@@ -18,7 +18,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemupdate"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerdeploy"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/releaseinstall"
@@ -83,11 +86,16 @@ func run(arguments []string) error {
 			_ = core.resume(context.Background())
 		}
 	}()
-	staged, err := systemupdate.FetchAndStage(ctx, request.Repository, request.Target, filepath.Clean(*destination), nil)
+	downloadClient, err := core.updateClient(ctx, request.Network)
 	if err != nil {
-		status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateFailed, "download", "update_download_failed", err.Error(), time.Now().UTC()
+		return markUpdaterFailure(store, status, "download", "update_network_changed", errors.New("verified update network route is unavailable"))
+	}
+	defer downloadClient.CloseIdleConnections()
+	staged, err := systemupdate.FetchAndStage(ctx, request.Repository, request.Target, filepath.Clean(*destination), downloadClient)
+	if err != nil {
+		status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateFailed, "download", "update_download_failed", "release download or verification failed on the selected route", time.Now().UTC()
 		_ = store.SetStatus(status)
-		return err
+		return errors.New(status.ErrorDetail)
 	}
 	manager := providerdeploy.Systemctl{Path: filepath.Clean(*systemctlPath)}
 	if err := manager.Validate(); err != nil {
@@ -160,9 +168,10 @@ func markUpdaterFailure(store *systemupdate.Store, status systemupdate.Status, p
 }
 
 type coreMaintenance struct {
-	baseURL, token string
-	request        providerapply.DrainRequest
-	active         bool
+	egressStatusPath string
+	baseURL, token   string
+	request          providerapply.DrainRequest
+	active           bool
 }
 
 func loadCoreMaintenance(path string) (coreMaintenance, error) {
@@ -171,6 +180,9 @@ func loadCoreMaintenance(path string) (coreMaintenance, error) {
 		return coreMaintenance{}, err
 	}
 	var config struct {
+		ProviderApply struct {
+			EgressStatusPath string `json:"egress_status_path"`
+		} `json:"provider_apply"`
 		Local struct {
 			Listen string `json:"listen"`
 			Token  string `json:"token"`
@@ -185,7 +197,44 @@ func loadCoreMaintenance(path string) (coreMaintenance, error) {
 	if len(config.Local.Token) < 32 {
 		return coreMaintenance{}, errors.New("Core maintenance token unavailable")
 	}
-	return coreMaintenance{baseURL: "http://" + config.Local.Listen, token: config.Local.Token}, nil
+	return coreMaintenance{baseURL: "http://" + config.Local.Listen, token: config.Local.Token, egressStatusPath: config.ProviderApply.EgressStatusPath}, nil
+}
+
+func (core *coreMaintenance) updateClient(ctx context.Context, recorded *updatenetwork.Route) (*http.Client, error) {
+	if recorded == nil {
+		return (updatenetwork.Route{Mode: "direct"}).Client(0)
+	}
+	if err := recorded.ValidateIdentity(); err != nil {
+		return nil, err
+	}
+	ipc := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer ipc.CloseIdleConnections()
+	if err := updatenetwork.CheckPolicy(ctx, core.baseURL+updatenetwork.PolicyPath, core.token, recorded.PolicyRevision, ipc); err != nil {
+		return nil, err
+	}
+	if recorded.Mode == "direct" {
+		return recorded.Client(0)
+	}
+	config, err := egressconfig.FetchSnapshot(ctx, core.baseURL+egressconfig.SnapshotIPCPath, core.token, ipc)
+	if err != nil {
+		return nil, errors.New("update proxy configuration unavailable")
+	}
+	var actual egressstatus.Snapshot
+	if recorded.Country != "" {
+		actual, err = egressstatus.Load(core.egressStatusPath)
+		if err != nil {
+			return nil, errors.New("verified country exit unavailable")
+		}
+	}
+	resolved, err := updatenetwork.ResolveRecorded(*recorded, config, actual)
+	if err != nil {
+		return nil, err
+	}
+	if err := updatenetwork.CheckPolicy(ctx, core.baseURL+updatenetwork.PolicyPath, core.token, recorded.PolicyRevision, ipc); err != nil {
+		return nil, err
+	}
+	return resolved.Client(0)
 }
 func (core *coreMaintenance) begin(ctx context.Context, operationID string) error {
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}}

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
 	"golang.org/x/mod/semver"
 )
 
@@ -19,21 +20,24 @@ const cacheTTL = 5 * time.Minute
 var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 type Release struct {
-	OK              bool      `json:"ok"`
-	Current         string    `json:"current"`
-	Repository      string    `json:"repository"`
-	Latest          string    `json:"latest,omitempty"`
-	UpdateAvailable bool      `json:"update_available"`
-	ComparisonKnown bool      `json:"comparison_known"`
-	ReleaseURL      string    `json:"release_url,omitempty"`
-	PublishedAt     string    `json:"published_at,omitempty"`
-	Notes           string    `json:"notes,omitempty"`
-	CheckedAt       time.Time `json:"checked_at"`
-	Error           string    `json:"error,omitempty"`
-	ErrorCode       string    `json:"error_code,omitempty"`
+	Network         *updatenetwork.Route `json:"network,omitempty"`
+	OK              bool                 `json:"ok"`
+	Current         string               `json:"current"`
+	Repository      string               `json:"repository"`
+	Latest          string               `json:"latest,omitempty"`
+	UpdateAvailable bool                 `json:"update_available"`
+	ComparisonKnown bool                 `json:"comparison_known"`
+	ReleaseURL      string               `json:"release_url,omitempty"`
+	PublishedAt     string               `json:"published_at,omitempty"`
+	Notes           string               `json:"notes,omitempty"`
+	CheckedAt       time.Time            `json:"checked_at"`
+	Error           string               `json:"error,omitempty"`
+	ErrorCode       string               `json:"error_code,omitempty"`
 }
 
 type Checker struct {
+	routes              RouteSource
+	cachedRouteKey      string
 	repository, current string
 	client              *http.Client
 	mu                  sync.Mutex
@@ -41,27 +45,94 @@ type Checker struct {
 	cachedAt            time.Time
 }
 
-func NewChecker(repository, current string, client *http.Client) (*Checker, error) {
+type RouteSource func() (string, []updatenetwork.Route, error)
+
+func NewChecker(repository, current string, client *http.Client, sources ...RouteSource) (*Checker, error) {
 	repository, current = strings.TrimSpace(repository), strings.TrimSpace(current)
 	if !repositoryPattern.MatchString(repository) || current == "" {
 		return nil, errors.New("invalid update checker configuration")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 12 * time.Second}
+		var err error
+		client, err = (updatenetwork.Route{Mode: "direct"}).Client(12 * time.Second)
+		if err != nil {
+			return nil, err
+		}
 	}
 	copyClient := *client
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Checker{repository: repository, current: current, client: &copyClient}, nil
+	if len(sources) > 1 {
+		return nil, errors.New("only one update network source is allowed")
+	}
+	checker := &Checker{repository: repository, current: current, client: &copyClient}
+	if len(sources) == 1 {
+		checker.routes = sources[0]
+	}
+	return checker, nil
 }
 
 func (checker *Checker) Check(ctx context.Context, force bool) Release {
+	key := "direct"
+	var routes []updatenetwork.Route
+	if checker.routes != nil {
+		var err error
+		key, routes, err = checker.routes()
+		if err != nil || len(routes) == 0 {
+			return Release{Current: checker.current, Repository: checker.repository, CheckedAt: time.Now().UTC(), Error: "update network selection unavailable", ErrorCode: "update.error.network"}
+		}
+	}
 	checker.mu.Lock()
-	if !force && !checker.cachedAt.IsZero() && time.Since(checker.cachedAt) < cacheTTL {
+	if !force && checker.cachedRouteKey == key && !checker.cachedAt.IsZero() && time.Since(checker.cachedAt) < cacheTTL {
 		value := checker.cached
 		checker.mu.Unlock()
 		return value
 	}
 	checker.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	var result Release
+	if checker.routes == nil {
+		result = checker.checkWithClient(ctx, checker.client)
+		if result.OK {
+			result.Network = &updatenetwork.Route{Mode: "direct"}
+		}
+	} else {
+		for _, route := range routes {
+			if ctx.Err() != nil {
+				break
+			}
+			client := checker.client
+			if route.Mode != "direct" {
+				var err error
+				client, err = route.Client(12 * time.Second)
+				if err != nil {
+					continue
+				}
+			}
+			if route.Mode != "direct" {
+				client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+			}
+			result = checker.checkWithClient(ctx, client)
+			if route.Mode != "direct" {
+				client.CloseIdleConnections()
+			}
+			if result.OK {
+				copy := route
+				result.Network = &copy
+				break
+			}
+		}
+	}
+	if result.CheckedAt.IsZero() {
+		result = Release{Current: checker.current, Repository: checker.repository, CheckedAt: time.Now().UTC(), Error: "update network attempt failed", ErrorCode: "update.error.unavailable"}
+	}
+	checker.mu.Lock()
+	checker.cached, checker.cachedAt, checker.cachedRouteKey = result, time.Now(), key
+	checker.mu.Unlock()
+	return result
+}
+
+func (checker *Checker) checkWithClient(ctx context.Context, client *http.Client) Release {
 	result := Release{Current: checker.current, Repository: checker.repository, CheckedAt: time.Now().UTC()}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+checker.repository+"/releases/latest", nil)
 	if err == nil {
@@ -71,7 +142,7 @@ func (checker *Checker) Check(ctx context.Context, force bool) Release {
 	}
 	if err != nil {
 		result.Error, result.ErrorCode = "update request could not be created", "update.error.request"
-	} else if response, requestErr := checker.client.Do(request); requestErr != nil {
+	} else if response, requestErr := client.Do(request); requestErr != nil {
 		result.Error, result.ErrorCode = "update service unavailable", "update.error.unavailable"
 	} else {
 		defer response.Body.Close()
@@ -95,9 +166,6 @@ func (checker *Checker) Check(ctx context.Context, force bool) Release {
 			result.ReleaseURL, result.PublishedAt, result.Notes = payload.URL, payload.Published, truncate(payload.Body, 4000)
 		}
 	}
-	checker.mu.Lock()
-	checker.cached, checker.cachedAt = result, time.Now()
-	checker.mu.Unlock()
 	return result
 }
 
@@ -189,7 +257,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		}
 		now := time.Now().UTC()
 		op := "update-" + now.Format("20060102T150405.000000000Z")
-		if err := handler.store.Request(Request{SchemaVersion: 1, OperationID: op, Repository: result.Repository, Target: result.Latest, RequestedAt: now}); err != nil {
+		if err := handler.store.Request(Request{SchemaVersion: 1, OperationID: op, Repository: result.Repository, Target: result.Latest, RequestedAt: now, Network: result.Network}); err != nil {
 			response.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(response).Encode(map[string]string{"code": "update_already_in_progress"})
 			return

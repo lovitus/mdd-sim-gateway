@@ -168,3 +168,19 @@ Public mutation responses are recorded without bodies, headers, query strings
 or concrete path parameters. Authentication routes retain only fixed action
 names. Audit storage is bounded in events.db and included in existing backups;
 the original security page exposes manual history reads without polling.
+
+## Update networking
+
+The original update_check.py selection, candidate ordering and proxy resolution
+are adapted to the current Go stores. Existing Go installations retain direct
+networking until the user changes the original form. Auto mode tries direct
+then eligible proxy-library entries; explicit selection never silently becomes
+direct. Country-backed entries require a confirmed runtime generation.
+
+The successful route's non-secret identity is recorded with the update request.
+The updater re-resolves the same profile/country and verifies configuration and
+preference revisions before downloading. Proxy credentials are not serialized,
+and local-token policy checks do not follow redirects. Metered cellular-SIM
+update downloads remain excluded pending an explicit cost policy. Tests for
+proxy fallback use the existing SOCKS server library and a trusted fixture CA,
+not external traffic or relaxed TLS verification.

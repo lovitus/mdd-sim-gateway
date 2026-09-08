@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -35,10 +36,11 @@ var (
 )
 
 type Preferences struct {
-	AuditEnabled       *bool    `json:"audit_enabled"`
-	TrustedProxies     []string `json:"trusted_proxies"`
-	CallAudioBufferMS  int      `json:"call_audio_buffer_ms"`
-	RingTimeoutSeconds int      `json:"ring_timeout_seconds"`
+	Updates            *updatenetwork.Selection `json:"updates"`
+	AuditEnabled       *bool                    `json:"audit_enabled"`
+	TrustedProxies     []string                 `json:"trusted_proxies"`
+	CallAudioBufferMS  int                      `json:"call_audio_buffer_ms"`
+	RingTimeoutSeconds int                      `json:"ring_timeout_seconds"`
 }
 
 type Snapshot struct {
@@ -173,6 +175,12 @@ func (store *Store) PutExpected(input Preferences, expected uint64) (Snapshot, e
 }
 
 func normalizeAudit(value *Preferences) error {
+	if value.Updates == nil {
+		value.Updates = &updatenetwork.Selection{Mode: "direct"}
+	}
+	if err := value.Updates.Validate(); err != nil {
+		return err
+	}
 	if value.AuditEnabled == nil {
 		enabled := true
 		value.AuditEnabled = &enabled

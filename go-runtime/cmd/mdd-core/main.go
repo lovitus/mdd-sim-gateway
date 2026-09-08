@@ -35,8 +35,10 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprobe"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprofiletest"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/euiccprofiles"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linebootstrap"
@@ -50,6 +52,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systempreferences"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemupdate"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
@@ -831,7 +834,32 @@ func run(ctx context.Context, settings config) error {
 	if repository == "" {
 		repository = "lovitus/mdd-sim-gateway"
 	}
-	updateChecker, err := systemupdate.NewChecker(repository, runtimeInfo.BuildVersion, nil)
+	updateChecker, err := systemupdate.NewChecker(repository, runtimeInfo.BuildVersion, nil, func() (string, []updatenetwork.Route, error) {
+		preferences, err := preferenceStore.Snapshot()
+		if err != nil {
+			return "", nil, err
+		}
+		selection := *preferences.Preferences.Updates
+		var exits egressconfig.Snapshot
+		var actual egressstatus.Snapshot
+		expected := ""
+		if selection.Mode != "direct" {
+			exits, err = egressStore.Snapshot()
+			if err != nil && selection.Mode == "library" {
+				return "", nil, err
+			}
+			if desired, readErr := egressdesired.Read(settings.ProviderApply.EgressDesiredPath); readErr == nil && desired.EgressConfigRevision == exits.Revision {
+				expected = desired.Generation
+			}
+			actual, _ = egressstatus.Load(settings.ProviderApply.EgressStatusPath)
+		}
+		routes, err := updatenetwork.Candidates(selection, exits, actual, expected)
+		for index := range routes {
+			routes[index].PolicyRevision = preferences.Revision
+		}
+		key := fmt.Sprintf("%d:%d:%s:%s", preferences.Revision, exits.Revision, expected, actual.DesiredGeneration)
+		return key, routes, err
+	})
 	if err != nil {
 		return err
 	}
@@ -896,6 +924,11 @@ func run(ctx context.Context, settings config) error {
 		core.WithEgressConfig(egressConfigAPI, egressApplyAPI),
 	)
 	localMux := http.NewServeMux()
+	updatePolicySnapshot, err := systempreferences.NewUpdatePolicyHandler(preferenceStore, settings.Local.Token)
+	if err != nil {
+		return err
+	}
+	localMux.Handle(updatenetwork.PolicyPath, updatePolicySnapshot)
 	localMux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshot)
 	localMux.Handle(egressconfig.SnapshotIPCPath, egressSnapshot)
 	localMux.Handle(cellulardata.InternalPath, cellularDataIPC)

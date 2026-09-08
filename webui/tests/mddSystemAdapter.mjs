@@ -64,6 +64,13 @@ assert.deepEqual(preferenceWrites.at(-1),{revision:4,patch:{audit_enabled:false,
 assert.equal(auditSaved.security.audit_enabled,false)
 assert.equal(auditSaved.cellular_audio_buffer_ms,700)
 await assert.rejects(systemAPI.saveSettings(settings,'security'),/audit_settings_unavailable/)
+const updateSettings=systemSettingsView({revision:4,preferences:{call_audio_buffer_ms:700,ring_timeout_seconds:35,updates:{proxy_mode:'direct'}}},notificationConfig,{})
+updateSettings.proxy={profiles:{'proxy-a':{name:'Proxy A',type:'socks5'}}}
+const routeSaved=await systemAPI.saveSettings({...updateSettings,updates:{proxy_mode:'library',proxy_profile_id:'proxy-a'}},'backup')
+assert.deepEqual(preferenceWrites.at(-1),{revision:4,patch:{updates:{proxy_mode:'library',proxy_profile_id:'proxy-a'}}})
+assert.equal(routeSaved.__saved_updates.proxy_profile_id,'proxy-a')
+assert.equal(routeSaved.cellular_audio_buffer_ms,700)
+await assert.rejects(systemAPI.saveSettings({...updateSettings,updates:{proxy_mode:'library',proxy_profile_id:'missing'}},'backup'),/selected_update_proxy_unavailable/)
 let notificationPatch
 go.saveNotificationConfig=async patch=>{notificationPatch=patch;return {...notificationConfig,revision:9,timezone:patch.timezone}}
 const timezoneSaved=await systemAPI.saveSettings({...settings,timezone:'Asia/Shanghai'},'general')
@@ -100,6 +107,7 @@ await assert.rejects(systemAPI.saveRekeySettings({...rekeySettings,rekey:{minute
 go.systemPreferences=async()=>({revision:4,preferences:{call_audio_buffer_ms:700,ring_timeout_seconds:35}})
 go.notificationConfig=async()=>notificationConfig
 go.systemRuntime=async()=>({public:{listen:'127.0.0.1:8443'}})
+go.egressConfig=async()=>({revision:1,config:{profiles:{}}})
 go.catalogLines=async()=>({revision:9,defaults:{rekey_minutes:0}})
 go.systemStatus=async()=>{throw new Error('host sampling must not block settings')}
 const complete=await systemAPI.settings()

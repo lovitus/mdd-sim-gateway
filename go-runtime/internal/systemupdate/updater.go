@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/releasebundle"
 )
 
@@ -40,7 +41,12 @@ func FetchAndStage(ctx context.Context, repository, target, destination string, 
 		return "", errors.New("invalid release staging input")
 	}
 	if client == nil {
-		client = &http.Client{}
+		var err error
+		client, err = (updatenetwork.Route{Mode: "direct"}).Client(0)
+		if err != nil {
+			return "", err
+		}
+		defer client.CloseIdleConnections()
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+repository+"/releases/tags/v"+target, nil)
 	if err != nil {

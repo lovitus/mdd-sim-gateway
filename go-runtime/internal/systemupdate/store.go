@@ -3,6 +3,7 @@ package systemupdate
 import (
 	"encoding/json"
 	"errors"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,11 +12,12 @@ import (
 )
 
 type Request struct {
-	SchemaVersion int       `json:"schema_version"`
-	OperationID   string    `json:"operation_id"`
-	Repository    string    `json:"repository"`
-	Target        string    `json:"target"`
-	RequestedAt   time.Time `json:"requested_at"`
+	Network       *updatenetwork.Route `json:"network,omitempty"`
+	SchemaVersion int                  `json:"schema_version"`
+	OperationID   string               `json:"operation_id"`
+	Repository    string               `json:"repository"`
+	Target        string               `json:"target"`
+	RequestedAt   time.Time            `json:"requested_at"`
 }
 
 type Status struct {
@@ -64,6 +66,11 @@ func (store *Store) Request(input Request) error {
 	if input.OperationID == "" || input.Repository == "" || input.Target == "" || input.RequestedAt.IsZero() {
 		return errors.New("invalid update request")
 	}
+	if input.Network != nil {
+		if err := input.Network.ValidateIdentity(); err != nil {
+			return err
+		}
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	status, found, err := store.statusLocked()
@@ -105,6 +112,9 @@ func (store *Store) PendingRequest() (Request, bool, error) {
 	var request Request
 	if json.Unmarshal(payload, &request) != nil || request.SchemaVersion != 1 || request.OperationID == "" || request.Target == "" {
 		return Request{}, false, errors.New("stored update request is corrupt")
+	}
+	if request.Network != nil && request.Network.ValidateIdentity() != nil {
+		return Request{}, false, errors.New("stored update route is invalid")
 	}
 	return request, true, nil
 }

@@ -600,6 +600,8 @@ const zh = {
   'Administrative operations': '管理操作记录',
   'Read recent operations': '读取近期操作',
   'Save audit settings': '保存审计设置',
+  'Save update networking': '保存升级联网方式',
+  'Verified update route': '已验证的升级路径',
   'Trusted audit proxies (IP/CIDR, comma-separated)': '可信审计代理（IP/CIDR，逗号分隔）',
   Enable: '启用', Disable: '禁用', 'Delete profile {iccid}?': '确定删除配置文件 {iccid}？', Notifications: '通知', 'Process all': '全部处理',
   'Click Load to list notifications.': '点击“读取”列出通知。', 'No pending notifications.': '没有待处理通知。', 'No notifications to show.': '没有可显示的通知。',
