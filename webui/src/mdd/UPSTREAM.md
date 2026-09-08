@@ -184,3 +184,13 @@ and local-token policy checks do not follow redirects. Metered cellular-SIM
 update downloads remain excluded pending an explicit cost policy. Tests for
 proxy fallback use the existing SOCKS server library and a trusted fixture CA,
 not external traffic or relaxed TLS verification.
+
+## Management safety and certificate readback
+
+Provider preflight and the locked maintenance entry both reject ringing calls,
+not just active calls. Refused maintenance does not acquire a lease.
+The original Web/security fields read the certificate actually loaded by Core:
+self-signature, DNS names and expiry, with missing evidence remaining unknown.
+This does not expose key paths, enable certificate editing or equate a
+non-self-signed certificate with a validated trust chain. Support bundles keep
+certificate identifiers redacted.

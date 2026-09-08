@@ -56,6 +56,8 @@ func BuildPlan(current, candidate providerconfig.Manifest, preflight Snapshot) P
 			code := "provider_already_present"
 			if status.ActiveCall != nil {
 				code = "active_call"
+			} else if status.PendingIncomingCall != nil {
+				code = "incoming_call_pending"
 			}
 			plan.Blockers = append(plan.Blockers, Blocker{LineID: change.LineID, Code: code})
 		}
@@ -67,6 +69,8 @@ func BuildPlan(current, candidate providerconfig.Manifest, preflight Snapshot) P
 			plan.Blockers = append(plan.Blockers, Blocker{LineID: change.LineID, Code: "preflight_missing"})
 		case status.ActiveCall != nil:
 			plan.Blockers = append(plan.Blockers, Blocker{LineID: change.LineID, Code: "active_call"})
+		case status.PendingIncomingCall != nil:
+			plan.Blockers = append(plan.Blockers, Blocker{LineID: change.LineID, Code: "incoming_call_pending"})
 		case status.Code != "provider_reachable" && status.Code != "provider_absent":
 			plan.Blockers = append(plan.Blockers, Blocker{LineID: change.LineID, Code: "provider_unreachable"})
 		}

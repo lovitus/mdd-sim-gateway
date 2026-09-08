@@ -41,7 +41,8 @@ export function systemSettingsView(preferences = {}, notifications = {}, status 
     rekey:{minutes:catalog.defaults?.rekey_minutes},__catalog_revision:catalog.revision,
     __saved_rekey_minutes:catalog.defaults?.rekey_minutes,
     __rekey_supported:Number.isInteger(catalog.defaults?.rekey_minutes),
-    bind,http_port:port,tls:{fingerprint:status.public?.tls_fingerprint_sha256 || ''},
+    bind,http_port:port,tls:{fingerprint:status.public?.tls_fingerprint_sha256 || '',self_signed:status.public?.certificate?.self_signed,
+      domain:(status.public?.certificate?.dns_names || []).join(', '),not_after:status.public?.certificate?.not_after},
     __preference_revision:preferences.revision,__notifications:notifications,
   }
 }

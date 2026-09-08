@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -740,8 +738,9 @@ func run(ctx context.Context, settings config) error {
 	if len(certificate.Certificate) == 0 {
 		return errors.New("TLS identity contains no certificate")
 	}
-	fingerprint := sha256.Sum256(certificate.Certificate[0])
-	runtimeInfo.Public.TLSFingerprintSHA256 = hex.EncodeToString(fingerprint[:])
+	if err := runtimeInfo.Public.DescribeCertificate(certificate.Certificate[0]); err != nil {
+		return fmt.Errorf("describe TLS certificate: %w", err)
+	}
 	var providerApplyAPI http.Handler
 	var egressProbeAPI http.Handler
 	var egressApplyAPI http.Handler

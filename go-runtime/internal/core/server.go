@@ -299,6 +299,15 @@ func WithEgressConfig(configHandler, applyHandler http.Handler) Option {
 func WithRuntimeInfo(info RuntimeInfo) Option {
 	return func(server *Server) {
 		copy := info
+		if info.Public.Certificate != nil {
+			certificate := *info.Public.Certificate
+			certificate.DNSNames = append([]string{}, certificate.DNSNames...)
+			if certificate.SelfSigned != nil {
+				value := *certificate.SelfSigned
+				certificate.SelfSigned = &value
+			}
+			copy.Public.Certificate = &certificate
+		}
 		server.runtimeInfo = &copy
 	}
 }

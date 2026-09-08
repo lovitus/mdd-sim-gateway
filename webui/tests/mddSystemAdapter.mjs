@@ -51,6 +51,10 @@ assert.equal(settings.http_port,8443)
 assert.equal(systemSettingsView({}, {}, {public:{listen:'[::1]:9443'}}).http_port,9443)
 assert.equal(systemSettingsView({}, {}, {public:{listen:':8443'}}).http_port,8443)
 assert.equal(systemSettingsView().http_port,undefined)
+const certView=systemSettingsView({}, {}, {public:{certificate:{self_signed:false,dns_names:['gateway.example'],not_after:'2027-01-01T00:00:00Z'}}})
+assert.equal(certView.tls.self_signed,false)
+assert.equal(certView.tls.domain,'gateway.example')
+assert.equal(systemSettingsView().tls.self_signed,undefined)
 assert.equal(systemSettingsView().__voice_supported,false)
 const preferenceWrites=[]
 go.saveSystemPreferences=async (revision,patch)=>{preferenceWrites.push({revision,patch});return {revision:4,preferences:patch}}

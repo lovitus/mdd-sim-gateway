@@ -45,7 +45,7 @@ func TestSupportBundleContainsOnlyRedactedProjections(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{now: time.Now, replay: replay, catalog: catalog, eventStore: eventStore,
-		runtimeInfo: &RuntimeInfo{Public: PublicRuntimeInfo{TLSFingerprintSHA256: "fingerprint-private"}}}
+		runtimeInfo: &RuntimeInfo{Public: PublicRuntimeInfo{TLSFingerprintSHA256: "fingerprint-private", Certificate: &PublicCertificate{DNSNames: []string{"private-host.example"}}}}}
 	request := httptest.NewRequest(http.MethodGet, "/v1/diagnostics/support-bundle", nil)
 	response := httptest.NewRecorder()
 	server.supportBundle(response, request)
@@ -77,7 +77,7 @@ func TestSupportBundleContainsOnlyRedactedProjections(t *testing.T) {
 		}
 	}
 	for _, secret := range []string{"8944100000000000001", "234100000000001", "+441234567890", "192.0.2.10",
-		"Private name", "agent-private", "generation-private", "fingerprint-private"} {
+		"Private name", "agent-private", "generation-private", "fingerprint-private", "private-host.example"} {
 		if strings.Contains(expanded.String(), secret) {
 			t.Fatalf("expanded bundle contains %q", secret)
 		}

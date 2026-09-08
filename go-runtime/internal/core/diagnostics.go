@@ -36,17 +36,18 @@ type RuntimeInfo struct {
 }
 
 type PublicRuntimeInfo struct {
-	ListenerCount        int    `json:"listener_count"`
-	Listen               string `json:"listen"`
-	Transport            string `json:"transport"`
-	Multiplexing         string `json:"multiplexing"`
-	WebUIPath            string `json:"webui_path"`
-	BrowserStatePath     string `json:"browser_state_path"`
-	AgentControlPath     string `json:"agent_control_path"`
-	BrowserMediaPath     string `json:"browser_media_path"`
-	CellularMediaPath    string `json:"cellular_browser_media_path"`
-	AgentMediaPath       string `json:"agent_media_path"`
-	TLSFingerprintSHA256 string `json:"tls_fingerprint_sha256"`
+	Certificate          *PublicCertificate `json:"certificate,omitempty"`
+	ListenerCount        int                `json:"listener_count"`
+	Listen               string             `json:"listen"`
+	Transport            string             `json:"transport"`
+	Multiplexing         string             `json:"multiplexing"`
+	WebUIPath            string             `json:"webui_path"`
+	BrowserStatePath     string             `json:"browser_state_path"`
+	AgentControlPath     string             `json:"agent_control_path"`
+	BrowserMediaPath     string             `json:"browser_media_path"`
+	CellularMediaPath    string             `json:"cellular_browser_media_path"`
+	AgentMediaPath       string             `json:"agent_media_path"`
+	TLSFingerprintSHA256 string             `json:"tls_fingerprint_sha256"`
 }
 
 type LocalRuntimeInfo struct {

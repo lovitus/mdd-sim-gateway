@@ -120,6 +120,7 @@ func (s *Server) supportBundle(response http.ResponseWriter, request *http.Reque
 		}
 	}
 	runtime.Public.TLSFingerprintSHA256 = ""
+	runtime.Public.Certificate = nil
 	runtime.Local = LocalRuntimeInfo{Scope: runtime.Local.Scope, Transport: runtime.Local.Transport}
 	var archive bytes.Buffer
 	writer := zip.NewWriter(&archive)

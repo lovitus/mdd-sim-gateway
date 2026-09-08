@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
@@ -41,6 +42,18 @@ func TestBuildPlanBlocksRevisionChangeAndUnmanagedProvider(t *testing.T) {
 	if plan.Safe || len(plan.Blockers) != 2 || plan.Blockers[0].Code != "catalog_revision_changed" ||
 		plan.Blockers[1].Code != "provider_already_present" {
 		t.Fatalf("plan=%+v", plan)
+	}
+}
+
+func TestBuildPlanPreservesRingingCallsOnChangedOrRemovedLines(t *testing.T) {
+	current := testManifest(1, testEntry("line-a", "old"))
+	for _, candidate := range []providerconfig.Manifest{testManifest(2, testEntry("line-a", "new")), testManifest(2)} {
+		preflight := Snapshot{SchemaVersion: 1, CatalogRevision: 2, Lines: []LineStatus{{LineID: "line-a", ProviderPresent: true, Code: "provider_reachable",
+			PendingIncomingCall: &vowifiipc.PendingIncomingCall{CallID: "ringing", Caller: "fixture-peer", Callee: "fixture-line", ReceivedAt: time.Now()}}}}
+		plan := BuildPlan(current, candidate, preflight)
+		if plan.Safe || len(plan.Blockers) != 1 || plan.Blockers[0].Code != "incoming_call_pending" {
+			t.Fatal("ringing call was treated as idle", plan)
+		}
 	}
 }
 

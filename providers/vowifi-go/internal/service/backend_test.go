@@ -114,6 +114,31 @@ func TestBackendManualRegisterIsDurableAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestMaintenanceRejectsPendingIncomingWithoutPersistingLease(t *testing.T) {
+	runtime := &fakeRuntime{}
+	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-for-drain"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.pending = &vowifiipc.PendingIncomingCall{CallID: "ringing", Caller: "fixture-peer", Callee: "fixture-line", ReceivedAt: time.Now()}
+	if _, err := backend.BeginDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "maintenance-one"}); operationCode(err) != "incoming_call_pending" {
+		t.Fatal(err)
+	}
+	if backend.drainLease != "" || runtime.closes.Load() != 0 || runtime.pending == nil {
+		t.Fatal("rejected drain altered runtime ownership")
+	}
+	runtime.pending = nil
+	if _, err := backend.BeginDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "maintenance-one"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.EndDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "maintenance-one"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBackendManualRegisterGatesBusyAndFailureStates(t *testing.T) {
 	for name, prepare := range map[string]func(*Backend, *fakeRuntime){
 		"stopped": func(*Backend, *fakeRuntime) {},

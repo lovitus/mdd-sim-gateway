@@ -20,6 +20,9 @@ func (backend *Backend) BeginDrain(_ context.Context, request vowifiipc.Maintena
 	if backend.activeCall != nil {
 		return vowifiipc.MaintenanceResult{}, conflictLayer("active_call", "maintenance")
 	}
+	if backend.pendingIncomingCallSnapshotLocked() != nil {
+		return vowifiipc.MaintenanceResult{}, conflictLayer("incoming_call_pending", "maintenance")
+	}
 	if backend.messageSends != 0 || backend.condition == vowifiipc.RuntimeStarting || backend.condition == vowifiipc.RuntimeStopping {
 		return vowifiipc.MaintenanceResult{}, conflictLayer("operation_in_progress", "maintenance")
 	}
