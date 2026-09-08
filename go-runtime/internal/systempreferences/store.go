@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,8 +35,10 @@ var (
 )
 
 type Preferences struct {
-	CallAudioBufferMS  int `json:"call_audio_buffer_ms"`
-	RingTimeoutSeconds int `json:"ring_timeout_seconds"`
+	AuditEnabled       *bool    `json:"audit_enabled"`
+	TrustedProxies     []string `json:"trusted_proxies"`
+	CallAudioBufferMS  int      `json:"call_audio_buffer_ms"`
+	RingTimeoutSeconds int      `json:"ring_timeout_seconds"`
 }
 
 type Snapshot struct {
@@ -74,7 +77,11 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 }
 
 func (store *Store) initialize() error {
-	defaults, _ := json.Marshal(Preferences{CallAudioBufferMS: DefaultCallAudioBufferMS, RingTimeoutSeconds: DefaultRingTimeoutSeconds})
+	initial := Preferences{CallAudioBufferMS: DefaultCallAudioBufferMS, RingTimeoutSeconds: DefaultRingTimeoutSeconds}
+	if err := normalizeAudit(&initial); err != nil {
+		return err
+	}
+	defaults, _ := json.Marshal(initial)
 	return store.db.Update(func(tx *bolt.Tx) error {
 		metadata, err := tx.CreateBucketIfNotExists(metadataBucket)
 		if err != nil {
@@ -119,6 +126,9 @@ func (store *Store) Snapshot() (Snapshot, error) {
 		if result.Preferences.RingTimeoutSeconds == 0 {
 			result.Preferences.RingTimeoutSeconds = DefaultRingTimeoutSeconds
 		}
+		if err := normalizeAudit(&result.Preferences); err != nil {
+			return err
+		}
 		if validate(result.Preferences) != nil {
 			return errors.New("stored system preferences are invalid")
 		}
@@ -131,6 +141,9 @@ func (store *Store) Snapshot() (Snapshot, error) {
 func (store *Store) PutExpected(input Preferences, expected uint64) (Snapshot, error) {
 	if input.RingTimeoutSeconds == 0 {
 		input.RingTimeoutSeconds = DefaultRingTimeoutSeconds
+	}
+	if err := normalizeAudit(&input); err != nil {
+		return Snapshot{}, err
 	}
 	if err := validate(input); err != nil {
 		return Snapshot{}, err
@@ -157,6 +170,30 @@ func (store *Store) PutExpected(input Preferences, expected uint64) (Snapshot, e
 		return metadata.Put(revisionKey, uint64Bytes(result.Revision))
 	})
 	return result, err
+}
+
+func normalizeAudit(value *Preferences) error {
+	if value.AuditEnabled == nil {
+		enabled := true
+		value.AuditEnabled = &enabled
+	}
+	if len(value.TrustedProxies) > 32 {
+		return errors.New("too many trusted audit proxies")
+	}
+	normalized := make([]string, 0, len(value.TrustedProxies))
+	for _, raw := range value.TrustedProxies {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			address, addressErr := netip.ParseAddr(raw)
+			if addressErr != nil || address.Zone() != "" {
+				return errors.New("trusted audit proxy must be an IP address or CIDR")
+			}
+			prefix = netip.PrefixFrom(address, address.BitLen())
+		}
+		normalized = append(normalized, prefix.Masked().String())
+	}
+	value.TrustedProxies = normalized
+	return nil
 }
 
 func validate(value Preferences) error {

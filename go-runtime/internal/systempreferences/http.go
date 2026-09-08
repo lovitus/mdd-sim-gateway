@@ -58,12 +58,14 @@ func (handler *Handler) patch(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	var patch struct {
-		CallAudioBufferMS  *int `json:"call_audio_buffer_ms"`
-		RingTimeoutSeconds *int `json:"ring_timeout_seconds"`
+		AuditEnabled       *bool     `json:"audit_enabled"`
+		TrustedProxies     *[]string `json:"trusted_proxies"`
+		CallAudioBufferMS  *int      `json:"call_audio_buffer_ms"`
+		RingTimeoutSeconds *int      `json:"ring_timeout_seconds"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&patch) != nil || decoder.Decode(&struct{}{}) != io.EOF || (patch.CallAudioBufferMS == nil && patch.RingTimeoutSeconds == nil) {
+	if decoder.Decode(&patch) != nil || decoder.Decode(&struct{}{}) != io.EOF || (patch.CallAudioBufferMS == nil && patch.RingTimeoutSeconds == nil && patch.AuditEnabled == nil && patch.TrustedProxies == nil) {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_system_preferences"})
 		return
 	}
@@ -74,6 +76,12 @@ func (handler *Handler) patch(response http.ResponseWriter, request *http.Reques
 	}
 	if patch.CallAudioBufferMS != nil {
 		current.Preferences.CallAudioBufferMS = *patch.CallAudioBufferMS
+	}
+	if patch.AuditEnabled != nil {
+		current.Preferences.AuditEnabled = patch.AuditEnabled
+	}
+	if patch.TrustedProxies != nil {
+		current.Preferences.TrustedProxies = *patch.TrustedProxies
 	}
 	if patch.RingTimeoutSeconds != nil {
 		if *patch.RingTimeoutSeconds < 5 || *patch.RingTimeoutSeconds > 180 {

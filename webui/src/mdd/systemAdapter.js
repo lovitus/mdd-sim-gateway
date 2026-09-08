@@ -29,6 +29,8 @@ export function systemSettingsView(preferences = {}, notifications = {}, status 
     } catch { /* An unknown listener is not a fabricated address or port. */ }
   }
   return {timezone:notifications.timezone,cellular_audio_buffer_ms:audio,
+    security:{audit_enabled:preferences.preferences?.audit_enabled,trusted_proxies:preferences.preferences?.trusted_proxies || []},
+    __security_supported:preferences.revision>0 && typeof preferences.preferences?.audit_enabled==='boolean' && Array.isArray(preferences.preferences?.trusted_proxies),
     __general_supported:notifications.revision > 0 && typeof notifications.timezone === 'string',
     __voice_supported:preferences.revision > 0 && Number.isInteger(audio),
     ring_timeout:preferences.preferences?.ring_timeout_seconds,
@@ -93,6 +95,11 @@ export const systemAPI = {
     return {...draft,__catalog_revision:result.revision,rekey:{minutes:result.defaults.rekey_minutes},__saved_rekey_minutes:result.defaults.rekey_minutes}
   },
   async saveSettings(draft, domain) {
+    if (domain === 'security') {
+      if(!draft.__security_supported || typeof draft.security?.audit_enabled!=='boolean' || !Array.isArray(draft.security?.trusted_proxies)) throw new Error('audit_settings_unavailable')
+      const saved=await go.saveSystemPreferences(draft.__preference_revision,{audit_enabled:draft.security.audit_enabled,trusted_proxies:draft.security.trusted_proxies})
+      return {...draft,__preference_revision:saved.revision,security:{audit_enabled:saved.preferences.audit_enabled,trusted_proxies:saved.preferences.trusted_proxies}}
+    }
     if (domain === 'general') {
       if (!draft.__general_supported) throw new Error('notification_settings_unavailable')
       const patch = notificationSettingsPatch({...notificationSettingsView(draft.__notifications),timezone:draft.timezone})

@@ -28,6 +28,7 @@ const (
 )
 
 type Server struct {
+	audit              *adminAudit
 	replay             *events.Replay
 	eventStore         *events.BoltStore
 	now                func() time.Time
@@ -457,6 +458,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	server.mux.HandleFunc("GET /healthz", server.health)
 	server.mux.Handle("GET /v1/lines", server.protect(http.HandlerFunc(server.lines)))
+	if server.audit != nil {
+		server.mux.Handle("GET /v1/system/audit", server.protect(http.HandlerFunc(server.auditHistory)))
+	}
 	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
 	server.mux.Handle("GET /v1/lines/{lineID}/availability", server.protect(http.HandlerFunc(server.lineAvailability)))
 	if server.exitRecovery != nil {
@@ -753,6 +757,16 @@ func (s *Server) protect(handler http.Handler) http.Handler {
 }
 
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if s.audit != nil && (request.Method == "POST" || request.Method == "PUT" || request.Method == "PATCH" || request.Method == "DELETE") {
+		recorded := &auditResponse{ResponseWriter: response}
+		s.mux.ServeHTTP(recorded, request)
+		status := recorded.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.audit.record(request, status, s.now())
+		return
+	}
 	s.mux.ServeHTTP(response, request)
 }
 

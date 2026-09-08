@@ -844,6 +844,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	publicHandler := core.NewServer(replay, nil,
+		core.WithAdminAudit(preferenceStore, store),
 		core.WithDevicePresentation(devicePresentation),
 		core.WithWebUI(ui),
 		core.WithAdminAuth(authHandler),

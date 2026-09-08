@@ -57,6 +57,13 @@ go.saveSystemPreferences=async (revision,patch)=>{preferenceWrites.push({revisio
 const audioSaved=await systemAPI.saveSettings({...settings,cellular_audio_buffer_ms:700},'voice')
 assert.deepEqual(preferenceWrites,[{revision:3,patch:{call_audio_buffer_ms:700}}])
 assert.equal(audioSaved.__preference_revision,4)
+const auditSettings=systemSettingsView({revision:4,preferences:{call_audio_buffer_ms:700,ring_timeout_seconds:35,audit_enabled:true,trusted_proxies:[]}},notificationConfig,{})
+assert.equal(auditSettings.__security_supported,true)
+const auditSaved=await systemAPI.saveSettings({...auditSettings,security:{audit_enabled:false,trusted_proxies:['127.0.0.1/32']}},'security')
+assert.deepEqual(preferenceWrites.at(-1),{revision:4,patch:{audit_enabled:false,trusted_proxies:['127.0.0.1/32']}})
+assert.equal(auditSaved.security.audit_enabled,false)
+assert.equal(auditSaved.cellular_audio_buffer_ms,700)
+await assert.rejects(systemAPI.saveSettings(settings,'security'),/audit_settings_unavailable/)
 let notificationPatch
 go.saveNotificationConfig=async patch=>{notificationPatch=patch;return {...notificationConfig,revision:9,timezone:patch.timezone}}
 const timezoneSaved=await systemAPI.saveSettings({...settings,timezone:'Asia/Shanghai'},'general')

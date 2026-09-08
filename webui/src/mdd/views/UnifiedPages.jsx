@@ -151,7 +151,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     if (!selectedId) return
     const target = String(stabilityTarget || '').replace(/[\s().-]/g, '')
     if (!/^(?:\d{2,6}|\+[1-9]\d{6,14})$/.test(target)) {
-      setError(language === 'zh' ? '请输入短号或国际号码，例如 +448001076285。' : 'Enter a service short code or an international number.'); return
+      setError(language === 'zh' ? '请输入短号或带 + 国家码的国际号码。' : 'Enter a service short code or an international number.'); return
     }
     const seconds = Math.max(10, Math.min(300, Number(stabilitySeconds) || 50))
     const confirmText = language === 'zh'
@@ -199,7 +199,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     <p className="u-hint">{language === 'zh'
       ? '通话稳定测试由用户明确输入号码并确认后才开始；它复用正常浏览器 WSS 外呼，接通后按绝对时钟挂断，并以独立被动采样核验 Engine 零活动通道。健康轮询永不自动拨号。'
       : 'The stability test starts only after you enter and confirm a target. It reuses normal browser WSS calling, hangs up on an absolute timer after answer, then verifies Engine idle through an independent passive sample. Health polling never dials.'}</p>
-    <div className="u-form-grid"><div><label>{language === 'zh' ? '稳定测试号码（收费）' : 'Stability-test number (chargeable)'}</label><input value={stabilityTarget} onChange={e => setStabilityTarget(e.target.value)} placeholder="+448001076285" /></div><div><label>{language === 'zh' ? '接通后测试秒数（10–300）' : 'Seconds after answer (10–300)'}</label><input type="number" min="10" max="300" value={stabilitySeconds} onChange={e => setStabilitySeconds(e.target.value)} /></div></div>
+    <div className="u-form-grid"><div><label>{language === 'zh' ? '稳定测试号码（收费）' : 'Stability-test number (chargeable)'}</label><input value={stabilityTarget} onChange={e => setStabilityTarget(e.target.value)} placeholder={language === 'zh' ? '短号或 + 国家码号码' : 'Service code or + country number'} /></div><div><label>{language === 'zh' ? '接通后测试秒数（10–300）' : 'Seconds after answer (10–300)'}</label><input type="number" min="10" max="300" value={stabilitySeconds} onChange={e => setStabilitySeconds(e.target.value)} /></div></div>
     <button className="btn btn-primary" disabled={!selectedId || !!running} onClick={testStability}>{running === 'stability' ? (language === 'zh' ? '通话稳定测试中…' : 'Running stability test…') : (language === 'zh' ? '开始人工通话稳定测试' : 'Start manual call stability test')}</button>
     <p className="u-hint">{language === 'zh' ? '人工 IMS 重新注册会先由服务端核实当前线路没有活动通话；恢复记录身份不明、当前世代恢复中或有通话时会拒绝，不提供“清空 fence”按钮。' : 'Manual IMS re-registration first proves that the line has no active call. It is refused for an unknown/current recovery owner or a live call; there is intentionally no clear-fence button.'}</p>
     {error && <p className="u-error">{error}</p>}
@@ -1352,6 +1352,27 @@ export function NotificationsPage({ showToast }) {
   </fieldset>
 }
 
+function AuditHistory() {
+  const {t}=useI18n()
+  const [entries,setEntries]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false)
+  const pending=useRef(false)
+  const load=async()=>{
+    if(pending.current)return
+    pending.current=true;setBusy(true);setError('')
+    try{const result=await api.adminAudit();setEntries(result.entries)}catch(error){setError(error.message)}
+    finally{pending.current=false;setBusy(false)}
+  }
+  return <>
+    <h3>{t('Administrative operations')}</h3>
+    <button className="btn btn-ghost" disabled={busy} onClick={load}>{t(busy?'Loading':'Read recent operations')}</button>
+    {error&&<p role="alert" className="u-error">{error}</p>}
+    {entries&&<div style={{maxHeight:320,overflowY:'auto'}}>{entries.length===0?<p>{t('No records')}</p>:entries.map((entry,index)=><div className="u-detail" key={`${entry.at}:${index}`} style={{flexWrap:'wrap'}}>
+      <span>{new Date(entry.at).toLocaleString()} · {entry.client}</span><b>{entry.status}</b>
+      <code style={{flexBasis:'100%',minWidth:0,overflowWrap:'anywhere'}}>{entry.method} · {entry.route}</code>
+    </div>)}</div>}
+  </>
+}
+
 export function SystemPage({ showToast, openUpdateDialog, instances, callCoordinator, setSelected, setView }) {
   const { t, language, setLanguage } = useI18n(); const [s, setS] = useState(null); const [tab, setTab] = useState('general'); const [status, setStatus] = useState(null); const [update,setUpdate]=useState(null); const [checking,setChecking]=useState(false); const [passwordForm,setPasswordForm]=useState({current:'',next:'',confirm:''})
   const [settingsError,setSettingsError] = useState('')
@@ -1403,7 +1424,7 @@ export function SystemPage({ showToast, openUpdateDialog, instances, callCoordin
       {status?.public?.tls_fingerprint_sha256 && <div className="u-detail"><span>{t('TLS 证书 SHA-256 指纹')}</span><div className="u-inline"><code style={{fontSize:'12px',wordBreak:'break-all'}}>{status.public.tls_fingerprint_sha256}</code><button className="btn btn-ghost" style={{padding:'2px 8px',fontSize:'12px'}} onClick={() => { navigator.clipboard.writeText(status.public.tls_fingerprint_sha256); showToast(t('Copied')) }}>{t('Copy')}</button></div></div>}
 
       <AgentCredentials showToast={showToast} />
-      <h3>{t('Change administrator password')}</h3><div className="u-form-grid"><div><label>{t('Current password')}</label><input type="password" autoComplete="current-password" value={passwordForm.current} onChange={e=>setPasswordForm({...passwordForm,current:e.target.value})}/></div><div><label>{t('New password (at least 10 characters)')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.next} onChange={e=>setPasswordForm({...passwordForm,next:e.target.value})}/></div><div><label>{t('Confirm password')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.confirm} onChange={e=>setPasswordForm({...passwordForm,confirm:e.target.value})}/></div></div><button className="btn btn-ghost" disabled={!passwordForm.current||passwordForm.next.length<10||!passwordForm.confirm} onClick={changePassword}>{t('Change password')}</button><fieldset disabled><legend>{t('Not available in the current Go settings API')}</legend><label><input type="checkbox" className="u-toggle" ref={node => {if(node)node.indeterminate=true}} aria-checked="mixed" checked={false} onChange={e => setS({ ...s, security: { ...s.security, audit_enabled: e.target.checked } })} />{t('Record administrative operations')}</label><label>{t('Trusted reverse proxies (comma-separated)')}</label><input value={(s.security?.trusted_proxies || []).join(', ')} onChange={e => setS({ ...s, security: { ...s.security, trusted_proxies: e.target.value.split(',').map(x => x.trim()).filter(Boolean) } })} /></fieldset></>}
+      <h3>{t('Change administrator password')}</h3><div className="u-form-grid"><div><label>{t('Current password')}</label><input type="password" autoComplete="current-password" value={passwordForm.current} onChange={e=>setPasswordForm({...passwordForm,current:e.target.value})}/></div><div><label>{t('New password (at least 10 characters)')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.next} onChange={e=>setPasswordForm({...passwordForm,next:e.target.value})}/></div><div><label>{t('Confirm password')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.confirm} onChange={e=>setPasswordForm({...passwordForm,confirm:e.target.value})}/></div></div><button className="btn btn-ghost" disabled={!passwordForm.current||passwordForm.next.length<10||!passwordForm.confirm} onClick={changePassword}>{t('Change password')}</button><fieldset disabled={settingsBusy || !s.__security_supported}>{!s.__security_supported && <legend>{t('Not available in the current Go settings API')}</legend>}<label><input type="checkbox" className="u-toggle" ref={node => {if(node)node.indeterminate=!s.__security_supported}} aria-checked={s.__security_supported ? s.security?.audit_enabled === true : 'mixed'} checked={s.security?.audit_enabled === true} onChange={e => setS({ ...s, security: { ...s.security, audit_enabled: e.target.checked } })} />{t('Record administrative operations')}</label><label>{t('Trusted audit proxies (IP/CIDR, comma-separated)')}</label><input value={(s.security?.trusted_proxies || []).join(', ')} onChange={e => setS({ ...s, security: { ...s.security, trusted_proxies: e.target.value.split(',').map(x => x.trim()).filter(Boolean) } })} /></fieldset>{s.__security_supported && <AuditHistory />}</>}
 
     {tab === 'backup' && <>
       <div className="u-card-head"><div><h2>{t('Backup & updates')}</h2></div><button className="btn btn-primary" onClick={() => action('backup')}>{t('Download durable state backup')}</button></div>
@@ -1423,7 +1444,7 @@ export function SystemPage({ showToast, openUpdateDialog, instances, callCoordin
       {(status?.backups || []).map(item => <div className="u-detail" key={item.name}><span>{item.name}</span><b>{formatBytes(item.size)} · {new Date(item.created_at * 1000).toLocaleString()}</b></div>)}
     </>}
     {tab === 'maintenance' && <Maintenance showToast={showToast} />}
-  </div>{['general','voice'].includes(tab) && <button className="btn btn-primary" disabled={settingsBusy || (tab === 'general' ? !s.__general_supported : !s.__voice_supported)} onClick={save}>{t(tab === 'voice' ? 'Save audio and call timeout' : 'Save')}</button>}</div>
+  </div>{['general','voice','security'].includes(tab) && <button className="btn btn-primary" disabled={settingsBusy || (tab === 'general' ? !s.__general_supported : tab === 'security' ? !s.__security_supported : !s.__voice_supported)} onClick={save}>{t(tab === 'voice' ? 'Save audio and call timeout' : tab === 'security' ? 'Save audit settings' : 'Save')}</button>}</div>
 }
 
 const HOST_ALERT_TEXT = {

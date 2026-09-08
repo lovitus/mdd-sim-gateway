@@ -157,3 +157,14 @@ deduplication store, with atomic event outbox publication. Existing Go channel
 settings do not silently subscribe to the newly supported event; legacy import
 preserves the original explicit choice. Deployment and real acceptance remain
 separate evidence gates in the recovery cursor.
+
+## Administrative audit settings
+
+The security page's audit switch and trusted proxy list are ported from
+ec620942 main.py `_audit_client`, `audit_mutations` and `_write_audit_record`.
+The Go adapter uses the existing versioned preferences store. Trusted proxy
+prefixes affect only the audit client address, never authentication or limits.
+Public mutation responses are recorded without bodies, headers, query strings
+or concrete path parameters. Authentication routes retain only fixed action
+names. Audit storage is bounded in events.db and included in existing backups;
+the original security page exposes manual history reads without polling.

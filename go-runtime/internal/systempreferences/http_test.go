@@ -67,6 +67,33 @@ func TestPreferencesPersistWithCASAndBounds(t *testing.T) {
 	}
 }
 
+func TestSecurityPatchUsesCASAndDoesNotChangeVoice(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "preferences.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	handler, _ := NewHandler(store)
+	request := httptest.NewRequest(http.MethodPatch, "/v1/system/preferences", bytes.NewBufferString(`{"audit_enabled":false,"trusted_proxies":["192.0.2.17/24"]}`))
+	request.Header.Set("If-Match", `"1"`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	current, err := store.Snapshot()
+	if err != nil || *current.Preferences.AuditEnabled || current.Preferences.TrustedProxies[0] != "192.0.2.0/24" || current.Preferences.CallAudioBufferMS != 500 || current.Preferences.RingTimeoutSeconds != 35 {
+		t.Fatal(current, err)
+	}
+	request = httptest.NewRequest(http.MethodPatch, "/v1/system/preferences", bytes.NewBufferString(`{"audit_enabled":true}`))
+	request.Header.Set("If-Match", `"1"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 412 {
+		t.Fatal("stale security form overwrote current choice", response.Code)
+	}
+}
+
 func TestRingTimeoutPatchPreservesAudioAndRejectsOutOfRange(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "preferences.db"), time.Second)
 	if err != nil {
