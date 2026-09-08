@@ -69,7 +69,7 @@ export function lineCallReadinessStatus(line, devices, options = {}, translate =
     ? 'Browser voice capability check failed' : 'Browser voice capability checking')
   else vowifiBrowserVoiceLabel = translate('Browser WSS voice unavailable')
   const browserVoiceLabel = (!vowifiBrowserVoiceReady && cellularBrowserVoiceReady)
-    ? translate('Cellular voice self-test passed; browser audio is available.')
+    ? translate('Modem voice hardware ready; browser audio is checked per call.')
     : vowifiBrowserVoiceLabel
 
   return {

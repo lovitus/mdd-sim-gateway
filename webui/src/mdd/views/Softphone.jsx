@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from '../api.js'
 import { getCallAudioBufferMS } from '../../browserPreferences.js'
-import { originalCallView } from '../callView.js'
+import { originalCallView, historyCallDraft } from '../callView.js'
 import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
 
@@ -70,6 +70,7 @@ export default function Softphone({
   const currentIdRef = useRef(id)
   const historyRequest = useRef(0)
   const historyPending = useRef(new Map())
+  const historyDraft = useRef(null)
   currentIdRef.current = id
   const owned = callCoordinator?.current
   const call = owned && String(owned.line_id) === String(id) ? originalCallView(owned) : null
@@ -111,7 +112,9 @@ export default function Softphone({
   }, [loadCalls])
   useEffect(() => {
     setKeypad(false); setDtmfSeq('')
-    setCallTransport(!vowifiReady && cellularReady ? 'cellular' : 'vowifi')
+    const draft = historyDraft.current
+    setCallTransport(draft?.lineID === String(id) ? draft.transport : !vowifiReady && cellularReady ? 'cellular' : 'vowifi')
+    historyDraft.current = null
     setMediaTest('idle')
   }, [id])
   useEffect(() => {
@@ -173,6 +176,14 @@ export default function Softphone({
     return () => window.removeEventListener('keydown', onKey)
   }, [keypad, call?.state, pressDTMF])
   const dialKey = key => setNum(value => key === '+' ? (value.startsWith('+') ? value : '+' + value) : value + key)
+  const prepareHistoryCall = record => {
+    const draft = historyCallDraft(record, instances)
+    if (!draft || owned) return
+    historyDraft.current = draft.lineID === String(id) ? null : draft
+    setSelected(draft.lineID)
+    setCallTransport(draft.transport)
+    setNum(draft.number)
+  }
   const placeCall = async (number = num) => {
     if (owned) { toast(t('This line is already in use')); return }
     const target = normalizeDialTarget(number)
@@ -329,7 +340,7 @@ export default function Softphone({
             </div>
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 24, marginTop: 16 }}>
               <button className="btn btn-ghost" aria-label={t('International prefix')} title={t('International prefix')} onClick={() => dialKey('+')} style={{ width:58, height:58, fontSize:26 }}>+</button>
-              <button onClick={() => placeCall()} disabled={cellularBusy || !num || (callTransport === 'vowifi' ? !vowifiReady : !cellularReady)} style={{
+              <button aria-label={t('Call')} onClick={() => placeCall()} disabled={cellularBusy || !normalizeDialTarget(num) || (callTransport === 'vowifi' ? !vowifiReady : !cellularReady)} style={{
                 width: 64, height: 64, borderRadius: '50%', border: 'none', cursor: 'pointer', fontSize: 26,
                 background: (num && (callTransport === 'cellular' ? cellularReady : vowifiReady)) ? GREEN : 'var(--border-strong)', color: '#fff',
               }}>✆</button>
@@ -391,8 +402,8 @@ export default function Softphone({
                   <span style={{ color, fontWeight: 600, textTransform: 'capitalize' }}>{c.status || 'ringing'}</span>
                   {!callSelMode && <>
                     <button className="btn btn-ghost" style={{ padding: '5px 10px' }}
-                      disabled={callTransport === 'vowifi' ? !vowifiReady : !cellularReady}
-                      onClick={(e) => { e.stopPropagation(); setSelected(String(c.line_id)); setCallTransport(c.transport); setNum(c.peer) }}>{t('Call')}</button>
+                      disabled={Boolean(owned) || !historyCallDraft(c, instances)}
+                      onClick={(e) => { e.stopPropagation(); prepareHistoryCall(c) }}>{t('Prepare call')}</button>
                     <button className="row-del" title={t('Delete this call')} aria-label={t('Delete this call')}
                       onClick={(e) => deleteOneCall(c, e)}>🗑</button>
                   </>}

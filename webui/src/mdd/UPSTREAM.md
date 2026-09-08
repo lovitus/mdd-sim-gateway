@@ -120,3 +120,19 @@ the desired-state catalog or another database. Duplicate writes do not advance
 the revision, and permanent event-line purge removes and fences this state.
 This is the persistence/diagnostic foundation, not completed automatic failover:
 the live recovery controller and safe node-selection integration remain open.
+
+## Browser acceptance follow-up
+
+The copied call history stages the original line, transport and number without
+dialling; current-line readiness must not prevent selecting another line's record.
+Hardware readiness is not a claim that this browser's audio has been verified.
+eSIM profile availability distinguishes a confirmed empty inventory from missing
+facts, and the download form reflects the Go API's required IMEI contract.
+
+Settings read independent Go domains separately. A notification or catalog read
+failure does not blank unrelated settings; the affected save remains unavailable,
+and authentication failures are not converted into partial success. Missing audio
+values remain absent rather than becoming a saved default. Runtime listener facts
+populate the original separate address and port fields without exposing key paths.
+Validation and deployment evidence for this batch is tracked in the recovery cursor;
+source adaptation alone does not establish carrier-call or profile-write acceptance.

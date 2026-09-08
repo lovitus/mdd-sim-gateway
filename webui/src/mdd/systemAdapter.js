@@ -17,14 +17,26 @@ export function agentCredentialChange(action, agentID, mode) {
     : 'Issue or rotate credential for {agent}? Its Agent configuration must be updated.'}
 }
 
-export function systemSettingsView(preferences, notifications, status, catalog = {}) {
-  return {timezone:notifications.timezone,cellular_audio_buffer_ms:preferences.preferences.call_audio_buffer_ms,
-    ring_timeout:preferences.preferences.ring_timeout_seconds,
-    __ring_timeout_supported:Number.isInteger(preferences.preferences.ring_timeout_seconds),
+export function systemSettingsView(preferences = {}, notifications = {}, status = {}, catalog = {}) {
+  const audio = preferences.preferences?.call_audio_buffer_ms
+  let bind = '', port
+  if (status.public?.listen) {
+    try {
+      const listen = status.public.listen
+      const address = new URL(`https://${listen.startsWith(':') ? '0.0.0.0' + listen : listen}`)
+      bind = listen.startsWith(':') ? '' : address.hostname
+      port = Number(address.port || 443)
+    } catch { /* An unknown listener is not a fabricated address or port. */ }
+  }
+  return {timezone:notifications.timezone,cellular_audio_buffer_ms:audio,
+    __general_supported:notifications.revision > 0 && typeof notifications.timezone === 'string',
+    __voice_supported:preferences.revision > 0 && Number.isInteger(audio),
+    ring_timeout:preferences.preferences?.ring_timeout_seconds,
+    __ring_timeout_supported:Number.isInteger(preferences.preferences?.ring_timeout_seconds),
     rekey:{minutes:catalog.defaults?.rekey_minutes},__catalog_revision:catalog.revision,
     __saved_rekey_minutes:catalog.defaults?.rekey_minutes,
     __rekey_supported:Number.isInteger(catalog.defaults?.rekey_minutes),
-    bind:status.public?.listen || '',tls:{fingerprint:status.public?.tls_fingerprint_sha256 || ''},
+    bind,http_port:port,tls:{fingerprint:status.public?.tls_fingerprint_sha256 || ''},
     __preference_revision:preferences.revision,__notifications:notifications,
   }
 }
@@ -64,9 +76,15 @@ export function maintenanceRequest(snapshot, action, leaseID) {
 
 export const systemAPI = {
   async settings() {
-    const [preferences,notifications,status,catalog] = await Promise.all([go.systemPreferences(),go.notificationConfig(),go.systemStatus(),go.catalogLines()])
-    cacheCallAudioBufferMS(preferences.preferences.call_audio_buffer_ms)
-    return systemSettingsView(preferences,notifications,status,catalog)
+    const sources = ['Audio settings', 'Notification settings', 'Runtime information', 'Line defaults']
+    const results = await Promise.allSettled([go.systemPreferences(),go.notificationConfig(),go.systemRuntime(),go.catalogLines()])
+    const unauthorized = results.find(result => result.status === 'rejected' && [401,403].includes(result.reason?.status))
+    if (unauthorized) throw unauthorized.reason
+    const view = systemSettingsView(...results.map(result => result.status === 'fulfilled' ? result.value : {}))
+    if (view.__voice_supported) cacheCallAudioBufferMS(view.cellular_audio_buffer_ms)
+    view.__load_errors = results.flatMap((result,index) => result.status === 'rejected'
+      ? [{source:sources[index],code:result.reason?.code || result.reason?.message || 'settings_unavailable'}] : [])
+    return view
   },
   async saveRekeySettings(draft) {
     const minutes=Number(draft.rekey?.minutes)
@@ -76,11 +94,13 @@ export const systemAPI = {
   },
   async saveSettings(draft, domain) {
     if (domain === 'general') {
+      if (!draft.__general_supported) throw new Error('notification_settings_unavailable')
       const patch = notificationSettingsPatch({...notificationSettingsView(draft.__notifications),timezone:draft.timezone})
       const notifications = await go.saveNotificationConfig(patch)
       return {...draft,timezone:notifications.timezone,__notifications:notifications}
     }
     if (domain === 'voice') {
+      if (!draft.__voice_supported) throw new Error('audio_settings_unavailable')
       const value = Number(draft.cellular_audio_buffer_ms)
       if (!Number.isInteger(value) || value < 100 || value > 2000) throw new Error('invalid_call_audio_buffer_ms')
       const patch={call_audio_buffer_ms:value}

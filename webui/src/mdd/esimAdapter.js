@@ -62,6 +62,10 @@ export function secureElementView(entry) {
   }
 }
 
+export function profileInventoryAvailable(ses) {
+  return ses.length > 0 && ses.every(se => se.capabilities?.profiles_available === true)
+}
+
 export function profileRequest(action, target, nickname) {
   if (!target.eid || !target.profile) throw new Error('euicc_profile_identity_required')
   const request = {operation_id:operationID(`mdd-euicc-${action}`)}

@@ -46,6 +46,12 @@ const notificationConfig={revision:8,timezone:'UTC',supported_events:['incoming_
   webhook:{enabled:false,events:{},headers:{configured:true},url:{configured:false},payload_template:{configured:false}},
   pushplus:{enabled:false,events:{},token:{configured:false},topic:{configured:false}}}
 const settings=systemSettingsView({revision:3,preferences:{call_audio_buffer_ms:500}},notificationConfig,{public:{listen:'127.0.0.1:8443'}})
+assert.equal(settings.bind,'127.0.0.1')
+assert.equal(settings.http_port,8443)
+assert.equal(systemSettingsView({}, {}, {public:{listen:'[::1]:9443'}}).http_port,9443)
+assert.equal(systemSettingsView({}, {}, {public:{listen:':8443'}}).http_port,8443)
+assert.equal(systemSettingsView().http_port,undefined)
+assert.equal(systemSettingsView().__voice_supported,false)
 const preferenceWrites=[]
 go.saveSystemPreferences=async (revision,patch)=>{preferenceWrites.push({revision,patch});return {revision:4,preferences:patch}}
 const audioSaved=await systemAPI.saveSettings({...settings,cellular_audio_buffer_ms:700},'voice')
@@ -84,6 +90,38 @@ assert.equal(rekeySaved.__saved_rekey_minutes,30)
 assert.equal(rekeySaved.__catalog_revision,10)
 assert.equal(rekeySaved.__preference_revision,4)
 await assert.rejects(systemAPI.saveRekeySettings({...rekeySettings,rekey:{minutes:1441}}),/invalid_rekey_default/)
+go.systemPreferences=async()=>({revision:4,preferences:{call_audio_buffer_ms:700,ring_timeout_seconds:35}})
+go.notificationConfig=async()=>notificationConfig
+go.systemRuntime=async()=>({public:{listen:'127.0.0.1:8443'}})
+go.catalogLines=async()=>({revision:9,defaults:{rekey_minutes:0}})
+go.systemStatus=async()=>{throw new Error('host sampling must not block settings')}
+const complete=await systemAPI.settings()
+assert.equal(complete.__general_supported,true)
+assert.equal(complete.__voice_supported,true)
+assert.equal(complete.__rekey_supported,true)
+assert.deepEqual(complete.__load_errors,[])
+go.notificationConfig=async()=>{throw Object.assign(new Error('request failed'),{code:'notification_config_unavailable',status:503})}
+const notificationUnavailable=await systemAPI.settings()
+assert.equal(notificationUnavailable.cellular_audio_buffer_ms,700)
+assert.equal(notificationUnavailable.__rekey_supported,true)
+assert.equal(notificationUnavailable.timezone,undefined)
+assert.equal(notificationUnavailable.__general_supported,false)
+assert.deepEqual(notificationUnavailable.__load_errors,[{source:'Notification settings',code:'notification_config_unavailable'}])
+await assert.rejects(systemAPI.saveSettings({...notificationUnavailable,timezone:'UTC'},'general'),/notification_settings_unavailable/)
+go.notificationConfig=async()=>notificationConfig
+go.systemPreferences=async()=>{throw new Error('preferences unavailable')}
+go.catalogLines=async()=>{throw new Error('catalog unavailable')}
+const audioUnavailable=await systemAPI.settings()
+assert.equal(audioUnavailable.timezone,'UTC')
+assert.equal(audioUnavailable.__voice_supported,false)
+assert.equal(audioUnavailable.cellular_audio_buffer_ms,undefined)
+assert.equal(audioUnavailable.__rekey_supported,false)
+const writesBefore=preferenceWrites.length
+await assert.rejects(systemAPI.saveSettings({...audioUnavailable,cellular_audio_buffer_ms:500},'voice'),/audio_settings_unavailable/)
+assert.equal(preferenceWrites.length,writesBefore)
+const unauthorized=Object.assign(new Error('authentication expired'),{status:401})
+go.systemRuntime=async()=>{throw unauthorized}
+await assert.rejects(systemAPI.settings(),error=>error===unauthorized)
 const originalFetch = globalThis.fetch
 const allowanceWrites = []
 try {

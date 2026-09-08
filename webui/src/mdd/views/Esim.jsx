@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
-import { euiccReaderKey, downloadView, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch } from '../esimAdapter.js'
+import { euiccReaderKey, downloadView, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch, profileInventoryAvailable } from '../esimAdapter.js'
 import { useI18n } from '../i18n.jsx'
 import { compactReaderName } from '../linePresentation.js'
 
@@ -451,7 +451,7 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
         </label>
         <label style={{ display: 'block', marginBottom: 10 }}>
           <div style={{ fontSize: 12, color: 'var(--text-mute)', marginBottom: 4 }}>
-            IMEI {t(imeiDefault ? '(from matched line — editable)' : '(optional)')}
+            IMEI {t(imeiDefault ? '(from matched line — editable)' : '(required, 15 digits)')}
           </div>
           <input value={imei} onChange={(e) => setImei(e.target.value)} placeholder={t('15-digit IMEI')} style={{ width: '100%' }} />
         </label>
@@ -547,6 +547,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     [ses],
   )
   const hasEuicc = ses.some((se) => se.eid || se.chip || (se.profiles || []).length)
+  const profilesAvailable = profileInventoryAvailable(ses)
 
   // Read authenticated inventory, not a claim about local lpac installation.
   useEffect(() => {
@@ -875,7 +876,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
             )}
             <div>
               <div style={{ color: 'var(--text-mute)', fontSize: 11 }}>{t('IMEI for download')}</div>
-              <div>{imeiDefault || t('— (lpac default TAC)')}</div>
+              <div>{imeiDefault || t('Required when downloading')}</div>
             </div>
           </div>
         )}
@@ -884,7 +885,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
       <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <div style={{ fontWeight: 700 }}>{t('Profiles')}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-mute)' }}>{t('{count} profile(s)', { count: profiles.length })}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-mute)' }}>{profilesAvailable ? t('{count} profile(s)', { count: profiles.length }) : '—'}</div>
         </div>
         {cachedAt > 0 && !loaded && (
           <div style={{ fontSize: 12, color: 'var(--text-mute)', marginBottom: 10 }}>
@@ -895,11 +896,13 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
           <div style={{ color: 'var(--text-mute)', fontSize: 13 }}>
             {loading
               ? t('Reading…')
-              : !loaded
-                ? t('Click Load to list profiles.')
+              : profilesAvailable
+                ? t('No profiles on this eUICC.')
                 : hasEuicc
-                  ? t('No profiles on this eUICC.')
-                  : t('No profiles to show.')}
+                  ? t('Profile inventory unavailable.')
+                  : !loaded
+                    ? t('Click Load to list profiles.')
+                    : t('No profiles to show.')}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>

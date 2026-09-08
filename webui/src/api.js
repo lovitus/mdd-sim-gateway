@@ -647,6 +647,7 @@ Object.assign(api, {
   rawModemBinding: lineID => j('GET', `/v1/lines/${encodeURIComponent(lineID)}/raw-modem`),
   saveRawModemBinding: (lineID, body) => j('PUT', `/v1/lines/${encodeURIComponent(lineID)}/raw-modem`, body),
   testEgress: country => j('POST', `/v1/egress/exits/${encodeURIComponent(String(country).toLowerCase())}/test`, {}),
+  systemRuntime: () => j('GET', '/v1/system/runtime'),
   systemStatus: async () => {
     const [status, runtime] = await Promise.all([
       j('GET', '/v1/system/status'), j('GET', '/v1/system/runtime'),
