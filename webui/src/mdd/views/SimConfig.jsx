@@ -24,6 +24,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const [pinMsg, setPinMsg] = useState('')
   const [form, setForm] = useState(emptyInstance())
   const [saving, setSaving] = useState(false)
+  const [detecting,setDetecting]=useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteHistory, setDeleteHistory] = useState(true)
   const [creating, setCreating] = useState(false)
@@ -132,24 +133,26 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const portForIdx = (i) => (cards.find((c) => c.index === i) || {}).reader_port || ''
 
   const detect = async () => {
+    if(mutationBusy.current)return
+    mutationBusy.current=true;setDetecting(true)
+    const epoch=pinEpoch.current,target=currentTarget.current
+    const current=()=>pinEpoch.current===epoch && currentTarget.current===target
     setPinMsg(t('Detecting…'))
     try {
+      const c=await api.detect(targetDevice)
+      if(!current())return
       // OS modem providers expose subscriber identity without raw APDU access. Use their
       // authoritative snapshot instead of probing a reserved-but-disconnected VPCD slot.
       // PC/SC and APDU-capable modems keep the full card/PIN path below.
       if (providerOnly) {
-        const sim = targetDevice.sim || {}
-        const c = { present: sim.present !== false, iccid: sim.iccid || '',
-          imsi: sim.imsi || '', mcc: sim.mcc || '', mnc: sim.mnc || '',
-          pin_enabled: null, identity_source: sim.identity_source || 'modem-provider' }
         setCard(c)
         upd({ imsi: c.imsi || form.imsi, mcc: c.mcc || form.mcc,
-          mnc: c.mnc || form.mnc, msisdn: sim.number || form.msisdn })
+          mnc: c.mnc || form.mnc, msisdn: c.number || form.msisdn,
+          ...(smscMode==='auto' && c.smsc ? {smsc:c.smsc} : {}) })
         setPinMsg(c.imsi ? t('Card identity read from the modem provider.')
           : t('Only ICCID is available from this modem provider.'))
         return
       }
-      const c = await api.detect(targetDevice)
       setCard(c)
       if (!c.present) {
         setPinMsg(t('No SIM card in this reader.'))
@@ -164,7 +167,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       if (port) patch.reader_port = port
       upd(patch)
       setPinMsg(c.imsi ? t('Card read.') : t('Card present; enter PIN to read IMSI. ICCID {iccid}, {tries} tries left.', { iccid: c.iccid || '?', tries: c.pin_tries ?? '?' }))
-    } catch (e) { setPinMsg(`${t('Error')}: ${e.message}`) }
+    } catch (e) { if(current())setPinMsg(`${t('Error')}: ${e.message}`) }
+    finally {mutationBusy.current=false;setDetecting(false)}
   }
 
   const checkPINStatus = async () => {
@@ -186,7 +190,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     const epoch = pinEpoch.current
     try {
       const target = simPINIdentity(targetDevice,form.iccid)
-      if (!proof || proof.target !== JSON.stringify(target) || !/^\\d{4,8}$/.test(pin)) throw new Error('sim_pin_preflight_required')
+      if (!proof || proof.target !== JSON.stringify(target) || !/^\d{4,8}$/.test(pin)) throw new Error('sim_pin_preflight_required')
       if (saveOnAgent && !pinConfiguration?.revision) throw new Error('sim_pin_configuration_unavailable')
       mutationBusy.current = true; setPinBusy(true)
       const preflight = proof.operation
@@ -216,14 +220,11 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       // Strip runtime-only fields that ride along on the instance object from /api/instances
       // (they are computed per-request, not config — never persist them).
       delete body.status; delete body.has_pin
-      // Never send an empty PIN — the stored PIN (tied to this IMSI) must survive edits to
-      // unrelated fields. `pin` state is only set when the user re-enters/verifies a PIN
-      // here; only then do we forward it to update the saved credential.
+      // PIN is managed only by the explicit Agent actions, never by catalog saves.
       delete body.pin
       // Device identity belongs to the physical modem/reader and is managed on the
       // Hardware tab. Never let a stale SIM form overwrite the current hardware snapshot.
       delete body.imei; delete body.imeisv
-      if (pin) body.pin = pin
       // A Windows/system-managed modem can expose ICCID/IMSI/SMS without exposing raw SIM
       // APDUs.  It still needs an editable ICCID-scoped line record for the user-supplied
       // MSISDN/SMSC and message history, but provisioning must not pretend VoWiFi can start.
@@ -343,7 +344,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           : t('Claim the SIM, save its configuration, then verify and provision the hardware.')}
         {!!missing.length && <div style={{ marginTop: 6 }}>{t('Missing information')}: {missing.map(key => missingLabels[key] || key).join('、')}</div>}
       </div>}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div className="mdd-sim-layout">
       {/* Card / PIN panel */}
       <div className="card" style={{ padding: 20 }}>
         <h3 style={{ marginTop: 0 }}>{t('SIM card')}</h3>
@@ -357,7 +358,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           <div className="mono" style={{ fontSize: 11, color: 'var(--text-mute)', marginTop: 4 }}>
             {t('Bound to USB port {port} (stable across reader re-enumeration)', { port: form.reader_port })}
           </div>}
-        <button className="btn btn-ghost" style={{ marginTop: 10 }} onClick={detect}>{providerOnly ? t('Refresh SIM identity') : t('Detect card')}</button>
+        <button className="btn btn-ghost" style={{ marginTop: 10 }} onClick={detect} disabled={detecting || saving || deleting || pinBusy || !targetDevice}>{detecting ? t('Detecting…') : providerOnly ? t('Refresh SIM identity') : t('Detect card')}</button>
         {card && (
           <div className="mono" style={{ fontSize: 12, color: card.present ? 'var(--text-dim)' : '#ef4444', marginTop: 12, lineHeight: 1.6 }}>
             {card.present ? (<>
@@ -390,7 +391,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       <div className="card" style={{ padding: 20 }}>
         <h3 style={{ marginTop: 0 }}>{t('Line configuration')}</h3>
         <label><input type="checkbox" checked={form.enabled === true} disabled={!form.__catalog_revision || form.provisioning_state === 'draft' || saving || deleting || pinBusy} onChange={event => upd({enabled:event.target.checked})} />{t('Enabled in Provider catalog')}</label>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div className="mdd-sim-fields">
           {!creating && <Field label={t('Instance ID')}><input className="mono" value={form.id} readOnly title={t('Assigned by the system and cannot be changed.')} /></Field>}
           <Field label={t('Name')}><input value={form.name} onChange={(e) => upd({ name: e.target.value })} placeholder="Telus" /></Field>
           <Field label="IMSI"><input className="mono" value={form.imsi} onChange={(e) => upd({ imsi: e.target.value })} /></Field>
@@ -452,7 +453,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
         <details style={{ marginTop: 12 }}>
           <summary>{t('Advanced IMS identity')}</summary>
           <p className="u-note">{t('Carrier defaults are applied automatically. Change these fields only when required by the carrier.')}</p>
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
+          <div className="mdd-sim-fields">
             <Field label="P-Access-Network-Info (PANI)">
               <input className="mono" value={form.sip.pani || ''} onChange={(e) => updSip({ pani: e.target.value })}
                 placeholder={t('Automatic carrier default')} />
@@ -470,9 +471,9 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
         </details>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
-          <button className="btn btn-primary" onClick={save} disabled={saving || deleting || !form.__catalog_revision}>{t('Save')}</button>
+          <button className="btn btn-primary" onClick={save} disabled={saving || deleting || detecting || pinBusy || (!form.__catalog_revision && !(creating && targetDevice?.present === true && targetDevice?.sim?.iccid && !targetDevice.stale && !targetDevice.observed_only))}>{t('Save')}</button>
         </div>
-        <ProvisionActions form={form} device={targetDevice} refresh={refresh} operationLock={mutationBusy} blocked={saving || deleting || pinBusy}
+        <ProvisionActions form={form} device={targetDevice} refresh={refresh} operationLock={mutationBusy} blocked={saving || deleting || detecting || pinBusy}
           onSaved={value => { setForm({...emptyInstance(),...value}); setCreating(value.provisioning_state === 'draft'); setSavedLineId(String(value.id)); setSelected(String(value.id)) }} />
         {existingLine && <div className="u-line-delete" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>

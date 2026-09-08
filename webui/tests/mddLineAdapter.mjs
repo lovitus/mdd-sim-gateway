@@ -1,4 +1,10 @@
 import assert from 'node:assert/strict'
+import {readFile} from 'node:fs/promises'
+const simPage=await readFile(new URL('../src/mdd/views/SimConfig.jsx',import.meta.url),'utf8')
+assert.ok(!simPage.includes(String.raw`/^\\d{4,8}$/`),'PIN handlers must accept numeric PINs, not a literal backslash')
+assert.ok(simPage.includes('creating && targetDevice?.present === true && targetDevice?.sim?.iccid'),'new SIM Save must reach the existing claim-and-save adapter')
+assert.ok(!simPage.includes('if (pin) body.pin = pin'),'catalog saves must not submit the separate PIN input')
+assert.ok(simPage.includes('className="mdd-sim-layout"'),'SIM panels must use the responsive layout')
 globalThis.window = {location:{pathname:'/'}}
 const {lineForm,editedCatalogLine,lineAPI,simPINIdentity,pinProof,candidateForDevice,savedCatalogLine,modemProvisionIntent,runtimeNetworkSelection} = await import('../src/mdd/lineAdapter.js')
 const {mapGoSnapshot} = await import('../src/goV1Adapter.js')
@@ -38,6 +44,18 @@ for (const attempts of [undefined,0,1,2,'3']) assert.equal(pinProof({state:'pin_
 assert.equal(pinProof({state:'pin_required',attempts_remaining:3},'op',target).operation,'op')
 assert.equal(pinProof({state:'unknown',attempts_remaining:3},'op',target),null)
 const device = {device_type:'modem',sim:{iccid:'fixture-card'},go_device:{agent_id:'agent',process_generation:'process',modem:{equipment_id:'equipment',attachment_id:'attachment',sim_session_generation:'session'}}}
+const originalDevices=go.devices
+const detectDevice={...device,id:'modem-a',present:true}
+go.devices=async()=>({devices:[{...detectDevice,sim:{iccid:'fixture-card',present:true,imsi:'fresh-imsi'},sms_diagnostics:{service_center:'+12025550123'}}]})
+const detected=await lineAPI.detect(detectDevice)
+assert.equal(detected.imsi,'fresh-imsi')
+assert.equal(detected.smsc,'+12025550123')
+assert.equal(detected.pin_enabled,null)
+go.devices=async()=>({devices:[{...detectDevice,stale:true}]})
+await assert.rejects(lineAPI.detect(detectDevice),/device_snapshot_unavailable/)
+go.devices=async()=>({devices:[{...detectDevice,sim:{iccid:'replacement'}}]})
+await assert.rejects(lineAPI.detect(detectDevice),/sim_pin_card_identity_changed/)
+go.devices=originalDevices
 const candidate = {card_id:'fixture-card',agent_id:'agent',process_generation:'process',equipment_id:'equipment',attachment_id:'attachment',session_generation:'session'}
 assert.equal(candidateForDevice([candidate],device),candidate)
 assert.equal(candidateForDevice([candidate],{...device,stale:true}),null)

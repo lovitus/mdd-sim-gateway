@@ -107,6 +107,12 @@ export const lineAPI = {
       const result = await go.readerReadback(device)
       if (result.state !== 'applied' || !result.reader) throw new Error(result.error_code || 'reader_readback_unconfirmed')
       sim = {...result.reader.sim,iccid:result.reader.card_id,present:result.reader.card_present}
+    } else {
+      const snapshot=await go.devices()
+      const latest=(snapshot.devices || []).find(item=>String(item.id)===String(device.id))
+      if(!latest || latest.stale || latest.observed_only || latest.present!==true)throw new Error('device_snapshot_unavailable')
+      if(device.sim?.iccid && latest.sim?.iccid!==device.sim.iccid)throw new Error('sim_pin_card_identity_changed')
+      sim={...latest.sim,smsc:latest.sms_diagnostics?.service_center || ''}
     }
     return {...sim,present:sim.present === true,iccid:sim.iccid || '',pin_enabled:null}
   },

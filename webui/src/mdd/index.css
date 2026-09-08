@@ -347,8 +347,13 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .mdd-imei-editor { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.4fr); gap:16px; }
 .mdd-imei-binding { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) auto; gap:10px; align-items:center; border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
 .mdd-imei-editor > *, .mdd-imei-binding > * { min-width:0; overflow-wrap:anywhere; }
+.mdd-sim-layout { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }
+.mdd-sim-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.mdd-sim-layout > *, .mdd-sim-fields > * { min-width:0; overflow-wrap:anywhere; }
+.mdd-sim-layout .u-inline { flex-wrap:wrap; }
 .mdd-message-layout > .card > div { overflow-wrap:anywhere; }
 @media(max-width:800px) {
+  .mdd-sim-layout, .mdd-sim-fields { grid-template-columns:minmax(0,1fr); }
   .u-split { grid-template-columns:minmax(0,1fr); }
   .mdd-imei-editor, .mdd-imei-binding { grid-template-columns:minmax(0,1fr); }
   .mdd-imei-binding > button { justify-self:end; }

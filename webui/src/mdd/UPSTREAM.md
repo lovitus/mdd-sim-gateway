@@ -43,6 +43,21 @@ selected line rather than only the visible page, and rejects active call records
 The working-tree and production entrypoints use this App and its stylesheet.
 Remaining contracts and acceptance still block a claim of full restoration.
 
+The SIM form retains the original fields while separating catalog saves from
+explicit Agent PIN actions. New-card Save reaches the existing disabled-draft
+claim/save adapter; modem identity refresh reads fresh Go telemetry and rejects
+a changed card. Reader readback remains the existing hardware operation. Pending
+readback cannot fill a different selected SIM form. The original two-panel layout
+stacks on narrow screens; actual 390px and 1280px browser measurements are recorded
+in the recovery cursor. These corrections do not prove new-card provisioning or
+PIN hardware acceptance, and remain in the current uncommitted frontend batch.
+
+User scope decision (2026-09-08): retain the existing balance/data-allowance
+query implementation, but exclude it from current development and proactive
+acceptance. Only perform its manual validation when the customer explicitly
+requests it. Missing allowance-rule or verification evidence is not a blocker
+for the remaining frontend work; do not remove the feature.
+
 The copied App now instantiates the existing Go coordinator once for both transports
 and its global incoming-call overlay. Softphone retains the customized page structure,
 but delegates signalling/media/mute/DTMF/hangup to that owner. Unknown start and
@@ -104,7 +119,7 @@ module matrix, not a claim that all other original actions have passed acceptanc
 | --- | --- | --- |
 | New modem 4G/VoWiFi defaults | Disabled in the mounted page; one uncommitted cross-layer batch is in progress. | Complete authenticated first-discovery/default initialization and original automatic draft promotion, then wire and exercise the original form. |
 | VoWiFi-only hardware mode | Disabled; the original Linux ModemManager behavior is not a general remote-Agent switch. | Preserve the original behavior and declared platform scope without releasing persistent modem ownership. |
-| Web bind/port/domain/certificate editing | Real startup/certificate facts are displayed; editing remains disabled. | Restore the original management workflow with configuration validation and rollback, rather than counting readback as editing support. |
+| Web bind/port/certificate paths | Saved startup settings are editable through the existing helper; the production browser saved/read back unchanged values. | Changed-value persistence/backup has CI coverage; no production port/certificate change was performed. Domain/self-signed fields remain actual certificate information, not an automatic certificate-issuance feature. |
 | Retry count and interval | Original inputs, Go persistence, per-line overrides and continuous-failure window are connected; the production page saved/read back 3/40. | Fault-window behavior is covered by CI, not a manufactured production failure; exit-recovery strike counts remain separate. |
 | Rekey default | Go catalog/provider and original form are already connected. | Retain existing evidence; do not treat this as another missing implementation merely because it appears beside disabled retry fields. |
 | eSIM deletion customization | Intentionally unavailable. | Only after all other original functions, through the user-requested interactive final phase. |
@@ -150,6 +165,14 @@ Short-screen download dialogs scroll internally and remain cancellable.
 
 These source contracts still require batch CI and actual non-destructive field
 readback. No profile installation or deletion is implied by the implementation.
+
+Explicit chip reading now uses a read-only EID inventory refresh, including an
+empty eUICC, through the existing Agent session and inspection functions. Older
+Agents with a current ICCID use the existing reader-readback operation instead;
+cache loading never triggers this refresh. Notification read failure remains
+visible without discarding successful profile readback. Core must precede new
+Agent deployment. CI and one actual empty-chip browser refresh are recorded in
+the recovery cursor; this does not certify profile writes or every reader host.
 
 ## Recovery diagnostics and persistence boundary
 
