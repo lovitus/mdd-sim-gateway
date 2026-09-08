@@ -1,9 +1,6 @@
 import React, { useEffect } from 'react'
 import { useI18n } from '../i18n.jsx'
-import { compactReaderName, lineCompositeStatus } from '../linePresentation.js'
-
-const virtualReaderName = (slot) =>
-  `Virtual PCD 00 ${Math.max(0, Number(slot) || 0).toString(16).toUpperCase().padStart(2, '0')}`
+import { lineEndpointLabel, lineCompositeStatus } from '../linePresentation.js'
 
 // Per-page SIM/line picker for multi-SIM setups.
 // Clearly labels each option with:
@@ -30,9 +27,9 @@ export default function SimSelector({
       String(c.matched) === String(inst.id) ||
       (c.iccid && inst.iccid && String(c.iccid) === String(inst.iccid))
     ))
-    const isOnline = !!card || devices.some((d) => d.present && String(d.instance_id || '') === String(inst.id))
-    const slotIdx = card?.vpcd_slot ?? card?.index ?? inst.reader_index ?? 0
-    const slotName = compactReaderName(card?.name || inst.reader_name || virtualReaderName(slotIdx))
+    const device=devices.find(d=>String(d.instance_id || '')===String(inst.id))
+    const isOnline = !!card || device?.present === true
+    const endpoint=lineEndpointLabel(card,device,inst,t)
     const profileName = (card ? (card.spn || card.profile_name || card.carrier) : '') ||
       inst.carrier || inst.profile_name || inst.name ||
       (inst.mcc && inst.mnc ? `${inst.mcc}-${inst.mnc}` : '') || t('SIM')
@@ -45,7 +42,7 @@ export default function SimSelector({
     seenIds.add(String(inst.id))
     options.push({
       id: String(inst.id),
-      label: `[${t('Slot')} ${slotIdx}] ${slotName} · ${profileName}${tail}${statusText}`,
+      label: `${endpoint} · ${profileName}${tail}${statusText}`,
       raw: inst,
       isOnline,
     })
@@ -57,28 +54,29 @@ export default function SimSelector({
     const matchedId = card.matched ? String(card.matched) : null
     if (matchedId && seenIds.has(matchedId)) continue
     if (card.iccid && instances.some((inst) => String(inst.iccid) === String(card.iccid))) continue
-    const cardId = matchedId || `card-${card.index ?? 0}`
+    const cardId = `unconfigured:${JSON.stringify([card.agent_id || '',card.name || '',card.iccid || '',card.index ?? null])}`
     if (seenIds.has(cardId)) continue
     seenIds.add(cardId)
 
-    const slotIdx = card.vpcd_slot ?? card.index ?? 0
-    const slotName = compactReaderName(card.name || virtualReaderName(slotIdx))
+    const endpoint=lineEndpointLabel(card,null,null,t)
     const profileName = card.spn || card.profile_name || card.carrier || (card.mcc && card.mnc ? `${card.mcc}-${card.mnc}` : '') || t('SIM')
     const tail = card.iccid ? ` · ICCID: ••••${String(card.iccid).slice(-4)}` : (card.imsi ? ` · IMSI: ••••${String(card.imsi).slice(-4)}` : '')
 
     options.push({
       id: cardId,
-      label: `[${t('Slot')} ${slotIdx}] ${slotName} · ${profileName}${tail}`,
+      label: `${endpoint} · ${profileName}${tail} — ${t('Configure this SIM first')}`,
       raw: card,
       isOnline: true,
+      disabled: true,
     })
   }
 
   const selectedId = selected?.id ? String(selected.id) : (typeof selected === 'string' ? selected : '')
+  const selectable=options.filter(option=>!option.disabled)
 
   useEffect(() => {
-    if (options.length > 0 && (!selectedId || !options.some((o) => o.id === selectedId))) {
-      setSelected((options.find((option) => option.isOnline) || options[0]).id)
+    if (selectable.length > 0 && (!selectedId || !selectable.some((o) => o.id === selectedId))) {
+      setSelected((selectable.find((option) => option.isOnline) || selectable[0]).id)
     }
   }, [selectedId, options.map((o) => o.id).join(',')]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -88,15 +86,17 @@ export default function SimSelector({
     <div className="card" style={{ padding: '10px 14px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
       <span style={{ fontSize: 12, color: 'var(--text-mute)', whiteSpace: 'nowrap', fontWeight: 600 }}>{t(label)}</span>
       <select
-        value={selectedId || options[0]?.id || ''}
+        value={selectedId || selectable[0]?.id || ''}
+        disabled={!selectable.length}
         onChange={(e) => setSelected(e.target.value)}
         style={{ flex: 1, maxWidth: 580, fontWeight: 500 }}
       >
+        {!selectable.length && <option value="">{t('Configure this SIM first')}</option>}
         {options.map((opt) => (
-          <option key={opt.id} value={opt.id}>{opt.label}</option>
+          <option key={opt.id} value={opt.id} disabled={opt.disabled}>{opt.label}</option>
         ))}
       </select>
-      {options.length === 1 && <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('only line')}</span>}
+      {selectable.length === 1 && <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('only line')}</span>}
     </div>
   )
 }

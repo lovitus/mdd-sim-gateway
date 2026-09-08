@@ -105,7 +105,7 @@ module matrix, not a claim that all other original actions have passed acceptanc
 | New modem 4G/VoWiFi defaults | Disabled in the mounted page; one uncommitted cross-layer batch is in progress. | Complete authenticated first-discovery/default initialization and original automatic draft promotion, then wire and exercise the original form. |
 | VoWiFi-only hardware mode | Disabled; the original Linux ModemManager behavior is not a general remote-Agent switch. | Preserve the original behavior and declared platform scope without releasing persistent modem ownership. |
 | Web bind/port/domain/certificate editing | Real startup/certificate facts are displayed; editing remains disabled. | Restore the original management workflow with configuration validation and rollback, rather than counting readback as editing support. |
-| Retry count and interval | Original inputs exist but remain disabled. | Map their original consumers and behavior; exit-recovery strike counts are not an equivalent replacement. |
+| Retry count and interval | Original inputs, Go persistence, per-line overrides and continuous-failure window are connected; the production page saved/read back 3/40. | Fault-window behavior is covered by CI, not a manufactured production failure; exit-recovery strike counts remain separate. |
 | Rekey default | Go catalog/provider and original form are already connected. | Retain existing evidence; do not treat this as another missing implementation merely because it appears beside disabled retry fields. |
 | eSIM deletion customization | Intentionally unavailable. | Only after all other original functions, through the user-requested interactive final phase. |
 
@@ -123,6 +123,14 @@ Recovery still requires an exact idle generation and no maintenance owner;
 healthy status resets the window, while missing cards/PIN failures follow their
 own handling. Restoring these controls must retain those consumers and gates,
 not merely expose existing Go backoff fields under the old labels.
+
+The original Web settings are startup settings: `ec620942 control/run.py:164-191`
+reads bind/port at process start, prefers an existing configured certificate/key
+pair, and otherwise creates/reuses the private self-signed pair. Saving the old
+form does not change an already-running listener. The `domain` field also feeds
+legacy manager URLs; it is not automatically a certificate SAN. An adapter must
+not claim that saving display metadata changed TLS or the live port. This
+remaining backend gap does not authorize a new general TLS-management framework.
 
 ## eSIM information and one-time download tracking
 

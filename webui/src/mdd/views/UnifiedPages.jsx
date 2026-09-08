@@ -1459,7 +1459,7 @@ export function SystemPage({ showToast, openUpdateDialog, instances, callCoordin
       {(status?.backups || []).map(item => <div className="u-detail" key={item.name}><span>{item.name}</span><b>{formatBytes(item.size)} · {new Date(item.created_at * 1000).toLocaleString()}</b></div>)}
     </>}
     {tab === 'maintenance' && <Maintenance showToast={showToast} />}
-  </div>{['general','voice','security','backup'].includes(tab) && <button className="btn btn-primary" disabled={settingsBusy || (tab === 'general' ? !s.__general_supported : tab === 'security' ? !s.__security_supported : tab === 'backup' ? !s.__updates_supported : !s.__voice_supported)} onClick={save}>{t(tab === 'voice' ? 'Save audio and call timeout' : tab === 'security' ? 'Save audit settings' : tab === 'backup' ? 'Save update networking' : 'Save')}</button>}</div>
+  </div>{['general','voice','security','backup'].includes(tab) && <button className="btn btn-primary" disabled={settingsBusy || (tab === 'general' ? !s.__general_supported : tab === 'security' ? !s.__security_supported : tab === 'backup' ? !s.__updates_supported : !s.__voice_supported)} onClick={save}>{t(tab === 'voice' ? 'Save call and VoWiFi settings' : tab === 'security' ? 'Save audit settings' : tab === 'backup' ? 'Save update networking' : 'Save')}</button>}</div>
 }
 
 const HOST_ALERT_TEXT = {
@@ -1542,7 +1542,7 @@ function HostPanel({ host, alerts, loading, clearing, onClear, t }) {
 
 function AgentHostsPanel({ agents, loading, now, language }) {
   const isZh = language === 'zh'
-  if (loading) return <div className="card u-panel"><p>{isZh ? '正在读取 Agent 状态…' : 'Loading Agent health…'}</p></div>
+  if (loading && !agents.length) return <div className="card u-panel"><p>{isZh ? '正在读取 Agent 状态…' : 'Loading Agent health…'}</p></div>
   if (!agents.length) return <Empty title={isZh ? '尚无 Agent 健康上报' : 'No Agent health reports'} detail={isZh ? '新版 Windows、macOS Agent 接入后会显示在这里；旧版 Agent 的设备功能不受影响。' : 'Updated Windows and macOS Agents appear here. Older Agent device functions are unaffected.'} />
   return <>
     <div className="u-section-title"><div><h2>{isZh ? 'Agent 主机' : 'Agent hosts'}</h2><p>{isZh ? '这是管理程序自身的健康状态；不代表 SIM、4G、短信或通话一定可用。' : 'This is the management process health, not proof that SIM, cellular, SMS or calling is available.'}</p></div></div>
@@ -1575,33 +1575,50 @@ export function DiagnosticsPage(props) {
   const [clearingAlerts, setClearingAlerts] = useState(false)
   const [agents, setAgents] = useState([])
   const [agentsLoading, setAgentsLoading] = useState(true)
+  const [agentsError, setAgentsError] = useState('')
+  const [hostError, setHostError] = useState('')
+  const agentReadBusy = useRef(false)
+  const hostReadBusy = useRef(false)
+  const mounted = useRef(true)
+  useEffect(() => {mounted.current=true;return () => {mounted.current=false}},[])
+  const loadAgents = useCallback(async () => {
+    if(agentReadBusy.current)return
+    agentReadBusy.current=true;setAgentsLoading(true)
+    try {const value=await api.agentHealth();if(mounted.current){setAgents(value.agents || []);setAgentsError('')}}
+    catch(error){if(mounted.current)setAgentsError(error.message)}
+    finally{agentReadBusy.current=false;if(mounted.current)setAgentsLoading(false)}
+  },[])
+  const loadHost = useCallback(async () => {
+    if(hostReadBusy.current)return
+    hostReadBusy.current=true;setHostLoading(true)
+    try {const value=await api.diagnosticSystemStatus();if(mounted.current){setSystem(value);props.setSystemMeta?.(value);setHostError('')}}
+    catch(error){if(mounted.current)setHostError(error.message)}
+    finally{hostReadBusy.current=false;if(mounted.current)setHostLoading(false)}
+  },[props.setSystemMeta])
   const [agentNow, setAgentNow] = useState(Date.now())
   // The host is where an outage that hits every line at once comes from, so this refreshes
   // on its own rather than showing whatever was true when the page was opened.
   useEffect(() => {
-    const load = () => api.diagnosticSystemStatus().then(value => { setSystem(value); props.setSystemMeta?.(value) }).catch(error => props.showToast(error.message)).finally(() => setHostLoading(false))
-    load(); const timer = setInterval(load, 30 * 1000); return () => clearInterval(timer)
-  }, [])
+    loadHost(); const timer = setInterval(loadHost, 30 * 1000); return () => clearInterval(timer)
+  }, [loadHost])
   useEffect(() => {
-    let active = true
-    const load = () => api.agentHealth().then(value => { if (active) setAgents(value.agents || []) }).catch(() => {}).finally(() => { if (active) setAgentsLoading(false) })
-    load()
+    loadAgents()
     // Relative age is local presentation state. Do not replace the Agent array every heartbeat:
     // only semantic server events do that. The slow fallback repairs a missed browser event.
     const clock = setInterval(() => setAgentNow(Date.now()), 10 * 1000)
-    const fallback = setInterval(load, 60 * 1000)
-    const unsubscribe = props.subscribe?.(message => { if (message.type === 'agent-health') load() })
-    return () => { active = false; clearInterval(clock); clearInterval(fallback); unsubscribe?.() }
-  }, [props.subscribe])
+    const fallback = setInterval(loadAgents, 60 * 1000)
+    const unsubscribe = props.subscribe?.(message => { if (message.type === 'agent-health') loadAgents() })
+    return () => { clearInterval(clock); clearInterval(fallback); unsubscribe?.() }
+  }, [props.subscribe,loadAgents])
   const host = system?.host || {}
   const hostAlerts = system?.host_alerts || []
   const issueUrl = `${(system?.repository_url || 'https://github.com/MddIdd/mdd-sim-gateway').replace(/\/$/, '')}/issues/new/choose`
   const clearHostAlerts = async () => { try { setClearingAlerts(true); const next = await api.clearHostAlerts(hostAlerts); setSystem(next); props.setSystemMeta?.(next); props.showToast(t('Host alerts acknowledged')) } catch (e) { props.showToast(e.message) } finally { setClearingAlerts(false) } }
   const run = async d => { try { const result = await api.deviceDiagnostics(d.id); setResults(x => ({ ...x, [d.id]: result })); props.showToast(result.ok ? t('Diagnostics passed') : t('Diagnostics found problems')) } catch (e) { props.showToast(e.message) } }
   return <div className="u-page"><div className="u-tabs"><button className={tab === 'health' ? 'active' : ''} onClick={() => setTab('health')}>{t('Health')}</button><button className={tab === 'agents' ? 'active' : ''} onClick={() => setTab('agents')}>{language === 'zh' ? 'Agent 主机' : 'Agent hosts'}</button><button className={tab === 'host' ? 'active' : ''} onClick={() => setTab('host')}>{language === 'zh' ? '网关主机' : 'Gateway host'}{!!hostAlerts.length && <i className={`u-nav-dot ${hostAlerts.some(a => a.severity === 'critical') ? 'critical' : 'warning'}`} />}</button><button className={tab === 'logs' ? 'active' : ''} onClick={() => setTab('logs')}>{t('Live logs')}</button><button className={tab === 'bundle' ? 'active' : ''} onClick={() => setTab('bundle')}>{t('Support bundle')}</button></div>
-    {tab === 'health' && <div className="u-device-grid">{devices.map((d, i) => <div className="card u-panel" key={d.id}><h3>{deviceTitle(d, i)}</h3><div className="u-detail"><span>{t('4G network')}</span><Badge state={capability(d, 'cellular').actual} /></div><div className="u-detail"><span>VoWiFi / IMS</span><Badge state={capability(d, 'vowifi').actual} /></div><button className="btn btn-ghost" onClick={() => run(d)}>{t('Run diagnostics')}</button>{results[d.id]?.checks?.map(check => <div className="u-detail" key={check.name}><span>{check.name}</span><b>{check.ok ? '✓' : '✕'} {check.detail}</b></div>)}</div>)}</div>}
-    {tab === 'agents' && <AgentHostsPanel agents={agents} loading={agentsLoading} now={agentNow} language={language} />}
-    {tab === 'host' && <HostPanel host={host} alerts={hostAlerts} loading={hostLoading} clearing={clearingAlerts} onClear={clearHostAlerts} t={t} />}
+    {tab === 'health' && <div className="u-device-grid">{devices.map((d, i) => <div className="card u-panel" key={d.id}><h3>{deviceTitle(d, i)}</h3><div className="u-detail"><span>{t('4G network')}</span><Badge state={capability(d, 'connection').actual} /></div><div className="u-detail"><span>VoWiFi / IMS</span><Badge state={capability(d, 'vowifi').actual} /></div><button className="btn btn-ghost" onClick={() => run(d)}>{t('Run diagnostics')}</button>{results[d.id]?.checks?.map(check => <div className="u-detail" key={check.name}><span>{check.name}</span><b>{check.ok ? '✓' : '✕'} {check.detail}</b></div>)}</div>)}</div>}
+    {tab === 'agents' && <><button className="btn btn-ghost" disabled={agentsLoading} onClick={loadAgents}>{t('Refresh')}</button>{agentsError && <p role="alert" className="u-error">{agentsError}</p>}{(!agentsError || agents.length>0) && <AgentHostsPanel agents={agents} loading={agentsLoading} now={agentNow} language={language} />}</>}
+    {tab === 'host' && <><button className="btn btn-ghost" disabled={hostLoading} onClick={loadHost}>{t('Refresh')}</button>{hostError && <p role="alert" className="u-error">{hostError}</p>}{(!hostError || system) && <HostPanel host={host} alerts={hostAlerts} loading={hostLoading && !system} clearing={clearingAlerts} onClear={clearHostAlerts} t={t} />}</>}
     {tab === 'logs' && <Logs {...props} />}
     {tab === 'bundle' && <div className="card u-panel"><h2>{t('Redacted support bundle')}</h2><p>{t('Contains status, configuration shape and bounded logs. SIM identities, phone numbers, credentials and cryptographic material are removed.')}</p><div className="u-support-actions"><a className="btn btn-primary" href={api.supportBundleUrl}>{t('Download support bundle')}</a><div><b>{t('Found a problem or have a suggestion?')}</b><p>{t('Open a GitHub Issue. For faults, attach the redacted support bundle when appropriate.')}</p><a href={issueUrl} target="_blank" rel="noreferrer">{t('Submit an Issue')} ↗</a></div></div></div>}
   </div>

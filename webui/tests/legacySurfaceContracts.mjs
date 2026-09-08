@@ -32,6 +32,15 @@ for(const page of [networkPage,notificationPage]) {
   assert.ok(page.includes('if (!s) return settingsError ?'), 'failed initial reads must not stay on Loading forever')
   assert.ok(page.includes('onClick={retrySettings}'), 'original pages need an explicit retry without reloading the app')
 }
+const diagnostics=unified.slice(unified.indexOf('export function DiagnosticsPage('))
+assert.ok(diagnostics.includes("capability(d, 'connection').actual"), '4G status must not display borrowing permission')
+assert.ok(diagnostics.includes('setAgentsError(error.message)'), 'Agent read failures must not become empty inventory')
+assert.ok(diagnostics.includes('onClick={loadAgents}'))
+assert.ok(diagnostics.includes('onClick={loadHost}'))
+const selector=read('src/mdd/views/SimSelector.jsx')
+assert.ok(selector.includes('options.filter(option=>!option.disabled)'), 'unconfigured cards must not become call/SMS line IDs')
+assert.ok(selector.includes('disabled={opt.disabled}'))
+assert.equal(selector.includes('virtualReaderName'),false, 'missing hardware must not create a fictional Virtual PCD endpoint')
 for (const restored of ['LineVerificationPanel', 'function HardwarePanel(', 'RecycleBinPanel', 'export function SystemPage']) {
   assert.equal(unified.includes(restored), true, `${restored} must remain in the requested customized UI`)
 }

@@ -2,6 +2,12 @@ export function compactReaderName(value) {
   return String(value || '').replace(/\bVirtual PCD\b/g, 'V PCD')
 }
 
+export function lineEndpointLabel(card, device, line, translate) {
+  const index=card?.vpcd_slot ?? card?.index ?? line?.reader_index
+  const name=compactReaderName(card?.name || device?.name || line?.reader_name || '') || translate('Device not reported')
+  return Number.isInteger(index) && index>=0 ? `[${translate('Slot')} ${index}] ${name}` : name
+}
+
 function deviceForLine(line, devices) {
   const iid = String(line?.id || '')
   const iccid = String(line?.iccid || '')

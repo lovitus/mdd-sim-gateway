@@ -3,6 +3,10 @@ globalThis.window = {location:{pathname:'/'}}
 const {lineForm,editedCatalogLine,lineAPI,simPINIdentity,pinProof,candidateForDevice,savedCatalogLine,modemProvisionIntent,runtimeNetworkSelection} = await import('../src/mdd/lineAdapter.js')
 const {mapGoSnapshot} = await import('../src/goV1Adapter.js')
 const {api:go} = await import('../src/api.js')
+const {lineEndpointLabel}=await import('../src/mdd/linePresentation.js')
+assert.equal(lineEndpointLabel(null,{name:'EC20F'}, {},x=>x),'EC20F')
+assert.equal(lineEndpointLabel({name:'Actual reader',index:0},null,{},x=>x),'[Slot 0] Actual reader')
+assert.equal(lineEndpointLabel(null,null,{},x=>x),'Device not reported')
 const source = {schema_version:1,id:'a',card_id:'fixture-card',enabled:false,
   sim:{imsi:'fixture-imsi',mcc:'001',mnc:'01',imei:'fixture-imei'},
   network:{ims_apn:'ims',apn_profiles:[{id:'saved-profile',password_set:true}],epdg_address:'saved-epdg'},
