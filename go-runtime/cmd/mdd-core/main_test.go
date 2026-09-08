@@ -340,6 +340,39 @@ func TestLoadConfigDefaultsAllowanceAndNotificationPathsAndRejectsDatabaseCollis
 	}
 }
 
+func TestXrayExecutableConfigurationDefaultsAndExplicitPath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "core.json")
+	for _, item := range []struct {
+		input, want string
+		invalid     bool
+	}{
+		{"", "/usr/libexec/mdd/xray", false},
+		{"/opt/xray/bin/xray", "/opt/xray/bin/xray", false},
+		{"relative/xray", "", true},
+		{"/", "", true},
+	} {
+		payload := map[string]any{
+			"public":    map[string]any{"listen": "127.0.0.1:8443", "tls_cert": "/cert", "tls_key": "/key"},
+			"local":     map[string]any{"listen": "127.0.0.1:9081", "token": "0123456789abcdef0123456789abcdef"},
+			"auth_path": "/auth", "events_path": filepath.Join(root, "events.db"),
+			"sing_box_path": "/opt/proxy/sing-box", "xray_path": item.input,
+		}
+		wire, _ := json.Marshal(payload)
+		if err := os.WriteFile(path, wire, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := loadConfig(path)
+		if item.invalid {
+			if err == nil {
+				t.Fatal("invalid Xray path accepted")
+			}
+		} else if err != nil || settings.XrayPath != item.want {
+			t.Fatalf("Xray path %q: %v", settings.XrayPath, err)
+		}
+	}
+}
+
 func TestImportNotificationsIsPrivateIdempotentAndDoesNotEchoSecrets(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "core.json")

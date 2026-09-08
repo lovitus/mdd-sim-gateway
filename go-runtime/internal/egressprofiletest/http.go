@@ -50,6 +50,20 @@ func NewHandler(store Store, binary, root string, cellular ...CellularProber) (*
 	return handler, nil
 }
 
+func NewHandlerWithXray(store Store, binary, xray, root string, cellular ...CellularProber) (*Handler, error) {
+	if !filepath.IsAbs(xray) || filepath.Clean(xray) == string(filepath.Separator) {
+		return nil, errors.New("invalid Xray profile test path")
+	}
+	handler, err := NewHandler(store, binary, root, cellular...)
+	if err != nil {
+		return nil, err
+	}
+	handler.probe = func(ctx context.Context, binary, root string, profile egressconfig.Profile) (egressexec.ProfileProbeResult, error) {
+		return egressexec.ProbeProfileWithXray(ctx, binary, xray, root, profile)
+	}
+	return handler, nil
+}
+
 func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", "application/json")
 	response.Header().Set("Cache-Control", "no-store")

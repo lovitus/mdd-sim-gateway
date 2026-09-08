@@ -31,6 +31,59 @@ func TestCreateAndLoadStrictReleaseDirectory(t *testing.T) {
 	}
 }
 
+func TestXrayReleaseRequiresCompleteSourceGroupAndNewSchema(t *testing.T) {
+	root := t.TempDir()
+	inputs := fullTestInputs(t, root)
+	xray := materializeInputs(t, root, []struct {
+		name, role string
+		mode       os.FileMode
+	}{
+		{"xray", RoleXray, 0o755}, {"xray-source.tar.gz", RoleXraySource, 0o644}, {"XRAY-NOTICE.md", RoleXrayNotice, 0o644},
+	})
+	identity := Manifest{ReleaseID: "xray-test", SourceRevision: strings.Repeat("a", 40), OS: "linux", Architecture: "amd64"}
+	for omitted := range xray {
+		partial := append([]Input(nil), inputs...)
+		for index, item := range xray {
+			if index != omitted {
+				partial = append(partial, item)
+			}
+		}
+		if _, err := CreateDirectory(filepath.Join(root, "invalid-"+xray[omitted].Role), identity, partial); err == nil {
+			t.Fatal("incomplete Xray capability accepted")
+		}
+	}
+	manifest, err := CreateDirectory(filepath.Join(root, "complete"), identity, append(inputs, xray...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadDirectory(filepath.Join(root, "complete")); err != nil {
+		t.Fatal(err)
+	}
+	manifest.SchemaVersion = guardSchemaVersion
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("Xray mislabelled as old schema")
+	}
+	var previous []Artifact
+	for _, item := range manifest.Artifacts {
+		if item.Role != RoleXray && item.Role != RoleXraySource && item.Role != RoleXrayNotice {
+			previous = append(previous, item)
+		}
+	}
+	manifest.Artifacts = previous
+	if err := manifest.Validate(); err != nil {
+		t.Fatal("previous schema three rejected", err)
+	}
+	for index, item := range manifest.Artifacts {
+		if item.Role == RoleGuardUnit {
+			manifest.Artifacts = append(manifest.Artifacts[:index], manifest.Artifacts[index+1:]...)
+			break
+		}
+	}
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("schema three lost its guard requirement")
+	}
+}
+
 func TestReleaseDirectoryRejectsTamperingAndUnexpectedFiles(t *testing.T) {
 	root := t.TempDir()
 	output := filepath.Join(root, "release")

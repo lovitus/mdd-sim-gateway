@@ -26,6 +26,8 @@ type subscriptionNode struct {
 	Auth           string            `yaml:"auth"`
 	UUID           string            `yaml:"uuid"`
 	Flow           string            `yaml:"flow"`
+	PacketEncoding string            `yaml:"packet-encoding"`
+	XHTTP          xhttpOptions      `yaml:"xhttp-opts"`
 	Cipher         string            `yaml:"cipher"`
 	AlterID        int               `yaml:"alterId"`
 	TLS            bool              `yaml:"tls"`
@@ -185,13 +187,18 @@ func parseSubscription(payload []byte) ([]subscriptionNode, error) {
 }
 
 func subscriptionPool(nodes []subscriptionNode, keywords []string, tag, pinned, pinMode, running string) ([]map[string]any, []string, string, error) {
+	return subscriptionPoolWithBridges(nodes, keywords, tag, pinned, pinMode, running, nil)
+}
+
+func subscriptionPoolWithBridges(nodes []subscriptionNode, keywords []string, tag, pinned, pinMode, running string, bridges *xhttpBridges) ([]map[string]any, []string, string, error) {
 	var matches []subscriptionNode
 	for _, node := range nodes {
 		match := len(keywords) == 0
 		for _, keyword := range keywords {
 			match = match || nodeKeywordMatches(node.Name, keyword)
 		}
-		if match && node.supportsUDP() {
+		xhttp := bridges != nil && strings.EqualFold(node.Network, "xhttp") && (node.UDP == nil || *node.UDP)
+		if match && (node.supportsUDP() || xhttp) {
 			matches = append(matches, node)
 		}
 	}
@@ -211,7 +218,13 @@ func subscriptionPool(nodes []subscriptionNode, keywords []string, tag, pinned, 
 		}
 		seen[node.Name] = true
 		member := fmt.Sprintf("%s-%d", tag, i)
-		out, err := node.outbound(member)
+		var out map[string]any
+		var err error
+		if bridges != nil && strings.EqualFold(node.Network, "xhttp") {
+			out, err = bridges.outbound(node, member, tag+"/"+node.Name)
+		} else {
+			out, err = node.outbound(member)
+		}
 		if err != nil {
 			return nil, nil, "", err
 		}

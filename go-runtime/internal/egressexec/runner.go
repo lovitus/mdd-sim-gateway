@@ -22,6 +22,7 @@ type Settings struct {
 	StatusPath  string
 	StateDir    string
 	SingBoxPath string
+	XrayPath    string
 	PortBase    int
 	Poll        time.Duration
 	CoreURL     string
@@ -55,19 +56,21 @@ func (systemProcessController) WaitReady(ctx context.Context, ports []int, child
 }
 
 type executor struct {
-	settings      Settings
-	controller    processController
-	now           func() time.Time
-	child         managedProcess
-	applied       string
-	appliedConfig []byte
-	appliedResult Rendered
-	requested     string
-	blocked       string
-	failures      int
-	nextAttempt   time.Time
-	cellular      *cellularClient
-	feedCache     *subscriptionCache
+	settings       Settings
+	controller     processController
+	xrayController processController
+	now            func() time.Time
+	child          managedProcess
+	xrayChild      managedProcess
+	applied        string
+	appliedConfig  []byte
+	appliedResult  Rendered
+	requested      string
+	blocked        string
+	failures       int
+	nextAttempt    time.Time
+	cellular       *cellularClient
+	feedCache      *subscriptionCache
 }
 
 func Run(ctx context.Context, settings Settings) error {
@@ -90,13 +93,18 @@ func Run(ctx context.Context, settings Settings) error {
 	if err != nil {
 		return err
 	}
-	runner := &executor{settings: settings, controller: systemProcessController{}, now: time.Now, cellular: cellular}
+	runner := &executor{settings: settings, controller: systemProcessController{}, xrayController: xrayProcessController{}, now: time.Now, cellular: cellular}
 	ticker := time.NewTicker(settings.Poll)
 	defer ticker.Stop()
 	defer func() {
 		if runner.child != nil {
 			_ = runner.child.Stop(5 * time.Second)
 		}
+		if runner.xrayChild != nil {
+			_ = runner.xrayChild.Stop(5 * time.Second)
+		}
+		_ = os.Remove(filepath.Join(settings.StateDir, "xray.json"))
+		_ = os.Remove(filepath.Join(settings.StateDir, ".xray-candidate.json"))
 		runner.cellular.close()
 		_ = os.Remove(filepath.Join(settings.StateDir, "sing-box.json"))
 		_ = os.Remove(filepath.Join(settings.StateDir, ".sing-box-candidate.json"))
@@ -135,6 +143,10 @@ func (runner *executor) reconcile(ctx context.Context) {
 			_ = runner.child.Stop(5 * time.Second)
 			runner.child = nil
 		}
+		if runner.xrayChild != nil {
+			_ = runner.xrayChild.Stop(5 * time.Second)
+			runner.xrayChild = nil
+		}
 		_ = os.Remove(filepath.Join(runner.settings.StateDir, "sing-box.json"))
 		runner.fail(document.Generation, "prepare cellular exit: "+cellularErr.Error(), false)
 		return
@@ -153,7 +165,7 @@ func (runner *executor) reconcile(ctx context.Context) {
 		return
 	}
 	if runner.applied != "" && !runner.runtimeReady() {
-		runner.publishFailure("sing-box process is not running", document.Generation, false)
+		runner.publishFailure("country exit process is not running", document.Generation, false)
 	}
 	if len(feeds) == 0 && document.Generation == runner.blocked && runner.runtimeReady() {
 		return
@@ -168,8 +180,14 @@ func (runner *executor) reconcile(ctx context.Context) {
 			runner.runtimeReady(), result.Status)
 		return
 	}
-	if runner.runtimeReady() && bytes.Equal(result.Config, runner.appliedConfig) {
+	if runner.runtimeReady() && bytes.Equal(result.Config, runner.appliedConfig) && bytes.Equal(result.XrayConfig, runner.appliedResult.XrayConfig) {
 		runner.commit(document.Generation, result)
+		return
+	}
+	if runner.child != nil && runner.child.Running() && len(result.XrayConfig) > 0 &&
+		(runner.xrayChild == nil || !runner.xrayChild.Running()) &&
+		bytes.Equal(result.Config, runner.appliedConfig) && bytes.Equal(result.XrayConfig, runner.appliedResult.XrayConfig) {
+		runner.restoreXrayBridge(ctx, document.Generation, result)
 		return
 	}
 	// A feed refresh is not authority to interrupt another line's active
@@ -180,16 +198,17 @@ func (runner *executor) reconcile(ctx context.Context) {
 		return
 	}
 	if !document.Proxy.Enabled {
-		if runner.child != nil {
-			err = runner.child.Stop(5 * time.Second)
-		}
-		if err != nil {
-			runner.fail(document.Generation, "stop sing-box: "+err.Error(), runner.runtimeReady())
+		if err = runner.stopPair(); err != nil {
+			runner.fail(document.Generation, "stop exit processes: "+err.Error(), runner.runtimeReady())
 			return
 		}
-		runner.child = nil
+		_ = os.Remove(filepath.Join(runner.settings.StateDir, "xray.json"))
 		_ = os.Remove(filepath.Join(runner.settings.StateDir, "sing-box.json"))
 		runner.commit(document.Generation, result)
+		return
+	}
+	if len(result.XrayConfig) != 0 || len(runner.appliedResult.XrayConfig) != 0 {
+		runner.activateXrayPair(ctx, document.Generation, result)
 		return
 	}
 
@@ -259,7 +278,8 @@ func (runner *executor) reconcile(ctx context.Context) {
 }
 
 func (runner *executor) runtimeReady() bool {
-	return runner.child != nil && runner.child.Running()
+	return runner.child != nil && runner.child.Running() &&
+		(len(runner.appliedResult.XrayConfig) == 0 || (runner.xrayChild != nil && runner.xrayChild.Running()))
 }
 
 func (runner *executor) commit(generation string, result Rendered) {
@@ -330,6 +350,12 @@ func cloneStatus(source Status) Status {
 }
 
 func (settings *Settings) validate() error {
+	if settings.XrayPath == "" {
+		settings.XrayPath = "/usr/libexec/mdd/xray"
+	}
+	if !filepath.IsAbs(settings.XrayPath) || filepath.Clean(settings.XrayPath) == "/" {
+		return errors.New("Xray path must be absolute and scoped")
+	}
 	settings.DesiredPath = filepath.Clean(strings.TrimSpace(settings.DesiredPath))
 	settings.StatusPath = filepath.Clean(strings.TrimSpace(settings.StatusPath))
 	settings.StateDir = filepath.Clean(strings.TrimSpace(settings.StateDir))

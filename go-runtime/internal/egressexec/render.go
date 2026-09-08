@@ -42,9 +42,11 @@ type Status struct {
 }
 
 type Rendered struct {
-	Config []byte
-	Status Status
-	Ports  []int
+	Config     []byte
+	XrayConfig []byte
+	XrayPorts  []int
+	Status     Status
+	Ports      []int
 }
 
 func Render(document egressdesired.Document) (Rendered, error) {
@@ -81,6 +83,10 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 	}
 
 	var inbounds, outbounds, rules []map[string]any
+	bridges := &xhttpBridges{reserved: map[int]bool{}}
+	for port := portBase; port <= portBase+675; port++ {
+		bridges.reserved[port] = true
+	}
 	allReady := true
 	for _, country := range sortedCountries(document.Proxy.Exits) {
 		exit := document.Proxy.Exits[country]
@@ -100,10 +106,10 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 					// Exact runtime choice, not a rewrite of the user's pin policy.
 					pinned, pinMode = selection.ToNode, "lock"
 				}
-				built, status.Candidates, status.Node, err = subscriptionPool(feeds[exit.ProfileID], exit.Keywords, "exit-"+country, pinned, pinMode, running[country])
+				built, status.Candidates, status.Node, err = subscriptionPoolWithBridges(feeds[exit.ProfileID], exit.Keywords, "exit-"+country, pinned, pinMode, running[country], bridges)
 				status.CandidateCount = len(status.Candidates)
 			} else {
-				built, status.Node, err = renderProfile(profile, mode, "exit-"+country)
+				built, status.Node, err = renderProfileWithBridges(profile, mode, "exit-"+country, bridges)
 			}
 			if err == nil {
 				outbounds = append(outbounds, built...)
@@ -140,7 +146,11 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 		return result, err
 	}
 	result.Config = append(payload, '\n')
-	return result, nil
+	result.XrayConfig, err = bridges.config()
+	for _, inbound := range bridges.inbounds {
+		result.XrayPorts = append(result.XrayPorts, inbound["port"].(int))
+	}
+	return result, err
 }
 
 func baseConfig(inbounds, outbounds, rules []map[string]any) map[string]any {
@@ -187,6 +197,10 @@ func effectiveProfile(config egressconfig.Config, exit egressconfig.Exit) (egres
 }
 
 func renderProfile(profile egressconfig.Profile, mode, finalTag string) ([]map[string]any, string, error) {
+	return renderProfileWithBridges(profile, mode, finalTag, nil)
+}
+
+func renderProfileWithBridges(profile egressconfig.Profile, mode, finalTag string, bridges *xhttpBridges) ([]map[string]any, string, error) {
 	if profile.Type == "direct" {
 		return []map[string]any{{"type": "direct", "tag": finalTag}}, profile.Name, nil
 	}
@@ -217,7 +231,23 @@ func renderProfile(profile egressconfig.Profile, mode, finalTag string) ([]map[s
 		if index != len(hops)-1 {
 			tag = finalTag + "-hop-" + strconv.Itoa(index+1)
 		}
-		outbound, err := parseNode(raw, tag)
+		var outbound map[string]any
+		var err error
+		if strings.HasPrefix(strings.ToLower(raw), "vless://") {
+			var node subscriptionNode
+			node, err = parseVLESSLink(raw)
+			if err == nil && strings.EqualFold(node.Network, "xhttp") {
+				if index != 0 || bridges == nil {
+					err = errors.New("XHTTP requires its managed bridge and must be the first hop")
+				} else {
+					outbound, err = bridges.outbound(node, tag, finalTag+"/manual-first-hop")
+				}
+			} else if err == nil {
+				outbound, err = node.outbound(tag)
+			}
+		} else {
+			outbound, err = parseNode(raw, tag)
+		}
 		if err != nil {
 			return nil, "", fmt.Errorf("node hop %d: %w", index+1, err)
 		}

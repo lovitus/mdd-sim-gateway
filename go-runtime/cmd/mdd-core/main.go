@@ -87,6 +87,7 @@ type config struct {
 	NotificationsPath string `json:"notifications_path,omitempty"`
 	PreferencesPath   string `json:"preferences_path,omitempty"`
 	SingBoxPath       string `json:"sing_box_path,omitempty"`
+	XrayPath          string `json:"xray_path,omitempty"`
 	EgressTestPath    string `json:"egress_test_path,omitempty"`
 	ProviderApply     struct {
 		Enabled           bool   `json:"enabled,omitempty"`
@@ -310,6 +311,13 @@ func (settings *config) validate() error {
 	settings.SingBoxPath = filepath.Clean(strings.TrimSpace(settings.SingBoxPath))
 	if settings.SingBoxPath == "." {
 		settings.SingBoxPath = "/usr/local/bin/sing-box"
+	}
+	settings.XrayPath = filepath.Clean(strings.TrimSpace(settings.XrayPath))
+	if settings.XrayPath == "." {
+		settings.XrayPath = "/usr/libexec/mdd/xray"
+	}
+	if !filepath.IsAbs(settings.XrayPath) || settings.XrayPath == string(filepath.Separator) {
+		return errors.New("Xray executable path must be absolute and scoped")
 	}
 	settings.EgressTestPath = filepath.Clean(strings.TrimSpace(settings.EgressTestPath))
 	if settings.EgressTestPath == "." {
@@ -563,7 +571,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	defer cellularData.Close()
-	egressProfileTestAPI, err := egressprofiletest.NewHandler(egressStore, settings.SingBoxPath, settings.EgressTestPath, cellularData.ProbeCard)
+	egressProfileTestAPI, err := egressprofiletest.NewHandlerWithXray(egressStore, settings.SingBoxPath, settings.XrayPath, settings.EgressTestPath, cellularData.ProbeCard)
 	if err != nil {
 		return err
 	}

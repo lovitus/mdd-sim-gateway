@@ -319,6 +319,9 @@ func stableLinks(layout Layout, manifest *releasebundle.Manifest) map[string]str
 	if _, found := manifest.Artifact(releasebundle.RoleUpdater); found {
 		links[filepath.Join(layout.LibexecDirectory, "mdd-updater")] = filepath.Join(layout.CurrentLink, "mdd-updater")
 	}
+	if artifact, found := manifest.Artifact(releasebundle.RoleXray); found {
+		links[filepath.Join(layout.LibexecDirectory, "xray")] = filepath.Join(layout.CurrentLink, artifact.Name)
+	}
 	if _, found := manifest.Artifact(releasebundle.RoleUpdaterUnit); found {
 		links[filepath.Join(layout.UnitDirectory, "mdd-updater.service")] = filepath.Join(layout.CurrentLink, "mdd-updater.service")
 	}
@@ -336,6 +339,7 @@ func stableLinks(layout Layout, manifest *releasebundle.Manifest) map[string]str
 
 func knownStableLinks(layout Layout) map[string]string {
 	return map[string]string{
+		filepath.Join(layout.LibexecDirectory, "xray"):                    filepath.Join(layout.CurrentLink, "xray"),
 		filepath.Join(layout.LibexecDirectory, "mdd-core"):                filepath.Join(layout.CurrentLink, "mdd-core"),
 		filepath.Join(layout.LibexecDirectory, "mdd-agent"):               filepath.Join(layout.CurrentLink, "mdd-agent"),
 		filepath.Join(layout.LibexecDirectory, "mdd-call-audio-helper"):   filepath.Join(layout.CurrentLink, "mdd-call-audio-helper"),

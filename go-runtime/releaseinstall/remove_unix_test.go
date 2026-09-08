@@ -31,7 +31,8 @@ func TestInspectRemoveAcceptsStrictTerminalInstallation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if inspection.plan.SchemaVersion != 1 || inspection.plan.CurrentRelease != current ||
-		len(inspection.plan.ReleaseIDs) != 2 || len(inspection.plan.StableLinks) != 13 {
+		len(inspection.plan.ReleaseIDs) != 2 || len(inspection.plan.StableLinks) != 14 ||
+		inspection.stableTarget[filepath.Join(layout.LibexecDirectory, "xray")] != filepath.Join(layout.CurrentLink, "xray") {
 		t.Fatalf("inspection=%+v", inspection)
 	}
 }

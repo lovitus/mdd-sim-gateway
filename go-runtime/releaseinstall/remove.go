@@ -251,6 +251,7 @@ func expectedStableLinks(layout Layout, manifest releasebundle.Manifest) map[str
 		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"): filepath.Join(layout.CurrentLink, "mdd-vowifi@.service"),
 	}
 	for role, item := range map[string][2]string{
+		releasebundle.RoleXray:        {layout.LibexecDirectory, "xray"},
 		releasebundle.RoleAgent:       {layout.LibexecDirectory, "mdd-agent"},
 		releasebundle.RoleAgentAudio:  {layout.LibexecDirectory, "mdd-call-audio-helper"},
 		releasebundle.RoleUpdater:     {layout.LibexecDirectory, "mdd-updater"},
@@ -270,6 +271,7 @@ func expectedStableLinks(layout Layout, manifest releasebundle.Manifest) map[str
 
 func validateStableNamespace(layout Layout, expected map[string]string, uid, gid int, allowDisabledUnitLinks bool) error {
 	known := []string{
+		filepath.Join(layout.LibexecDirectory, "xray"),
 		filepath.Join(layout.LibexecDirectory, "mdd-core"),
 		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"),
 		filepath.Join(layout.LibexecDirectory, "mdd-agent"),

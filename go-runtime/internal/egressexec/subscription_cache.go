@@ -93,7 +93,7 @@ func (cache *subscriptionCache) load(ctx context.Context, profile egressconfig.P
 	if fetchErr == nil {
 		usable := false
 		for _, node := range nodes {
-			if node.supportsUDP() {
+			if node.supportsUDP() || node.supportsXHTTP() {
 				usable = true
 				break
 			}

@@ -42,6 +42,11 @@ on:
       - 'THIRD_PARTY_LICENSES.md'
       - '.github/workflows/go-runtime.yml'
   workflow_dispatch:
+    inputs:
+      require_macos_signing:
+        description: Require the production Developer ID instead of a development signature
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -387,6 +392,17 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq binutils libasound2-dev libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pcscd pkg-config xorg-dev
 
+      - name: Fetch pinned Xray source
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/mdd-xray-source"
+          mkdir -p "$source"
+          git -C "$source" init --quiet
+          git -C "$source" remote add origin https://github.com/XTLS/Xray-core.git
+          timeout 120 git -C "$source" fetch --depth=1 origin d2758a023cd7f4174a5a5fa4ff66e487d4342ba0
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = d2758a023cd7f4174a5a5fa4ff66e487d4342ba0
+
       - name: Build release executables
         env:
           BUILD_ROOT: ${{ runner.temp }}/mdd-build
@@ -399,6 +415,9 @@ jobs:
           go -C agent/call-audio-helper build -trimpath -o "$BUILD_ROOT/bin/mdd-call-audio-helper" .
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-release" ./cmd/mdd-release
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-updater" ./cmd/mdd-updater
+          CGO_ENABLED=0 go -C "$RUNNER_TEMP/mdd-xray-source" build -mod=readonly -trimpath -o "$BUILD_ROOT/bin/xray" ./main
+          "$BUILD_ROOT/bin/xray" version
+          git -C "$RUNNER_TEMP/mdd-xray-source" archive --format=tar HEAD | gzip -n > "$BUILD_ROOT/source/xray-source.tar.gz"
           GOBIN="$BUILD_ROOT/bin" go install github.com/google/go-licenses/v2@v2.0.1
           CGO_ENABLED=1 go -C providers/vowifi-go build \
             -tags netgo,osusergo \
@@ -434,6 +453,19 @@ jobs:
           grep -Fxq \
             'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
             go-runtime/release/mdd-egress.service
+
+      - name: Verify real Xray XHTTP UDP in loopback-only namespace
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+        run: |
+          set -euo pipefail
+          test -x "$BUILD_ROOT/bin/xray"
+          go -C go-runtime test -race -c ./internal/egressexec -o "$BUILD_ROOT/bin/egressexec.test"
+          sudo unshare --net -- /bin/bash -euc '
+            ip link set lo up
+            export MDD_TEST_XRAY="$1"
+            exec "$2" -test.run "^TestXrayRealProcessXHTTPUDP$" -test.v -test.timeout 60s
+          ' bash "$BUILD_ROOT/bin/xray" "$BUILD_ROOT/bin/egressexec.test"
 
       - name: Assemble strict release bundle
         env:
@@ -489,6 +521,32 @@ jobs:
             grep -Fxq "$source_path" "$provider_source_listing"
           done
           cp -R go-runtime/licenses "$license_root/curated"
+          (
+            cd "$RUNNER_TEMP/mdd-xray-source"
+            "$BUILD_ROOT/bin/go-licenses" save ./main \
+              --ignore github.com/sagernet/sing \
+              --ignore github.com/sagernet/sing-shadowsocks \
+              --save_path "$license_root/xray"
+            # The scanner cannot classify these upstream short GPL notices.
+            # Preserve both exact modules plus notices and the full license.
+            curated="$license_root/xray-curated"
+            mkdir -p "$curated"
+            cp "$GITHUB_WORKSPACE/LICENSE" "$curated/GPL-3.0.txt"
+            for dependency in 'github.com/sagernet/sing@v0.5.1' 'github.com/sagernet/sing-shadowsocks@v0.2.7'; do
+              module=${dependency%@*}
+              version=${dependency##*@}
+              metadata=$(go list -m -json "$module")
+              test "$(printf '%s' "$metadata" | jq -r .Version)" = "$version"
+              directory=$(printf '%s' "$metadata" | jq -r .Dir)
+              test -d "$directory"
+              printf '%s  %s\n' 2f02b7486bcfa90d115c71a20437f3906b6fd5bef81c5dc0efd341399e89d0fd "$directory/LICENSE" | sha256sum -c -
+              name=${module##*/}
+              cp "$directory/LICENSE" "$curated/$name-NOTICE.txt"
+              tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+                -C "$directory" -cf - . | gzip -n > "$curated/$name-$version-source.tar.gz"
+              printf '%s\n' "$dependency" >> "$curated/SOURCES.txt"
+            done
+          )
           for license in \
             "$license_root/curated/sagernet-sing-GPL-3.0-or-later.txt" \
             "$license_root/curated/sagernet-sing-mux-GPL-3.0-or-later.txt" \
@@ -519,6 +577,9 @@ jobs:
             -updater-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-updater.service" \
             -updater-path "$GITHUB_WORKSPACE/go-runtime/release/mdd-updater.path" \
             -provider "$BUILD_ROOT/bin/mdd-vowifi" \
+            -xray "$BUILD_ROOT/bin/xray" \
+            -xray-source "$BUILD_ROOT/source/xray-source.tar.gz" \
+            -xray-notice "$GITHUB_WORKSPACE/go-runtime/release/XRAY-NOTICE.md" \
             -core-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-core.service" \
             -agent-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-agent.service" \
             -cellular-guard-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-cellular-guard.service" \
@@ -1207,6 +1268,43 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Select macOS signing mode
+        id: signing
+        env:
+          CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.BUILD_CERTIFICATE_BASE64 || '' }}
+          REQUIRE_SIGNING: ${{ inputs.require_macos_signing || startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$CERTIFICATE" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          elif [[ "$REQUIRE_SIGNING" == true ]]; then
+            echo '::error::Developer ID signing requires BUILD_CERTIFICATE_BASE64 and P12_PASSWORD repository secrets.'
+            exit 1
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Development signature only; this artifact cannot replace a Developer ID installation.'
+          fi
+
+      - name: Import Developer ID into temporary keychain
+        if: steps.signing.outputs.enabled == 'true'
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.P12_PASSWORD }}
+
+      - name: Select the existing production Developer ID
+        if: steps.signing.outputs.enabled == 'true'
+        id: developer_id
+        run: |
+          set -euo pipefail
+          identities=$(security find-identity -v -p codesigning signing_temp.keychain)
+          matches=$(printf '%s\n' "$identities" | sed -nE 's/^[[:space:]]*[0-9]+\) ([A-Fa-f0-9]{40}) "Developer ID Application: .* \(8WPJLUNLY8\)"$/\1/p')
+          if [[ -z "$matches" || $(printf '%s\n' "$matches" | wc -l | tr -d ' ') != 1 ]]; then
+            echo '::error::Expected exactly one valid Developer ID Application identity for the production team.'
+            exit 1
+          fi
+          printf 'identity=%s\n' "$matches" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -1224,6 +1322,16 @@ jobs:
         run: |
           set -euo pipefail
           go-runtime/release/test-install-macos-agent.sh
+          sh -n go-runtime/release/build-macos-agent.sh
+          for args in '--identity - --team-id 8WPJLUNLY8' '--identity unavailable' '--team-id 8WPJLUNLY8'; do
+            set +e
+            # These inputs must fail before any packaging or signing begins.
+            go-runtime/release/build-macos-agent.sh $args > "$RUNNER_TEMP/signing-input-check.txt" 2>&1
+            result=$?
+            set -e
+            test "$result" = 2
+            grep -Fq 'Developer ID signing requires' "$RUNNER_TEMP/signing-input-check.txt"
+          done
           test "$(uname -m)" = arm64
           mkdir -p "$TMPDIR" "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
           go -C go-runtime test -race \
@@ -1241,6 +1349,7 @@ jobs:
 
       - name: Build CLI, tray app and isolated modem helpers
         env:
+          MDD_SIGNING_IDENTITY: ${{ steps.developer_id.outputs.identity }}
           BUILD_NUMBER: ${{ github.run_number }}
           MDD_SHARED_CACHE_ROOT: ${{ runner.temp }}/mdd-agent-cache
           TMPDIR: ${{ runner.temp }}/mdd-agent-build-tmp
@@ -1252,10 +1361,14 @@ jobs:
           GOBIN="$tools_root" go install github.com/google/go-licenses/v2@v2.0.1
           export GO_LICENSES="$tools_root/go-licenses"
           output="$RUNNER_TEMP/MDD-Agent-macOS-arm64"
+          set --
+          if [[ -n "$MDD_SIGNING_IDENTITY" ]]; then
+            set -- --identity "$MDD_SIGNING_IDENTITY" --team-id 8WPJLUNLY8
+          fi
           go-runtime/release/build-macos-agent.sh \
             --output "$output" \
             --version 0.1.0 \
-            --build "$BUILD_NUMBER"
+            --build "$BUILD_NUMBER" "$@"
           test -x "$output/mdd-agent"
           test -x "$output/mdd-cellular-io"
           test -x "$output/mdd-call-audio-helper"

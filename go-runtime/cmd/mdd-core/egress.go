@@ -19,6 +19,7 @@ func runEgress(arguments []string) error {
 	status := flags.String("status", "", "absolute runtime status path")
 	stateDir := flags.String("state-dir", "", "absolute private runtime state directory")
 	singBox := flags.String("sing-box", "", "absolute sing-box executable path")
+	xray := flags.String("xray", "", "override Core xray_path for XHTTP exits")
 	portBase := flags.Int("proxy-port-base", 22000, "loopback country proxy port base")
 	poll := flags.Duration("poll", 2*time.Second, "desired-state polling interval")
 	coreConfig := flags.String("core-config", "", "0600 Core configuration used only to locate local IPC")
@@ -35,11 +36,14 @@ func runEgress(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	if *xray == "" {
+		*xray = core.XrayPath
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return egressexec.Run(ctx, egressexec.Settings{
 		DesiredPath: *desired, StatusPath: *status, StateDir: *stateDir,
-		SingBoxPath: *singBox, PortBase: *portBase, Poll: *poll,
+		SingBoxPath: *singBox, XrayPath: *xray, PortBase: *portBase, Poll: *poll,
 		CoreURL: "http://" + core.Local.Listen, TokenPath: *tokenPath,
 	})
 }

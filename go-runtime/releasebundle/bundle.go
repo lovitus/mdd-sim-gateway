@@ -17,7 +17,8 @@ import (
 )
 
 const (
-	SchemaVersion         = 3
+	SchemaVersion         = 4
+	guardSchemaVersion    = 3
 	legacySchemaVersion   = 1
 	previousSchemaVersion = 2
 	maximumManifestSize   = 64 << 10
@@ -26,6 +27,9 @@ const (
 
 const (
 	RoleCore           = "core"
+	RoleXray           = "xray"
+	RoleXraySource     = "xray_source"
+	RoleXrayNotice     = "xray_notice"
 	RoleAgent          = "agent"
 	RoleAgentAudio     = "agent_audio_helper"
 	RoleUpdater        = "updater"
@@ -213,7 +217,7 @@ func LoadDirectory(directory string) (Manifest, error) {
 }
 
 func (manifest Manifest) Validate() error {
-	if manifest.SchemaVersion != legacySchemaVersion && manifest.SchemaVersion != previousSchemaVersion && manifest.SchemaVersion != SchemaVersion || !releaseIDPattern.MatchString(manifest.ReleaseID) ||
+	if manifest.SchemaVersion != legacySchemaVersion && manifest.SchemaVersion != previousSchemaVersion && manifest.SchemaVersion != guardSchemaVersion && manifest.SchemaVersion != SchemaVersion || !releaseIDPattern.MatchString(manifest.ReleaseID) ||
 		!validRevision(manifest.SourceRevision) || manifest.OS != "linux" ||
 		(manifest.Architecture != "amd64" && manifest.Architecture != "arm64") ||
 		len(manifest.Artifacts) < 6 {
@@ -221,6 +225,9 @@ func (manifest Manifest) Validate() error {
 	}
 	seenNames, seenRoles := map[string]struct{}{}, map[string]struct{}{}
 	for _, artifact := range manifest.Artifacts {
+		if manifest.SchemaVersion < 4 && (artifact.Role == RoleXray || artifact.Role == RoleXraySource || artifact.Role == RoleXrayNotice) {
+			return errors.New("Xray artifacts require release schema four")
+		}
 		if filepath.Base(artifact.Name) != artifact.Name || artifact.Name == "manifest.json" || artifact.Name == "." ||
 			!validRole(artifact.Role) || (artifact.Mode != "0644" && artifact.Mode != "0755") || artifact.Size < 1 ||
 			artifact.Size > maximumArtifactSize || len(artifact.SHA256) != 64 || !hexPattern.MatchString(artifact.SHA256) {
@@ -247,7 +254,7 @@ func (manifest Manifest) Validate() error {
 			RoleProjectLicense, RoleProjectNotice, RoleThirdParty, RoleGoLicenses,
 		)
 	}
-	if manifest.SchemaVersion == SchemaVersion {
+	if manifest.SchemaVersion >= guardSchemaVersion {
 		required = append(required, RoleGuardUnit)
 	}
 	for _, role := range required {
@@ -259,7 +266,7 @@ func (manifest Manifest) Validate() error {
 	if manifest.SchemaVersion >= previousSchemaVersion {
 		agentGroup = []string{RoleAgent, RoleAgentAudio, RoleAgentUnit}
 	}
-	for _, group := range [][]string{agentGroup} {
+	for _, group := range [][]string{agentGroup, {RoleXray, RoleXraySource, RoleXrayNotice}} {
 		present := 0
 		for _, role := range group {
 			if _, found := seenRoles[role]; found {
@@ -297,7 +304,7 @@ func validateInput(input Input, seen map[string]struct{}) error {
 
 func validRole(role string) bool {
 	switch role {
-	case RoleCore, RoleAgent, RoleAgentAudio, RoleUpdater, RoleUpdaterUnit, RoleUpdaterPath, RoleProvider, RoleCoreUnit, RoleAgentUnit, RoleGuardUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit,
+	case RoleXray, RoleXraySource, RoleXrayNotice, RoleCore, RoleAgent, RoleAgentAudio, RoleUpdater, RoleUpdaterUnit, RoleUpdaterPath, RoleProvider, RoleCoreUnit, RoleAgentUnit, RoleGuardUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit,
 		RoleProviderSource, RoleProviderNotice, RoleProjectLicense, RoleProjectNotice, RoleThirdParty, RoleGoLicenses:
 		return true
 	default:
@@ -306,7 +313,7 @@ func validRole(role string) bool {
 }
 
 func executableRole(role string) bool {
-	return role == RoleCore || role == RoleAgent || role == RoleAgentAudio || role == RoleUpdater || role == RoleProvider
+	return role == RoleXray || role == RoleCore || role == RoleAgent || role == RoleAgentAudio || role == RoleUpdater || role == RoleProvider
 }
 func validRevision(value string) bool {
 	return (len(value) == 40 || len(value) == 64) && hexPattern.MatchString(value)

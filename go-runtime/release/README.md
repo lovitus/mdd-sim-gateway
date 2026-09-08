@@ -1,5 +1,55 @@
 # Go Agent desktop candidates
 
+## GitHub Developer ID signing
+
+The macOS job imports `BUILD_CERTIFICATE_BASE64` (a base64 PKCS#12 containing the
+Developer ID Application certificate and private key) with `P12_PASSWORD`, using
+Apple-Actions/import-codesign-certs v7.0.0 pinned to its commit. Its post action
+deletes the temporary keychain. No certificates or private keys enter artifacts.
+The job selects exactly one valid identity for team `8WPJLUNLY8`, passes its hash
+to the existing builder, and checks the team, Developer ID authority, hardened
+runtime and timestamp on every executable and the outer bundle.
+
+Pull requests never receive signing material. A manual run with
+`require_macos_signing=true`, or a release tag, fails if signing is unavailable;
+ordinary unsigned CI remains explicitly a development candidate and must not
+replace a Developer ID installation. Signing is not notarization: `BUILD.txt`
+records both facts separately. Notarization and physical installation validation
+are not implied by a successful signature. Secret values must never be written
+into this repository or passed through workflow inputs.
+
+Source: https://github.com/apple-actions/import-codesign-certs/tree/v7.0.0 and
+https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications.
+
+## XHTTP executor boundary
+
+XHTTP retains the original MDD Xray process boundary rather than being converted
+to sing-box TCP. Both subscription nodes and manual VLESS links use the copied
+`ec620942` native REALITY/XHTTP conversion. An XHTTP node may only be the first
+hop of a manual chain, matching the original validation rule. Bridge listeners
+remain loopback-only; no host route or TUN is created.
+
+Core's owner-only `xray_path` applies to the country executor and independent
+profile tests. If absent it defaults to the release-owned `/usr/libexec/mdd/xray`.
+`run-egress -xray` is an explicit process-local override, not a change to Core
+settings. Profile tests allocate separate temporary listeners, do not publish
+desired state, and stop both children before removing their private files.
+The live executor checks both configurations before replacing the pair, restores
+the previous checked pair on activation failure, and does not report readiness
+when a required Xray child is absent. Missing Xray does not fall back to direct.
+
+Linux CI builds unmodified Xray v26.3.27 at the exact revision documented in
+`XRAY-NOTICE.md`. Release schema 4 groups its executable, complete source archive
+and notice and verifies all hashes through the existing installer. It installs
+only the release-owned `/usr/libexec/mdd/xray` link, not `/usr/local/bin/xray`.
+Schemas 1-3 remain readable; schema 3 still requires the cellular guard.
+The first schema-4 upgrade must use the candidate installer because an older
+updater rejects unfamiliar manifests. Never bypass that validation.
+
+These are implementation contracts, not production acceptance evidence. The
+current development batch still requires real Xray UDP validation and the full
+GitHub workflow before deployment.
+
 `build-macos-agent.sh` builds the unified Go Agent into a caller-selected output directory. It uses
 the pinned Fyne packaging tool to create the standard macOS app bundle and produces a separate
 headless CLI from the same source tree. Both executables read the same owner-only configuration and

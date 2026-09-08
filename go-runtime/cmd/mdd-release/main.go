@@ -33,6 +33,9 @@ func run(arguments []string) error {
 	updaterUnit := flags.String("updater-unit", "", "mdd-updater.service (optional)")
 	updaterPath := flags.String("updater-path", "", "mdd-updater.path (optional)")
 	provider := flags.String("provider", "", "Linux mdd-vowifi executable")
+	xray := flags.String("xray", "", "optional pinned Linux Xray executable")
+	xraySource := flags.String("xray-source", "", "complete corresponding Xray source archive")
+	xrayNotice := flags.String("xray-notice", "", "Xray license and source provenance notice")
 	coreUnit := flags.String("core-unit", "", "mdd-core.service")
 	agentUnit := flags.String("agent-unit", "", "mdd-agent.service")
 	guardUnit := flags.String("cellular-guard-unit", "", "mdd-cellular-guard.service")
@@ -95,6 +98,19 @@ func run(arguments []string) error {
 		inputs = append(inputs, releasebundle.Input{Name: "mdd-updater", Role: releasebundle.RoleUpdater, Mode: 0o755, SourcePath: *updater, GoVersion: agentVersion})
 		inputs = append(inputs, releasebundle.Input{Name: "mdd-updater.service", Role: releasebundle.RoleUpdaterUnit, Mode: 0o644, SourcePath: *updaterUnit})
 		inputs = append(inputs, releasebundle.Input{Name: "mdd-updater.path", Role: releasebundle.RoleUpdaterPath, Mode: 0o644, SourcePath: *updaterPath})
+	}
+	if *xray != "" || *xraySource != "" || *xrayNotice != "" {
+		if empty(*xray, *xraySource, *xrayNotice) {
+			return errors.New("xray, xray-source and xray-notice must be supplied together")
+		}
+		version, err := releasebundle.InspectGoExecutable(*xray, "linux", strings.TrimSpace(*architecture))
+		if err != nil {
+			return err
+		}
+		inputs = append(inputs,
+			releasebundle.Input{Name: "xray", Role: releasebundle.RoleXray, Mode: 0o755, SourcePath: *xray, GoVersion: version},
+			releasebundle.Input{Name: "xray-source.tar.gz", Role: releasebundle.RoleXraySource, Mode: 0o644, SourcePath: *xraySource},
+			releasebundle.Input{Name: "XRAY-NOTICE.md", Role: releasebundle.RoleXrayNotice, Mode: 0o644, SourcePath: *xrayNotice})
 	}
 	manifest, err := releasebundle.CreateDirectory(*output, releasebundle.Manifest{
 		ReleaseID: strings.TrimSpace(*releaseID), SourceRevision: strings.TrimSpace(*revision),

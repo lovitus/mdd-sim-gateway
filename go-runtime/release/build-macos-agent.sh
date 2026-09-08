@@ -8,6 +8,7 @@ version="0.1.0"
 build_number="1"
 output=""
 identity=""
+team_id=""
 go_licenses="${GO_LICENSES-}"
 deployment_target="15.0"
 libusb_archive="libusb-1.0.30.tar.bz2"
@@ -18,7 +19,7 @@ lwip_url="https://github.com/lwip-tcpip/lwip/archive/refs/tags/STABLE-2_2_1_RELE
 lwip_sha256="ce0b7461c0ad9602c376f0bf07c5eb7253b48c7bf66f011c6bf3e2a96731c539"
 
 usage() {
-	printf '%s\n' "usage: build-macos-agent.sh --output /absolute/path [--version x.y.z] [--build number] [--identity Developer-ID]"
+	printf '%s\n' "usage: build-macos-agent.sh --output /absolute/path [--version x.y.z] [--build number] [--identity Developer-ID --team-id TEAM]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -39,6 +40,10 @@ while [ "$#" -gt 0 ]; do
 		identity=${2-}
 		shift 2
 		;;
+	--team-id)
+		team_id=${2-}
+		shift 2
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -49,6 +54,13 @@ while [ "$#" -gt 0 ]; do
 		;;
 	esac
 done
+
+if [ -n "$identity" ] || [ -n "$team_id" ]; then
+	if [ -z "$identity" ] || [ "$identity" = - ] || ! printf '%s\n' "$team_id" | grep -Eq '^[A-Z0-9]{10}$'; then
+		printf '%s\n' "Developer ID signing requires --identity and a ten-character --team-id" >&2
+		exit 2
+	fi
+fi
 
 case "$output" in
 /*) ;;
@@ -325,6 +337,17 @@ for executable in "$payload/mdd-agent" "$payload/mdd-cellular-io" "$payload/mdd-
 	codesign --verify --strict "$executable"
 done
 codesign --verify --deep --strict "$payload/$app_name.app"
+if [ -n "$identity" ]; then
+	for executable in "$payload/mdd-agent" "$payload/mdd-cellular-io" "$payload/mdd-call-audio-helper" \
+		"$app_executable" "$payload/$app_name.app/Contents/MacOS/mdd-cellular-io" \
+		"$payload/$app_name.app/Contents/MacOS/mdd-call-audio-helper" "$payload/$app_name.app"; do
+		signature=$(codesign -dv --verbose=4 "$executable" 2>&1)
+		printf '%s\n' "$signature" | grep -Fxq "TeamIdentifier=$team_id"
+		printf '%s\n' "$signature" | grep -Eq '^Authority=Developer ID Application:'
+		printf '%s\n' "$signature" | grep -Eq '^CodeDirectory .*flags=.*\(runtime\)'
+		printf '%s\n' "$signature" | grep -Eq '^Timestamp='
+	done
+fi
 
 printf '%s\n' \
 	"MDD Go Agent development candidate" \
@@ -352,6 +375,8 @@ printf '%s\n' \
 	"lwip=2.2.1" \
 	"cellular_io_protocol=1" \
 	"signing=$signing" \
+	"team_identifier=${team_id:-not-set}" \
+	"notarization=not-performed" \
 	>"$payload/BUILD.txt"
 
 (

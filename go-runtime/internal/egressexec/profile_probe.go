@@ -26,8 +26,16 @@ type ProfileProbeResult struct {
 // exits, and removes the child and private config before returning. It never
 // publishes desired state or signals the production egress process.
 func ProbeProfile(ctx context.Context, binary, stateRoot string, profile egressconfig.Profile) (ProfileProbeResult, error) {
-	var result ProfileProbeResult
-	if ctx == nil || !filepath.IsAbs(binary) || !filepath.IsAbs(stateRoot) ||
+	return ProbeProfileWithXray(ctx, binary, filepath.Join(filepath.Dir(binary), "xray"), stateRoot, profile)
+}
+
+func ProbeProfileWithXray(ctx context.Context, binary, xrayBinary, stateRoot string, profile egressconfig.Profile) (ProfileProbeResult, error) {
+	return probeProfile(ctx, binary, xrayBinary, stateRoot, profile, systemProcessController{}, xrayProcessController{}, egressprobe.Probe)
+}
+
+func probeProfile(ctx context.Context, binary, xrayBinary, stateRoot string, profile egressconfig.Profile,
+	controller, xray processController, probe func(context.Context, string) (egressprobe.Result, error)) (result ProfileProbeResult, resultErr error) {
+	if ctx == nil || !filepath.IsAbs(binary) || !filepath.IsAbs(xrayBinary) || !filepath.IsAbs(stateRoot) ||
 		(profile.Type != "node" && profile.Type != "socks5") {
 		return result, errors.New("egress profile is not independently testable")
 	}
@@ -38,7 +46,17 @@ func ProbeProfile(ctx context.Context, binary, stateRoot string, profile egressc
 	if err != nil {
 		return result, err
 	}
-	defer os.RemoveAll(directory)
+	runner := &executor{settings: Settings{StateDir: directory, SingBoxPath: binary, XrayPath: xrayBinary}, controller: controller, xrayController: xray}
+	defer func() {
+		if err := runner.stopPair(); err != nil {
+			result = ProfileProbeResult{}
+			resultErr = errors.Join(resultErr, errors.New("test proxy cleanup failed; private configuration retained"))
+			return
+		}
+		if err := os.RemoveAll(directory); err != nil {
+			resultErr = errors.Join(resultErr, errors.New("test proxy private configuration cleanup failed"))
+		}
+	}()
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return result, err
 	}
@@ -46,7 +64,8 @@ func ProbeProfile(ctx context.Context, binary, stateRoot string, profile egressc
 	if err != nil {
 		return result, err
 	}
-	outbounds, node, err := renderProfile(profile, "profile_test", "profile-test")
+	bridges := &xhttpBridges{allocatePort: availableLoopbackPort, reserved: map[int]bool{port: true}}
+	outbounds, node, err := renderProfileWithBridges(profile, "profile_test", "profile-test", bridges)
 	if err != nil {
 		return result, err
 	}
@@ -63,24 +82,48 @@ func ProbeProfile(ctx context.Context, binary, stateRoot string, profile egressc
 	if err := atomicWrite(configPath, append(payload, '\n'), 0o600); err != nil {
 		return result, err
 	}
-	controller := systemProcessController{}
 	if err := controller.Check(ctx, binary, configPath); err != nil {
 		return result, fmt.Errorf("validate test profile: %w", err)
+	}
+	xrayConfig, err := bridges.config()
+	if err != nil {
+		return result, err
+	}
+	if len(xrayConfig) != 0 {
+		xrayPath := filepath.Join(directory, "xray.json")
+		if err := atomicWrite(xrayPath, xrayConfig, 0o600); err != nil {
+			return result, err
+		}
+		if err := xray.Check(ctx, xrayBinary, xrayPath); err != nil {
+			return result, err
+		}
+		xrayChild, err := xray.Start(xrayBinary, xrayPath)
+		if err != nil {
+			return result, err
+		}
+		runner.xrayChild = xrayChild
+		var ports []int
+		for _, inbound := range bridges.inbounds {
+			ports = append(ports, inbound["port"].(int))
+		}
+		if err := xray.WaitReady(ctx, ports, xrayChild, 5*time.Second); err != nil {
+			return result, err
+		}
 	}
 	child, err := controller.Start(binary, configPath)
 	if err != nil {
 		return result, fmt.Errorf("start test profile: %w", err)
 	}
-	defer child.Stop(3 * time.Second)
+	runner.child = child
 	if err := controller.WaitReady(ctx, []int{port}, child, 5*time.Second); err != nil {
 		return result, err
 	}
-	probe, err := egressprobe.Probe(ctx, fmt.Sprintf("socks5://127.0.0.1:%d", port))
+	observation, err := probe(ctx, fmt.Sprintf("socks5://127.0.0.1:%d", port))
 	if err != nil {
 		return result, err
 	}
-	return ProfileProbeResult{Node: node, LatencyMS: probe.LatencyMS, Target: probe.Target,
-		AttemptedTargets: append([]string(nil), probe.AttemptedTargets...)}, nil
+	return ProfileProbeResult{Node: node, LatencyMS: observation.LatencyMS, Target: observation.Target,
+		AttemptedTargets: append([]string(nil), observation.AttemptedTargets...)}, nil
 }
 
 func availableLoopbackPort() (int, error) {
