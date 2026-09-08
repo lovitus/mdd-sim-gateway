@@ -160,7 +160,7 @@ func inspectEUICCDetails(ctx context.Context, card Card, aid []byte, includeInfo
 	if len(eid) != 32 || !numeric(eid) {
 		return nil, errors.New("eUICC returned an invalid EID")
 	}
-	fact = &agentlink.EUICCFact{EID: eid, Profiles: []agentlink.EUICCProfileFact{}}
+	fact = &agentlink.EUICCFact{EID: eid, InventoryRefresh: true, Profiles: []agentlink.EUICCProfileFact{}}
 	profiles, err := client.ListProfile(nil, nil)
 	if err != nil {
 		return fact, err

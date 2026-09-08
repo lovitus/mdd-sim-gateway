@@ -274,7 +274,7 @@ func TestManagerIdentifiesBlankEUICCWithoutOfferingAKA(t *testing.T) {
 	waitForSession(t, manager, "blank-euicc-session")
 	views := manager.Sessions()
 	if len(views) != 1 || views[0].CardID != "" || views[0].EUICC == nil ||
-		views[0].EUICC.EID != testEID || !views[0].EUICC.ProfilesAvailable ||
+		views[0].EUICC.EID != testEID || !views[0].EUICC.ProfilesAvailable || !views[0].EUICC.InventoryRefresh ||
 		views[0].EUICC.Profiles == nil {
 		t.Fatalf("blank eUICC view=%+v", views)
 	}
@@ -284,6 +284,30 @@ func TestManagerIdentifiesBlankEUICCWithoutOfferingAKA(t *testing.T) {
 	})
 	if response.Failure == nil || response.Failure.Code != "card_identity_unavailable" {
 		t.Fatalf("blank eUICC AKA response=%+v", response)
+	}
+	mutations := 0
+	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction, string) error {
+		mutations++
+		return errors.New("unexpected mutation")
+	}
+	request := agentlink.EUICCProfileRequest{OperationID: "read-blank", SessionGeneration: "blank-euicc-session", EID: testEID, Action: agentlink.EUICCProfileRefresh}
+	card.mu.Lock()
+	beforeReads, beforeBegins := len(card.commands), card.begins
+	card.mu.Unlock()
+	refreshed := manager.ExecuteEUICCProfile(context.Background(), request)
+	if err := refreshed.ValidateFor(request); err != nil || refreshed.Failure != nil || mutations != 0 || refreshed.Inventory == nil || len(refreshed.Inventory.Profiles) != 0 {
+		t.Fatalf("blank refresh failed or mutated: %+v err=%v mutations=%d", refreshed, err, mutations)
+	}
+	card.mu.Lock()
+	afterReads, afterBegins := len(card.commands), card.begins
+	card.mu.Unlock()
+	if afterReads <= beforeReads || afterBegins != beforeBegins+1 {
+		t.Fatal("refresh did not read the card in a new transaction")
+	}
+	select {
+	case <-done:
+		t.Fatal("read-only refresh ended the reader session")
+	default:
 	}
 	cancel()
 	<-done

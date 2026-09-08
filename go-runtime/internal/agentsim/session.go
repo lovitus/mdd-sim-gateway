@@ -514,8 +514,9 @@ func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 		info = &value
 	}
 	return &agentlink.EUICCFact{
-		Info: info,
-		EID:  source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
+		InventoryRefresh: source.InventoryRefresh,
+		Info:             info,
+		EID:              source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
 		NotificationInventory: source.NotificationInventory, NotificationDelivery: source.NotificationDelivery,
 		NotificationRemoval: source.NotificationRemoval,
@@ -616,8 +617,8 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 		result.Failure = failure("conflict", "euicc_identity_mismatch", false)
 		return result
 	}
-	live, inspectErr := inspectEUICCWithAID(ctx, current.card, target.aid)
-	if inspectErr != nil || live == nil || !live.ProfilesAvailable || !live.ProfileManagement {
+	live, inspectErr := inspectEUICCDetails(ctx, current.card, target.aid, request.Action == agentlink.EUICCProfileRefresh)
+	if inspectErr != nil || live == nil || !live.ProfilesAvailable || (!live.ProfileManagement && request.Action != agentlink.EUICCProfileRefresh) {
 		if !releaseEUICCTransaction(current, &result) {
 			return result
 		}
@@ -629,6 +630,24 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 			return result
 		}
 		result.Failure = failure("conflict", "euicc_identity_mismatch", false)
+		return result
+	}
+	if request.Action == agentlink.EUICCProfileRefresh {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		manager.mu.Lock()
+		if manager.sessions[current.generation] != current || !current.active.Load() {
+			manager.mu.Unlock()
+			result.Failure = failure("not_ready", "card_session_replaced", true)
+			return result
+		}
+		if stored, ok := findSecureElement(current.secureElements, request.EID); ok {
+			stored.fact = cloneEUICCFact(live)
+		}
+		manager.mu.Unlock()
+		result.Outcome = agentlink.EUICCProfileRefreshed
+		result.Inventory = cloneEUICCFact(live)
 		return result
 	}
 	profile, found := findEUICCProfile(live.Profiles, request.ICCID)

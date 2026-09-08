@@ -49,6 +49,20 @@ assert.equal(cached.ses[0].profiles[0].profileNickname,'remembered')
 assert.equal(cached.ses[0].capabilities.profile_management,false)
 assert.equal(cached.ses[0].capabilities.profile_download,false)
 assert.equal(cached.ts,Date.parse('2026-09-07T01:00:00Z')/1000)
+let refreshCalls=0
+const freshEID='89049032000000000000000000000001'
+go.euiccs=async()=>({euiccs:[{agent_id:'agent-a',reader_name:'Same reader',euicc:{eid:freshEID,inventory_refresh:true,profiles_available:true,profiles:[]}}]})
+go.refreshEuiccInventory=async eid=>{refreshCalls++;return {outcome:'refreshed',inventory:{eid,profiles_available:true,profiles:[{iccid:'8944000000000000001',state:'disabled',nickname:'fresh'}]}}}
+const liveRead=await esimAPI.esimChip(euiccReaderKey({agent_id:'agent-a',name:'Same reader'}))
+assert.equal(liveRead.cached,false)
+assert.equal(liveRead.ses[0].profiles[0].profileNickname,'fresh')
+await esimAPI.esimChipCached(euiccReaderKey({agent_id:'agent-a',name:'Same reader'}))
+assert.equal(refreshCalls,1)
+go.euiccs=async()=>({euiccs:[{agent_id:'agent-a',reader_name:'Same reader',euicc:{eid:freshEID,inventory_refresh:true,notification_inventory:true,profiles_available:true,profiles:[]}}]})
+go.euiccNotifications=async()=>{throw new Error('notification read failed')}
+const partialRead=await esimAPI.esimChip(euiccReaderKey({agent_id:'agent-a',name:'Same reader'}))
+assert.equal(partialRead.ses[0].profiles[0].profileNickname,'fresh')
+assert.equal(partialRead.ses[0].notification_error,'notification read failed')
 console.log('Customized MDD eSIM identity, typed outcomes and deferred-deletion contracts passed')
 const page=readFileSync(new URL('../src/mdd/views/Esim.jsx',import.meta.url),'utf8')
 assert.ok(page.includes('(required, 15 digits)'))

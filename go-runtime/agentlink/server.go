@@ -427,7 +427,7 @@ func (server *Server) ExecuteEUICCProfileCommand(ctx context.Context,
 }
 
 func (server *Server) ResolveEUICCProfileTarget(eid, iccid string) (EUICCProfileTarget, error) {
-	if !validEID(eid) || !validCardID(iccid) {
+	if !validEID(eid) || (iccid != "" && !validCardID(iccid)) {
 		return EUICCProfileTarget{}, errors.New("invalid eUICC profile target")
 	}
 	var matches []EUICCProfileTarget
@@ -436,10 +436,16 @@ func (server *Server) ResolveEUICCProfileTarget(eid, iccid string) (EUICCProfile
 			continue
 		}
 		for _, reader := range status.Topology.Readers {
-			if reader.IdentityState != CardIdentified {
+			if (iccid != "" && reader.IdentityState != CardIdentified) || !reader.CardPresent {
 				continue
 			}
 			for _, slot := range ReaderEUICCs(reader) {
+				if iccid == "" {
+					if slot.EUICC.EID == eid && slot.EUICC.InventoryRefresh {
+						matches = append(matches, EUICCProfileTarget{AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration, SessionGeneration: reader.SessionGeneration})
+					}
+					continue
+				}
 				if slot.EUICC.EID != eid || !slot.EUICC.ProfilesAvailable || !slot.EUICC.ProfileManagement {
 					continue
 				}

@@ -72,6 +72,7 @@ type EUICCProfileFact struct {
 // active profile. ProfilesAvailable distinguishes a blank eUICC from a failed
 // profile query.
 type EUICCFact struct {
+	InventoryRefresh      bool               `json:"inventory_refresh,omitempty"`
 	Info                  *EUICCInfoFact     `json:"info,omitempty"`
 	EID                   string             `json:"eid"`
 	ProfilesAvailable     bool               `json:"profiles_available"`
@@ -480,6 +481,7 @@ const (
 	EUICCProfileEnable   EUICCProfileAction = "enable"
 	EUICCProfileDisable  EUICCProfileAction = "disable"
 	EUICCProfileNickname EUICCProfileAction = "nickname"
+	EUICCProfileRefresh  EUICCProfileAction = "refresh"
 )
 
 type EUICCProfileOutcome string
@@ -488,6 +490,7 @@ const (
 	EUICCProfileAlreadyApplied EUICCProfileOutcome = "already_applied"
 	EUICCProfileRefreshPending EUICCProfileOutcome = "refresh_pending"
 	EUICCProfileUncertain      EUICCProfileOutcome = "uncertain"
+	EUICCProfileRefreshed      EUICCProfileOutcome = "refreshed"
 )
 
 // EUICCProfileCommand is the stable browser/Core intent. Core resolves the
@@ -521,6 +524,7 @@ type EUICCProfileRequest struct {
 // after submission is uncertain. Both cause only the matching card session to
 // reconnect and republish authoritative topology.
 type EUICCProfileResponse struct {
+	Inventory         *EUICCFact          `json:"inventory,omitempty"`
 	OperationID       string              `json:"operation_id"`
 	SessionGeneration string              `json:"session_generation"`
 	EID               string              `json:"eid"`
@@ -1128,8 +1132,17 @@ type EUICCNotificationExecutor interface {
 
 func (command EUICCProfileCommand) Validate() error {
 	if !validIdentifier(command.OperationID) || !validEID(command.EID) ||
-		!validCardID(command.ICCID) || !validEUICCProfileAction(command.Action) {
+		!validEUICCProfileAction(command.Action) {
 		return errors.New("invalid eUICC profile command identity or action")
+	}
+	if command.Action == EUICCProfileRefresh {
+		if command.ICCID != "" || command.ExpectedState != "" || command.Nickname != "" || command.ExpectedNickname != "" {
+			return errors.New("inventory refresh contains profile mutation fields")
+		}
+		return nil
+	}
+	if !validCardID(command.ICCID) {
+		return errors.New("invalid profile ICCID")
 	}
 	if command.Action == EUICCProfileNickname {
 		if command.ExpectedState != "" || !validProfileNickname(command.Nickname) ||
@@ -1177,12 +1190,21 @@ func (response EUICCProfileResponse) ValidateFor(request EUICCProfileRequest) er
 		response.EID != request.EID || response.ICCID != request.ICCID || response.Action != request.Action {
 		return errors.New("eUICC profile response identity does not match request")
 	}
+	if response.Inventory != nil && (request.Action != EUICCProfileRefresh || response.Failure != nil) {
+		return errors.New("unexpected eUICC inventory")
+	}
 	if response.Failure != nil {
 		if response.Failure.Validate() != nil || response.Outcome != "" || response.State != "" ||
 			response.Nickname != "" || response.Changed {
 			return errors.New("invalid failed eUICC profile response")
 		}
 		return nil
+	}
+	if request.Action == EUICCProfileRefresh {
+		if response.Outcome != EUICCProfileRefreshed || response.Changed || response.State != "" || response.Nickname != "" || response.Inventory == nil || response.Inventory.EID != request.EID || !response.Inventory.ProfilesAvailable {
+			return errors.New("invalid refreshed eUICC inventory")
+		}
+		return validateEUICC(response.Inventory)
 	}
 	if request.Action == EUICCProfileNickname {
 		switch response.Outcome {
@@ -2593,8 +2615,9 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 		info = &value
 	}
 	return &EUICCFact{
-		Info: info,
-		EID:  source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
+		InventoryRefresh: source.InventoryRefresh,
+		Info:             info,
+		EID:              source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
 		NotificationInventory: source.NotificationInventory, NotificationDelivery: source.NotificationDelivery,
 		NotificationRemoval: source.NotificationRemoval,
@@ -2709,7 +2732,7 @@ func validEID(value string) bool {
 }
 
 func validEUICCProfileAction(action EUICCProfileAction) bool {
-	return action == EUICCProfileEnable || action == EUICCProfileDisable || action == EUICCProfileNickname
+	return action == EUICCProfileEnable || action == EUICCProfileDisable || action == EUICCProfileNickname || action == EUICCProfileRefresh
 }
 
 func validProfileNickname(value string) bool {

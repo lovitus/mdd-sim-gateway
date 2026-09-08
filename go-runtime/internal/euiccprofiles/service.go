@@ -125,6 +125,10 @@ func New(agents AgentRuntime, options ...Option) (*Service, error) {
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
+	if strings.HasSuffix(request.URL.Path, "/refresh") {
+		service.refreshInventory(response, request)
+		return
+	}
 	if strings.HasSuffix(request.URL.Path, "/deliver") && strings.Contains(request.URL.Path, "/notifications/") {
 		service.deliverNotification(response, request)
 		return
@@ -154,6 +158,40 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	service.mutate(response, request)
+}
+
+func (service *Service) refreshInventory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]string{"code": "method_not_allowed"})
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeJSON(w, 415, map[string]string{"code": "json_required"})
+		return
+	}
+	var input struct {
+		OperationID string `json:"operation_id"`
+	}
+	if decodeStrict(r, &input) != nil {
+		writeJSON(w, 400, map[string]string{"code": "invalid_euicc_refresh"})
+		return
+	}
+	command := agentlink.EUICCProfileCommand{OperationID: input.OperationID, EID: r.PathValue("eid"), Action: agentlink.EUICCProfileRefresh}
+	if command.Validate() != nil {
+		writeJSON(w, 400, map[string]string{"code": "invalid_euicc_refresh"})
+		return
+	}
+	result, err := service.agents.ExecuteEUICCProfileCommand(r.Context(), command)
+	if err != nil {
+		writeOperationError(w, err)
+		return
+	}
+	if result.Outcome != agentlink.EUICCProfileRefreshed || result.Inventory == nil || result.Inventory.EID != command.EID || result.Changed {
+		writeJSON(w, 502, map[string]string{"code": "euicc_refresh_unconfirmed"})
+		return
+	}
+	writeJSON(w, 200, result)
 }
 
 func (service *Service) removeAcknowledgedNotification(response http.ResponseWriter, request *http.Request) {

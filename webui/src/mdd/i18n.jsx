@@ -40,6 +40,8 @@ const zh = {
   'Allowance SMS transport': '余量查询短信通道',
   'Save Web access settings': '保存 Web 访问设置',
   'Web access changes require a Core restart.': 'Web 访问设置已保存，需要重启 Core 后生效。',
+  'Update the Agent to refresh this eUICC inventory.': '需要更新 Agent 后才能刷新此 eUICC 芯片信息。',
+  'Notification inventory unavailable': '当前无法读取芯片通知列表',
   'Choose an SMS transport before querying allowance.': '请先选择余量查询使用的短信通道。',
   'scheduled': '已调度',
   'retry_wait': '等待重试',

@@ -85,6 +85,19 @@ async function inventory(reader, notifications) {
   const result = await go.euiccs()
   let entries = readerEuiccs(result.euiccs || [], reader)
   let observedAt = ''
+  let readerRefreshed=false
+  if(notifications && (!entries.length || entries.some(entry=>!entry.euicc.inventory_refresh))) {
+    const [agentID,readerName]=JSON.parse(reader)
+    const devices=(await go.devices()).devices || []
+    const matches=devices.filter(device=>!device.stale&&!device.observed_only&&device.present===true&&device.go_device?.agent_id===agentID&&device.go_device?.reader?.reader_name===readerName)
+    if(matches.length!==1 || !(matches[0].sim?.iccid || matches[0].go_device?.reader?.card_id))throw new Error('Update the Agent to refresh this eUICC inventory.')
+    const refreshed=await go.readerReadback(matches[0])
+    if(refreshed.state!=='applied'||refreshed.reader?.reader_name!==readerName)throw new Error(refreshed.error_code || 'reader_readback_unconfirmed')
+    const fact=refreshed.reader
+    const slots=fact.secure_elements?.length ? fact.secure_elements : fact.euicc ? [{euicc:fact.euicc}] : []
+    entries=slots.map(slot=>({agent_id:agentID,reader_name:readerName,slot_id:slot.slot_id,slot_label:slot.label,euicc:slot.euicc}))
+    readerRefreshed=true
+  }
   if (!entries.length && !notifications) {
     const [agentID,readerName] = JSON.parse(reader)
     const snapshot = await go.devices()
@@ -98,14 +111,24 @@ async function inventory(reader, notifications) {
     }
   }
   const ses = await Promise.all(entries.map(async entry => {
-    const se = secureElementView(entry)
-    if (notifications && entry.euicc.notification_inventory) {
-      const result = await go.euiccNotifications(se.eid)
-      se.notifications = (result.entries || []).map(item => ({...item,seq:item.sequence_number,seqNumber:item.sequence_number,profileManagementOperation:item.event}))
+    let current=entry
+    if(notifications && !readerRefreshed && entry.euicc.inventory_refresh) {
+      const result=await go.refreshEuiccInventory(entry.euicc.eid)
+      if(result.outcome!=='refreshed'||result.inventory?.eid!==entry.euicc.eid)throw new Error('euicc_refresh_unconfirmed')
+      current={...entry,euicc:{...entry.euicc,...result.inventory}}
+    }
+    const se = secureElementView(current)
+    if (notifications && current.euicc.notification_inventory) {
+      try {
+        const result = await go.euiccNotifications(se.eid)
+        se.notifications = (result.entries || []).map(item => ({...item,seq:item.sequence_number,seqNumber:item.sequence_number,profileManagementOperation:item.event}))
+      } catch(error) {se.notification_error=error.message || 'Notification inventory unavailable'}
+    } else if(notifications) {
+      se.notification_error='Notification inventory unavailable'
     }
     return se
   }))
-  return {ses,cached:true,ts:observedAt ? Date.parse(observedAt)/1000 : 0}
+  return {ses,cached:!notifications,ts:notifications ? Date.now()/1000 : observedAt ? Date.parse(observedAt)/1000 : 0}
 }
 
 export function notificationEntries(target) {

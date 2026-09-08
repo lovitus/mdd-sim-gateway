@@ -599,21 +599,15 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     const current = () => activeReader.current === reader && readGeneration.current === generation
     setLoading(true)
     setErr('')
-    setSes([])
-    setMeta({ imei: '' })
     try {
       const st = await api.esimStatus()
       if (!current()) return
       setStatus(st)
-      if (!st.available) {
-        setErr(t('No eUICC inventory available.'))
-        setLoaded(false)
-        return
-      }
       // One call loads every SE (chip + profiles + notifications).
       const c = await api.esimChip(reader)
       if (!current()) return
       const list = c.ses || []
+      if(list.length)setStatus({...st,available:true})
       setSes(list)
       setMeta({ imei: c.imei || '' })
       const seErr = list.map((s) => s.error).filter(Boolean)
@@ -633,9 +627,8 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
       if (!current()) return
       // Non-eUICC cards surface as a calm empty state, not a red error banner.
       setEmptyReason(isNoCardError(e.message) ? 'no-card' : 'not-euicc')
-      setErr(isNonEuiccError(e.message) || isNoCardError(e.message) ? '' : e.message)
-      setSes([])
-      setMeta({ imei: '' })
+      setErr(isNonEuiccError(e.message) || isNoCardError(e.message) ? '' : t(e.message))
+      if(isNonEuiccError(e.message) || isNoCardError(e.message)) {setSes([]);setMeta({imei:''})}
       setLoaded(true)
     } finally {
       if (current()) setLoading(false)
@@ -1003,7 +996,8 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
             {t('Process all')}
           </button>
         </div>
-        {!notifications.length ? (
+        {ses.some(se=>se.notification_error) && <p role="alert" className="u-error">{ses.map(se=>se.notification_error?t(se.notification_error):'').filter(Boolean).join(' · ')}</p>}
+        {!notifications.length ? (!ses.some(se=>se.notification_error) &&
           <div style={{ color: 'var(--text-mute)', fontSize: 13 }}>
             {loading
               ? t('Reading…')
