@@ -9,8 +9,8 @@ selectors, interactions, styles and translations. This directory is now mounted
 by the working-tree and production entrypoints. Feature parity and acceptance
 remain incomplete; mounted pages alone are not proof of restored behavior.
 
-Before mounting, replace the legacy HTTP/WebSocket adapter with the existing Go
-contracts and adapt the customized PCM call interface to the Go call coordinator.
+The mounted UI replaces the legacy HTTP/WebSocket adapter with the existing Go
+contracts and adapts the customized PCM call interface to the Go call coordinator.
 Do not restore Python, Docker or a second call owner. Preserve exact line/card
 identity and the user's latest aggregation and data-switch requirements. eSIM
 deletion remains excluded pending the final interactive phase.
@@ -84,10 +84,45 @@ existing Provider maintenance leases, publishes a new generation, and resumes
 only after runtime confirmation. Unknown publication/application retains the
 leases for recovery through the existing maintenance page.
 
-XHTTP still requires the deferred Xray capability-boundary decision. Automatic
-failure attribution/reselection remains unfinished; it is not supplied by ordinary
-subscription parsing or explicit application. Do not represent either as working
-or generate paid hardware traffic to manufacture acceptance evidence.
+The XHTTP boundary decision is resolved: the Go executor owns an independent
+Xray process. Subscription and first-hop manual VLESS/XHTTP conversion, private
+loopback bridges, paired activation/rollback, bridge-only recovery and isolated
+profile testing are implemented. CI exercised real Xray REALITY/XHTTP UDP in a
+loopback-only namespace. This is not evidence of production XHTTP node quality.
+Automatic exit recovery has a separate durable ledger and guarded apply path;
+real fault-switching acceptance remains distinct from parsing and CI evidence.
+Current deployment and workflow identities are maintained only in the recovery
+cursor. Do not generate paid traffic or manufacture failures to fill evidence gaps.
+
+## Remaining Original UI Gaps
+
+The following are confirmed by comparing `ec620942` with the mounted
+`views/UnifiedPages.jsx` and its Go adapter. This is a correction to the existing
+module matrix, not a claim that all other original actions have passed acceptance.
+
+| Original action | Current boundary | Required closure |
+| --- | --- | --- |
+| New modem 4G/VoWiFi defaults | Disabled in the mounted page; one uncommitted cross-layer batch is in progress. | Complete authenticated first-discovery/default initialization and original automatic draft promotion, then wire and exercise the original form. |
+| VoWiFi-only hardware mode | Disabled; the original Linux ModemManager behavior is not a general remote-Agent switch. | Preserve the original behavior and declared platform scope without releasing persistent modem ownership. |
+| Web bind/port/domain/certificate editing | Real startup/certificate facts are displayed; editing remains disabled. | Restore the original management workflow with configuration validation and rollback, rather than counting readback as editing support. |
+| Retry count and interval | Original inputs exist but remain disabled. | Map their original consumers and behavior; exit-recovery strike counts are not an equivalent replacement. |
+| Rekey default | Go catalog/provider and original form are already connected. | Retain existing evidence; do not treat this as another missing implementation merely because it appears beside disabled retry fields. |
+| eSIM deletion customization | Intentionally unavailable. | Only after all other original functions, through the user-requested interactive final phase. |
+
+Opening all main routes and tabs verifies navigation and rendering only. It does
+not prove saving, actions, persistence, notification delivery, calls, SMS or
+hardware behavior. Keep missing implementation separate from missing acceptance.
+Agent platform delivery (including Android readers and persistent modem capture)
+also cannot be certified by this frontend matrix.
+
+The original retry controls are consumed by `ec620942 control/app/main.py`
+`_health_recovery_due` and `apply_health`: `max * interval` bounds a continuous
+failure window, rather than counting HTTP failures or exit-selection strikes.
+The old fallback is max=3 and interval=40 seconds, with minimums 1 and 5.
+Recovery still requires an exact idle generation and no maintenance owner;
+healthy status resets the window, while missing cards/PIN failures follow their
+own handling. Restoring these controls must retain those consumers and gates,
+not merely expose existing Go backoff fields under the old labels.
 
 ## eSIM information and one-time download tracking
 

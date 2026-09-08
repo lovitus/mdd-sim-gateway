@@ -38,6 +38,8 @@ export function systemSettingsView(preferences = {}, notifications = {}, status 
     __voice_supported:preferences.revision > 0 && Number.isInteger(audio),
     ring_timeout:preferences.preferences?.ring_timeout_seconds,
     __ring_timeout_supported:Number.isInteger(preferences.preferences?.ring_timeout_seconds),
+    retry:preferences.preferences?.retry ? {...preferences.preferences.retry} : undefined,
+    __retry_supported:Number.isSafeInteger(preferences.preferences?.retry?.max) && preferences.preferences.retry.max>=1 && Number.isSafeInteger(preferences.preferences?.retry?.interval) && preferences.preferences.retry.interval>=5,
     rekey:{minutes:catalog.defaults?.rekey_minutes},__catalog_revision:catalog.revision,
     __saved_rekey_minutes:catalog.defaults?.rekey_minutes,
     __rekey_supported:Number.isInteger(catalog.defaults?.rekey_minutes),
@@ -127,6 +129,10 @@ export const systemAPI = {
       const value = Number(draft.cellular_audio_buffer_ms)
       if (!Number.isInteger(value) || value < 100 || value > 2000) throw new Error('invalid_call_audio_buffer_ms')
       const patch={call_audio_buffer_ms:value}
+      if (draft.__retry_supported) {
+        if(!Number.isSafeInteger(draft.retry?.max)||draft.retry.max<1||!Number.isSafeInteger(draft.retry?.interval)||draft.retry.interval<5)throw new Error('invalid_retry_window')
+        patch.retry={max:draft.retry.max,interval:draft.retry.interval}
+      }
       if (draft.__ring_timeout_supported) {
         const seconds=Number(draft.ring_timeout)
         if (!Number.isInteger(seconds) || seconds<5 || seconds>180) throw new Error('invalid_ring_timeout_seconds')
@@ -135,6 +141,7 @@ export const systemAPI = {
       const saved = await go.saveSystemPreferences(draft.__preference_revision,patch)
       cacheCallAudioBufferMS(saved.preferences.call_audio_buffer_ms)
       return {...draft,__preference_revision:saved.revision,cellular_audio_buffer_ms:saved.preferences.call_audio_buffer_ms,
+        retry:saved.preferences.retry ? {...saved.preferences.retry} : draft.retry,
         ring_timeout:saved.preferences.ring_timeout_seconds,__ring_timeout_supported:Number.isInteger(saved.preferences.ring_timeout_seconds)}
     }
     throw new Error('system_setting_not_writable')

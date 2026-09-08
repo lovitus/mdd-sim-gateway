@@ -84,6 +84,16 @@ export function editedCatalogLine(form) {
   return next
 }
 
+export function claimedDraftForm(result, edited) {
+  const form=lineForm(result.line,result.revision)
+  for(const field of ['name','imsi','mcc','mnc','msisdn','smsc','apn','proxy_country','idr_mode','cp_mode']) {
+    if(typeof edited[field]==='string' && edited[field].trim()!=='')form[field]=edited[field]
+  }
+  if(edited.sip)form.sip={...form.sip,...edited.sip}
+  form.enabled=false
+  return form
+}
+
 function expectedRevision(revision) {
   if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('line_catalog_revision_required')
   return revision
@@ -106,7 +116,25 @@ export const lineAPI = {
     if (!line) throw new Error('line_not_found')
     return lineForm(line,snapshot.revision)
   },
-  async saveInstance(form) {
+  async saveInstance(form, device, claimState) {
+    if(form.pin)throw new Error('use_explicit_agent_pin_action')
+    if(!form.__catalog_line && device && claimState) {
+      const key=JSON.stringify([device.id,device.sim?.iccid])
+      if(claimState.key!==key || !claimState.request) {
+        const snapshot=await go.lineCandidates()
+        const candidate=candidateForDevice(snapshot.candidates || [],device)
+        if(!candidate?.can_claim || candidate.configured_line_id)throw new Error('line_candidate_unavailable')
+        claimState.key=key
+        claimState.request={id:crypto.randomUUID(),candidate:candidate.candidate_id,name:form.name || candidate.observed?.msisdn || '',revision:snapshot.catalog_revision}
+      }
+      const request=claimState.request
+      const result=await go.claimLineCandidate(request.candidate,request.name,request.revision,request.id)
+      form=claimedDraftForm(result,form)
+      try {
+        const saved=await go.saveCatalogLine(editedCatalogLine(form),expectedRevision(form.__catalog_revision))
+        return lineForm(saved.line,saved.revision)
+      } catch(error) {error.createdDraft=form;throw error}
+    }
     const result = await go.saveCatalogLine(editedCatalogLine(form),expectedRevision(form.__catalog_revision))
     return lineForm(result.line,result.revision)
   },

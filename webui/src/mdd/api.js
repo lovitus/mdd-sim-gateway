@@ -11,5 +11,5 @@ import { hardwareAPI } from './hardwareAdapter.js'
 export { getBasePrefix, setCsrf, setAuthToken, getAuthToken, connectWs } from '../api.js'
 
 // Remaining original page operations are deliberately not stubbed as success.
-// The entrypoint stays unmounted until all required adapters are implemented.
+// This is the mounted entrypoint; unresolved actions are not evidence of parity.
 export const api = { ...go, ...historyAPI, ...notificationAPI, ...networkAPI, ...smsAPI, ...systemAPI, ...esimAPI, ...lineAPI, ...hardwareAPI }

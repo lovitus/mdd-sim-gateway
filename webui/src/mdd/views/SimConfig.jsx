@@ -30,6 +30,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const [savedLineId, setSavedLineId] = useState('')
   const [smscMode, setSmscMode] = useState('auto')   // 'auto' = read from SIM, 'manual' = typed
   const currentFormID = useRef('')
+  const newLineClaim = useRef({})
+  const currentTarget = useRef('')
   const deletionRequests = useRef(new Map())
   const mutationBusy = useRef(false)
   const [proof, setProof] = useState(null)
@@ -38,6 +40,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const pinEpoch = useRef(0)
   useEffect(() => { ++pinEpoch.current; setProof(null); setPinConfiguration(null); setPin('') }, [targetDevice?.id, targetDevice?.sim?.iccid, targetDevice?.go_device?.process_generation, targetDevice?.go_device?.modem?.sim_session_generation, targetDevice?.go_device?.reader?.session_generation, form.id])
   currentFormID.current = form.id
+  currentTarget.current=JSON.stringify([targetDevice?.id,targetDevice?.sim?.iccid])
   // Capability is authoritative; do not depend on a transport/type label that an older
   // device-list adapter may omit.  A reserved VPCD name is not proof of APDU access.
   const providerOnly = targetDevice?.sim?.apdu_available === false
@@ -202,6 +205,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     if (mutationBusy.current) return
     mutationBusy.current = true
     const forId = form.id
+    const forTarget=currentTarget.current
     setSaving(true)
     try {
       const rawMnc = String(form.mnc || '').trim()
@@ -224,14 +228,20 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       // APDUs.  It still needs an editable ICCID-scoped line record for the user-supplied
       // MSISDN/SMSC and message history, but provisioning must not pretend VoWiFi can start.
       // Save that record stopped; a future APDU-capable attachment can use the same ICCID.
-      const res = await api.saveInstance(body)
+      const res = await api.saveInstance(body,targetDevice,newLineClaim.current)
       await refresh()
-      if (currentFormID.current === forId) {
+      if (currentFormID.current === forId && currentTarget.current===forTarget) {
         setForm({...emptyInstance(),...res})
+        setSavedLineId(String(res.id));setSelected(String(res.id))
         setCreating(res.provisioning_state === 'draft')
         setPinMsg(t('Catalog saved. Runtime apply is a separate action.'))
       }
-    } catch (e) { alert(e.message) }
+    } catch (e) {
+      if(e.createdDraft && currentFormID.current===forId && currentTarget.current===forTarget) {
+        setForm({...emptyInstance(),...e.createdDraft});setSavedLineId(String(e.createdDraft.id));setSelected(String(e.createdDraft.id))
+      }
+      alert(e.message)
+    }
     setSaving(false)
     mutationBusy.current = false
   }

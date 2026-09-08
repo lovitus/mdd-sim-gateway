@@ -394,22 +394,22 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
           : t('VoWiFi intent was saved; turn off the persistent 4G data connection and it will start after SIM ownership is released'))
         return
       }
-      if (errorDetail.code === 'imei_binding_required') {
+      if (errorCode === 'imei_binding_required') {
         showToast?.(isZh ? '该读卡器尚未设置 IMEI，请在「硬件」标签页添加或选择已保存的 IMEI' : 'Please configure an IMEI in the Hardware tab before enabling VoWiFi')
         onNavigateToHardware?.(device.id)
         return
       }
-      if (errorDetail.code === 'pin_required' || errorDetail.code === 'pin_invalid') {
+      if (errorCode === 'pin_required' || errorCode === 'pin_invalid') {
         const tries = errorDetail.tries == null ? '' : (isZh ? `，剩余 ${errorDetail.tries} 次尝试` : `; ${errorDetail.tries} attempts remain`)
         showToast?.(isZh ? `需要先在「SIM」标签页输入正确的 SIM PIN${tries}` : `Enter the correct SIM PIN in the SIM tab first${tries}`)
         onNavigateToSim?.(device.id)
         return
       }
-      if (errorDetail.code === 'no_card') {
+      if (errorCode === 'no_card') {
         showToast?.(isZh ? '当前没有检测到 SIM 卡，请检查读卡器连接' : 'No SIM card is currently detected; check the reader connection')
         return
       }
-      if (errorDetail.code === 'port_conflict') {
+      if (errorCode === 'port_conflict') {
         showToast?.(isZh ? '线路端口被其他程序占用，请使用自动端口；系统会自动选择其它可用端口' : 'A line port is in use; use Automatic port mapping so another block can be selected')
         return
       }
@@ -909,6 +909,7 @@ export function UnifiedOverview({
   showToast,
   instances,
   setSelectedDeviceId,
+  setDeviceTab,
   setSelected,
   subscribe,
   callCoordinator,
@@ -929,7 +930,7 @@ export function UnifiedOverview({
       !devices.length ? <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} /> :
       <div className="u-device-grid">{devices.map((d, i) => <div className="card u-device-card" key={d.id}>
         <div className="u-card-head"><div><h2>{deviceTitle(d, i)}</h2><p>{deviceIdentityLine(d, t)}</p></div><Badge state={d.stale ? 'degraded' : d.present === false ? 'error' : 'on'}>{d.stale ? t('Snapshot unavailable') : d.present === false ? t('Offline') : t('Detected')}</Badge></div>
-        <div className="u-card-body">{supportsCellular(d) && <><CapabilitySwitch device={d} kind="connection" compact onChanged={refreshDevices} showToast={showToast} /><CapabilitySwitch device={d} kind="cellular" compact onChanged={refreshDevices} showToast={showToast} /><CapabilitySwitch device={d} kind="roaming" compact onChanged={refreshDevices} showToast={showToast} /></>}<CapabilitySwitch device={d} kind="vowifi" compact onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => { setSelectedDeviceId(d.id); setView('devices') }} onNavigateToSim={() => { setSelectedDeviceId(d.id); setView('devices') }} /><LineActivity device={d} compact /><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator} compact />{capability(d, 'vowifi').desired && <VowifiHistory instanceId={d.instance_id} subscribe={subscribe} compact />}
+        <div className="u-card-body">{supportsCellular(d) && <><CapabilitySwitch device={d} kind="connection" compact onChanged={refreshDevices} showToast={showToast} /><CapabilitySwitch device={d} kind="cellular" compact onChanged={refreshDevices} showToast={showToast} /><CapabilitySwitch device={d} kind="roaming" compact onChanged={refreshDevices} showToast={showToast} /></>}<CapabilitySwitch device={d} kind="vowifi" compact onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => { setSelectedDeviceId(d.id); setDeviceTab('hardware'); setView('devices') }} onNavigateToSim={() => { setSelectedDeviceId(d.id); setDeviceTab('sim'); setView('devices') }} /><LineActivity device={d} compact /><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator} compact />{capability(d, 'vowifi').desired && <VowifiHistory instanceId={d.instance_id} subscribe={subscribe} compact />}
           <div className="u-details"><div className="u-detail"><span>{t('Carrier')}</span><b>{carrierLabel(d, t)}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t) || d.proxy_node || t('Not connected')} /></b></div></div>
           <ImsCapabilityBadges device={d} />
           {d.instance_id && <AllowancePanel instanceId={String(d.instance_id)} showToast={showToast} />}
@@ -950,10 +951,12 @@ export function DevicesPage({
   showToast,
   selectedDeviceId,
   setSelectedDeviceId,
+  deviceTab: tab = 'status',
+  setDeviceTab: setTab,
   subscribe,
   callCoordinator,
 }) {
-  const { t, language } = useI18n(); const [tab, setTab] = useState('status')
+  const { t, language } = useI18n()
   const active = devices.some(device => device.id === selectedDeviceId) ? selectedDeviceId : devices[0]?.id
   useEffect(() => { if (active && active !== selectedDeviceId) setSelectedDeviceId(active) }, [active, selectedDeviceId, setSelectedDeviceId])
   const d = devices.find(x => x.id === active)
@@ -1413,7 +1416,7 @@ export function SystemPage({ showToast, openUpdateDialog, instances, callCoordin
       setS({ ...s, hardware: { ...s.hardware, modem_backend: serial ? 'serial' : 'auto' } })
     }} />{t('VoWiFi-only mode (do not run ModemManager)')}</label><p className="u-hint">{t('serialModeHint')}</p></fieldset></>}
     {tab === 'web' && <fieldset disabled><legend>{t('Startup configuration; editing is not available')}</legend><h2>{t('Web access')}</h2><label><input type="checkbox" className="u-toggle" ref={node => {if(node)node.indeterminate=typeof s.tls?.self_signed!=='boolean'}} aria-checked={typeof s.tls?.self_signed==='boolean'?s.tls.self_signed:'mixed'} checked={s.tls?.self_signed===true} onChange={e => setS({ ...s, tls: { ...s.tls, self_signed: e.target.checked } })} />{t('Use self-signed certificate')}</label><div className="u-form-grid"><div><label>{t('Bind address')}</label><input value={s.bind || ''} onChange={e => setS({ ...s, bind: e.target.value })} /></div><div><label>{t('HTTPS port')}</label><input type="number" value={s.http_port ?? ''} onChange={e => setS({ ...s, http_port: +e.target.value })} /></div><div><label>{t('Domain')}</label><input value={s.tls?.domain || ''} onChange={e => setS({ ...s, tls: { ...s.tls, domain: e.target.value } })} /></div><div><label>{t('Certificate path')}</label><input value={s.tls?.cert_path || ''} onChange={e => setS({ ...s, tls: { ...s.tls, cert_path: e.target.value } })} /></div><div><label>{t('Private key path')}</label><input value={s.tls?.key_path || ''} onChange={e => setS({ ...s, tls: { ...s.tls, key_path: e.target.value } })} /></div></div></fieldset>}
-    {tab === 'voice' && <><h2>{t('Calls & VoWiFi')}</h2><div className="u-form-grid"><div><label>{t('VoWiFi outgoing call timeout (seconds)')}</label><input type="number" min="5" max="180" disabled={settingsBusy || !s.__ring_timeout_supported} value={s.ring_timeout ?? ''} onChange={event => setS({...s,ring_timeout:Number(event.target.value)})}/></div></div><fieldset disabled><legend>{t('Not available in the current Go settings API')}</legend><div className="u-form-grid"><div><label>{t('Max retries')}</label><input type="number" value={s.retry?.max ?? ''} onChange={e => setS({ ...s, retry: { ...s.retry, max: +e.target.value } })} /></div><div><label>{t('Seconds per attempt')}</label><input type="number" value={s.retry?.interval ?? ''} onChange={e => setS({ ...s, retry: { ...s.retry, interval: +e.target.value } })} /></div>
+    {tab === 'voice' && <><h2>{t('Calls & VoWiFi')}</h2><div className="u-form-grid"><div><label>{t('VoWiFi outgoing call timeout (seconds)')}</label><input type="number" min="5" max="180" disabled={settingsBusy || !s.__ring_timeout_supported} value={s.ring_timeout ?? ''} onChange={event => setS({...s,ring_timeout:Number(event.target.value)})}/></div></div><fieldset disabled={settingsBusy || !s.__retry_supported}>{!s.__retry_supported && <legend>{t('Not available in the current Go settings API')}</legend>}<div className="u-form-grid"><div><label>{t('Max retries')}</label><input type="number" min="1" value={s.retry?.max ?? ''} onChange={e => setS({ ...s, retry: { ...s.retry, max: +e.target.value } })} /></div><div><label>{t('Seconds per attempt')}</label><input type="number" min="5" value={s.retry?.interval ?? ''} onChange={e => setS({ ...s, retry: { ...s.retry, interval: +e.target.value } })} /></div>
     </div></fieldset><div className="u-form-grid"><div><label htmlFor="cellular-audio-buffer-ms">{t('Call audio buffer limit (ms)')}</label><input id="cellular-audio-buffer-ms" disabled={settingsBusy || !s.__voice_supported} type="number" min="100" max="2000" step="1" value={s.cellular_audio_buffer_ms ?? ''} onChange={e => setS({ ...s, cellular_audio_buffer_ms: +e.target.value })} /><p className="u-hint">{t('Call audio buffer hint')}</p></div>
     </div><div className="u-form-grid"><div><label>{t('Rekey minutes (0 disables)')}</label><input type="number" min="0" max="1440" disabled={settingsBusy || !s.__rekey_supported} value={s.rekey?.minutes ?? ''} onChange={event=>setS({...s,rekey:{minutes:Number(event.target.value)}})}/></div></div><div className="u-inline"><button className="btn btn-ghost" disabled={settingsBusy || !s.__rekey_supported} onClick={saveRekey}>{t('Save rekey default')}</button><button className="btn btn-ghost" disabled={settingsBusy || !s.__rekey_supported || s.rekey?.minutes !== s.__saved_rekey_minutes} onClick={applyRekey}>{t('Apply saved catalog')}</button></div></>}
     {tab === 'verification' && <LineVerificationPanel instances={instances} callCoordinator={callCoordinator} setSelected={setSelected} setView={setView} showToast={showToast} />}

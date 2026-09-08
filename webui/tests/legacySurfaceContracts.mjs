@@ -22,6 +22,10 @@ for (const component of ['Softphone.jsx', 'Messages.jsx', 'Esim.jsx', 'UnifiedPa
   assert.ok(app.includes(component), `App must import ${component}`)
 }
 const unified = read('src/mdd/views/UnifiedPages.jsx')
+assert.ok(app.includes('deviceTab,setDeviceTab'), 'device subpage selection must survive overview navigation')
+assert.ok(unified.includes("setDeviceTab('hardware'); setView('devices')"))
+assert.ok(unified.includes("setDeviceTab('sim'); setView('devices')"))
+assert.ok(unified.includes("errorCode === 'imei_binding_required'"), 'Go top-level errors must retain the original corrective navigation')
 for (const restored of ['LineVerificationPanel', 'function HardwarePanel(', 'RecycleBinPanel', 'export function SystemPage']) {
   assert.equal(unified.includes(restored), true, `${restored} must remain in the requested customized UI`)
 }

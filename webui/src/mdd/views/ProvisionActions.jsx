@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
-import { candidateForDevice, lineForm, savedCatalogLine, modemProvisionIntent } from '../lineAdapter.js'
+import { candidateForDevice, claimedDraftForm, savedCatalogLine, modemProvisionIntent } from '../lineAdapter.js'
 import { useI18n } from '../i18n.jsx'
 
 // The existing Go preflight/provision/apply workflow, within the original SIM form.
@@ -53,7 +53,7 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
     const key = JSON.stringify([candidate.candidate_id,name])
     if (!claimOperation.current || claimOperation.current.key !== key) claimOperation.current = {key,id:crypto.randomUUID()}
     const result = await api.claimLineCandidate(candidate.candidate_id,name,candidates.catalog_revision,claimOperation.current.id)
-    if (epoch === generation.current) onSaved(lineForm(result.line,result.revision))
+    if (epoch === generation.current) onSaved(claimedDraftForm(result,form))
     setMessage(t('Disabled draft created. Hardware provisioning is still required.'))
     await refresh?.()
   })
