@@ -44,7 +44,13 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   const routes = useMemo(() => routesFor(instances), [instances])
   const [current, setCurrent] = useState(null)
   const currentRef = useRef(null)
-  const mediaProbeRef = useRef(false)
+  const mediaProbeRef = useRef(null)
+  const cancelMediaTest = useCallback(() => {
+    const probe = mediaProbeRef.current
+    if (!probe) return
+    probe.cancelled = true
+    probe.media.close()
+  }, [])
   const [statuses, setStatuses] = useState({})
   const [cellularIncoming, setCellularIncoming] = useState([])
   const [history, setHistory] = useState([])
@@ -138,15 +144,16 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   }), [subscribe, refreshStatuses])
 
   useEffect(() => {
-    const stopEvidence = () => currentRef.current?.media?.close()
+    const stopEvidence = () => { currentRef.current?.media?.close(); cancelMediaTest() }
     window.addEventListener('pagehide', stopEvidence)
-    return () => window.removeEventListener('pagehide', stopEvidence)
-  }, [])
+    return () => { window.removeEventListener('pagehide', stopEvidence); stopEvidence() }
+  }, [cancelMediaTest])
 
   useEffect(() => {
     if (enabled) return
     currentRef.current?.media?.close()
-  }, [enabled])
+    cancelMediaTest()
+  }, [enabled, cancelMediaTest])
 
   const mediaEvent = useCallback((call, type, detail) => {
     if (currentRef.current !== call) return
@@ -200,10 +207,11 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     }
     const media = new CallMedia(call.buffer_ms, (type, detail) => mediaEvent(call, type, detail))
     call.media = media
-    media.openAudioFromGesture()
     currentRef.current = call
     setCurrent({ ...call })
     try {
+      await media.openAudioFromGesture()
+      if (currentRef.current !== call || call.cancelled) return null
       const leaseBody = mode === 'cellular' ? {
         line_id: call.line_id, call_id: call.call_id, expected_card_id: call.expected_card_id,
         ...(incoming ? {
@@ -223,7 +231,8 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
       await submitStart(call)
       return call
     } catch (error) {
-      if (currentRef.current === call && !call.cancelled && !['active', 'start_unknown'].includes(call.phase)) {
+      if (currentRef.current !== call || call.cancelled) return null
+      if (!['active', 'start_unknown'].includes(call.phase)) {
         showToastRef.current?.(`Pre-call check failed: ${error.message}. No carrier call was confirmed.`)
         await release(call)
       }
@@ -335,23 +344,30 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     const callID = operationID('react-media-canary')
     const media = new CallMedia(500)
     let lease
-    mediaProbeRef.current = true
+    const probe = {media,cancelled:false}
+    mediaProbeRef.current = probe
     try {
-      media.openAudioFromGesture()
+      await media.openAudioFromGesture()
+      if (probe.cancelled) return {cancelled:true}
       lease = await api.createCallMediaLease('vowifi', { line_id: lineID, call_id: callID })
+      if (probe.cancelled) return {cancelled:true}
       await media.prepare(lease, callID)
+      return {cancelled:false}
+    } catch (error) {
+      if (probe.cancelled) return {cancelled:true}
+      throw error
     } finally {
       media.close()
       try {
         if (lease?.session_id) await api.releaseCallMediaLease('vowifi', lease.session_id)
-      } finally { mediaProbeRef.current = false }
+      } finally { if(mediaProbeRef.current === probe)mediaProbeRef.current = null }
     }
   }, [instances])
 
   return {
     routes, current, incoming, statuses, history, historyLoading, selectHistoryScope,
     refresh: refreshStatuses, loadHistory, startOutgoing, answerIncoming, rejectIncoming,
-    hangup, retryStart, sendDTMF, toggleMute, deleteHistory, line, lines: {}, verifyMedia,
+    hangup, retryStart, sendDTMF, toggleMute, deleteHistory, line, lines: {}, verifyMedia, cancelMediaTest,
   }
 }
 

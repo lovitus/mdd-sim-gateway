@@ -67,6 +67,8 @@ export default function Softphone({
   const [callSelMode, setCallSelMode] = useState(false)
   const [callSel, setCallSel] = useState(() => new Set())
   const [mediaTest, setMediaTest] = useState('idle')
+	const [mediaTestError,setMediaTestError]=useState('')
+	const mediaTestEpoch=useRef(0)
   const currentIdRef = useRef(id)
   const historyRequest = useRef(0)
   const historyPending = useRef(new Map())
@@ -116,10 +118,23 @@ export default function Softphone({
     setCallTransport(draft?.lineID === String(id) ? draft.transport : !vowifiReady && cellularReady ? 'cellular' : 'vowifi')
     historyDraft.current = null
     setMediaTest('idle')
+	setMediaTestError('')
+	++mediaTestEpoch.current
+	callCoordinator.cancelMediaTest?.()
   }, [id])
   useEffect(() => {
     if (call?.transport) setCallTransport(call.transport)
   }, [call?.transport])
+  useEffect(() => {
+    if(callTransport==='vowifi')return
+    ++mediaTestEpoch.current
+    callCoordinator.cancelMediaTest?.()
+    setMediaTest('idle');setMediaTestError('')
+  }, [callTransport])
+  useEffect(() => () => {
+    ++mediaTestEpoch.current
+    callCoordinator.cancelMediaTest?.()
+  }, [callCoordinator.cancelMediaTest])
   useEffect(() => subscribe?.(message => {
     if (message.type === 'go.snapshot' || (message.type === 'call' && String(message.instance) === String(id))) void loadCalls()
   }), [subscribe, id, loadCalls])
@@ -145,15 +160,28 @@ export default function Softphone({
   const verifyMedia = async () => {
     if (!browserMediaAvailable || owned || mediaTest === 'running') return
     const forId = id
+    const epoch=++mediaTestEpoch.current
+    const current=()=>String(currentIdRef.current)===String(forId) && mediaTestEpoch.current===epoch
     setMediaTest('running')
+	setMediaTestError('')
     try {
-      await callCoordinator.verifyMedia(id)
-      if (String(currentIdRef.current) === String(forId)) setMediaTest('passed')
-      toast(t('No-charge media test passed. This browser route is ready.'))
+      const result=await callCoordinator.verifyMedia(id)
+      if(result?.cancelled){if(current())setMediaTest('idle');return}
+      if (current()) {
+		setMediaTest('passed')
+		toast(t('No-charge media test passed. This browser route is ready.'))
+	  }
     } catch (error) {
-      if (String(currentIdRef.current) === String(forId)) setMediaTest('failed')
-      toast(error.message)
+      if (current()) {
+		setMediaTest('failed');setMediaTestError(error.message || String(error))
+		toast(error.message)
+	  }
     }
+  }
+  const cancelMediaVerification=()=>{
+    ++mediaTestEpoch.current
+    callCoordinator.cancelMediaTest?.()
+    setMediaTest('idle');setMediaTestError('')
   }
   useEffect(() => {
     if (call?.state !== 'active' || !call.startedAt) { setDur(0); return }
@@ -242,10 +270,10 @@ export default function Softphone({
             </div>
           </div>
         )}
-        {callTransport === 'vowifi' && browserMediaAvailable && <div className="u-note" style={{ margin: '8px 0 12px' }}>
+        {callTransport === 'vowifi' && (browserMediaAvailable || mediaTest==='running' || mediaTest==='failed') && <div className="u-note" style={{ margin: '8px 0 12px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-            <span>{t(mediaTest === 'passed' ? 'Browser media route verified without placing a carrier call.' : mediaTest === 'failed' ? 'The last browser media test failed.' : 'Verify microphone and bidirectional audio through the same-origin WebSocket without placing a carrier call.')}</span>
-            <button className="btn btn-ghost" disabled={!browserMediaAvailable || Boolean(call) || mediaTest === 'running'} onClick={verifyMedia}>{t(mediaTest === 'running' ? 'Testing…' : 'Test media')}</button>
+            <span>{t(mediaTest === 'passed' ? 'Browser media route verified without placing a carrier call.' : mediaTest === 'failed' ? 'The last browser media test failed.' : 'Verify microphone and bidirectional audio through the same-origin WebSocket without placing a carrier call.')}{mediaTestError && <span role="alert" className="u-error" style={{display:'block'}}>{mediaTestError}</span>}</span>
+            <button className="btn btn-ghost" disabled={mediaTest!=='running' && (!browserMediaAvailable || Boolean(call))} onClick={mediaTest==='running'?cancelMediaVerification:verifyMedia}>{t(mediaTest === 'running' ? 'Cancel' : 'Test media')}</button>
           </div>
         </div>}
         {callTransport === 'cellular' && <div className="u-note" style={{ margin: '8px 0 12px', color: cellularReady ? GREEN : '#f59e0b' }}>

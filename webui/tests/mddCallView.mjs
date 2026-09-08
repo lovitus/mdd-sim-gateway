@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { originalCallView, historyCallDraft } from '../src/mdd/callView.js'
-import { lineCallReadinessStatus } from '../src/mdd/linePresentation.js'
+import { lineCallReadinessStatus, intentionalLineStop, unavailableCellularLabel } from '../src/mdd/linePresentation.js'
+
+assert.equal(unavailableCellularLabel({device_type:'modem',present:false}),'Device not connected')
+assert.equal(unavailableCellularLabel({device_type:'modem',present:true}),'Cellular modem is unavailable')
+assert.match(unavailableCellularLabel({device_type:'reader'}),/smart-card reader/)
+
+assert.equal(intentionalLineStop({summary:{state:'blocked',code:'vowifi_disabled'},facts:{vowifi_intent:{available:false}}}),true)
+assert.equal(intentionalLineStop({summary:{state:'blocked',code:'line_disabled'},facts:{intent:{available:false}}}),true)
+assert.equal(intentionalLineStop({summary:{state:'blocked',code:'hardware_not_found'},facts:{vowifi_intent:{available:false}}}),false)
+assert.equal(intentionalLineStop({summary:{state:'blocked',code:'vowifi_disabled'},facts:{}}),false)
 
 const historyRecord = {line_id:'2', transport:'cellular', peer:'+441234567890'}
 const lines = [{id:'1', operations:{}}, {id:'2', operations:{cellular_call:{ready:true}}}]
@@ -24,6 +33,8 @@ assert.equal(originalCallView({ ...source, phase:'active', muted:true }).muted, 
 assert.equal(source.phase, 'start_unknown')
 assert.equal(originalCallView(null), null)
 const phone = readFileSync(new URL('../src/mdd/views/Softphone.jsx', import.meta.url), 'utf8')
+assert.ok(phone.includes('setMediaTestError(error.message || String(error))'))
+assert.ok(phone.includes('{mediaTestError && <span role="alert"'))
 const app = readFileSync(new URL('../src/mdd/App.jsx', import.meta.url), 'utf8')
 assert.equal(phone.includes('new CellularBrowserCall'), false)
 assert.equal(phone.includes('closeLocal'), false)

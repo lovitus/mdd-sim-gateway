@@ -85,6 +85,7 @@ export class CallMedia {
     this.closed = false
     this.readyResolve = null
     this.readyReject = null
+    this.audioReject = null
   }
 
   openAudioFromGesture() {
@@ -97,7 +98,16 @@ export class CallMedia {
     const microphone = navigator.mediaDevices.getUserMedia({ video: false, audio: {
       channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true,
     } })
-    this.audioPromise = Promise.all([resume, microphone]).then(([, stream]) => stream)
+    const acquired = microphone.then(stream => {
+      if (this.closed) {
+        for (const track of stream.getTracks()) track.stop()
+        throw new Error('Browser audio was cancelled')
+      }
+      this.stream = stream
+      return stream
+    })
+    const cancelled = new Promise((_, reject) => { this.audioReject = reject })
+    this.audioPromise = Promise.race([Promise.all([resume, acquired]).then(([, stream]) => stream), cancelled])
     return this.audioPromise
   }
 
@@ -237,7 +247,12 @@ export class CallMedia {
   close() {
     if (this.closed) return
     this.closed = true
+    this.audioReject?.(new Error('Browser audio was cancelled'))
+    this.audioReject = null
     clearInterval(this.evidenceTimer)
+    this.readyReject?.(new Error('Browser audio was cancelled'))
+    this.readyReject = null
+    this.readyResolve = null
     clearTimeout(this.readyTimer)
     clearTimeout(this.reconnectTimer)
     try { this.socket?.close(1000, 'browser call closed') } catch {}

@@ -29,7 +29,7 @@ export default function DiagnosticsV1({ instances, devices, callCoordinator, sho
 	}
   const verifyMedia = async () => {
     setMedia('running')
-    try { await callCoordinator.verifyMedia(lineID); setMedia('pass'); showToast(t('Bidirectional WSS PCM passed without placing a call.')) }
+    try { const result=await callCoordinator.verifyMedia(lineID); if(result?.cancelled){setMedia('');return}; setMedia('pass'); showToast(t('Bidirectional WSS PCM passed without placing a call.')) }
     catch (error) { setMedia(`fail: ${error.message}`); showToast(error.message) }
   }
 	const selectedLine = (instances || []).find(line => String(line.id) === String(lineID))

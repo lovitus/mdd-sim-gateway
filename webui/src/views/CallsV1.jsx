@@ -61,7 +61,7 @@ export default function CallsV1({ instances, selected: selectedLine, setSelected
   const testMedia = async () => {
     if (!route?.line?.id || !coordinator?.verifyMedia) return
     setBusy('media')
-    try { await coordinator.verifyMedia(route.line.id); showToast(t('No-charge browser media test passed.')) }
+    try { const result=await coordinator.verifyMedia(route.line.id); if(!result?.cancelled)showToast(t('No-charge browser media test passed.')) }
     catch (error) { showToast(error.message) }
     finally { setBusy('') }
   }

@@ -69,6 +69,13 @@ key is dial-only, never a DTMF tone. WebSocket snapshots supersede older REST re
 Hardware acceptance remains tracked separately in the current recovery cursor.
 Source-shape checks are not browser or call acceptance evidence.
 
+Browser acceptance exposed a missing-input-device error whose detail disappeared
+with the toast. The call page now retains that error, awaits microphone acquisition
+before allocating a media lease, and cancels pending acquisition and media tests
+on explicit cancellation, route changes or logout. Late microphone streams are
+closed and cancelled tests are never counted as passed. The observed browser has
+no available audio input; no carrier call was placed to work around that condition.
+
 Messages now retains the copied conversation/bubble layout with all-line history.
 Conversation identities include line, transport and peer; replies and deletion use
 that exact scope. Expanded history keeps its server cursors and refreshes loaded
@@ -137,8 +144,8 @@ module matrix, not a claim that all other original actions have passed acceptanc
 
 | Original action | Current boundary | Required closure |
 | --- | --- | --- |
-| New modem 4G/VoWiFi defaults | Disabled in the mounted page; one uncommitted cross-layer batch is in progress. | Complete authenticated first-discovery/default initialization and original automatic draft promotion, then wire and exercise the original form. |
-| VoWiFi-only hardware mode | Disabled; the original Linux ModemManager behavior is not a general remote-Agent switch. | Preserve the original behavior and declared platform scope without releasing persistent modem ownership. |
+| New modem 4G/VoWiFi defaults | Deployed in a57bdb0. Original persisted defaults were restored through the production browser; save and re-entry passed, with existing lines and notification configuration unchanged. | Real new-modem automatic provisioning remains unverified. Do not repeat the completed settings-save acceptance. |
+| VoWiFi-only hardware mode | 8d58e64 passed full CI and was deployed to Core/helper and Windows Agents. Production has no configured production-owned Linux host binding. | Real host-mode switching remains unverified. The 9443 validation Agent must not be substituted for an 8443 production Agent. |
 | Web bind/port/certificate paths | Saved startup settings are editable through the existing helper; the production browser saved/read back unchanged values. | Changed-value persistence/backup has CI coverage; no production port/certificate change was performed. Domain/self-signed fields remain actual certificate information, not an automatic certificate-issuance feature. |
 | Retry count and interval | Original inputs, Go persistence, per-line overrides and continuous-failure window are connected; the production page saved/read back 3/40. | Fault-window behavior is covered by CI, not a manufactured production failure; exit-recovery strike counts remain separate. |
 | Rekey default | Go catalog/provider and original form are already connected. | Retain existing evidence; do not treat this as another missing implementation merely because it appears beside disabled retry fields. |
@@ -153,9 +160,10 @@ also cannot be certified by this frontend matrix.
 Source verification for the two remaining General settings controls:
 `ec620942 control/app/device_state.py:23,302` defaults to cellular=false,
 VoWiFi=true, flight=false, roaming=false; partial default edits retain the other
-values and apply only to future hardware IDs. The paused Go preferences test
-currently expects all-false on the first partial edit. That is a behavior gap,
-not proof of original-default parity. Do not overwrite existing device choices.
+values and apply only to future hardware IDs. The earlier all-false Go fallback
+was corrected in a57bdb0 and covered by CI. Production browser acceptance restored
+the old persisted false/true/false/false defaults; existing device choices were
+not overwritten. This does not substitute for new-device hardware acceptance.
 `ec620942 host/mdd_orchestrator.py:1339,1637-1663,3171` implements serial mode by
 switching discovery/bridges as well as stopping/disabling ModemManager. Current
 `go-runtime/internal/linuxmodem/prober_linux.go:77` opens ModemManager to discover

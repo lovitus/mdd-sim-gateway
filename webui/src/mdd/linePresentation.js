@@ -2,6 +2,18 @@ export function compactReaderName(value) {
   return String(value || '').replace(/\bVirtual PCD\b/g, 'V PCD')
 }
 
+export function intentionalLineStop(projection) {
+  if(projection?.summary?.state!=='blocked')return false
+  const code=projection.summary.code
+  return (code==='vowifi_disabled' && projection.facts?.vowifi_intent?.available===false) ||
+    (code==='line_disabled' && projection.facts?.intent?.available===false)
+}
+
+export function unavailableCellularLabel(device) {
+  if(device?.device_type==='reader')return 'This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.'
+  return device?.present===false ? 'Device not connected' : 'Cellular modem is unavailable'
+}
+
 export function lineEndpointLabel(card, device, line, translate) {
   const index=card?.vpcd_slot ?? card?.index ?? line?.reader_index
   const name=compactReaderName(card?.name || device?.name || line?.reader_name || '') || translate('Device not reported')

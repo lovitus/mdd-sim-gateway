@@ -9,7 +9,7 @@ import AgentCredentials from './AgentCredentials.jsx'
 import Maintenance from './Maintenance.jsx'
 import { saveReaderIMEI } from '../hardwareAdapter.js'
 import { networkProbeError } from '../networkAdapter.js'
-import { compactReaderName, lineCallReadinessStatus } from '../linePresentation.js'
+import { compactReaderName, lineCallReadinessStatus, intentionalLineStop, unavailableCellularLabel } from '../linePresentation.js'
 import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel } from '../agentHealthPresentation.js'
 
 
@@ -108,14 +108,15 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
   useEffect(() => {
     setFacts(null); setStabilityResult(null)
     if (selectedId) void loadFacts(false)
-    return () => { ++factsRequest.current }
+    return () => { ++factsRequest.current; callCoordinator?.cancelMediaTest?.() }
   }, [selectedId])
   const testMedia = async () => {
     if (!selectedId) return
     setError(''); setRunning('media')
     try {
       if (!callCoordinator?.verifyMedia) throw new Error('Browser media coordinator is unavailable')
-      await callCoordinator.verifyMedia(selectedId)
+      const result=await callCoordinator.verifyMedia(selectedId)
+      if(result?.cancelled)return
       await loadFacts(false)
       showToast(language === 'zh' ? '无收费浏览器 WSS 双向 PCM 测试通过。' : 'No-charge browser WSS two-way PCM test passed.')
     } catch (e) { setError(e.message) } finally { setRunning('') }
@@ -305,17 +306,18 @@ function LineActivity({ device, compact = false }) {
   const activity = status.activity || {}
   const factState = String(factSummary?.state || '')
   const factCode = String(factSummary?.code || '')
-  const current = factCode || activity.current || status.label || t('Checking line status')
+  const expectedStop=intentionalLineStop(device?.facts)
+  const current = expectedStop ? t('Stopped') : factCode || activity.current || status.label || t('Checking line status')
   const next = activity.next || ''
-  const actual = factState === 'ready' ? 'on'
+  const actual = expectedStop ? 'off' : factState === 'ready' ? 'on'
     : factState === 'blocked' ? 'error'
       : factState === 'degraded' ? 'degraded'
         : factState === 'unknown' ? 'starting' : capability(device, 'vowifi').actual
   const retryCount = Number(activity.retry_count || status.retry?.count || 0)
   const retryMax = Number(activity.retry_max || status.retry?.max || 0)
   return <div className={`u-line-activity ${compact ? 'compact' : ''}`}>
-    <div className="u-line-activity-head"><b>{t('Backend activity')}</b><Badge state={actual}>{factState ? `${factState} · ${factCode}` : t(status.label || `cap.${actual}`)}</Badge></div>
-    {!compact && factSummary && <p className="u-line-reason"><b>{t('Reason')}:</b> {factCode}</p>}
+    <div className="u-line-activity-head"><b>{t('VoWiFi backend')}</b><Badge state={actual}>{expectedStop ? t('cap.off') : factState ? `${factState} · ${factCode}` : t(status.label || `cap.${actual}`)}</Badge></div>
+    {!compact && factSummary && <p className="u-line-reason" style={expectedStop?{color:'var(--text-mute)'}:undefined}><b>{t('Reason')}:</b> {factCode}</p>}
     {!compact && !factSummary && status.reason && status.state !== 'OK' && <p className="u-line-reason"><b>{t('Reason')}:</b> {t(status.reason)}</p>}
     <div className="u-line-step"><span>{t('Now')}</span><b>{t(current)}</b></div>
     {next && <div className="u-line-step"><span>{t('Next')}</span><b>{t(next, { seconds: activity.seconds || status.automatic_retry_in || 0 })}</b></div>}
@@ -968,7 +970,7 @@ export function DevicesPage({
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
       {d.stale && <p role="status" className="u-note">{t('Showing the last device snapshot; hardware actions are unavailable.')}<button className="btn btn-ghost" onClick={refreshDevices}>{t('Refresh')}</button></p>}
       <fieldset disabled={d.stale && !['imeis','trash'].includes(tab)} style={{border:0,padding:0,minWidth:0}}>
-      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} onNavigateToSim={() => setTab('sim')} /><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><SmsAdvisory device={d} refreshDevices={refreshDevices} showToast={showToast}/><FirmwareAdvice advice={d.firmware_advice}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t(unavailableCellularLabel(d))}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} onNavigateToSim={() => setTab('sim')} /><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><SmsAdvisory device={d} refreshDevices={refreshDevices} showToast={showToast}/><FirmwareAdvice advice={d.firmware_advice}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d} devices={devices}/></div>}
       {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<CellularProfilePanel device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}
       {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{d.facts?.facts?.tunnel?.code || (typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected')))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.facts?.facts?.ims?.code || d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? '—'} {t('minutes')}{d.vowifi?.rekey_state ? ` · ${t(d.vowifi.rekey_state)}` : ''}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
