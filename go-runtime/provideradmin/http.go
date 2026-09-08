@@ -36,6 +36,7 @@ type Status struct {
 }
 
 type ApplyRequest struct {
+	OnlyAddLineID   string `json:"only_add_line_id,omitempty"`
 	SchemaVersion   int    `json:"schema_version"`
 	CatalogRevision uint64 `json:"catalog_revision"`
 }
@@ -109,7 +110,20 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			writeError(response, &Error{Status: http.StatusBadRequest, Code: "invalid_apply_request"})
 			return
 		}
-		result, err := handler.service.Apply(request.Context(), input.CatalogRevision)
+		var result ApplyResult
+		var err error
+		if input.OnlyAddLineID != "" {
+			service, ok := handler.service.(interface {
+				ApplyAdded(context.Context, uint64, string) (ApplyResult, error)
+			})
+			if !ok {
+				writeError(response, &Error{Status: http.StatusConflict, Code: "scoped_apply_unavailable"})
+				return
+			}
+			result, err = service.ApplyAdded(request.Context(), input.CatalogRevision, input.OnlyAddLineID)
+		} else {
+			result, err = handler.service.Apply(request.Context(), input.CatalogRevision)
+		}
 		if err != nil {
 			writeError(response, err)
 			return
@@ -176,6 +190,15 @@ func (client *Client) Status(ctx context.Context) (Status, error) {
 func (client *Client) Apply(ctx context.Context, revision uint64) (ApplyResult, error) {
 	var result ApplyResult
 	err := client.request(ctx, http.MethodPost, ApplyRequest{SchemaVersion: SchemaVersion, CatalogRevision: revision}, &result)
+	return result, err
+}
+
+func (client *Client) ApplyAdded(ctx context.Context, revision uint64, lineID string) (ApplyResult, error) {
+	if strings.TrimSpace(lineID) == "" {
+		return ApplyResult{}, errors.New("scoped apply requires a line")
+	}
+	var result ApplyResult
+	err := client.request(ctx, http.MethodPost, ApplyRequest{SchemaVersion: SchemaVersion, CatalogRevision: revision, OnlyAddLineID: lineID}, &result)
 	return result, err
 }
 

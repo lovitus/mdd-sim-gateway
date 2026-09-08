@@ -79,32 +79,37 @@ type EventStore interface {
 }
 
 type Config struct {
-	ContinuousRetry func() (recovery.ContinuousRetry, error)
-	ExitRecovery    *ExitRecoveryConfig
-	Context         context.Context
-	Catalog         Catalog
-	Agents          AgentFacts
-	Runtime         RuntimeControl
-	Store           EventStore
-	Replay          *events.Replay
-	Interval        time.Duration
-	ActionTimeout   time.Duration
-	BaseBackoff     time.Duration
-	MaxBackoff      time.Duration
-	Now             func() time.Time
-	Logf            func(string, ...any)
-	Generation      string
+	ReconcileDefaultDrafts func(context.Context) error
+	ContinuousRetry        func() (recovery.ContinuousRetry, error)
+	ExitRecovery           *ExitRecoveryConfig
+	Context                context.Context
+	Catalog                Catalog
+	Agents                 AgentFacts
+	Runtime                RuntimeControl
+	Store                  EventStore
+	Replay                 *events.Replay
+	Interval               time.Duration
+	ActionTimeout          time.Duration
+	BaseBackoff            time.Duration
+	MaxBackoff             time.Duration
+	Now                    func() time.Time
+	Logf                   func(string, ...any)
+	Generation             string
 }
 
 type Reconciler struct {
-	continuousRetry func() (recovery.ContinuousRetry, error)
-	selectionMu     sync.Mutex
-	exitRecovery    *ExitRecoveryConfig
-	catalog         Catalog
-	agents          AgentFacts
-	runtime         RuntimeControl
-	store           EventStore
-	replay          *events.Replay
+	defaultsInFlight       bool
+	defaultsNext           time.Time
+	defaultsFailures       uint32
+	reconcileDefaultDrafts func(context.Context) error
+	continuousRetry        func() (recovery.ContinuousRetry, error)
+	selectionMu            sync.Mutex
+	exitRecovery           *ExitRecoveryConfig
+	catalog                Catalog
+	agents                 AgentFacts
+	runtime                RuntimeControl
+	store                  EventStore
+	replay                 *events.Replay
 
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -246,9 +251,10 @@ func New(config Config) (*Reconciler, error) {
 	}
 	ctx, cancel := context.WithCancel(config.Context)
 	return &Reconciler{
-		continuousRetry: config.ContinuousRetry,
-		exitRecovery:    config.ExitRecovery,
-		catalog:         config.Catalog, agents: config.Agents, runtime: config.Runtime,
+		reconcileDefaultDrafts: config.ReconcileDefaultDrafts,
+		continuousRetry:        config.ContinuousRetry,
+		exitRecovery:           config.ExitRecovery,
+		catalog:                config.Catalog, agents: config.Agents, runtime: config.Runtime,
 		store: config.Store, replay: config.Replay, ctx: ctx, cancel: cancel,
 		interval: config.Interval, actionTimeout: config.ActionTimeout,
 		baseBackoff: config.BaseBackoff, maxBackoff: config.MaxBackoff,
@@ -447,6 +453,8 @@ func (reconciler *Reconciler) run() {
 }
 
 func (reconciler *Reconciler) reconcile(ctx context.Context) error {
+	var failures []error
+	reconciler.scheduleDefaultDrafts()
 	catalog, err := reconciler.catalog.Snapshot()
 	if err != nil {
 		reconciler.mu.Lock()
@@ -458,7 +466,6 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 		return fmt.Errorf("read line catalog: %w", err)
 	}
 	agents := reconciler.agents.Statuses()
-	var failures []error
 	for _, line := range catalog.Lines {
 		if err := ctx.Err(); err != nil {
 			return err

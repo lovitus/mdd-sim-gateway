@@ -71,7 +71,7 @@ func runProviderApply(arguments []string, output io.Writer) error {
 	return applyErr
 }
 
-func executeProviderCandidate(ctx context.Context, settings config, candidatePath, currentLink, receiptPath, providerBinary, providerUser, systemctlPath string) (providerdeploy.Receipt, error) {
+func executeProviderCandidate(ctx context.Context, settings config, candidatePath, currentLink, receiptPath, providerBinary, providerUser, systemctlPath string, onlyAdd ...string) (providerdeploy.Receipt, error) {
 	account, err := user.Lookup(strings.TrimSpace(providerUser))
 	if err != nil {
 		return providerdeploy.Receipt{}, errors.New("provider service account was not found")
@@ -113,6 +113,9 @@ func executeProviderCandidate(ctx context.Context, settings config, candidatePat
 		return providerdeploy.Receipt{}, err
 	}
 	plan := providerapply.BuildPlan(current, candidate, preflight)
+	if len(onlyAdd) > 0 && onlyAdd[0] != "" {
+		plan = providerapply.RestrictAddedLine(plan, onlyAdd[0])
+	}
 	if !plan.Safe {
 		return providerdeploy.Receipt{}, providerApplyBlockedError{plan: plan}
 	}

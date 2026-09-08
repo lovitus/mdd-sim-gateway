@@ -53,19 +53,28 @@ type Record struct {
 }
 
 type Snapshot struct {
-	Desired  []Pair   `json:"desired"`
-	Captures []Record `json:"captures"`
+	Desired        []Pair          `json:"desired"`
+	Captures       []Record        `json:"captures"`
+	ModeSelections []ModeSelection `json:"mode_selections,omitempty"`
+}
+
+// Explicit local selection is distinct from having no raw capture. In
+// particular, a future-device default must not override a saved adapted choice.
+type ModeSelection struct {
+	Pair Pair   `json:"pair"`
+	Mode string `json:"mode"`
 }
 
 type Store struct{ db *bolt.DB }
 
 var (
-	metadataBucket = []byte("metadata")
-	desiredBucket  = []byte("desired_raw_pairs")
-	captureBucket  = []byte("captures")
-	schemaKey      = []byte("schema")
-	ErrModeChanged = errors.New("raw modem mode changed")
-	ErrNotFound    = errors.New("raw modem capture not found")
+	metadataBucket  = []byte("metadata")
+	desiredBucket   = []byte("desired_raw_pairs")
+	captureBucket   = []byte("captures")
+	selectionBucket = []byte("mode_selections_v1")
+	schemaKey       = []byte("schema")
+	ErrModeChanged  = errors.New("raw modem mode changed")
+	ErrNotFound     = errors.New("raw modem capture not found")
 )
 
 func Open(path string, timeout time.Duration) (*Store, error) {
@@ -98,7 +107,7 @@ func (store *Store) initialize() error {
 		if err != nil {
 			return err
 		}
-		for _, bucket := range [][]byte{desiredBucket, captureBucket} {
+		for _, bucket := range [][]byte{desiredBucket, captureBucket, selectionBucket} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -129,6 +138,17 @@ func (store *Store) Snapshot() (Snapshot, error) {
 		}); err != nil {
 			return err
 		}
+		if err := tx.Bucket(selectionBucket).ForEach(func(key, payload []byte) error {
+			var selection ModeSelection
+			if json.Unmarshal(payload, &selection) != nil || validatePair(selection.Pair) != nil ||
+				(selection.Mode != "adapted" && selection.Mode != "raw") || string(key) != selection.Pair.EquipmentID {
+				return errors.New("stored modem mode selection is invalid")
+			}
+			result.ModeSelections = append(result.ModeSelections, selection)
+			return nil
+		}); err != nil {
+			return err
+		}
 		return tx.Bucket(captureBucket).ForEach(func(_, payload []byte) error {
 			record, err := decodeRecord(payload)
 			if err != nil {
@@ -140,6 +160,9 @@ func (store *Store) Snapshot() (Snapshot, error) {
 	})
 	sort.Slice(result.Desired, func(i, j int) bool { return result.Desired[i].EquipmentID < result.Desired[j].EquipmentID })
 	sort.Slice(result.Captures, func(i, j int) bool { return result.Captures[i].Pair.EquipmentID < result.Captures[j].Pair.EquipmentID })
+	sort.Slice(result.ModeSelections, func(i, j int) bool {
+		return result.ModeSelections[i].Pair.EquipmentID < result.ModeSelections[j].Pair.EquipmentID
+	})
 	return result, err
 }
 
@@ -156,7 +179,7 @@ func (store *Store) SetRaw(pair Pair) error {
 			if json.Unmarshal(owner, &current) != nil || current != pair {
 				return ErrModeChanged
 			}
-			return nil
+			return putModeSelection(tx, pair, "raw")
 		}
 		cursor := desired.Cursor()
 		for _, value := cursor.First(); value != nil; _, value = cursor.Next() {
@@ -168,13 +191,20 @@ func (store *Store) SetRaw(pair Pair) error {
 				return ErrModeChanged
 			}
 		}
-		return desired.Put([]byte(pair.EquipmentID), payload)
+		if err := desired.Put([]byte(pair.EquipmentID), payload); err != nil {
+			return err
+		}
+		return putModeSelection(tx, pair, "raw")
 	})
 }
 
 // SetAdapted atomically removes local raw intent and marks any exact capture
 // for guarded release before the platform is touched.
 func (store *Store) SetAdapted(pair Pair, now time.Time) error {
+	return store.setAdapted(pair, now, true)
+}
+
+func (store *Store) setAdapted(pair Pair, now time.Time, explicit bool) error {
 	if err := validatePair(pair); err != nil {
 		return err
 	}
@@ -197,10 +227,23 @@ func (store *Store) SetAdapted(pair Pair, now time.Time) error {
 			}
 			record.Stage, record.UpdatedAt = StageReleasePending, now.UTC()
 			encoded, _ := json.Marshal(record)
-			return captures.Put([]byte(pair.EquipmentID), encoded)
+			if err := captures.Put([]byte(pair.EquipmentID), encoded); err != nil {
+				return err
+			}
+		}
+		if explicit {
+			return putModeSelection(tx, pair, "adapted")
 		}
 		return nil
 	})
+}
+
+func putModeSelection(tx *bolt.Tx, pair Pair, mode string) error {
+	payload, err := json.Marshal(ModeSelection{Pair: pair, Mode: mode})
+	if err != nil {
+		return err
+	}
+	return tx.Bucket(selectionBucket).Put([]byte(pair.EquipmentID), payload)
 }
 
 func (store *Store) ArmCapture(proof Proof, generation string, now time.Time) (Record, error) {

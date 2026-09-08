@@ -3,6 +3,18 @@ import {readFileSync} from 'node:fs'
 globalThis.window = {location:{pathname:'/'}}
 const {maintenanceLeases, maintenanceRequest, systemAPI, hostView, systemSettingsView,agentCredentialChange} = await import('../src/mdd/systemAdapter.js')
 const {api:go} = await import('../src/api.js')
+const defaultView=systemSettingsView({revision:3,new_device_defaults_supported:true,preferences:{new_device_defaults:{connection_enabled:false,vowifi_enabled:false,flight_mode:true,roaming_enabled:true}}})
+assert.equal(defaultView.__device_defaults_supported,true)
+assert.deepEqual(defaultView.device_defaults,{cellular_enabled:false,vowifi_enabled:false,flight_mode:true,roaming_enabled:true})
+assert.equal(systemSettingsView().__device_defaults_supported,false)
+const originalPreferenceSave=go.saveSystemPreferences
+let defaultPatch
+go.saveSystemPreferences=async(revision,patch)=>{defaultPatch={revision,patch};return {revision:4,preferences:patch}}
+const defaultSaved=await systemAPI.saveSettings(defaultView,'device-defaults')
+assert.deepEqual(defaultPatch,{revision:3,patch:{new_device_defaults:{connection_enabled:false,vowifi_enabled:false,flight_mode:true,roaming_enabled:true}}})
+assert.equal(defaultSaved.__preference_revision,4)
+await assert.rejects(systemAPI.saveSettings({...defaultView,__device_defaults_supported:false},'device-defaults'),/device_defaults_unavailable/)
+go.saveSystemPreferences=originalPreferenceSave
 go.webSettings=async()=>{throw Object.assign(new Error('unsupported'),{status:404})}
 const snapshot = {catalog_revision:7,lines:[
   {line_id:'a',provider_present:true,maintenance:{draining:true,lease_id:'lease-a'}},

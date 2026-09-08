@@ -54,17 +54,20 @@ var (
 )
 
 type Server struct {
-	tokens         TokenResolver
-	mu             sync.RWMutex
-	agents         map[string]*serverConnection
-	modemAdmission ModemRouteAdmission
-	events         ModemEventSink
-	nextID         atomic.Uint64
-	pingEvery      time.Duration
-	pingWait       time.Duration
+	deviceDefaultsSource func() (*DeviceDefaults, error)
+	tokens               TokenResolver
+	mu                   sync.RWMutex
+	agents               map[string]*serverConnection
+	modemAdmission       ModemRouteAdmission
+	events               ModemEventSink
+	nextID               atomic.Uint64
+	pingEvery            time.Duration
+	pingWait             time.Duration
 }
 
 type serverConnection struct {
+	defaultsSent bool
+	lastDefaults *DeviceDefaults
 	hello        Hello
 	socket       *websocket.Conn
 	closed       chan struct{}
@@ -227,6 +230,12 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	readerReadbackCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), readerReadbackFeature)
 	agentHostHealthCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), agentHostHealthFeature)
 	features := []string{}
+	server.mu.RLock()
+	defaultsAvailable := server.deviceDefaultsSource != nil
+	server.mu.RUnlock()
+	if defaultsAvailable && featureEnabled(request.Header.Get(agentCapabilitiesHeader), deviceDefaultsFeature) {
+		features = append(features, deviceDefaultsFeature)
+	}
 	if server.events != nil && modemEventsCapable {
 		features = append(features, modemEventsFeature)
 	}
@@ -1556,6 +1565,9 @@ func (server *Server) remove(connection *serverConnection) {
 }
 
 func (server *Server) readLoop(ctx context.Context, connection *serverConnection) {
+	if err := server.syncDeviceDefaults(ctx, connection); err != nil {
+		return
+	}
 	for {
 		message, err := readEnvelope(ctx, connection.socket)
 		if err != nil {
@@ -1571,6 +1583,9 @@ func (server *Server) readLoop(ctx context.Context, connection *serverConnection
 				return
 			}
 			connection.lastSeen.Store(time.Now().UnixNano())
+			if err := server.syncDeviceDefaults(ctx, connection); err != nil {
+				return
+			}
 			continue
 		}
 		if message.Kind == kindModemEvent {
@@ -1638,6 +1653,13 @@ func (connection *serverConnection) applyHealth(report HealthReport) error {
 	} else {
 		if report.Topology.Host != nil && !featureEnabled(strings.Join(connection.capabilities, ","), agentHostHealthFeature) {
 			return errors.New("Agent published host health without negotiation")
+		}
+		if !featureEnabled(strings.Join(connection.capabilities, ","), deviceDefaultsFeature) {
+			for _, modem := range report.Topology.Modems {
+				if modem.Policy != nil && modem.Policy.Enrollment != nil {
+					return errors.New("Agent published device enrollment without negotiation")
+				}
+			}
 		}
 		if !featureEnabled(strings.Join(connection.capabilities, ","), modemSIMAPDUPrepareFeature) {
 			for _, modem := range report.Topology.Modems {

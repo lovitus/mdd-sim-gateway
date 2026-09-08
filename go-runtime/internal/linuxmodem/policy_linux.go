@@ -13,6 +13,53 @@ import (
 
 func (*Prober) PolicyProfileMode() string { return "agent" }
 
+type homePLMNObservation struct {
+	cardID, attachmentID, session, imsi string
+	length                              int
+}
+
+// Same explicit preparation flow as windowsmbn, using Linux's retained AT owner.
+func (prober *Prober) PrepareSIMAPDU(ctx context.Context, target agentpolicy.Target) (bool, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx, true)
+	if err != nil {
+		return false, err
+	}
+	if !exactPolicyTarget(facts, target) {
+		return false, agentmodem.ErrOperationTargetReplaced
+	}
+	for _, fact := range facts {
+		if fact.EquipmentID != target.EquipmentID || fact.AttachmentID != target.AttachmentID || fact.SIM.ICCID != target.CardID || fact.SIM.SessionGeneration != target.SIMSessionGeneration {
+			continue
+		}
+		if fact.Network.Data != agentmodem.DataDisconnected {
+			return false, agentpolicy.ErrSIMAPDUDataActive
+		}
+		ready := fact.AT.SIMAPDU
+		if !ready {
+			if fact.AT.State != agentmodem.ATControlReady || !fact.AT.SIMAPDUOnDemand {
+				return false, agentpolicy.ErrSIMAPDUUnavailable
+			}
+			ready, err = prober.at.PrepareSIMAPDU(ctx, target.EquipmentID)
+			if err != nil || !ready {
+				return ready, err
+			}
+		}
+		if fact.SIM.MNCLength == 0 && fact.SIM.IMSI != "" {
+			_, mnc, readErr := prober.at.ReadHomePLMN(ctx, target.EquipmentID, target.CardID, fact.SIM.IMSI)
+			if readErr == nil {
+				if prober.homePLMN == nil {
+					prober.homePLMN = make(map[string]homePLMNObservation)
+				}
+				prober.homePLMN[target.EquipmentID] = homePLMNObservation{cardID: target.CardID, attachmentID: target.AttachmentID, session: target.SIMSessionGeneration, imsi: fact.SIM.IMSI, length: len(mnc)}
+			}
+		}
+		return ready, nil
+	}
+	return false, agentmodem.ErrOperationTargetReplaced
+}
+
 func (prober *Prober) SetPolicyRadio(ctx context.Context, target agentpolicy.Target, enabled bool) error {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()

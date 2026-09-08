@@ -14,7 +14,9 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerconfig"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
 func TestRenderProviderCommandReadsCatalogAndWritesNewDirectory(t *testing.T) {
@@ -229,4 +231,63 @@ func testEgressStatus() egressstatus.Snapshot {
 	return egressstatus.Snapshot{Exits: map[string]egressstatus.Exit{
 		"gb": {Ready: true, HostProxyHost: "127.0.0.1", ProxyPort: 22157},
 	}}
+}
+
+func TestRenderProviderDirectoryKeepsHealthyCountryWhenAnotherExitFails(t *testing.T) {
+	for _, failedFirst := range []bool{true, false} {
+		directory := t.TempDir()
+		settings := config{}
+		settings.Local.Listen = "127.0.0.1:39002"
+		settings.Local.Token = strings.Repeat("c", 32)
+		healthy := linecatalog.Line{
+			SchemaVersion: linecatalog.SchemaVersion, ID: "healthy", Enabled: true,
+			CardID:  "8944100000000000001",
+			SIM:     linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"},
+			Network: linecatalog.NetworkConfig{EgressCountry: "gb"},
+		}
+		failed := healthy
+		failed.ID, failed.CardID, failed.Network.EgressCountry = "failed", "8944100000000000002", "fr"
+		lines := []linecatalog.Line{healthy, failed}
+		if failedFirst {
+			lines[0], lines[1] = lines[1], lines[0]
+		}
+		manifest, err := renderProviderDirectory(settings, linecatalog.Snapshot{
+			SchemaVersion: 1, Revision: 1, Lines: lines,
+		}, testEgressStatus(), filepath.Join(directory, "rendered"), filepath.Join(directory, "state"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(manifest.Providers) != 1 || manifest.Providers[0].LineID != healthy.ID {
+			t.Fatalf("failed exit affected unrelated line: %+v", manifest.Providers)
+		}
+		if _, err := os.Stat(filepath.Join(directory, "rendered", manifest.Providers[0].ConfigFile)); err != nil {
+			t.Fatal(err)
+		}
+		allExits := testEgressStatus()
+		allExits.Exits["fr"] = egressstatus.Exit{Ready: true, HostProxyHost: "127.0.0.1", ProxyPort: 22158}
+		full, err := renderProviderDirectory(settings, linecatalog.Snapshot{SchemaVersion: 1, Revision: 1, Lines: lines},
+			allExits, filepath.Join(directory, "full"), filepath.Join(directory, "state"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		preflight := providerapply.Snapshot{CatalogRevision: 1, Lines: []providerapply.LineStatus{
+			{LineID: failed.ID, Code: "provider_reachable", ProviderPresent: true},
+		}}
+		plan := providerapply.BuildPlan(full, manifest, preflight)
+		if !plan.Safe || len(plan.Removed) != 1 || plan.Removed[0].LineID != failed.ID || len(plan.Changed) != 0 || len(plan.Added) != 0 {
+			t.Fatalf("country failure affected unrelated provider: %+v", plan)
+		}
+		preflight.Lines[0].ActiveCall = &vowifiipc.ActiveCall{}
+		plan = providerapply.BuildPlan(full, manifest, preflight)
+		if plan.Safe || len(plan.Blockers) != 1 || plan.Blockers[0].Code != "active_call" {
+			t.Fatalf("active call not protected: %+v", plan)
+		}
+		preflight.Lines[0].ActiveCall = nil
+		preflight.Lines[0].ProviderPresent = false
+		preflight.Lines[0].Code = "provider_absent"
+		plan = providerapply.BuildPlan(manifest, full, preflight)
+		if !plan.Safe || len(plan.Added) != 1 || plan.Added[0].LineID != failed.ID || len(plan.Removed) != 0 || len(plan.Changed) != 0 {
+			t.Fatalf("recovered exit cannot restore provider: %+v", plan)
+		}
+	}
 }

@@ -39,7 +39,10 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 		response.Header().Set("ETag", etag(snapshot.Revision))
-		writeJSON(response, http.StatusOK, snapshot)
+		writeJSON(response, http.StatusOK, struct {
+			Snapshot
+			NewDeviceDefaultsSupported bool `json:"new_device_defaults_supported"`
+		}{snapshot, true})
 	case http.MethodPatch:
 		handler.patch(response, request)
 	default:
@@ -60,16 +63,22 @@ func (handler *Handler) patch(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	var patch struct {
-		Retry              *recovery.ContinuousRetry `json:"retry"`
-		Updates            *updatenetwork.Selection  `json:"updates"`
-		AuditEnabled       *bool                     `json:"audit_enabled"`
-		TrustedProxies     *[]string                 `json:"trusted_proxies"`
-		CallAudioBufferMS  *int                      `json:"call_audio_buffer_ms"`
-		RingTimeoutSeconds *int                      `json:"ring_timeout_seconds"`
+		Retry             *recovery.ContinuousRetry `json:"retry"`
+		NewDeviceDefaults *struct {
+			ConnectionEnabled *bool `json:"connection_enabled"`
+			VoWiFiEnabled     *bool `json:"vowifi_enabled"`
+			FlightMode        *bool `json:"flight_mode"`
+			RoamingEnabled    *bool `json:"roaming_enabled"`
+		} `json:"new_device_defaults"`
+		Updates            *updatenetwork.Selection `json:"updates"`
+		AuditEnabled       *bool                    `json:"audit_enabled"`
+		TrustedProxies     *[]string                `json:"trusted_proxies"`
+		CallAudioBufferMS  *int                     `json:"call_audio_buffer_ms"`
+		RingTimeoutSeconds *int                     `json:"ring_timeout_seconds"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&patch) != nil || decoder.Decode(&struct{}{}) != io.EOF || (patch.CallAudioBufferMS == nil && patch.RingTimeoutSeconds == nil && patch.AuditEnabled == nil && patch.TrustedProxies == nil && patch.Updates == nil && patch.Retry == nil) {
+	if decoder.Decode(&patch) != nil || decoder.Decode(&struct{}{}) != io.EOF || (patch.CallAudioBufferMS == nil && patch.RingTimeoutSeconds == nil && patch.AuditEnabled == nil && patch.TrustedProxies == nil && patch.Updates == nil && patch.NewDeviceDefaults == nil && patch.Retry == nil) {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_system_preferences"})
 		return
 	}
@@ -81,14 +90,39 @@ func (handler *Handler) patch(response http.ResponseWriter, request *http.Reques
 	if patch.CallAudioBufferMS != nil {
 		current.Preferences.CallAudioBufferMS = *patch.CallAudioBufferMS
 	}
+	if defaults := patch.NewDeviceDefaults; defaults != nil {
+		if defaults.ConnectionEnabled == nil && defaults.VoWiFiEnabled == nil && defaults.FlightMode == nil && defaults.RoamingEnabled == nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_system_preferences"})
+			return
+		}
+		// ec620942 device_state.py:set_defaults merges edits with the original
+		// future-device baseline; absence alone still does not publish an intent.
+		value := NewDeviceDefaults{VoWiFiEnabled: true}
+		if current.Preferences.NewDeviceDefaults != nil {
+			value = *current.Preferences.NewDeviceDefaults
+		}
+		if defaults.ConnectionEnabled != nil {
+			value.ConnectionEnabled = *defaults.ConnectionEnabled
+		}
+		if defaults.VoWiFiEnabled != nil {
+			value.VoWiFiEnabled = *defaults.VoWiFiEnabled
+		}
+		if defaults.FlightMode != nil {
+			value.FlightMode = *defaults.FlightMode
+		}
+		if defaults.RoamingEnabled != nil {
+			value.RoamingEnabled = *defaults.RoamingEnabled
+		}
+		current.Preferences.NewDeviceDefaults = &value
+	}
 	if patch.AuditEnabled != nil {
 		current.Preferences.AuditEnabled = patch.AuditEnabled
 	}
-	if patch.Retry != nil {
-		current.Preferences.Retry = patch.Retry
-	}
 	if patch.Updates != nil {
 		current.Preferences.Updates = patch.Updates
+	}
+	if patch.Retry != nil {
+		current.Preferences.Retry = patch.Retry
 	}
 	if patch.TrustedProxies != nil {
 		current.Preferences.TrustedProxies = *patch.TrustedProxies

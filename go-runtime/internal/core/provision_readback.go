@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -50,6 +51,14 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_provision_readback_request"})
 		return
 	}
+	status, result := handler.executeReadback(r.Context(), command)
+	writeJSON(w, status, result)
+}
+
+func (handler *ProvisionReadbackHandler) executeReadback(ctx context.Context, command agentlink.ProvisionCommand) (int, any) {
+	if ctx == nil || command.Validate() != nil {
+		return http.StatusBadRequest, map[string]string{"code": "invalid_provision_readback_request"}
+	}
 	if command.APN != "" {
 		if line, lookupErr := handler.store.Get(command.LineID); lookupErr == nil {
 			for _, profile := range line.Network.APNProfiles {
@@ -59,15 +68,13 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 				}
 			}
 		} else if !errors.Is(lookupErr, linecatalog.ErrNotFound) {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_readback_catalog_unavailable"})
-			return
+			return http.StatusInternalServerError, map[string]string{"code": "provision_readback_catalog_unavailable"}
 		}
 	}
 	target, err := handler.runtime.ResolveModemTargetForAction(command.EquipmentID, command.CardID, agentlink.ModemCallStatus)
 	if err != nil || target.EquipmentID != command.EquipmentID || target.CardID != command.CardID ||
 		target.AttachmentID != command.AttachmentID || target.SIMSessionGeneration != command.SIMSessionGeneration {
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_readback_target_unavailable"})
-		return
+		return http.StatusConflict, map[string]string{"code": "provision_readback_target_unavailable"}
 	}
 	digest := provisionDigest(command)
 	if existing, found, lookupErr := handler.store.LookupOperation(command.OperationID, digest); lookupErr != nil {
@@ -75,21 +82,18 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 		if errors.Is(lookupErr, linecatalog.ErrOperationReused) {
 			status = http.StatusConflict
 		}
-		writeJSON(w, status, map[string]string{"code": "provision_readback_operation_unavailable"})
-		return
+		return status, map[string]string{"code": "provision_readback_operation_unavailable"}
 	} else if found {
 		if existing.Kind != linecatalog.OperationProvisionReadback {
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_readback_operation_unavailable"})
-			return
+			return http.StatusConflict, map[string]string{"code": "provision_readback_operation_unavailable"}
 		}
 		status := http.StatusAccepted
 		if existing.State == linecatalog.OperationSucceeded {
 			status = http.StatusOK
 		}
-		writeJSON(w, status, provisionReadbackStatus{
+		return status, provisionReadbackStatus{
 			OperationStatus: existing.PublicStatus(), SIMSessionGeneration: existing.SIMSessionGeneration,
-		})
-		return
+		}
 	}
 	now := time.Now().UTC()
 	receipt := linecatalog.OperationReceipt{
@@ -102,10 +106,9 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 		SIMSessionGeneration: target.SIMSessionGeneration, Step: "provision_readback", AttemptCount: 1,
 	}
 	if err := handler.store.PutOperation(receipt); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_readback_operation_conflict"})
-		return
+		return http.StatusConflict, map[string]string{"code": "provision_readback_operation_conflict"}
 	}
-	result, readErr := handler.runtime.ReconcileProvision(r.Context(), target.AgentID, target.ProcessGeneration,
+	result, readErr := handler.runtime.ReconcileProvision(ctx, target.AgentID, target.ProcessGeneration,
 		agentlink.ProvisionRequest{ProvisionCommand: command, ReadOnly: true})
 	receipt.UpdatedAt = time.Now().UTC()
 	if result.Step != "" {
@@ -136,10 +139,9 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 		receipt.ErrorDetail = result.Error
 	}
 	if err := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationInProgress, digest); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_readback_operation_race"})
-		return
+		return http.StatusConflict, map[string]string{"code": "provision_readback_operation_race"}
 	}
-	writeJSON(w, status, provisionReadbackStatus{
+	return status, provisionReadbackStatus{
 		OperationStatus: receipt.PublicStatus(), SIMSessionGeneration: receipt.SIMSessionGeneration,
-	})
+	}
 }

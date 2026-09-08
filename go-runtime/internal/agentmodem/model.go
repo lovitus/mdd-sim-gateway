@@ -103,6 +103,7 @@ type Capabilities struct {
 }
 
 type SIMFact struct {
+	MNCLength         int      `json:"mnc_length,omitempty"`
 	State             SIMState `json:"state"`
 	SessionGeneration string   `json:"session_generation,omitempty"`
 	ICCID             string   `json:"iccid,omitempty"`

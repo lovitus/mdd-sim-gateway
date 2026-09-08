@@ -15,32 +15,34 @@ import (
 )
 
 type Client struct {
-	URL               string
-	Token             string
-	Hello             Hello
-	HTTPClient        *http.Client
-	Authenticator     Authenticator
-	Modems            ModemExecutor
-	SMSSessionFencing bool
-	PIN               SIMPINExecutor
-	PINConfiguration  bool
-	Recovery          ModemRecoveryExecutor
-	Media             ModemMediaExecutor
-	Data              ModemDataExecutor
-	Policies          ModemPolicyExecutor
-	RawUSB            RawUSBExecutor
-	EUICC             EUICCProfileExecutor
-	Downloads         EUICCDownloadExecutor
-	Discovery         EUICCDiscoveryExecutor
-	Notifications     EUICCNotificationExecutor
-	Provision         ProvisionExecutor
-	ReaderReadback    ReaderReadbackExecutor
-	HostHealth        bool
-	Events            ModemEventSource
-	OperationTimeout  time.Duration
-	Connected         func()
-	Health            func() TopologySnapshot
-	HealthEvery       time.Duration
+	URL                 string
+	Token               string
+	Hello               Hello
+	HTTPClient          *http.Client
+	Authenticator       Authenticator
+	Modems              ModemExecutor
+	SMSSessionFencing   bool
+	PIN                 SIMPINExecutor
+	PINConfiguration    bool
+	Recovery            ModemRecoveryExecutor
+	Media               ModemMediaExecutor
+	Data                ModemDataExecutor
+	Policies            ModemPolicyExecutor
+	DeviceDefaults      func(*DeviceDefaults) error
+	DeviceDefaultsReset func()
+	RawUSB              RawUSBExecutor
+	EUICC               EUICCProfileExecutor
+	Downloads           EUICCDownloadExecutor
+	Discovery           EUICCDiscoveryExecutor
+	Notifications       EUICCNotificationExecutor
+	Provision           ProvisionExecutor
+	ReaderReadback      ReaderReadbackExecutor
+	HostHealth          bool
+	Events              ModemEventSource
+	OperationTimeout    time.Duration
+	Connected           func()
+	Health              func() TopologySnapshot
+	HealthEvery         time.Duration
 }
 
 const maximumConcurrentRequests = 16
@@ -103,6 +105,18 @@ func (client Client) Run(ctx context.Context) error {
 	if client.HostHealth {
 		capabilities = append(capabilities, agentHostHealthFeature)
 	}
+	if client.DeviceDefaults != nil {
+		capabilities = append(capabilities, deviceDefaultsFeature)
+		reset := func() {
+			if client.DeviceDefaultsReset != nil {
+				client.DeviceDefaultsReset()
+			} else {
+				_ = client.DeviceDefaults(nil)
+			}
+		}
+		reset()
+		defer reset()
+	}
 	if len(capabilities) != 0 {
 		headers.Set(agentCapabilitiesHeader, strings.Join(capabilities, ","))
 	}
@@ -118,6 +132,7 @@ func (client Client) Run(ctx context.Context) error {
 	policiesEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemPolicyFeature)
 	simAPDUPrepareEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemSIMAPDUPrepareFeature)
 	hostHealthEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), agentHostHealthFeature)
+	defaultsEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), deviceDefaultsFeature)
 	defer socket.CloseNow()
 	socket.SetReadLimit(maximumMessage)
 	if err := writeEnvelope(ctx, socket, envelope{Kind: kindHello, Hello: &client.Hello}); err != nil {
@@ -129,6 +144,11 @@ func (client Client) Run(ctx context.Context) error {
 	if err != nil || acknowledgement.validate() != nil || acknowledgement.Kind != kindHelloAck {
 		return errors.New("Core rejected or did not acknowledge Agent hello")
 	}
+	if client.DeviceDefaults != nil && !defaultsEnabled {
+		if err := client.DeviceDefaults(nil); err != nil {
+			return errors.New("Agent could not clear unsupported defaults")
+		}
+	}
 	if client.Connected != nil {
 		client.Connected()
 	}
@@ -139,7 +159,7 @@ func (client Client) Run(ctx context.Context) error {
 	if client.Health != nil {
 		reportDone = make(chan error, 1)
 		go func() {
-			err := client.reportHealth(reportContext, socket, &writes, policiesEnabled, simAPDUPrepareEnabled, hostHealthEnabled)
+			err := client.reportHealth(reportContext, socket, &writes, policiesEnabled, simAPDUPrepareEnabled, hostHealthEnabled, defaultsEnabled)
 			if err != nil && reportContext.Err() == nil {
 				socket.CloseNow()
 			}
@@ -193,6 +213,15 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			if err != nil {
 				return fmt.Errorf("apply modem event acknowledgement: %w", err)
+			}
+			continue
+		}
+		if message.Kind == kindDeviceDefaults {
+			if !defaultsEnabled || client.DeviceDefaults == nil {
+				return errors.New("Core sent unnegotiated device defaults")
+			}
+			if err := client.DeviceDefaults(message.DeviceDefaults.Template); err != nil {
+				return errors.New("Agent rejected device defaults")
 			}
 			continue
 		}
@@ -664,7 +693,7 @@ func rawUSBResponse(request RawUSBRequest) RawUSBResponse {
 }
 
 func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex,
-	policiesEnabled, simAPDUPrepareEnabled, hostHealthEnabled bool) error {
+	policiesEnabled, simAPDUPrepareEnabled, hostHealthEnabled, defaultsEnabled bool) error {
 	every := client.HealthEvery
 	if every == 0 {
 		every = defaultHealthEvery
@@ -681,6 +710,13 @@ func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, w
 		if !policiesEnabled {
 			for index := range topology.Modems {
 				topology.Modems[index].Policy = nil
+			}
+		}
+		if !defaultsEnabled {
+			for index := range topology.Modems {
+				if topology.Modems[index].Policy != nil {
+					topology.Modems[index].Policy.Enrollment = nil
+				}
 			}
 		}
 		if !simAPDUPrepareEnabled {

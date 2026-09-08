@@ -313,6 +313,7 @@ func newEditableConfig() (config, error) {
 	}
 	settings := config{Version: 1, ScanIntervalMS: 1000, RetryBaseMS: 1000, RetryCapMS: 30000, OperationTimeoutSeconds: 30}
 	settings.Agent.ID = "agent-" + agentSuffix
+	settings.Agent.InitialDefaultsEnrollment = true
 	settings.Agent.PINs = map[string]string{}
 	settings.Agent.PINRevisions = map[string]string{}
 	settings.Agent.ModemEnabled = false

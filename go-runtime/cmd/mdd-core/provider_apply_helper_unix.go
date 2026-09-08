@@ -362,6 +362,17 @@ func (service *providerApplyService) Status(ctx context.Context) (provideradmin.
 }
 
 func (service *providerApplyService) Apply(ctx context.Context, revision uint64) (provideradmin.ApplyResult, error) {
+	return service.applyProviders(ctx, revision, "")
+}
+
+func (service *providerApplyService) ApplyAdded(ctx context.Context, revision uint64, lineID string) (provideradmin.ApplyResult, error) {
+	if strings.TrimSpace(lineID) == "" {
+		return provideradmin.ApplyResult{}, providerFailure(http.StatusBadRequest, "scoped_apply_requires_line", nil)
+	}
+	return service.applyProviders(ctx, revision, lineID)
+}
+
+func (service *providerApplyService) applyProviders(ctx context.Context, revision uint64, onlyAdd string) (provideradmin.ApplyResult, error) {
 	if !service.mutation.TryLock() {
 		return provideradmin.ApplyResult{}, providerFailure(http.StatusConflict, "configuration_apply_in_progress", nil)
 	}
@@ -397,7 +408,7 @@ func (service *providerApplyService) Apply(ctx context.Context, revision uint64)
 	receipt, applyErr := executeProviderCandidate(applyContext, service.settings, candidate,
 		service.settings.ProviderApply.CurrentLink, service.settings.ProviderApply.ReceiptPath,
 		service.settings.ProviderApply.ProviderBinary, service.settings.ProviderApply.ProviderUser,
-		service.settings.ProviderApply.SystemctlPath)
+		service.settings.ProviderApply.SystemctlPath, onlyAdd)
 	result := applyResult(receipt, revision)
 	if applyErr == nil {
 		return result, nil

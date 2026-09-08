@@ -201,7 +201,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
       number: text(msisdn),
       name: line?.name || modem?.network?.operator_name || '',
 		mcc: text(sim.mcc || line?.sim?.mcc),
-      mnc: text(sim.mnc || line?.sim?.mnc),
+      mnc: text(sim.mnc || ([2,3].includes(sim.mnc_length) && typeof sim.imsi==='string' && sim.imsi.length>=3+sim.mnc_length ? sim.imsi.slice(3,3+sim.mnc_length) : line?.sim?.mnc)),
 		smsc: text(sim.smsc || line?.sim?.smsc),
       pin_state: text(sim.pin_state),
       pin_configured: sim.pin_configured === true,

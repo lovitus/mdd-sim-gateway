@@ -111,7 +111,8 @@ func (state *modemTopologyState) snapshot() (agentlink.ModemCondition, string, [
 				SIMAPDUOnDemand: modem.AT.SIMAPDUOnDemand,
 			},
 			SIM: agentlink.ModemSIMFact{
-				State: string(modem.SIM.State), SessionGeneration: modem.SIM.SessionGeneration,
+				MNCLength: modem.SIM.MNCLength,
+				State:     string(modem.SIM.State), SessionGeneration: modem.SIM.SessionGeneration,
 				ICCID: modem.SIM.ICCID, IMSI: modem.SIM.IMSI,
 				MSISDNs:  append([]string(nil), modem.SIM.MSISDNs...),
 				PINState: modem.SIM.PINState, PINConfigured: modem.SIM.PINConfigured,

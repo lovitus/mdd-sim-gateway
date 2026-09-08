@@ -125,6 +125,7 @@ type ModemCapabilities struct {
 }
 
 type ModemSIMFact struct {
+	MNCLength         int      `json:"mnc_length,omitempty"`
 	State             string   `json:"state"`
 	SessionGeneration string   `json:"session_generation,omitempty"`
 	ICCID             string   `json:"iccid,omitempty"`
@@ -933,6 +934,7 @@ type ModemPolicyDataLease struct {
 }
 
 type ModemPolicyFact struct {
+	Enrollment          *DeviceEnrollment     `json:"enrollment,omitempty"`
 	SchemaVersion       int                   `json:"schema_version"`
 	EquipmentID         string                `json:"equipment_id"`
 	CardID              string                `json:"card_id"`
@@ -1656,6 +1658,14 @@ func (response ModemPolicyResponse) ValidateFor(request ModemPolicyRequest) erro
 }
 
 func (fact ModemPolicyFact) Validate() error {
+	if fact.Enrollment != nil {
+		if err := fact.Enrollment.Validate(); err != nil {
+			return err
+		}
+		if fact.Enrollment.Initialized && !fact.Persisted {
+			return errors.New("device enrollment lacks persisted policy")
+		}
+	}
 	if fact.SchemaVersion != 1 || !validEquipmentID(fact.EquipmentID) || !validCardID(fact.CardID) ||
 		!oneOf(fact.State, "ready", "recovering", "error") ||
 		!oneOf(fact.ProfileMode, "agent", "system", "system_managed") || len(fact.Code) > 128 ||
@@ -2311,6 +2321,9 @@ func (topology TopologySnapshot) validateModems() error {
 		if modem.SIM.ICCID != "" && !validCardID(modem.SIM.ICCID) || modem.SIM.IMSI != "" && !validCardID(modem.SIM.IMSI) {
 			return errors.New("Agent topology contains an invalid modem SIM identity")
 		}
+		if modem.SIM.MNCLength != 0 && ((modem.SIM.MNCLength != 2 && modem.SIM.MNCLength != 3) || len(modem.SIM.IMSI) < 3+modem.SIM.MNCLength) {
+			return errors.New("Agent topology contains an invalid SIM MNC length")
+		}
 		if !oneOf(modem.SIM.PINState, "", "unknown", "not_required", "pin_required", "puk_required", "other_lock") ||
 			!oneOf(modem.SIM.PINRecovery, "", "configured", "attempting", "blocked", "unlocked", "status_unavailable") ||
 			modem.SIM.PINAttempts != nil && *modem.SIM.PINAttempts > 255 {
@@ -2479,6 +2492,9 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		result.Modems[index].SIM.MSISDNs = append([]string(nil), topology.Modems[index].SIM.MSISDNs...)
 		if topology.Modems[index].Policy != nil {
 			policy := *topology.Modems[index].Policy
+			if policy.Enrollment != nil {
+				policy.Enrollment = policy.Enrollment.Clone()
+			}
 			if policy.DataLease != nil {
 				lease := *policy.DataLease
 				policy.DataLease = &lease

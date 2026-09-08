@@ -19,6 +19,11 @@ import (
 
 func (*Prober) PolicyProfileMode() string { return "system" }
 
+type homePLMNObservation struct {
+	cardID, attachmentID, session, imsi string
+	length                              int
+}
+
 func (prober *Prober) PrepareSIMAPDU(ctx context.Context, target agentpolicy.Target) (bool, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
@@ -34,13 +39,29 @@ func (prober *Prober) PrepareSIMAPDU(ctx context.Context, target agentpolicy.Tar
 		if fact.Network.Data != agentmodem.DataDisconnected {
 			return false, agentpolicy.ErrSIMAPDUDataActive
 		}
-		if fact.AT.SIMAPDU {
-			return true, nil
+		ready := fact.AT.SIMAPDU
+		if !ready {
+			if fact.AT.State != agentmodem.ATControlReady || !fact.AT.SIMAPDUOnDemand {
+				return false, agentpolicy.ErrSIMAPDUUnavailable
+			}
+			var err error
+			ready, err = prober.at.PrepareSIMAPDU(ctx, target.EquipmentID)
+			if err != nil || !ready {
+				return ready, err
+			}
 		}
-		if fact.AT.State != agentmodem.ATControlReady || !fact.AT.SIMAPDUOnDemand {
-			return false, agentpolicy.ErrSIMAPDUUnavailable
+		if fact.SIM.MNCLength == 0 && fact.SIM.IMSI != "" {
+			// Optional identity enrichment must not turn an otherwise working
+			// APDU path into failure for an already configured line.
+			_, mnc, readErr := prober.at.ReadHomePLMN(ctx, target.EquipmentID, target.CardID, fact.SIM.IMSI)
+			if readErr == nil {
+				if prober.homePLMN == nil {
+					prober.homePLMN = make(map[string]homePLMNObservation)
+				}
+				prober.homePLMN[target.EquipmentID] = homePLMNObservation{cardID: target.CardID, attachmentID: target.AttachmentID, session: target.SIMSessionGeneration, imsi: fact.SIM.IMSI, length: len(mnc)}
+			}
 		}
-		return prober.at.PrepareSIMAPDU(ctx, target.EquipmentID)
+		return ready, nil
 	}
 	return false, agentmodem.ErrOperationTargetReplaced
 }

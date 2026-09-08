@@ -480,35 +480,47 @@ func TestProvisionHandlerFinalizesRequestedEnabledStateOnlyAfterAgentSuccess(t *
 }
 
 func TestFirstProvisionPromotesExistingDisabledDraftWithoutLosingDesiredState(t *testing.T) {
-	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	draft := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-draft", Name: "draft",
-		CardID: "89010000000000000001", HardwareProvisionState: "draft",
-		SIM:     linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", IMEI: "356789012345678", SMSC: "+8613800138000"},
-		Network: linecatalog.NetworkConfig{EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, EgressCountry: "cn"},
-		IMS:     linecatalog.IMSConfig{IMPI: "subscriber@example", IMPU: "sip:subscriber@example", Domain: "example"}}
-	if _, err := store.Put(draft); err != nil {
-		t.Fatal(err)
-	}
-	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
-	handler, err := NewProvisionHandler(stub, store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := withProvisionPrecondition(t, store, `{"operation_id":"first-provision-draft","line_id":"line-draft","line_name":"draft","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","egress_country":"cn"}`)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
-	line, lineErr := store.Get("line-draft")
-	receipt, found, receiptErr := store.GetOperation("first-provision-draft")
-	if response.Code != http.StatusOK || lineErr != nil || line.Enabled ||
-		line.HardwareProvisionState != "provisioned" || line.Network.EPDGAddress != "epdg.example" ||
-		len(line.Network.PCSCF) != 1 || line.IMS.IMPI != "subscriber@example" ||
-		receiptErr != nil || !found || !receipt.ExistingLine || receipt.State != linecatalog.OperationSucceeded {
-		t.Fatalf("status=%d line=%+v receipt=%+v lineErr=%v receiptErr=%v body=%s",
-			response.Code, line, receipt, lineErr, receiptErr, response.Body.String())
+	for _, automatic := range []bool{false, true} {
+		store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		draft := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-draft", Name: "draft",
+			CardID: "89010000000000000001", HardwareProvisionState: "draft",
+			SIM:     linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", IMEI: "356789012345678", SMSC: "+8613800138000"},
+			Network: linecatalog.NetworkConfig{EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, EgressCountry: "cn"},
+			IMS:     linecatalog.IMSConfig{IMPI: "subscriber@example", IMPU: "sip:subscriber@example", Domain: "example"}}
+		if _, err := store.Put(draft); err != nil {
+			t.Fatal(err)
+		}
+		stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+		handler, err := NewProvisionHandler(stub, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := withProvisionPrecondition(t, store, `{"operation_id":"first-provision-draft","line_id":"line-draft","line_name":"draft","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","egress_country":"cn"}`)
+		response := httptest.NewRecorder()
+		if automatic {
+			var input provisionAPIRequest
+			if err := json.Unmarshal([]byte(payload), &input); err != nil {
+				t.Fatal(err)
+			}
+			input.enableDefaultAfterSuccess = true
+			status, result := handler.executeProvision(context.Background(), input)
+			writeJSON(response, status, result)
+		} else {
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+		}
+		line, lineErr := store.Get("line-draft")
+		receipt, found, receiptErr := store.GetOperation("first-provision-draft")
+		if response.Code != http.StatusOK || lineErr != nil || line.Enabled != automatic ||
+			line.HardwareProvisionState != "provisioned" || line.Network.EPDGAddress != "epdg.example" ||
+			len(line.Network.PCSCF) != 1 || line.IMS.IMPI != "subscriber@example" ||
+			receiptErr != nil || !found || !receipt.ExistingLine || receipt.State != linecatalog.OperationSucceeded {
+			t.Fatalf("status=%d line=%+v receipt=%+v lineErr=%v receiptErr=%v body=%s",
+				response.Code, line, receipt, lineErr, receiptErr, response.Body.String())
+		}
 	}
 }
 

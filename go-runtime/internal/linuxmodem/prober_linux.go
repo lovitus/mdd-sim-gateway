@@ -29,6 +29,7 @@ import (
 )
 
 type Prober struct {
+	homePLMN      map[string]homePLMNObservation
 	mu            sync.Mutex
 	manager       modemManager
 	at            *agentat.Manager
@@ -272,7 +273,18 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agen
 	}
 	facts = visible
 	sort.Slice(facts, func(left, right int) bool { return facts[left].AttachmentID < facts[right].AttachmentID })
-	return prober.sessions.Observe(facts), nil
+	facts = prober.sessions.Observe(facts)
+	for index := range facts {
+		fact := &facts[index]
+		if observed, ok := prober.homePLMN[fact.EquipmentID]; ok {
+			if observed.cardID == fact.SIM.ICCID && observed.attachmentID == fact.AttachmentID && observed.session == fact.SIM.SessionGeneration && observed.imsi == fact.SIM.IMSI {
+				fact.SIM.MNCLength = observed.length
+			} else {
+				delete(prober.homePLMN, fact.EquipmentID)
+			}
+		}
+	}
+	return facts, nil
 }
 
 func (prober *Prober) acquire(ctx context.Context, inventory []modemSnapshot) []agentmodem.Fact {

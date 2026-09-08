@@ -340,7 +340,7 @@ func (controller *Controller) adoptOne(ctx context.Context, record Record) error
 
 func (controller *Controller) releaseOne(ctx context.Context, record Record) error {
 	if record.Stage != StageReleasePending {
-		if err := controller.store.SetAdapted(record.Pair, controller.now()); err != nil {
+		if err := controller.store.setAdapted(record.Pair, controller.now(), false); err != nil {
 			return err
 		}
 		record.Stage = StageReleasePending

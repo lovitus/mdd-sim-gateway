@@ -21,6 +21,7 @@ const (
 )
 
 type provisionAPIRequest struct {
+	enableDefaultAfterSuccess bool
 	agentlink.ProvisionCommand
 	PreflightOperationID string `json:"preflight_operation_id,omitempty"`
 }
@@ -72,6 +73,16 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_provision_request"})
 		return
 	}
+	status, result := handler.executeProvision(r.Context(), input)
+	writeJSON(w, status, result)
+}
+
+// executeProvision is shared by the authenticated HTTP adapter and durable
+// enrollment orchestration. Both use exactly the same ledger and preflight gates.
+func (handler *ProvisionHandler) executeProvision(ctx context.Context, input provisionAPIRequest) (int, any) {
+	if ctx == nil || input.ProvisionCommand.Validate() != nil {
+		return http.StatusBadRequest, map[string]string{"code": "invalid_provision_request"}
+	}
 	command := input.ProvisionCommand
 	requestedAPN := command.APN
 	selectedAPNID := ""
@@ -86,18 +97,15 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			if errors.Is(lookupErr, linecatalog.ErrNotFound) {
 				status = http.StatusConflict
 			}
-			writeJSON(w, status, map[string]string{"code": "provision_catalog_unavailable"})
-			return
+			return status, map[string]string{"code": "provision_catalog_unavailable"}
 		}
 	}
 	if !handler.reprovision && existingLineFound &&
 		(existingLine.HardwareProvisionState != "draft" || existingLine.Enabled || command.Enabled) {
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_requires_disabled_draft"})
-		return
+		return http.StatusConflict, map[string]string{"code": "provision_requires_disabled_draft"}
 	}
 	if handler.reprovision && existingLine.HardwareProvisionState == "draft" {
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "draft_requires_first_provision"})
-		return
+		return http.StatusConflict, map[string]string{"code": "draft_requires_first_provision"}
 	}
 	if existingLineFound {
 		if command.APN != "" {
@@ -111,19 +119,16 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if handler.reprovision && handler.store == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
-		return
+		return http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"}
 	}
 	digest := provisionDigest(command)
 	if handler.store != nil {
 		existing, found, lookupErr := handler.store.LookupOperation(command.OperationID, digest)
 		if errors.Is(lookupErr, linecatalog.ErrOperationReused) {
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "operation_id_reused"})
-			return
+			return http.StatusConflict, map[string]string{"code": "operation_id_reused"}
 		}
 		if lookupErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_unavailable"})
-			return
+			return http.StatusInternalServerError, map[string]string{"code": "provision_operation_unavailable"}
 		}
 		if found {
 			expectedKind := linecatalog.OperationProvision
@@ -131,8 +136,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 				expectedKind = linecatalog.OperationReprovision
 			}
 			if existing.Kind != expectedKind {
-				writeJSON(w, http.StatusConflict, map[string]string{"code": "operation_id_reused"})
-				return
+				return http.StatusConflict, map[string]string{"code": "operation_id_reused"}
 			}
 			status := http.StatusConflict
 			if existing.State == linecatalog.OperationSucceeded {
@@ -140,20 +144,17 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			} else if existing.State == linecatalog.OperationUnknown {
 				status = http.StatusAccepted
 			}
-			writeJSON(w, status, existing.PublicStatus())
-			return
+			return status, existing.PublicStatus()
 		}
 	}
 	previouslyEnabled := handler.reprovision && existingLine.Enabled
 	target, err := handler.runtime.ResolveModemTargetForAction(command.EquipmentID, command.CardID, agentlink.ModemCallStatus)
 	if err != nil || target.EquipmentID != command.EquipmentID || target.CardID != command.CardID ||
 		target.AttachmentID != command.AttachmentID {
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_target_unavailable"})
-		return
+		return http.StatusConflict, map[string]string{"code": "provision_target_unavailable"}
 	}
 	if status, code := handler.consumeProvisionPrecondition(input.PreflightOperationID, command, target); code != "" {
-		writeJSON(w, status, map[string]string{"code": code})
-		return
+		return status, map[string]string{"code": code}
 	}
 	candidateLine := provisionLine(command, existingLine, requestedAPN, selectedAPNID, existingLineFound)
 	var receipt linecatalog.OperationReceipt
@@ -169,6 +170,9 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			SIMSessionGeneration: command.SIMSessionGeneration, Step: "provision", AttemptCount: 1,
 		}
 		enableAfterSuccess := command.Enabled
+		if input.enableDefaultAfterSuccess && existingLineFound && existingLine.HardwareProvisionState == "draft" && !handler.reprovision {
+			enableAfterSuccess = true
+		}
 		if handler.reprovision {
 			enableAfterSuccess = previouslyEnabled
 		}
@@ -176,8 +180,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		receipt.ExistingLine = existingLineFound
 		snapshot, snapshotErr := handler.store.Snapshot()
 		if snapshotErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
-			return
+			return http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"}
 		}
 		receipt.ExpectedCatalogRevision = snapshot.Revision
 		var committed linecatalog.OperationReceipt
@@ -190,13 +193,12 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			_, committed, err = handler.store.CreateExpectedWithOperation(candidateLine, snapshot.Revision, receipt)
 		}
 		if err != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_catalog_conflict"})
-			return
+			return http.StatusConflict, map[string]string{"code": "provision_catalog_conflict"}
 		}
 		receipt = committed
 		hasReceipt = true
 	}
-	result, err := handler.runtime.ExecuteProvision(r.Context(), target.AgentID, target.ProcessGeneration, agentlink.ProvisionRequest{ProvisionCommand: command})
+	result, err := handler.runtime.ExecuteProvision(ctx, target.AgentID, target.ProcessGeneration, agentlink.ProvisionRequest{ProvisionCommand: command})
 	if err != nil {
 		result = agentlink.ProvisionResponse{OperationID: command.OperationID, State: agentlink.ProvisionUnknown,
 			EquipmentID: command.EquipmentID, CardID: command.CardID, SIMSessionGeneration: command.SIMSessionGeneration,
@@ -206,12 +208,10 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			receipt.ErrorCode = result.ErrorCode
 			receipt.UpdatedAt = handler.now().UTC()
 			if recordErr := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationCatalogCommitted, digest); recordErr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
-				return
+				return http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"}
 			}
 		}
-		writeJSON(w, http.StatusAccepted, result)
-		return
+		return http.StatusAccepted, result
 	}
 	if result.Validate() != nil || result.OperationID != command.OperationID ||
 		result.EquipmentID != command.EquipmentID || result.CardID != command.CardID ||
@@ -227,23 +227,19 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			receipt.ErrorDetail = result.Error
 			receipt.UpdatedAt = time.Now().UTC()
 			if recordErr := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationCatalogCommitted, digest); recordErr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
-				return
+				return http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"}
 			}
 		}
-		writeJSON(w, http.StatusAccepted, result)
-		return
+		return http.StatusAccepted, result
 	}
 	if result.State == agentlink.ProvisionFailed {
 		if hasReceipt {
 			if _, _, recordErr := handler.store.FailProvisionOperation(command.OperationID, digest,
 				result.ErrorCode, result.Error, handler.now().UTC()); recordErr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
-				return
+				return http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"}
 			}
 		}
-		writeJSON(w, http.StatusBadGateway, result)
-		return
+		return http.StatusBadGateway, result
 	}
 	if result.State != agentlink.ProvisionApplied {
 		if hasReceipt {
@@ -252,28 +248,24 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			receipt.ErrorDetail = "Agent returned a non-terminal provision state"
 			receipt.UpdatedAt = time.Now().UTC()
 			if recordErr := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationCatalogCommitted, digest); recordErr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
-				return
+				return http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"}
 			}
 		}
 		result.State = agentlink.ProvisionUnknown
 		result.ErrorCode = "provision_unrecognized_state"
-		writeJSON(w, http.StatusAccepted, result)
-		return
+		return http.StatusAccepted, result
 	}
 	if hasReceipt {
 		if existingLineFound {
 			if _, _, finalizeErr := handler.store.FinalizeExistingProvision(candidateLine, command.OperationID, digest, handler.now().UTC()); finalizeErr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
-				return
+				return http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"}
 			}
 		} else if _, _, finalizeErr := handler.store.FinalizeProvision(command.LineID, command.OperationID, digest,
 			command.Enabled, handler.now().UTC()); finalizeErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
-			return
+			return http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"}
 		}
 	}
-	writeJSON(w, http.StatusOK, result)
+	return http.StatusOK, result
 }
 
 func provisionLine(command agentlink.ProvisionCommand, existing linecatalog.Line, requestedAPN, selectedAPNID string,

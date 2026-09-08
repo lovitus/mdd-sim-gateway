@@ -38,11 +38,23 @@ var (
 
 type Preferences struct {
 	Retry              *recovery.ContinuousRetry `json:"retry"`
+	NewDeviceDefaults  *NewDeviceDefaults        `json:"new_device_defaults,omitempty"`
 	Updates            *updatenetwork.Selection  `json:"updates"`
 	AuditEnabled       *bool                     `json:"audit_enabled"`
 	TrustedProxies     []string                  `json:"trusted_proxies"`
 	CallAudioBufferMS  int                       `json:"call_audio_buffer_ms"`
 	RingTimeoutSeconds int                       `json:"ring_timeout_seconds"`
+}
+
+// Source: ec620942 control/app/device_state.py:set_defaults and
+// host/mdd_orchestrator.py:desired_devices. These are future-device defaults,
+// never overrides for existing per-device intent. nil means not configured.
+// The legacy cellular_enabled maps to connection_enabled, not borrowing.
+type NewDeviceDefaults struct {
+	ConnectionEnabled bool `json:"connection_enabled"`
+	VoWiFiEnabled     bool `json:"vowifi_enabled"`
+	FlightMode        bool `json:"flight_mode"`
+	RoamingEnabled    bool `json:"roaming_enabled"`
 }
 
 type Snapshot struct {

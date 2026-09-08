@@ -51,12 +51,14 @@ type ConnectionRuntime interface {
 }
 
 type Config struct {
-	Store       *Store
-	Runtime     Runtime
-	Connection  ConnectionRuntime
-	Coordinator agentmodem.AuxiliaryCoordinator
-	Recovery    recovery.Policy
-	Now         func() time.Time
+	InitialInventoryDefaults bool
+	ProtectedEquipment       func() ([]string, error)
+	Store                    *Store
+	Runtime                  Runtime
+	Connection               ConnectionRuntime
+	Coordinator              agentmodem.AuxiliaryCoordinator
+	Recovery                 recovery.Policy
+	Now                      func() time.Time
 }
 
 type reconcileStatus struct {
@@ -77,12 +79,16 @@ type leaseStatus struct {
 // manager; that coordinator serializes policy mutation/reconcile with the
 // same paid-call and data lifecycle locks.
 type Manager struct {
-	config          Config
-	mu              sync.RWMutex
-	coordinator     agentmodem.AuxiliaryCoordinator
-	status          map[string]reconcileStatus
-	leases          map[string]leaseStatus
-	appliedProfiles map[string]Profile
+	config           Config
+	mu               sync.RWMutex
+	coordinator      agentmodem.AuxiliaryCoordinator
+	status           map[string]reconcileStatus
+	leases           map[string]leaseStatus
+	appliedProfiles  map[string]Profile
+	discovery        map[string]Discovery
+	discoveryErr     error
+	initialDefaults  *InitialDefaults
+	defaultsReceived bool
 }
 
 func New(config Config) (*Manager, error) {
@@ -169,6 +175,11 @@ func (manager *Manager) View(equipmentID, cardID string) agentlink.ModemPolicyFa
 	}
 	if lease.SessionID != "" {
 		view.DataLease = &agentlink.ModemPolicyDataLease{SessionID: lease.SessionID, Purpose: lease.Purpose, State: lease.State}
+	}
+	if record, observed, discoveryErr := manager.DiscoveryFor(equipmentID); err == nil && discoveryErr == nil && observed &&
+		(record.InitializedCard == "" || record.InitializedCard == cardID) {
+		view.Enrollment = &agentlink.DeviceEnrollment{FirstSeen: record.FirstSeen, Protected: record.Baseline,
+			Initialized: record.InitializedCard == cardID && found, Template: record.Defaults}
 	}
 	return view
 }
@@ -568,6 +579,7 @@ func (manager *Manager) DataLeaseActive(equipmentID string) bool {
 // selected platform profile and software radio. Data remains lease-driven;
 // roaming is enforced when the lease is prepared.
 func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmodem.Fact) {
+	manager.observeDiscovery(facts)
 	blockedConnections := manager.reconcileConnectionOwners(ctx, facts)
 	for _, fact := range facts {
 		if fact.EquipmentID == "" || fact.SIM.ICCID == "" || fact.SIM.State != agentmodem.SIMReady {
@@ -583,8 +595,24 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 			continue
 		}
 		if !found {
-			manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
-			continue
+			manager.mu.RLock()
+			pending := manager.status[pair(fact.EquipmentID, fact.SIM.ICCID)]
+			manager.mu.RUnlock()
+			if !pending.RetryAt.IsZero() && manager.config.Now().Before(pending.RetryAt) {
+				continue
+			}
+			policy, found, err = manager.initializeDiscoveryPolicy(ctx, fact)
+			if errors.Is(err, ErrRevision) {
+				policy, found, err = manager.config.Store.Get(fact.EquipmentID, fact.SIM.ICCID)
+			}
+			if err != nil {
+				manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "default_policy_initialization_unavailable")
+				continue
+			}
+			if !found {
+				manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
+				continue
+			}
 		}
 		key := pair(fact.EquipmentID, fact.SIM.ICCID)
 		manager.mu.RLock()

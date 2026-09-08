@@ -111,6 +111,16 @@ cursor. Do not generate paid traffic or manufacture failures to fill evidence ga
 
 ## Remaining Original UI Gaps
 
+The current new-device-defaults batch connects the original General controls to
+CAS preferences, imports the original device defaults without overwriting Go
+choices, and uses the existing Agent policy, draft, preparation, provision and
+Provider apply paths. New automatic Provider apply is restricted to one added
+line and cannot publish unrelated saved changes. MNC length comes from an
+explicit EF_AD read; the original MCC-country JSON is copied unchanged. This
+batch still requires complete CI and deployed browser/hardware acceptance.
+The older disabled-defaults entries below describe the pre-batch production
+boundary, not proof that the new implementation has passed acceptance.
+
 The following are confirmed by comparing `ec620942` with the mounted
 `views/UnifiedPages.jsx` and its Go adapter. This is a correction to the existing
 module matrix, not a claim that all other original actions have passed acceptance.
@@ -129,6 +139,21 @@ not prove saving, actions, persistence, notification delivery, calls, SMS or
 hardware behavior. Keep missing implementation separate from missing acceptance.
 Agent platform delivery (including Android readers and persistent modem capture)
 also cannot be certified by this frontend matrix.
+
+Source verification for the two remaining General settings controls:
+`ec620942 control/app/device_state.py:23,302` defaults to cellular=false,
+VoWiFi=true, flight=false, roaming=false; partial default edits retain the other
+values and apply only to future hardware IDs. The paused Go preferences test
+currently expects all-false on the first partial edit. That is a behavior gap,
+not proof of original-default parity. Do not overwrite existing device choices.
+`ec620942 host/mdd_orchestrator.py:1339,1637-1663,3171` implements serial mode by
+switching discovery/bridges as well as stopping/disabling ModemManager. Current
+`go-runtime/internal/linuxmodem/prober_linux.go:77` opens ModemManager to discover
+devices. Merely adding a helper service-stop action would remove discovery and
+does not restore the original feature. A serial discovery/owner path must exist
+before wiring that old checkbox; readers and remote Windows/macOS are unaffected
+by this original Linux-host control. These are unimplemented requirements, not
+new user decisions or reasons to claim the remaining settings work complete.
 
 The original retry controls are consumed by `ec620942 control/app/main.py`
 `_health_recovery_due` and `apply_health`: `max * interval` bounds a continuous

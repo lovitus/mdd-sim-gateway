@@ -4,6 +4,7 @@
 package linebootstrap
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -49,23 +50,25 @@ type RawAvailability struct {
 }
 
 type Candidate struct {
-	CandidateID       string           `json:"candidate_id"`
-	Kind              string           `json:"kind"`
-	Mode              string           `json:"mode"`
-	Condition         string           `json:"condition"`
-	CanClaim          bool             `json:"can_claim"`
-	AgentID           string           `json:"agent_id"`
-	ProcessGeneration string           `json:"process_generation"`
-	ReaderName        string           `json:"reader_name,omitempty"`
-	AttachmentID      string           `json:"attachment_id,omitempty"`
-	SessionGeneration string           `json:"session_generation"`
-	EquipmentID       string           `json:"equipment_id,omitempty"`
-	CardID            string           `json:"card_id"`
-	ConfiguredLineID  string           `json:"configured_line_id,omitempty"`
-	ProvisionState    string           `json:"provision_state"`
-	ProvisionBlockers []string         `json:"provision_blockers,omitempty"`
-	Observed          ObservedIdentity `json:"observed"`
-	Raw               *RawAvailability `json:"raw,omitempty"`
+	PolicyRevision    uint64                      `json:"policy_revision,omitempty"`
+	Enrollment        *agentlink.DeviceEnrollment `json:"enrollment,omitempty"`
+	CandidateID       string                      `json:"candidate_id"`
+	Kind              string                      `json:"kind"`
+	Mode              string                      `json:"mode"`
+	Condition         string                      `json:"condition"`
+	CanClaim          bool                        `json:"can_claim"`
+	AgentID           string                      `json:"agent_id"`
+	ProcessGeneration string                      `json:"process_generation"`
+	ReaderName        string                      `json:"reader_name,omitempty"`
+	AttachmentID      string                      `json:"attachment_id,omitempty"`
+	SessionGeneration string                      `json:"session_generation"`
+	EquipmentID       string                      `json:"equipment_id,omitempty"`
+	CardID            string                      `json:"card_id"`
+	ConfiguredLineID  string                      `json:"configured_line_id,omitempty"`
+	ProvisionState    string                      `json:"provision_state"`
+	ProvisionBlockers []string                    `json:"provision_blockers,omitempty"`
+	Observed          ObservedIdentity            `json:"observed"`
+	Raw               *RawAvailability            `json:"raw,omitempty"`
 }
 
 type Snapshot struct {
@@ -84,11 +87,17 @@ type ClaimResult struct {
 }
 
 type Service struct {
-	catalog *linecatalog.Store
-	agents  AgentFacts
-	now     func() time.Time
-	maxAge  time.Duration
-	random  io.Reader
+	defaultProvision func(context.Context, Candidate, linecatalog.Line, string) error
+	catalog          *linecatalog.Store
+	agents           AgentFacts
+	now              func() time.Time
+	maxAge           time.Duration
+	random           io.Reader
+}
+
+// SetDefaultProvisioner is wired before Core starts its existing coordinator.
+func (service *Service) SetDefaultProvisioner(run func(context.Context, Candidate, linecatalog.Line, string) error) {
+	service.defaultProvision = run
 }
 
 func New(catalog *linecatalog.Store, agents AgentFacts, now func() time.Time) (*Service, error) {
@@ -178,6 +187,10 @@ func (service *Service) Project() (Snapshot, error) {
 					SessionGeneration: modem.SIM.SessionGeneration, EquipmentID: modem.EquipmentID,
 					CardID: modem.SIM.ICCID, Observed: observed,
 					Raw: &RawAvailability{Available: false, Code: "raw_isolation_unproven"},
+				}
+				if modem.Policy != nil && modem.Policy.Enrollment != nil {
+					candidate.Enrollment = modem.Policy.Enrollment.Clone()
+					candidate.PolicyRevision = modem.Policy.Revision
 				}
 				candidate.CandidateID = candidateHash(candidate)
 				candidates = append(candidates, candidate)
@@ -352,6 +365,9 @@ func modemIdentity(modem agentlink.ModemFact) ObservedIdentity {
 	if validDigits(modem.SIM.IMSI, 5, 18) {
 		identity.IMSI = modem.SIM.IMSI
 		identity.MCC = modem.SIM.IMSI[:3]
+		if length := modem.SIM.MNCLength; (length == 2 || length == 3) && len(modem.SIM.IMSI) >= 3+length {
+			identity.MNC = modem.SIM.IMSI[3 : 3+length]
+		}
 	}
 	if validDigits(modem.EquipmentID, 14, 16) {
 		identity.IMEI = modem.EquipmentID

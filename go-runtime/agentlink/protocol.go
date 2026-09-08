@@ -73,6 +73,7 @@ const (
 )
 
 type envelope struct {
+	DeviceDefaults        *deviceDefaultsUpdate      `json:"device_defaults,omitempty"`
 	Kind                  string                     `json:"kind"`
 	RequestID             string                     `json:"request_id,omitempty"`
 	Hello                 *Hello                     `json:"hello,omitempty"`
@@ -193,6 +194,22 @@ func writeEnvelope(ctx context.Context, socket *websocket.Conn, message envelope
 }
 
 func (message envelope) validate() error {
+	if message.Kind == kindDeviceDefaults {
+		if message.DeviceDefaults == nil {
+			return errors.New("missing device defaults payload")
+		}
+		if value := message.DeviceDefaults.Template; value != nil {
+			if err := value.Validate(); err != nil {
+				return err
+			}
+		}
+		message.DeviceDefaults = nil
+		message.Kind = kindHelloAck
+		return message.validate()
+	}
+	if message.DeviceDefaults != nil {
+		return errors.New("unexpected device defaults payload")
+	}
 	if message.Kind != kindProvisionRequest && message.Kind != kindProvisionResponse &&
 		(message.ProvisionRequest != nil || message.ProvisionResult != nil) {
 		return errors.New("unexpected provision fields")

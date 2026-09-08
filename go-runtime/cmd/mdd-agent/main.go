@@ -48,10 +48,11 @@ type config struct {
 	configPath string
 	Version    int `json:"version"`
 	Agent      struct {
-		ID             string `json:"id"`
-		ServerURL      string `json:"server_url"`
-		ServerToken    string `json:"server_token"`
-		TLSFingerprint string `json:"tls_sha256"`
+		ID                        string `json:"id"`
+		InitialDefaultsEnrollment bool   `json:"initial_defaults_enrollment,omitempty"`
+		ServerURL                 string `json:"server_url"`
+		ServerToken               string `json:"server_token"`
+		TLSFingerprint            string `json:"tls_sha256"`
 		// advertise_host is retained for compatibility with legacy Shadow
 		// configuration files; Go Agent routing uses the authenticated server
 		// connection and never trusts this display-only value.
@@ -445,6 +446,27 @@ func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 			return nil, openErr
 		}
 		modemPolicies, managerErr = agentpolicy.New(agentpolicy.Config{Store: policyStore, Runtime: policyRuntime,
+			InitialInventoryDefaults: settings.Agent.InitialDefaultsEnrollment,
+			ProtectedEquipment: func() ([]string, error) {
+				if rawCapture == nil {
+					return nil, nil
+				}
+				snapshot, err := rawCapture.Snapshot()
+				if err != nil {
+					return nil, err
+				}
+				var equipment []string
+				for _, pair := range snapshot.Desired {
+					equipment = append(equipment, pair.EquipmentID)
+				}
+				for _, capture := range snapshot.Captures {
+					equipment = append(equipment, capture.Pair.EquipmentID)
+				}
+				for _, selection := range snapshot.ModeSelections {
+					equipment = append(equipment, selection.Pair.EquipmentID)
+				}
+				return equipment, nil
+			},
 			Coordinator: callManager, Recovery: recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond,
 				Cap: time.Duration(settings.RetryCapMS) * time.Millisecond}})
 		if managerErr != nil {

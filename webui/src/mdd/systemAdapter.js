@@ -29,6 +29,11 @@ export function systemSettingsView(preferences = {}, notifications = {}, status 
     } catch { /* An unknown listener is not a fabricated address or port. */ }
   }
   return {timezone:notifications.timezone,cellular_audio_buffer_ms:audio,
+	__device_defaults_supported:preferences.new_device_defaults_supported===true,
+	device_defaults:{cellular_enabled:preferences.preferences?.new_device_defaults?.connection_enabled ?? false,
+		vowifi_enabled:preferences.preferences?.new_device_defaults?.vowifi_enabled ?? true,
+		flight_mode:preferences.preferences?.new_device_defaults?.flight_mode ?? false,
+		roaming_enabled:preferences.preferences?.new_device_defaults?.roaming_enabled ?? false},
     __web_supported:web.schema_version===1 && /^[a-f0-9]{64}$/.test(web.revision || ''),
     __web_revision:web.revision,__web_restart_required:web.restart_required===true,
     updates:preferences.preferences?.updates ? {...preferences.preferences.updates} : undefined,
@@ -108,6 +113,13 @@ export const systemAPI = {
     return {...draft,__catalog_revision:result.revision,rekey:{minutes:result.defaults.rekey_minutes},__saved_rekey_minutes:result.defaults.rekey_minutes}
   },
   async saveSettings(draft, domain) {
+	if(domain==='device-defaults'){
+		if(!draft.__device_defaults_supported)throw new Error('device_defaults_unavailable')
+		const value=draft.device_defaults
+		if(!value || ['cellular_enabled','vowifi_enabled','flight_mode','roaming_enabled'].some(key=>typeof value[key]!=='boolean'))throw new Error('invalid_device_defaults')
+		const result=await go.saveSystemPreferences(draft.__preference_revision,{new_device_defaults:{connection_enabled:value.cellular_enabled,vowifi_enabled:value.vowifi_enabled,flight_mode:value.flight_mode,roaming_enabled:value.roaming_enabled}})
+		return {...draft,__preference_revision:result.revision,device_defaults:{cellular_enabled:result.preferences.new_device_defaults.connection_enabled,vowifi_enabled:result.preferences.new_device_defaults.vowifi_enabled,flight_mode:result.preferences.new_device_defaults.flight_mode,roaming_enabled:result.preferences.new_device_defaults.roaming_enabled}}
+	}
     if(domain==='web'){
       if(!draft.__web_supported)throw new Error('web_settings_unavailable')
       const port=Number(draft.http_port),host=String(draft.bind || '').trim()

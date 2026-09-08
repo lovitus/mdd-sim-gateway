@@ -84,7 +84,11 @@ func (owner *Owner) transmitAPDULocked(ctx context.Context, channel int, command
 	}
 	if response.SW1 == 0x6C {
 		corrected := append([]byte(nil), command...)
-		corrected = append(corrected, response.SW2)
+		if len(corrected) == 5 || (len(corrected) > 5 && len(corrected) == 6+int(corrected[4])) {
+			corrected[len(corrected)-1] = response.SW2
+		} else {
+			corrected = append(corrected, response.SW2)
+		}
 		response, err = owner.transmitAPDUOnceLocked(ctx, channel, corrected)
 		if err != nil {
 			return SIMAKAResult{}, err

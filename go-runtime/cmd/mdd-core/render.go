@@ -90,16 +90,22 @@ func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, exi
 		payload []byte
 	}
 	artifacts := make([]artifact, 0, len(snapshot.Lines)+1)
+	enabledLines := 0
 	for _, line := range snapshot.Lines {
 		if !line.Enabled {
 			continue
 		}
+		enabledLines++
 		instance := providerconfig.UnitInstance(line.ID)
 		provider := providerConfigForLine(settings, line, coreAddress, statePath, instance)
 		provider.Network.RekeyMinutes = linecatalog.EffectiveRekeyMinutes(line, snapshot.Defaults)
 		proxyURL, err := exits.ProxyURL(line.Network.EgressCountry)
 		if err != nil {
-			return empty, fmt.Errorf("line %q egress: %w", line.ID, err)
+			// Only this line's own country exit is unready; excluding just this
+			// line lets every other country's line still render and apply.
+			// BuildPlan drains and stops it like any other line that becomes
+			// absent from the candidate manifest.
+			continue
 		}
 		provider.Network.ProxyURL = proxyURL
 		provider.Network.MTU = proxiedProviderMTU
@@ -117,6 +123,9 @@ func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, exi
 		manifest.Providers = append(manifest.Providers, providerconfig.ManifestEntry{
 			LineID: line.ID, UnitInstance: instance, ConfigFile: name, ConfigSHA256: hex.EncodeToString(digest[:]),
 		})
+	}
+	if enabledLines > 0 && len(manifest.Providers) == 0 {
+		return empty, errors.New("no enabled line has a ready host loopback proxy exit")
 	}
 	manifestPayload, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

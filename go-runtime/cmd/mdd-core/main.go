@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -107,6 +108,12 @@ type config struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "import-device-defaults" {
+		if err := runDeviceDefaultsImport(os.Args[2:], os.Stdout); err != nil {
+			fatalf("import legacy device defaults: %v", err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "bootstrap-host" {
 		if err := runBootstrapHost(os.Args[2:], os.Stdin, os.Stdout); err != nil {
 			fatalf("bootstrap host: %v", err)
@@ -522,6 +529,26 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	defaultAuthority := fmt.Sprintf("%x", sha256.Sum256([]byte("mdd-device-defaults-v1:"+settings.Local.Token)))
+	if err := agents.SetDeviceDefaultsSource(func() (*agentlink.DeviceDefaults, error) {
+		snapshot, err := preferenceStore.Snapshot()
+		if err != nil {
+			return nil, err
+		}
+		value := snapshot.Preferences.NewDeviceDefaults
+		if value == nil {
+			return nil, nil
+		}
+		template, signErr := (agentlink.DeviceDefaults{Authority: defaultAuthority, Revision: snapshot.Revision,
+			ConnectionEnabled: value.ConnectionEnabled, VoWiFiEnabled: value.VoWiFiEnabled,
+			FlightMode: value.FlightMode, RoamingEnabled: value.RoamingEnabled}).Authorize([]byte(settings.Local.Token))
+		if signErr != nil {
+			return nil, signErr
+		}
+		return &template, nil
+	}); err != nil {
+		return err
+	}
 	rawAdmission, err := rawmodem.NewAdmission(catalog, time.Now)
 	if err != nil {
 		return err
@@ -663,6 +690,9 @@ func run(ctx context.Context, settings config) error {
 			DesiredPath: settings.ProviderApply.EgressDesiredPath, StatusPath: settings.ProviderApply.EgressStatusPath}
 	}
 	runtimeReconciler, err := runtimereconcile.New(runtimereconcile.Config{
+		ReconcileDefaultDrafts: func(ctx context.Context) error {
+			return lineBootstrap.ReconcileDefaultDrafts(ctx, defaultAuthority, []byte(settings.Local.Token))
+		},
 		ContinuousRetry: func() (recovery.ContinuousRetry, error) {
 			snapshot, err := preferenceStore.Snapshot()
 			if err != nil {
@@ -761,6 +791,7 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("describe TLS certificate: %w", err)
 	}
 	var providerApplyAPI http.Handler
+	var defaultApplyClient *provideradmin.Client
 	var webSettingsAPI http.Handler
 	var egressProbeAPI http.Handler
 	var egressApplyAPI http.Handler
@@ -771,6 +802,7 @@ func run(ctx context.Context, settings config) error {
 			return err
 		}
 		providerApplyAPI, err = provideradmin.NewHandler(client)
+		defaultApplyClient = client
 		if err != nil {
 			return err
 		}
@@ -819,6 +851,15 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	lineBootstrap.SetDefaultProvisioner(func(ctx context.Context, candidate linebootstrap.Candidate, line linecatalog.Line, claimID string) error {
+		if err := provisionAPI.AdvanceDefaultDraft(ctx, provisionReadbackAPI, candidate, line, claimID); err != nil {
+			return err
+		}
+		if defaultApplyClient == nil {
+			return nil
+		}
+		return provisionAPI.ApplyDefaultProvider(ctx, line.ID, claimID, defaultApplyClient)
+	})
 	readerReadbackAPI, err := core.NewReaderReadbackHandler(agents, catalog)
 	if err != nil {
 		return err

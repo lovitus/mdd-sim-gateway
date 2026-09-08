@@ -432,8 +432,12 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			modemEvents = worker.config.ModemEvents
 		}
 		var policyExecutor agentlink.ModemPolicyExecutor
+		var bindDefaults func(*agentlink.DeviceDefaults) error
+		var resetDefaults func()
 		if worker.config.ModemPolicies != nil {
 			policyExecutor = worker
+			bindDefaults = worker.config.ModemPolicies.BindInitialDefaults
+			resetDefaults = worker.config.ModemPolicies.ClearInitialDefaults
 		}
 		// Every Agent has the PC/SC manager and therefore advertises reader PIN
 		// status/verify. Modem PIN support remains optional inside ExecuteSIMPIN.
@@ -459,7 +463,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
 			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems,
 			SMSSessionFencing: worker.config.Operations != nil, Media: media,
-			Data: dataExecutor, Policies: policyExecutor, RawUSB: rawUSB, EUICC: manager,
+			Data: dataExecutor, Policies: policyExecutor, DeviceDefaults: bindDefaults, DeviceDefaultsReset: resetDefaults, RawUSB: rawUSB, EUICC: manager,
 			ReaderReadback: manager, Recovery: recoveryExecutor,
 			HostHealth: worker.config.HostHealth != nil,
 			PIN:        pinExecutor, PINConfiguration: worker.config.PINCredentials != nil,
