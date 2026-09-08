@@ -69,6 +69,14 @@ key is dial-only, never a DTMF tone. WebSocket snapshots supersede older REST re
 Hardware acceptance remains tracked separately in the current recovery cursor.
 Source-shape checks are not browser or call acceptance evidence.
 
+The original manual call-stability entry was still calling a missing coordinator
+method. Its ec620942 timer/observer workflow is now adapted to the same Go call
+owner, with one VoWiFi call, exact hangup, bounded setup and terminal readback.
+Duration comes from the exact durable call record rather than including the
+verification delay. Missing termination/duration is not a pass, and there is no
+automatic cellular fallback. Deterministic tests do not place carrier calls;
+real stability acceptance remains separate and subject to the roaming-cost limits.
+
 Browser acceptance exposed a missing-input-device error whose detail disappeared
 with the toast. The call page now retains that error, awaits microphone acquisition
 before allocating a media lease, and cancels pending acquisition and media tests

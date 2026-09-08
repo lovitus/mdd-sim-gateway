@@ -4,6 +4,11 @@ import { getCallAudioBufferMS } from './browserPreferences.js'
 import { CallMedia, normalizeDialTarget } from './goCallMedia.js'
 import { operationID } from './goV1Adapter.js'
 import { useI18n } from './i18n.jsx'
+import { runCallStabilityTest } from './mdd/callStability.js'
+
+function observeTestCall(call,type,cause='') {
+  try {call.testObserver?.(type,{call_id:call.call_id,stats:{...call.media?.stats},cause})}catch{}
+}
 
 function routesFor(instances) {
   const result = []
@@ -68,6 +73,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     if (currentRef.current !== call) return
     Object.assign(call, patch)
     setCurrent({ ...call })
+    observeTestCall(call,call.phase,['start_unknown','media_failed'].includes(call.phase)?call.message:'')
   }, [])
 
   const release = useCallback(async call => {
@@ -81,6 +87,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     if (call.lease?.session_id) {
       try { await api.releaseCallMediaLease(call.mode, call.lease.session_id) } catch {}
     }
+    observeTestCall(call,'ended',call.testFailure || '')
   }, [])
 
   const loadHistory = useCallback(async () => {
@@ -185,6 +192,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
           ? `${error.message}. The call will not be submitted again; hang up or wait for the 10-second guard.`
           : `${error.message}. Retry will reuse the same call identity.` })
       } else {
+        call.testFailure=error.message
         showToastRef.current?.(`Call failed: ${error.message}`)
         await release(call)
         void refreshStatuses(); void loadHistory()
@@ -192,7 +200,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     }
   }, [loadHistory, refreshStatuses, release, update])
 
-  const begin = useCallback(async ({ line, mode, callee, bufferMS, incoming }) => {
+  const begin = useCallback(async ({ line, mode, callee, bufferMS, incoming, testObserver }) => {
     if (currentRef.current || mediaProbeRef.current) throw new Error('another call or media test is already owned by this browser')
     const value = incoming ? (mode === 'cellular' ? incoming.number : incoming.caller) : normalizeDialTarget(callee)
     const call = {
@@ -204,11 +212,13 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
       message: 'Requesting microphone and bidirectional audio evidence',
       direction: incoming ? 'incoming' : 'outgoing', incoming: incoming || null,
       muted: false, cancelled: false,
+      testObserver,
     }
     const media = new CallMedia(call.buffer_ms, (type, detail) => mediaEvent(call, type, detail))
     call.media = media
     currentRef.current = call
     setCurrent({ ...call })
+    observeTestCall(call,'created')
     try {
       await media.openAudioFromGesture()
       if (currentRef.current !== call || call.cancelled) return null
@@ -233,6 +243,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     } catch (error) {
       if (currentRef.current !== call || call.cancelled) return null
       if (!['active', 'start_unknown'].includes(call.phase)) {
+        call.testFailure=error.message
         showToastRef.current?.(`Pre-call check failed: ${error.message}. No carrier call was confirmed.`)
         await release(call)
       }
@@ -240,10 +251,10 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     }
   }, [mediaEvent, release, submitStart, update])
 
-  const startOutgoing = useCallback((lineID, mode, callee, bufferMS) => {
+  const startOutgoing = useCallback((lineID, mode, callee, bufferMS, testObserver) => {
     const route = routes.find(value => value.mode === mode && String(value.line.id) === String(lineID))
     if (!route) return Promise.reject(new Error('the selected call route is not ready'))
-    return begin({ line: route.line, mode, callee, bufferMS })
+    return begin({ line: route.line, mode, callee, bufferMS, testObserver })
   }, [begin, routes])
 
   const answerIncoming = useCallback((lineID, mode, incoming, bufferMS) => {
@@ -286,6 +297,30 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
       update(call, { phase: 'ending', message: `${error.message}. Hangup is unconfirmed; the 10-second guard remains active.` })
     }
   }, [loadHistory, refreshStatuses, release, update])
+
+  const runStabilityTest = useCallback((lineID,number,activeSeconds=50) => {
+    const key=String(lineID || '')
+    const route=routes.find(item=>item.mode==='vowifi' && String(item.line.id)===key)
+    if(!route)return Promise.reject(new Error('VoWiFi calling is unavailable for this line'))
+    const cardID=String(route.line.iccid || route.line.card_id || '')
+    return runCallStabilityTest({activeSeconds,
+      start:observe=>startOutgoing(key,'vowifi',number,getCallAudioBufferMS(),observe),
+      hangup:callID=>currentRef.current?.call_id===callID ? hangup() : Promise.resolve(),
+      verifyTerminal:async callID=>{
+        const selected=instancesRef.current?.find(line=>String(line.id)===key)
+        if(!cardID || String(selected?.iccid || selected?.card_id || '')!==cardID)throw new Error('Stability-test SIM identity changed')
+        const status=await api.callTransportStatus(key,'vowifi')
+        if(String(status.line_id)!==key || status.active_call || status.pending_incoming_call)throw new Error('Call termination was not verified: the line is not idle')
+        const history=await api.callHistoryV1(key,'vowifi')
+        const record=(history.calls || []).find(item=>item.call_id===callID && String(item.line_id)===key && item.transport==='vowifi')
+        if(!record?.ended_at)throw new Error('Exact call termination is missing from durable history')
+        // Verification wait time is not active call duration.
+        const end=Date.parse(record.ended_at),answer=record.answered_at?Date.parse(record.answered_at):end
+        if(!Number.isFinite(end)||!Number.isFinite(answer)||end<answer)throw new Error('Call duration was not confirmed')
+        return {active_seconds:(end-answer)/1000,facts:await api.lineFacts(key)}
+      },
+    })
+  },[routes,startOutgoing,hangup])
 
   const retryStart = useCallback(() => {
     const call = currentRef.current
@@ -367,7 +402,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   return {
     routes, current, incoming, statuses, history, historyLoading, selectHistoryScope,
     refresh: refreshStatuses, loadHistory, startOutgoing, answerIncoming, rejectIncoming,
-    hangup, retryStart, sendDTMF, toggleMute, deleteHistory, line, lines: {}, verifyMedia, cancelMediaTest,
+    hangup, retryStart, sendDTMF, toggleMute, deleteHistory, line, lines: {}, verifyMedia, cancelMediaTest, runStabilityTest,
   }
 }
 

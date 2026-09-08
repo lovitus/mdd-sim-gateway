@@ -150,14 +150,15 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
   }
   const testStability = async () => {
     if (!selectedId) return
+    if(selected?.operations?.vowifi_call?.ready!==true){setError(language==='zh'?'当前线路 VoWiFi 通话不可用。':'VoWiFi calling is unavailable for this line.');return}
     const target = String(stabilityTarget || '').replace(/[\s().-]/g, '')
     if (!/^(?:\d{2,6}|\+[1-9]\d{6,14})$/.test(target)) {
       setError(language === 'zh' ? '请输入短号或带 + 国家码的国际号码。' : 'Enter a service short code or an international number.'); return
     }
     const seconds = Math.max(10, Math.min(300, Number(stabilitySeconds) || 50))
     const confirmText = language === 'zh'
-      ? `将通过当前线路拨打 ${target}，接通后最多测试 ${seconds} 秒，可能产生费用。系统会用该通话自己的 WSS 会话挂断，并核验 Engine 零通道。继续吗？`
-      : `Call ${target} on the selected line for up to ${seconds}s after answer? Charges may apply. The exact WSS call session will hang up and Engine idle will be verified. Continue?`
+      ? `将通过当前线路 VoWiFi 拨打 ${target}，接通后最多测试 ${seconds} 秒，可能产生费用。系统会挂断该通话，并核对持久通话记录和线路空闲状态。继续吗？`
+      : `Call ${target} through VoWiFi for up to ${seconds}s after answer? Charges may apply. The exact call will hang up, and durable call history plus line idle state will be verified. Continue?`
     if (!window.confirm(confirmText)) return
     setError(''); setStabilityResult(null); setRunning('stability')
     try {
@@ -165,8 +166,8 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       const result = await callCoordinator.runStabilityTest(selectedId, target, seconds)
       setStabilityResult(result)
       setFacts(result.facts || null)
-      if (result.passed) showToast(language === 'zh' ? '通话稳定测试通过，已核验零活动通道。' : 'Call stability test passed; zero active channels verified.')
-      else setError(result.reason || (language === 'zh' ? '通话未达到请求的稳定时长，但已核验零活动通道。' : 'Call did not reach the requested stability duration, but zero active channels was verified.'))
+      if (result.passed) showToast(language === 'zh' ? '通话稳定测试通过，已核对本次通话终态和线路空闲。' : 'Call stability test passed; exact call termination and line idle verified.')
+      else setError(result.reason || (language === 'zh' ? '通话未达到请求的稳定时长，本次通话已结束且线路空闲。' : 'Call did not reach the requested stability duration; the exact call has ended and the line is idle.'))
     } catch (e) { setError(e.message) } finally { setRunning('') }
   }
   const entries = Object.entries(facts?.facts || {})
@@ -186,8 +187,8 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
   return <>
     <h2>{language === 'zh' ? '线路验证与排障' : 'Line verification & troubleshooting'}</h2>
     <p className="u-note">{language === 'zh'
-      ? '状态不是“已注册”的同义词。此页按同一 Engine 世代展示卡路由、隧道、IMS、动作门槛和媒体证据。所有按钮均为手动触发；不会自动拨号或发送短信。'
-      : 'Registered is not a health verdict. This view keeps card route, tunnel, IMS, action boundary, and media evidence on one Engine generation. Every action is manual; it never auto-dials or sends SMS.'}</p>
+      ? '状态不是“已注册”的同义词。卡路由、隧道、IMS、动作门槛和媒体证据保留各自的故障层级。所有按钮均为手动触发；不会自动拨号或发送短信。'
+      : 'Registered is not a health verdict. Card route, tunnel, IMS, action boundaries and media evidence retain their own fault layers. Every action is manual; it never auto-dials or sends SMS.'}</p>
     <div className="u-form-grid"><div><label>{language === 'zh' ? '线路' : 'Line'}</label><select value={selectedId} onChange={e => setSelectedId(e.target.value)}>{usable.map(item => <option key={item.id} value={item.id}>{item.name || item.msisdn || `Line ${item.id}`}</option>)}</select></div></div>
     <div className="u-action-grid" style={{ marginTop: 12 }}>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={() => loadFacts(false)}>{running === 'refresh' ? (language === 'zh' ? '读取中…' : 'Reading…') : (language === 'zh' ? '刷新事实快照' : 'Refresh facts')}</button>
@@ -198,10 +199,10 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       <button className="btn btn-ghost" disabled={!selectedId} onClick={openCalls}>{language === 'zh' ? '打开普通通话页' : 'Open regular Calls page'}</button>
     </div>
     <p className="u-hint">{language === 'zh'
-      ? '通话稳定测试由用户明确输入号码并确认后才开始；它复用正常浏览器 WSS 外呼，接通后按绝对时钟挂断，并以独立被动采样核验 Engine 零活动通道。健康轮询永不自动拨号。'
-      : 'The stability test starts only after you enter and confirm a target. It reuses normal browser WSS calling, hangs up on an absolute timer after answer, then verifies Engine idle through an independent passive sample. Health polling never dials.'}</p>
+      ? '通话稳定测试由用户明确输入号码并确认后才开始；它复用正常浏览器 VoWiFi 外呼，接通后定时挂断，并核对本次通话记录和线路空闲。健康轮询永不自动拨号。'
+      : 'The stability test starts only after you enter and confirm a target. It reuses normal browser VoWiFi calling, hangs up on a timer after answer, then verifies the exact call record and line idle. Health polling never dials.'}</p>
     <div className="u-form-grid"><div><label>{language === 'zh' ? '稳定测试号码（收费）' : 'Stability-test number (chargeable)'}</label><input value={stabilityTarget} onChange={e => setStabilityTarget(e.target.value)} placeholder={language === 'zh' ? '短号或 + 国家码号码' : 'Service code or + country number'} /></div><div><label>{language === 'zh' ? '接通后测试秒数（10–300）' : 'Seconds after answer (10–300)'}</label><input type="number" min="10" max="300" value={stabilitySeconds} onChange={e => setStabilitySeconds(e.target.value)} /></div></div>
-    <button className="btn btn-primary" disabled={!selectedId || !!running} onClick={testStability}>{running === 'stability' ? (language === 'zh' ? '通话稳定测试中…' : 'Running stability test…') : (language === 'zh' ? '开始人工通话稳定测试' : 'Start manual call stability test')}</button>
+    <button className="btn btn-primary" disabled={!selectedId || !!running || selected?.operations?.vowifi_call?.ready!==true} onClick={testStability}>{running === 'stability' ? (language === 'zh' ? '通话稳定测试中…' : 'Running stability test…') : (language === 'zh' ? '开始人工通话稳定测试' : 'Start manual call stability test')}</button>
     <p className="u-hint">{language === 'zh' ? '人工 IMS 重新注册会先由服务端核实当前线路没有活动通话；恢复记录身份不明、当前世代恢复中或有通话时会拒绝，不提供“清空 fence”按钮。' : 'Manual IMS re-registration first proves that the line has no active call. It is refused for an unknown/current recovery owner or a live call; there is intentionally no clear-fence button.'}</p>
     {error && <p className="u-error">{error}</p>}
     {facts && <>
