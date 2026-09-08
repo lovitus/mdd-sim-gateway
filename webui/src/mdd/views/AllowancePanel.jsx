@@ -9,7 +9,7 @@ const FIELDS = [
 ]
 const EMPTY = Object.fromEntries(FIELDS.map(([key]) => [key, '']))
 
-export default function AllowancePanel({ instanceId, mode = 'overview', transport = 'auto', showToast }) {
+export default function AllowancePanel({ instanceId, mode = 'overview', transport = 'auto', availableTransports = [], showToast }) {
   const { t, language } = useI18n()
   const [value, setValue] = useState({ ...EMPTY })
   const [draft, setDraft] = useState({ ...EMPTY })
@@ -18,6 +18,17 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
   const [editing, setEditing] = useState(false)
   const [editingRule, setEditingRule] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [loading,setLoading]=useState(false)
+  const [loadErrors,setLoadErrors]=useState([])
+  const [allowanceLoaded,setAllowanceLoaded]=useState(false)
+  const [ruleLoaded,setRuleLoaded]=useState(false)
+  const editingRef=useRef(false)
+  const editingRuleRef=useRef(false)
+  editingRef.current=editing;editingRuleRef.current=editingRule
+  const [chosenTransport,setChosenTransport]=useState('')
+  const sendTransport=mode==='overview'
+    ? (availableTransports.includes(chosenTransport) ? chosenTransport : availableTransports.length===1 ? availableTransports[0] : '')
+    : transport
   const pollRef = useRef(null)
   const operationBusy = useRef(false)
   const activeId = useRef(instanceId)
@@ -27,23 +38,35 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
   const load = useCallback(async () => {
     if (!instanceId) return
     const forId = String(instanceId)
+    setLoading(true)
     try {
-      const [snapshot, queryRule] = await Promise.all([
+      const results = await Promise.allSettled([
         api.allowance(forId), api.allowanceQueryRule(forId),
       ])
       if (String(activeId.current) !== forId) return
-      setValue(snapshot.allowance || { ...EMPTY })
-      setDraft({ ...EMPTY, ...(snapshot.allowance || {}) })
-      setRule(queryRule.rule)
-      const effective = queryRule.rule?.effective || {}
-      setRuleDraft({ recipient: effective.recipient || '', body: effective.body || '' })
-    } catch (error) { toast(`${t('Could not load allowance data')}: ${error.message}`) }
+      const [snapshot,queryRule]=results
+      setAllowanceLoaded(snapshot.status==='fulfilled');setRuleLoaded(queryRule.status==='fulfilled')
+      if(snapshot.status==='fulfilled') {
+        const next=snapshot.value.allowance || {...EMPTY}
+        setValue(next);setAllowanceLoaded(true)
+        if(!editingRef.current)setDraft({...EMPTY,...next})
+      }
+      if(queryRule.status==='fulfilled') {
+        setRule(queryRule.value.rule);setRuleLoaded(true)
+        const effective=queryRule.value.rule?.effective || {}
+        if(!editingRuleRef.current)setRuleDraft({recipient:effective.recipient || '',body:effective.body || ''})
+      }
+      setLoadErrors(results.filter(result=>result.status==='rejected').map(result=>result.reason?.message || t('Could not load allowance data')))
+    } catch (error) {if(String(activeId.current)===forId)setLoadErrors([error.message])}
+    finally {if(String(activeId.current)===forId)setLoading(false)}
   }, [instanceId, t])
 
   useEffect(() => {
     activeId.current = instanceId
     clearTimeout(pollRef.current)
     setEditing(false); setEditingRule(false); setRule(null); setValue({ ...EMPTY })
+    setAllowanceLoaded(false);setRuleLoaded(false);setLoadErrors([])
+    setChosenTransport('')
     load()
     return () => {activeId.current = null; clearTimeout(pollRef.current)}
   }, [load])
@@ -71,7 +94,7 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
         const result = await api.allowance(instanceId)
         if (String(activeId.current) !== forId) return
         const next = result.allowance || { ...EMPTY }
-        setValue(next); setDraft({ ...EMPTY, ...next })
+        setValue(next); if(!editingRef.current)setDraft({ ...EMPTY, ...next })
         if (next.source === 'sms' && Number(next.updated_ts || 0) > Number(previousTs || 0)) {
           toast(t('Allowance reply received and cached'))
           return
@@ -85,8 +108,8 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
 
   const query = async () => {
     if (operationBusy.current) return
-    if (!['cellular','vowifi'].includes(transport)) {
-      toast(t('Choose an explicit SMS transport in Messages before querying allowance.'))
+    if (!['cellular','vowifi'].includes(sendTransport)) {
+      toast(t('Choose an SMS transport before querying allowance.'))
       return
     }
     if (!rule?.effective?.recipient || !rule?.effective?.body) {
@@ -100,7 +123,7 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
     setBusy(true)
     const previousTs = value.updated_ts
     try {
-      const result = await api.queryAllowance(instanceId, transport)
+      const result = await api.queryAllowance(instanceId, sendTransport)
       if (String(activeId.current) !== String(instanceId)) return
       if (result.ok === false) {
         toast(t('The query SMS was submitted with an uncertain result. Check Messages before retrying.'))
@@ -146,10 +169,15 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
       <div style={{ flex: 1, minWidth: 180 }}><b>{t('Balance and allowance')}</b>
         <div style={{ color: 'var(--text-mute)', fontSize: 11 }}>{t('Updated')}: {updated}{value.source === 'sms' ? ` · ${t('Carrier SMS')}` : ''}</div></div>
-      {mode === 'overview' && <button className="btn btn-ghost" disabled={busy} onClick={() => { setDraft({ ...EMPTY, ...value }); setEditing(!editing) }}>{editing ? t('Cancel') : t('Edit')}</button>}
-      <button className="btn btn-primary" disabled={busy} onClick={query}>{busy ? t('Working…') : t('Query allowance')}</button>
-      {mode === 'messages' && <button className="btn btn-ghost" disabled={busy} onClick={() => setEditingRule(!editingRule)}>{t('Query settings')}</button>}
+      {mode === 'overview' && <button className="btn btn-ghost" disabled={busy || !allowanceLoaded} onClick={() => { setDraft({ ...EMPTY, ...value }); setEditing(!editing) }}>{editing ? t('Cancel') : t('Edit')}</button>}
+      {mode === 'overview' && <select aria-label={t('Allowance SMS transport')} value={sendTransport} disabled={busy || !availableTransports.length} onChange={event=>setChosenTransport(event.target.value)} style={{width:'auto'}}>
+        <option value="" disabled>{t('Send via')}</option>
+        {availableTransports.map(value=><option key={value} value={value}>{value==='vowifi'?'VoWiFi':t('Cellular SMS')}</option>)}
+      </select>}
+      <button className="btn btn-primary" disabled={busy || !ruleLoaded} onClick={query}>{busy ? t('Working…') : t('Query allowance')}</button>
+      {mode === 'messages' && <button className="btn btn-ghost" disabled={busy || !ruleLoaded} onClick={() => setEditingRule(!editingRule)}>{t('Query settings')}</button>}
     </div>
+    {!!loadErrors.length && <div role="alert" className="u-error">{loadErrors.join(' · ')}<button className="btn btn-ghost" disabled={busy || loading} onClick={load}>{t('Retry')}</button></div>}
     {!editing && <div className="u-details cols" style={compact ? {
       marginTop: 10, gridTemplateColumns: 'repeat(6, minmax(110px, 1fr))',
       gap: '0 14px', overflowX: 'auto',

@@ -37,6 +37,8 @@ const zh = {
   'Save call and VoWiFi settings': '保存通话与 VoWiFi 设置',
   'Configure this SIM first': '请先配置此 SIM',
   'Device not reported': '设备信息未上报',
+  'Allowance SMS transport': '余量查询短信通道',
+  'Choose an SMS transport before querying allowance.': '请先选择余量查询使用的短信通道。',
   'scheduled': '已调度',
   'retry_wait': '等待重试',
   'VoWiFi outgoing call timeout (seconds)': 'VoWiFi 呼出等待上限（秒）',

@@ -53,9 +53,14 @@ assert.equal(allowance.includes('setInterval'), false, 'allowance reply reads mu
 assert.ok(allowance.includes('setTimeout(observe,30000)'), 'first reply read must use the low-frequency timer')
 assert.ok(allowance.includes('Date.now() + 600000'), 'reply observation must be bounded')
 const allowanceQuery = allowance.slice(allowance.indexOf('const query = async'))
-assert.ok(allowanceQuery.indexOf("!['cellular','vowifi'].includes(transport)") < allowanceQuery.indexOf('window.confirm'),
+assert.ok(allowanceQuery.indexOf("!['cellular','vowifi'].includes(sendTransport)") < allowanceQuery.indexOf('window.confirm'),
   'reject missing transport before asking for a paid SMS confirmation')
 assert.ok(allowanceQuery.includes('if (operationBusy.current) return'))
+assert.ok(allowance.includes("aria-label={t('Allowance SMS transport')}"))
+assert.ok(allowance.includes('api.queryAllowance(instanceId, sendTransport)'))
+assert.ok(allowance.includes('Promise.allSettled'), 'query-rule failure must not hide existing manual allowance data')
+assert.ok(allowance.includes('if(!editingRef.current)setDraft'), 'reply refresh must preserve an in-progress manual edit')
+assert.ok(allowance.includes('disabled={busy || !ruleLoaded}'), 'unknown query rule cannot be submitted as an empty rule')
 assert.match(css, /\.u-project-meta \.u-version \{[^}]*min-width:0;[^}]*overflow-wrap:anywhere;/,
   'full release revisions must wrap without pushing sidebar controls onto the page')
 assert.match(css, /\.u-sidebar \{[^}]*visibility:hidden;/,
