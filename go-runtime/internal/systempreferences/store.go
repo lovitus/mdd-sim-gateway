@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
 	bolt "go.etcd.io/bbolt"
 )
@@ -36,11 +37,12 @@ var (
 )
 
 type Preferences struct {
-	Updates            *updatenetwork.Selection `json:"updates"`
-	AuditEnabled       *bool                    `json:"audit_enabled"`
-	TrustedProxies     []string                 `json:"trusted_proxies"`
-	CallAudioBufferMS  int                      `json:"call_audio_buffer_ms"`
-	RingTimeoutSeconds int                      `json:"ring_timeout_seconds"`
+	Retry              *recovery.ContinuousRetry `json:"retry"`
+	Updates            *updatenetwork.Selection  `json:"updates"`
+	AuditEnabled       *bool                     `json:"audit_enabled"`
+	TrustedProxies     []string                  `json:"trusted_proxies"`
+	CallAudioBufferMS  int                       `json:"call_audio_buffer_ms"`
+	RingTimeoutSeconds int                       `json:"ring_timeout_seconds"`
 }
 
 type Snapshot struct {
@@ -175,6 +177,13 @@ func (store *Store) PutExpected(input Preferences, expected uint64) (Snapshot, e
 }
 
 func normalizeAudit(value *Preferences) error {
+	if value.Retry == nil {
+		policy := recovery.DefaultContinuousRetry()
+		value.Retry = &policy
+	}
+	if _, err := value.Retry.Budget(); err != nil {
+		return err
+	}
 	if value.Updates == nil {
 		value.Updates = &updatenetwork.Selection{Mode: "direct"}
 	}

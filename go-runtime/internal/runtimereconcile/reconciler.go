@@ -18,6 +18,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/operations"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
@@ -78,30 +79,32 @@ type EventStore interface {
 }
 
 type Config struct {
-	ExitRecovery  *ExitRecoveryConfig
-	Context       context.Context
-	Catalog       Catalog
-	Agents        AgentFacts
-	Runtime       RuntimeControl
-	Store         EventStore
-	Replay        *events.Replay
-	Interval      time.Duration
-	ActionTimeout time.Duration
-	BaseBackoff   time.Duration
-	MaxBackoff    time.Duration
-	Now           func() time.Time
-	Logf          func(string, ...any)
-	Generation    string
+	ContinuousRetry func() (recovery.ContinuousRetry, error)
+	ExitRecovery    *ExitRecoveryConfig
+	Context         context.Context
+	Catalog         Catalog
+	Agents          AgentFacts
+	Runtime         RuntimeControl
+	Store           EventStore
+	Replay          *events.Replay
+	Interval        time.Duration
+	ActionTimeout   time.Duration
+	BaseBackoff     time.Duration
+	MaxBackoff      time.Duration
+	Now             func() time.Time
+	Logf            func(string, ...any)
+	Generation      string
 }
 
 type Reconciler struct {
-	selectionMu  sync.Mutex
-	exitRecovery *ExitRecoveryConfig
-	catalog      Catalog
-	agents       AgentFacts
-	runtime      RuntimeControl
-	store        EventStore
-	replay       *events.Replay
+	continuousRetry func() (recovery.ContinuousRetry, error)
+	selectionMu     sync.Mutex
+	exitRecovery    *ExitRecoveryConfig
+	catalog         Catalog
+	agents          AgentFacts
+	runtime         RuntimeControl
+	store           EventStore
+	replay          *events.Replay
 
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -125,22 +128,25 @@ type Reconciler struct {
 }
 
 type lineState struct {
-	action           string
-	actionKey        string
-	operationID      string
-	inFlight         bool
-	intentKnown      bool
-	intentFound      bool
-	intentValue      bool
-	intentEpoch      uint64
-	failures         uint32
-	next             time.Time
-	recovering       bool
-	recoveryFailures uint32
-	recoveryNext     time.Time
-	recoveryEpisode  uint64
-	healthySince     time.Time
-	healthyFence     mediaauth.ProviderFence
+	failureWindowStart time.Time
+	failureWindowFence mediaauth.ProviderFence
+	failureWindowEpoch uint64
+	action             string
+	actionKey          string
+	operationID        string
+	inFlight           bool
+	intentKnown        bool
+	intentFound        bool
+	intentValue        bool
+	intentEpoch        uint64
+	failures           uint32
+	next               time.Time
+	recovering         bool
+	recoveryFailures   uint32
+	recoveryNext       time.Time
+	recoveryEpisode    uint64
+	healthySince       time.Time
+	healthyFence       mediaauth.ProviderFence
 }
 
 type lineObservation struct {
@@ -240,8 +246,9 @@ func New(config Config) (*Reconciler, error) {
 	}
 	ctx, cancel := context.WithCancel(config.Context)
 	return &Reconciler{
-		exitRecovery: config.ExitRecovery,
-		catalog:      config.Catalog, agents: config.Agents, runtime: config.Runtime,
+		continuousRetry: config.ContinuousRetry,
+		exitRecovery:    config.ExitRecovery,
+		catalog:         config.Catalog, agents: config.Agents, runtime: config.Runtime,
 		store: config.Store, replay: config.Replay, ctx: ctx, cancel: cancel,
 		interval: config.Interval, actionTimeout: config.ActionTimeout,
 		baseBackoff: config.BaseBackoff, maxBackoff: config.MaxBackoff,
@@ -294,6 +301,7 @@ func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, 
 		}
 		return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "runtime_intent_persist_failed", Layer: "intent"}
 	}
+	reconciler.clearFailureWindow(lineID)
 	if enabled && lineEnabled {
 		if err := reconciler.resetExitPolicyForManualRetry(lineID, operationID); err != nil {
 			return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "exit_recovery_unresolved", Layer: "recovery"}
@@ -311,6 +319,7 @@ func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, 
 	for {
 		current, found, _, currentEpoch, intentErr := reconciler.readIntent(lineID)
 		if intentErr != nil {
+			reconciler.clearFailureWindow(lineID)
 			if errors.Is(intentErr, linecatalog.ErrNotFound) {
 				return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "intent"}
 			}
@@ -478,6 +487,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 
 		intent, found, _, intentEpoch, intentErr := reconciler.readIntent(line.ID)
 		if intentErr != nil {
+			reconciler.clearFailureWindow(line.ID)
 			reconciler.breakHealthyWindow(line.ID)
 			failures = append(failures, fmt.Errorf("line %s runtime intent: %w", line.ID, intentErr))
 			continue
@@ -597,8 +607,21 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		observation.cardMatches == 1 && observation.providerReady
 	targetPreparing := line.Enabled && observation.intentFound && observation.intentEnabled &&
 		observation.preparation != nil && observation.providerReady
+	if !targetRunning || (observation.status.Runtime.Condition == vowifiipc.RuntimeRunning &&
+		observation.status.Tunnel.Condition == vowifiipc.LayerReady && observation.status.Tunnel.Available &&
+		observation.status.IMS.Condition == vowifiipc.LayerReady && observation.status.IMS.Available) {
+		reconciler.clearFailureWindow(line.ID)
+	}
+	if observation.status.Runtime.Condition != vowifiipc.RuntimeFailed && observation.status.Tunnel.Condition != vowifiipc.LayerDegraded {
+		reconciler.clearFailureWindow(line.ID)
+	}
 	if targetRunning && (observation.status.Maintenance.Draining || reconciler.exitPolicyPaused(line, observation)) {
+		reconciler.clearFailureWindow(line.ID)
 		return
+	}
+	recoveryDue := true
+	if targetRunning && (observation.status.Runtime.Condition == vowifiipc.RuntimeFailed || observation.status.Tunnel.Condition == vowifiipc.LayerDegraded) {
+		recoveryDue = reconciler.continuousFailureDue(line, observation)
 	}
 	if !targetRunning || observation.status.Runtime.Condition != vowifiipc.RuntimeRunning ||
 		observation.status.Tunnel.Condition != vowifiipc.LayerReady || !observation.status.Tunnel.Available ||
@@ -617,7 +640,7 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		reconciler.clearRecovery(line.ID)
 		reconciler.reset(line.ID)
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeFailed:
-		if observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
+		if recoveryDue && observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
 			reconciler.beginRecovery(line, observation)
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
@@ -626,7 +649,7 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning &&
 		observation.status.Tunnel.Condition == vowifiipc.LayerDegraded:
-		if observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
+		if recoveryDue && observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
 			reconciler.beginRecovery(line, observation)
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning:

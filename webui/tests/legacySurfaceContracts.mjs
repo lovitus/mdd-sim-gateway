@@ -26,6 +26,12 @@ assert.ok(app.includes('deviceTab,setDeviceTab'), 'device subpage selection must
 assert.ok(unified.includes("setDeviceTab('hardware'); setView('devices')"))
 assert.ok(unified.includes("setDeviceTab('sim'); setView('devices')"))
 assert.ok(unified.includes("errorCode === 'imei_binding_required'"), 'Go top-level errors must retain the original corrective navigation')
+const networkPage=unified.slice(unified.indexOf('export function EgressPage('),unified.indexOf('export function NotificationsPage('))
+const notificationPage=unified.slice(unified.indexOf('export function NotificationsPage('),unified.indexOf('export function SystemPage('))
+for(const page of [networkPage,notificationPage]) {
+  assert.ok(page.includes('if (!s) return settingsError ?'), 'failed initial reads must not stay on Loading forever')
+  assert.ok(page.includes('onClick={retrySettings}'), 'original pages need an explicit retry without reloading the app')
+}
 for (const restored of ['LineVerificationPanel', 'function HardwarePanel(', 'RecycleBinPanel', 'export function SystemPage']) {
   assert.equal(unified.includes(restored), true, `${restored} must remain in the requested customized UI`)
 }

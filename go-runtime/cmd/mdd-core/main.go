@@ -44,6 +44,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linedeletion"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/notifications"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/scopedtoken"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systembackup"
@@ -662,6 +663,16 @@ func run(ctx context.Context, settings config) error {
 			DesiredPath: settings.ProviderApply.EgressDesiredPath, StatusPath: settings.ProviderApply.EgressStatusPath}
 	}
 	runtimeReconciler, err := runtimereconcile.New(runtimereconcile.Config{
+		ContinuousRetry: func() (recovery.ContinuousRetry, error) {
+			snapshot, err := preferenceStore.Snapshot()
+			if err != nil {
+				return recovery.ContinuousRetry{}, err
+			}
+			if snapshot.Preferences.Retry == nil {
+				return recovery.DefaultContinuousRetry(), nil
+			}
+			return *snapshot.Preferences.Retry, nil
+		},
 		ExitRecovery: exitRecovery,
 		Context:      ctx, Catalog: catalog, Agents: agents, Runtime: control,
 		Store: store, Replay: replay, Logf: log.Printf,

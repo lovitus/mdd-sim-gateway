@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
 	"io"
 	"net/http"
@@ -59,15 +60,16 @@ func (handler *Handler) patch(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	var patch struct {
-		Updates            *updatenetwork.Selection `json:"updates"`
-		AuditEnabled       *bool                    `json:"audit_enabled"`
-		TrustedProxies     *[]string                `json:"trusted_proxies"`
-		CallAudioBufferMS  *int                     `json:"call_audio_buffer_ms"`
-		RingTimeoutSeconds *int                     `json:"ring_timeout_seconds"`
+		Retry              *recovery.ContinuousRetry `json:"retry"`
+		Updates            *updatenetwork.Selection  `json:"updates"`
+		AuditEnabled       *bool                     `json:"audit_enabled"`
+		TrustedProxies     *[]string                 `json:"trusted_proxies"`
+		CallAudioBufferMS  *int                      `json:"call_audio_buffer_ms"`
+		RingTimeoutSeconds *int                      `json:"ring_timeout_seconds"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&patch) != nil || decoder.Decode(&struct{}{}) != io.EOF || (patch.CallAudioBufferMS == nil && patch.RingTimeoutSeconds == nil && patch.AuditEnabled == nil && patch.TrustedProxies == nil && patch.Updates == nil) {
+	if decoder.Decode(&patch) != nil || decoder.Decode(&struct{}{}) != io.EOF || (patch.CallAudioBufferMS == nil && patch.RingTimeoutSeconds == nil && patch.AuditEnabled == nil && patch.TrustedProxies == nil && patch.Updates == nil && patch.Retry == nil) {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_system_preferences"})
 		return
 	}
@@ -81,6 +83,9 @@ func (handler *Handler) patch(response http.ResponseWriter, request *http.Reques
 	}
 	if patch.AuditEnabled != nil {
 		current.Preferences.AuditEnabled = patch.AuditEnabled
+	}
+	if patch.Retry != nil {
+		current.Preferences.Retry = patch.Retry
 	}
 	if patch.Updates != nil {
 		current.Preferences.Updates = patch.Updates

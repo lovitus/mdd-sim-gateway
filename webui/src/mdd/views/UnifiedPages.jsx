@@ -1122,10 +1122,15 @@ export function EgressPage({ showToast }) {
   const [remoteModems, setRemoteModems] = useState([])
   const [liveError, setLiveError] = useState('')
   const [simError, setSimError] = useState('')
+  const [settingsError, setSettingsError] = useState('')
+  const retrySettings = () => {
+    setSettingsError('')
+    api.networkSettings().then(setS).catch(error => setSettingsError(error.message))
+  }
   useEffect(() => {
     let stopped = false, timer, step = 0
     const deadline = Date.now() + 600000
-    api.networkSettings().then(value => {if (!stopped) setS(value)}).catch(error => {if (!stopped) showToast(error.message)})
+    api.networkSettings().then(value => {if (!stopped) setS(value)}).catch(error => {if (!stopped) setSettingsError(error.message)})
     api.cellularSims().then(result => {if (!stopped) setRemoteModems(result.sims || [])}).catch(error => {if (!stopped) setSimError(error.message)})
     const observe = async () => {
       try {const value = await api.egressStatus(); if (!stopped) {setLive(value);setLiveError('')}}
@@ -1142,7 +1147,7 @@ export function EgressPage({ showToast }) {
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [profileDraft])
-  if (!s) return <p>{t('Loading')}…</p>
+  if (!s) return settingsError ? <div role="alert" className="u-error">{settingsError}<button className="btn btn-ghost" onClick={retrySettings}>{t('Retry')}</button></div> : <p>{t('Loading')}…</p>
   const proxy = s.proxy || { profiles: {}, exits: {} }
   const patch = p => setS(x => ({ ...x, proxy: { ...x.proxy, ...p } }))
   const profiles = proxy.profiles || {}
@@ -1321,6 +1326,11 @@ export function NotificationsPage({ showToast }) {
   const { t } = useI18n(); const [s, setS] = useState(null); const [tab, setTab] = useState('channels'); const [deliveries, setDeliveries] = useState({ pending: [], history: [] })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [settingsError, setSettingsError] = useState('')
+  const retrySettings = () => {
+    setSettingsError('')
+    api.notificationSettings().then(setS).catch(failure => setSettingsError(failure.message))
+  }
   const gate = useRef(false)
   const guard = async action => {
     if (gate.current) return
@@ -1329,9 +1339,9 @@ export function NotificationsPage({ showToast }) {
     finally { gate.current = false; setBusy(false) }
   }
   const loadDeliveries = () => api.notificationDeliveries().then(value => {setDeliveries(value);setError('')}).catch(failure => setError(failure.message))
-  useEffect(() => { api.notificationSettings().then(setS).catch(error => showToast(error.message)); loadDeliveries() }, [])
+  useEffect(() => { api.notificationSettings().then(setS).catch(failure => setSettingsError(failure.message)); loadDeliveries() }, [])
   useEffect(() => { if (tab === 'delivery') loadDeliveries() }, [tab])
-  if (!s) return <p>{t('Loading')}…</p>
+  if (!s) return settingsError ? <div role="alert" className="u-error">{settingsError}<button className="btn btn-ghost" onClick={retrySettings}>{t('Retry')}</button></div> : <p>{t('Loading')}…</p>
   const wh = s.webhook || {}, tg = s.telegram || {}, pp = s.pushplus || {}
   const setChannel = (key, patch) => setS(x => ({ ...x, [key]: { ...(x[key] || {}), ...patch } }))
   const secretInput = (key, cfg, field, password = false, rows = 0) => {

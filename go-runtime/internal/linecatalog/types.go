@@ -5,6 +5,7 @@ package linecatalog
 
 import (
 	"errors"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 	"sort"
 	"strings"
 )
@@ -61,16 +62,17 @@ type IMSConfig struct {
 }
 
 type Line struct {
-	SchemaVersion          int           `json:"schema_version"`
-	ID                     string        `json:"id"`
-	Name                   string        `json:"name,omitempty"`
-	Enabled                bool          `json:"enabled"`
-	CardID                 string        `json:"card_id"`
-	SIM                    SIMConfig     `json:"sim"`
-	Network                NetworkConfig `json:"network"`
-	IMS                    IMSConfig     `json:"ims"`
-	Deleted                bool          `json:"deleted,omitempty"`
-	HardwareProvisionState string        `json:"hardware_provision_state,omitempty"`
+	Retry                  *recovery.ContinuousRetry `json:"retry,omitempty"`
+	SchemaVersion          int                       `json:"schema_version"`
+	ID                     string                    `json:"id"`
+	Name                   string                    `json:"name,omitempty"`
+	Enabled                bool                      `json:"enabled"`
+	CardID                 string                    `json:"card_id"`
+	SIM                    SIMConfig                 `json:"sim"`
+	Network                NetworkConfig             `json:"network"`
+	IMS                    IMSConfig                 `json:"ims"`
+	Deleted                bool                      `json:"deleted,omitempty"`
+	HardwareProvisionState string                    `json:"hardware_provision_state,omitempty"`
 }
 
 type Snapshot struct {
@@ -83,6 +85,11 @@ type Snapshot struct {
 func (line *Line) normalizeAndValidate() error {
 	if line == nil {
 		return errors.New("line is nil")
+	}
+	if line.Retry != nil {
+		if _, err := line.Retry.Budget(); err != nil {
+			return err
+		}
 	}
 	if line.Network.RekeyMinutes != nil && (*line.Network.RekeyMinutes < 0 || *line.Network.RekeyMinutes > 1440) {
 		return errors.New("line rekey period must be 0 or 1..1440 minutes")
@@ -221,6 +228,10 @@ func normalizeCountry(value string) (string, bool) {
 }
 
 func cloneLine(line Line) Line {
+	if line.Retry != nil {
+		value := *line.Retry
+		line.Retry = &value
+	}
 	line.Network.PCSCF = append([]string(nil), line.Network.PCSCF...)
 	line.Network.APNProfiles = append([]APNProfile(nil), line.Network.APNProfiles...)
 	return line

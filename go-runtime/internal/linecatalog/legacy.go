@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 	"io"
 	"os"
 	"path/filepath"
@@ -79,6 +80,10 @@ type legacySIP struct {
 }
 
 type legacyLine struct {
+	Retry *struct {
+		Max      *int `yaml:"max"`
+		Interval *int `yaml:"interval"`
+	} `yaml:"retry"`
 	ID           legacyString     `yaml:"id"`
 	Name         legacyString     `yaml:"name"`
 	Enabled      *bool            `yaml:"enabled"`
@@ -196,6 +201,16 @@ func parseLegacy(payload []byte) ([]Line, error) {
 				Server:            first(string(legacy.IMS.Server), string(legacy.IMSServer)),
 				Expires:           firstInt(legacy.IMS.Expires, legacy.IMSExpires),
 			},
+		}
+		if legacy.Retry != nil && (legacy.Retry.Max != nil || legacy.Retry.Interval != nil) {
+			policy := recovery.DefaultContinuousRetry()
+			if legacy.Retry.Max != nil {
+				policy.Max = max(1, *legacy.Retry.Max)
+			}
+			if legacy.Retry.Interval != nil {
+				policy.Interval = max(5, *legacy.Retry.Interval)
+			}
+			line.Retry = &policy
 		}
 		if err := line.normalizeAndValidate(); err != nil {
 			return nil, fmt.Errorf("legacy instance %s: %w", strconv.Quote(key), err)
