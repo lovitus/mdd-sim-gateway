@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressexec"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprobe"
@@ -124,9 +125,16 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		if profile.Type == "cellular_sim" {
 			code = "cellular_data_probe_failed"
 		}
-		writeJSON(response, http.StatusBadGateway, map[string]string{
+		failure := map[string]string{
 			"code": code, "detail": bounded(err.Error()),
-		})
+		}
+		var remote *agentlink.RemoteError
+		if errors.As(err, &remote) && remote != nil {
+			failure["cause_code"] = remote.Code
+			failure["cause_kind"] = remote.Kind
+			failure["layer"] = "agent"
+		}
+		writeJSON(response, http.StatusBadGateway, failure)
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{"profile_id": profileID, "config_revision": snapshot.Revision, "result": result})

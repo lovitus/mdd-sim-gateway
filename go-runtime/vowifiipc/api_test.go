@@ -38,6 +38,32 @@ func newFakeBackend() *fakeBackend {
 	}}
 }
 
+func TestSnapshotFailureIdentityIsOptionalAndFailedOnly(t *testing.T) {
+	snapshot := newFakeBackend().snapshot
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Runtime.FailureID = strings.Repeat("a", 64)
+	if snapshot.Validate() == nil {
+		t.Fatal("stopped runtime carried a failure identity")
+	}
+	snapshot.Runtime.Condition = RuntimeFailed
+	snapshot.Runtime.Code = "ims_register_failed"
+	snapshot.Tunnel = LayerStatus{Condition: LayerUnknown, Code: "runtime_start_failed"}
+	snapshot.IMS = LayerStatus{Condition: LayerBlocked, Code: "ims_register_failed"}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Runtime.FailureID = "not-a-digest"
+	if snapshot.Validate() == nil {
+		t.Fatal("invalid failure identity accepted")
+	}
+	snapshot.Runtime.FailureID = ""
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal("old Provider compatibility lost", err)
+	}
+}
+
 func TestSnapshotValidatesEffectiveNetworkSelection(t *testing.T) {
 	snapshot := newFakeBackend().snapshot
 	snapshot.Runtime = RuntimeStatus{Condition: RuntimeRunning, PDNFamily: "dual",

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
 globalThis.window={location:{pathname:'/'}}
-const {networkProfileView,networkProfileWire,networkAPI}=await import('../src/mdd/networkAdapter.js')
+const {networkProfileView,networkProfileWire,networkAPI,networkProbeError}=await import('../src/mdd/networkAdapter.js')
+const disabledFailure={message:'Agent operation failed (not_ready/cellular_data_disabled)',data:{cause_code:'cellular_data_disabled'}}
+assert.equal(networkProbeError(disabledFailure,s=>s),'Data borrowing is disabled by the device policy. · Agent operation failed (not_ready/cellular_data_disabled)')
+assert.equal(networkProbeError({message:'original transport failure',data:{cause_code:'unknown'}},s=>s),'original transport failure')
 const {api:go}=await import('../src/api.js')
 const readEgressConfig=go.egressConfig
 const originalFetch=globalThis.fetch

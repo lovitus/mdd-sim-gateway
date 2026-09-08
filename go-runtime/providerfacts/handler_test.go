@@ -18,6 +18,27 @@ import (
 
 const testToken = "0123456789abcdef0123456789abcdef"
 
+func TestIMSStartFailureKeepsItsLayerThroughProjection(t *testing.T) {
+	snapshot := readySnapshot("generation-1", 1, time.Now().UTC())
+	snapshot.Runtime = vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeFailed, Code: "ims_register_failed"}
+	snapshot.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerUnknown, Code: "runtime_start_failed"}
+	snapshot.IMS = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "ims_register_failed"}
+	snapshot.Voice = vowifiipc.LayerStatus{Condition: vowifiipc.LayerStopped, Code: "stopped"}
+	snapshot.Messaging = snapshot.Voice
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	facts := snapshotFacts(snapshot)
+	for _, fact := range facts {
+		if fact.layer == state.LayerIMS && (fact.code != "ims_register_failed" || fact.condition != state.ConditionBlocked) {
+			t.Fatal(fact)
+		}
+		if fact.layer == state.LayerTunnel && (fact.condition != state.ConditionUnknown || fact.available || fact.code == "ims_register_failed") {
+			t.Fatal(fact)
+		}
+	}
+}
+
 func TestSnapshotFactsAreDurableAndAppendOnlyOnChange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "facts.db")
 	store, err := events.OpenBoltStore(path, time.Second)

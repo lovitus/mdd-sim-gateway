@@ -128,4 +128,13 @@ assert.equal(unavailableEUICC.available, false)
 assert.equal(unavailableEUICC.count, null)
 assert.deepEqual(unavailableEUICC.profiles, [])
 
+const failedIMS=mapGoSnapshot({catalog:mapped.go.catalog,lines:[{line_id:'line-a',facts:[
+  {layer:'vowifi_runtime',condition:'failed',available:false,code:'ims_register_failed'},
+  {layer:'tunnel',condition:'unknown',available:false,code:'runtime_start_failed'},
+  {layer:'ims',condition:'blocked',available:false,code:'ims_register_failed'},
+],operations:{vowifi_call:{ready:false},vowifi_sms:{ready:false}}}]})
+assert.equal(failedIMS.instances[0].status.label,'ims_register_failed')
+assert.equal(failedIMS.instances[0].facts.facts.ims.state,'blocked')
+assert.equal(failedIMS.instances[0].facts.facts.tunnel.state,'unknown')
+assert.equal(failedIMS.instances[0].facts.summary.blockers.includes('tunnel'),false)
 console.log('Go v1 React adapter tests passed')

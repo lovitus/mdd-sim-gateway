@@ -6,6 +6,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"sync"
@@ -50,6 +52,8 @@ type Backend struct {
 	factory                        Factory
 	condition                      vowifiipc.RuntimeCondition
 	code                           string
+	failedLayer                    string
+	failureID                      string
 	sequence                       uint64
 	runtime                        Runtime
 	operations                     OperationStore
@@ -156,6 +160,9 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 				failure = publicFailure(&StageError{Layer: "runtime", Code: "close_failed", Err: err})
 			}
 		}
+		backend.failedLayer = failure.Layer
+		digest := sha256.Sum256([]byte(backend.lineID + "\x00" + backend.providerID + "\x00" + backend.generation + "\x00" + request.OperationID))
+		backend.failureID = hex.EncodeToString(digest[:])
 		backend.transitionLocked(vowifiipc.RuntimeFailed, failure.Code)
 		if storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure); storeErr != nil {
 			return vowifiipc.OperationResult{}, errors.Join(failure, storeErr)
@@ -463,6 +470,10 @@ func (backend *Backend) replayLocked(operationID, kind string) (vowifiipc.Operat
 }
 
 func (backend *Backend) transitionLocked(condition vowifiipc.RuntimeCondition, code string) {
+	if condition != vowifiipc.RuntimeFailed {
+		backend.failedLayer = ""
+		backend.failureID = ""
+	}
 	backend.condition = condition
 	backend.code = code
 	backend.sequence++
@@ -476,9 +487,14 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 	} else if backend.condition == vowifiipc.RuntimeStarting {
 		layers.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerConnecting, Code: "opening_swu"}
 	} else if backend.condition == vowifiipc.RuntimeFailed {
-		layers.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: backend.code}
+		if backend.failedLayer == "ims" {
+			layers.IMS = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: backend.code}
+			layers.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerUnknown, Code: "runtime_start_failed"}
+		} else {
+			layers.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: backend.code}
+		}
 	}
-	runtimeStatus := vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code}
+	runtimeStatus := vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code, FailureID: backend.failureID}
 	if backend.runtime != nil && backend.condition == vowifiipc.RuntimeRunning {
 		_, runtimeStatus.RegisterSupported = backend.runtime.(registrationRuntime)
 		if rekey, ok := backend.runtime.(interface {

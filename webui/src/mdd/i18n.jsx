@@ -3,6 +3,8 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'Data borrowing is disabled by the device policy.': '该设备的流量借用开关已关闭。',
+  'The 4G data connection switch is disabled.': '该设备的 4G 数据连接开关已关闭。',
   'An earlier download is still tracked; check its result before starting another.': '仍有较早的下载待核对，请先检查其结果再发起新的下载。',
   'Download result unknown': '下载结果未知',
   'Download result unknown; only the original operation will be queried.': '下载结果未知；只会查询原操作，不会重发。',

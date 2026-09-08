@@ -674,10 +674,32 @@ func TestBackendFailedStartIsRetryableByNewOperation(t *testing.T) {
 	if err != nil || status.Runtime.Condition != vowifiipc.RuntimeFailed || status.Runtime.Code != "ims_register_failed" {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
+	if status.IMS.Code != "ims_register_failed" || status.IMS.Condition != vowifiipc.LayerBlocked ||
+		status.Tunnel.Condition != vowifiipc.LayerUnknown || status.Tunnel.Available {
+		t.Fatalf("IMS failure was misattributed to a known tunnel failure: %+v", status)
+	}
+	firstFailure := status.Runtime.FailureID
+	if len(firstFailure) != 64 {
+		t.Fatal("failure identity missing")
+	}
+	repeated, _ := backend.Status(context.Background())
+	if repeated.Sequence == status.Sequence || repeated.Runtime.FailureID != firstFailure {
+		t.Fatal("reading status changed failure identity")
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-failure-2"}); err == nil {
+		t.Fatal("second failure unexpectedly succeeded")
+	}
+	next, _ := backend.Status(context.Background())
+	if next.Runtime.FailureID == firstFailure {
+		t.Fatal("different failed operations share identity")
+	}
 	factory.err = nil
 	factory.run = &fakeRuntime{}
 	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-2"}); err != nil {
 		t.Fatalf("retry start: %v", err)
+	}
+	if backend.failedLayer != "" || backend.failureID != "" {
+		t.Fatal("successful restart retained an old failure layer")
 	}
 }
 

@@ -8,6 +8,7 @@ import AllowancePanel from './AllowancePanel.jsx'
 import AgentCredentials from './AgentCredentials.jsx'
 import Maintenance from './Maintenance.jsx'
 import { saveReaderIMEI } from '../hardwareAdapter.js'
+import { networkProbeError } from '../networkAdapter.js'
 import { compactReaderName, lineCallReadinessStatus } from '../linePresentation.js'
 import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel } from '../agentHealthPresentation.js'
 
@@ -1147,7 +1148,7 @@ export function EgressPage({ showToast }) {
       showToast(t(profiles[id].type === 'cellular_sim' ? 'Borrowed data UDP test passed ({latency} ms via {target})' : 'Node UDP test passed ({latency} ms via {target})', {
         latency: result.latency_ms, target: result.target || '—' }))
     } catch (error) {
-      const translated = t(error.message)
+      const translated = networkProbeError(error,t)
       const safeProbeDetail = /^(UDP probes (failed|timed out):|UDP test failed:|SOCKS5 proxy returned an invalid UDP response|UDP DNS response did not match)/.test(error.message)
       const message = profiles[id].type === 'cellular_sim' || translated !== error.message || safeProbeDetail
         ? translated

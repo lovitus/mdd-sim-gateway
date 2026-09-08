@@ -107,3 +107,16 @@ Short-screen download dialogs scroll internally and remain cancellable.
 
 These source contracts still require batch CI and actual non-destructive field
 readback. No profile installation or deletion is implied by the implementation.
+
+## Recovery diagnostics and persistence boundary
+
+Known IMS start failures retain the IMS layer; an unconfirmed tunnel state is
+not relabeled as a confirmed tunnel failure. A failed start exposes an opaque,
+stable failure identity independent of snapshot-read sequence numbers.
+
+The ported exit policy has a once-per-failure entry point. Its ledger is stored
+with optimistic revision checks in the existing events database metadata, not
+the desired-state catalog or another database. Duplicate writes do not advance
+the revision, and permanent event-line purge removes and fences this state.
+This is the persistence/diagnostic foundation, not completed automatic failover:
+the live recovery controller and safe node-selection integration remain open.

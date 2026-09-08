@@ -43,6 +43,7 @@ const (
 )
 
 type RuntimeStatus struct {
+	FailureID         string              `json:"failure_id,omitempty"`
 	Rekey             *ChildSARekeyStatus `json:"rekey,omitempty"`
 	Condition         RuntimeCondition    `json:"condition"`
 	Code              string              `json:"code,omitempty"`
@@ -303,6 +304,9 @@ func (snapshot Snapshot) Validate() error {
 	}
 	if !validRuntimeCondition(snapshot.Runtime.Condition) || !validCode(snapshot.Runtime.Code) {
 		return errors.New("snapshot runtime status is invalid")
+	}
+	if id := snapshot.Runtime.FailureID; id != "" && (snapshot.Runtime.Condition != RuntimeFailed || len(id) != 64 || strings.TrimLeft(id, "0123456789abcdef") != "") {
+		return errors.New("snapshot failure identity is invalid")
 	}
 	if rekey := snapshot.Runtime.Rekey; rekey != nil {
 		if snapshot.Runtime.Condition != RuntimeRunning || rekey.PeriodMinutes < 0 || rekey.PeriodMinutes > 1440 || rekey.Enabled != (rekey.PeriodMinutes > 0) ||

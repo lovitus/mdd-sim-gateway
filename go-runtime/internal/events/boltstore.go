@@ -328,6 +328,9 @@ func (purger *LinePurger) PurgeLine(lineID string) error {
 		if err := tx.Bucket(bucketAvailability).Delete([]byte(lineID)); err != nil {
 			return err
 		}
+		if err := tx.Bucket(bucketMetadata).Delete(exitRecoveryKey(lineID)); err != nil {
+			return err
+		}
 		records, ids := tx.Bucket(bucketRecords), tx.Bucket(bucketEventIDs)
 		var recordKeys, eventIDs [][]byte
 		if err := records.ForEach(func(key, value []byte) error {

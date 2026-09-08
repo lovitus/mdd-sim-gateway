@@ -2,6 +2,13 @@ import { api as go } from '../api.js'
 
 let saved = null
 
+export function networkProbeError(error, translate) {
+  const code=error?.data?.cause_code
+  const label={cellular_data_disabled:'Data borrowing is disabled by the device policy.',cellular_connection_disabled:'The 4G data connection switch is disabled.'}[code]
+  if(label)return `${translate(label)} · ${error.message || code}`
+  return translate(error.message)
+}
+
 export function networkProfileView(profile) {
   return {...profile}
 }
