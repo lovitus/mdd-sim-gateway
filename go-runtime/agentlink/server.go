@@ -54,6 +54,7 @@ var (
 )
 
 type Server struct {
+	maintenance          map[string]string
 	deviceDefaultsSource func() (*DeviceDefaults, error)
 	tokens               TokenResolver
 	mu                   sync.RWMutex
@@ -1440,15 +1441,22 @@ func (server *Server) ExecuteRawUSB(ctx context.Context, agentID, processGenerat
 func (server *Server) roundTrip(ctx context.Context, connection *serverConnection, message envelope) (envelope, error) {
 	requestID := fmt.Sprintf("req-%d", server.nextID.Add(1))
 	reply := make(chan envelope, 1)
+	server.mu.RLock()
+	if server.maintenance[connection.hello.AgentID] != "" {
+		server.mu.RUnlock()
+		return envelope{}, ErrAgentMaintenance
+	}
 	connection.mu.Lock()
 	select {
 	case <-connection.closed:
 		connection.mu.Unlock()
+		server.mu.RUnlock()
 		return envelope{}, ErrAgentOffline
 	default:
 	}
 	connection.pending[requestID] = reply
 	connection.mu.Unlock()
+	server.mu.RUnlock()
 	defer connection.deletePending(requestID)
 	message.RequestID = requestID
 	connection.writeMu.Lock()

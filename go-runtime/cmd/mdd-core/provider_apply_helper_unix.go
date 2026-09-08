@@ -42,6 +42,7 @@ type providerApplyService struct {
 	gid            int
 	desiredUID     int
 	applying       atomic.Bool
+	hostSwitching  atomic.Bool
 	egressApplying atomic.Bool
 }
 
@@ -100,6 +101,7 @@ func runProviderApplyHelper(arguments []string) error {
 		return err
 	}
 	mux.Handle(provideradmin.WebPath, webHandler)
+	mux.Handle(provideradmin.HostModemPath, provideradmin.HostModemHandler(service))
 	handlerWithAuth, err := provideradmin.Authenticate(mux, settings.Local.Token)
 	if err != nil {
 		return err

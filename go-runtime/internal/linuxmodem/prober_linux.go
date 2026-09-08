@@ -29,6 +29,7 @@ import (
 )
 
 type Prober struct {
+	serialOnly    bool
 	homePLMN      map[string]homePLMNObservation
 	mu            sync.Mutex
 	manager       modemManager
@@ -424,7 +425,7 @@ func (prober *Prober) fact(ctx context.Context, current *ownedDevice, at agentat
 		return fact, errors.New(detail)
 	}
 	fact.Capabilities = agentmodem.Capabilities{
-		CellularData: prober.guard != nil, SMSReceive: at.SMS, SMSSend: at.SMS,
+		CellularData: prober.guard != nil && !prober.serialOnly, SMSReceive: at.SMS, SMSSend: at.SMS,
 	}
 	if prober.guard != nil {
 		if err := prober.guard.VerifyProtected(ctx, current.usb.PhysicalID, current.snapshot.NetPorts); err != nil {

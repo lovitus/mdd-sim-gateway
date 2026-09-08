@@ -64,6 +64,7 @@ type Server struct {
 	systemStatus       http.Handler
 	preferences        http.Handler
 	webSettings        http.Handler
+	hostModemSettings  http.Handler
 	devicePresentation *DevicePresentation
 	deviceProjectionMu sync.Mutex
 	simPIN             http.Handler
@@ -329,6 +330,10 @@ func WithWebSettings(handler http.Handler) Option {
 	return func(server *Server) { server.webSettings = handler }
 }
 
+func WithHostModemSettings(handler http.Handler) Option {
+	return func(server *Server) { server.hostModemSettings = handler }
+}
+
 func WithDevicePresentation(store *DevicePresentation) Option {
 	return func(server *Server) { server.devicePresentation = store }
 }
@@ -504,6 +509,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.webSettings != nil {
 		server.mux.Handle("GET /v1/system/web", server.protect(server.webSettings))
 		server.mux.Handle("PUT /v1/system/web", server.protect(server.webSettings))
+	}
+	if server.hostModemSettings != nil {
+		server.mux.Handle("GET /v1/system/host-modem", server.protect(server.hostModemSettings))
+		server.mux.Handle("PUT /v1/system/host-modem", server.protect(server.hostModemSettings))
 	}
 	if server.notifications != nil {
 		server.mux.Handle("GET /v1/system/alerts", server.protect(server.notifications))

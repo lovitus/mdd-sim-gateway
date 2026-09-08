@@ -31,30 +31,37 @@ type Worker interface {
 }
 
 type Snapshot struct {
-	State      State     `json:"state"`
-	Generation uint64    `json:"generation"`
-	ChangedAt  time.Time `json:"changed_at"`
-	Code       string    `json:"code,omitempty"`
-	Detail     string    `json:"detail,omitempty"`
+	RuntimeConfig *RuntimeConfig `json:"runtime_config,omitempty"`
+	State         State          `json:"state"`
+	Generation    uint64         `json:"generation"`
+	ChangedAt     time.Time      `json:"changed_at"`
+	Code          string         `json:"code,omitempty"`
+	Detail        string         `json:"detail,omitempty"`
 }
 
 type Controller struct {
-	mu       sync.Mutex
-	worker   Worker
-	now      func() time.Time
-	snapshot Snapshot
-	cancel   context.CancelFunc
-	done     chan struct{}
+	runtimeConfig *RuntimeConfig
+	mu            sync.Mutex
+	worker        Worker
+	now           func() time.Time
+	snapshot      Snapshot
+	cancel        context.CancelFunc
+	done          chan struct{}
 }
 
-func New(worker Worker, now func() time.Time) (*Controller, error) {
+func New(worker Worker, now func() time.Time, runtimeConfig ...RuntimeConfig) (*Controller, error) {
 	if worker == nil {
 		return nil, errors.New("agent worker is required")
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &Controller{worker: worker, now: now, snapshot: Snapshot{
+	var identity *RuntimeConfig
+	if len(runtimeConfig) > 0 {
+		copy := runtimeConfig[0]
+		identity = &copy
+	}
+	return &Controller{worker: worker, runtimeConfig: identity, now: now, snapshot: Snapshot{
 		State: StateStopped, ChangedAt: now().UTC(),
 	}}, nil
 }
@@ -62,7 +69,12 @@ func New(worker Worker, now func() time.Time) (*Controller, error) {
 func (controller *Controller) Status() Snapshot {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
-	return controller.snapshot
+	snapshot := controller.snapshot
+	if controller.runtimeConfig != nil {
+		copy := *controller.runtimeConfig
+		snapshot.RuntimeConfig = &copy
+	}
+	return snapshot
 }
 
 func (controller *Controller) Start(ctx context.Context) (Snapshot, error) {

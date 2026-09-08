@@ -111,6 +111,16 @@ cursor. Do not generate paid traffic or manufacture failures to fill evidence ga
 
 ## Remaining Original UI Gaps
 
+The serial-only batch directly adapts `ec620942`'s profiled USB/AT discovery and
+host ModemManager switching. It reuses the existing AT owner, persistent Linux
+guard, helper transport, atomic config writer, Provider maintenance and systemd
+executor. The General hardware control now has a save-and-switch path with exact
+host/Core binding, retained user switches, loaded-config readback and rollback.
+This is not a general remote-Agent switch. A validation Agent cannot be adopted
+through a conventional config filename. The batch requires full CI and an owned
+production host for real switching acceptance; the browser compatibility check
+against the current production API does not prove a hardware mode transition.
+
 The current new-device-defaults batch connects the original General controls to
 CAS preferences, imports the original device defaults without overwriting Go
 choices, and uses the existing Agent policy, draft, preparation, provision and

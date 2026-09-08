@@ -70,7 +70,8 @@ const (
 )
 
 type config struct {
-	Public struct {
+	HostModem *provideradmin.HostModemBinding `json:"host_modem,omitempty"`
+	Public    struct {
 		Listen  string `json:"listen"`
 		TLSCert string `json:"tls_cert"`
 		TLSKey  string `json:"tls_key"`
@@ -793,6 +794,7 @@ func run(ctx context.Context, settings config) error {
 	var providerApplyAPI http.Handler
 	var defaultApplyClient *provideradmin.Client
 	var webSettingsAPI http.Handler
+	var hostModemAPI http.Handler
 	var egressProbeAPI http.Handler
 	var egressApplyAPI http.Handler
 	var systemMaintenanceAPI http.Handler
@@ -803,6 +805,7 @@ func run(ctx context.Context, settings config) error {
 		}
 		providerApplyAPI, err = provideradmin.NewHandler(client)
 		defaultApplyClient = client
+		hostModemAPI = provideradmin.HostModemHandler(client)
 		if err != nil {
 			return err
 		}
@@ -984,11 +987,25 @@ func run(ctx context.Context, settings config) error {
 		core.WithLineBootstrap(lineBootstrapAPI),
 		core.WithProviderApply(providerApplyAPI),
 		core.WithWebSettings(webSettingsAPI),
+		core.WithHostModemSettings(hostModemAPI),
 		core.WithEgressProbe(egressProbeAPI),
 		core.WithEgressProfileTest(egressProfileTestAPI),
 		core.WithEgressConfig(egressConfigAPI, egressApplyAPI),
 	)
 	localMux := http.NewServeMux()
+	if settings.HostModem != nil {
+		hostIdle, err := provideradmin.Authenticate(core.HostModemIdleHandler(settings.HostModem.AgentID, catalog, agents.Statuses,
+			calls.ActiveLine, router.ActiveLine, cellularData.ActiveLine, rawModemAPI.ActiveLine), settings.Local.Token)
+		if err != nil {
+			return err
+		}
+		localMux.Handle(core.HostModemIdlePath, hostIdle)
+		hostMaintenance, err := provideradmin.Authenticate(core.HostModemMaintenanceHandler(settings.HostModem.AgentID, agents), settings.Local.Token)
+		if err != nil {
+			return err
+		}
+		localMux.Handle(core.HostModemMaintenancePath, hostMaintenance)
+	}
 	updatePolicySnapshot, err := systempreferences.NewUpdatePolicyHandler(preferenceStore, settings.Local.Token)
 	if err != nil {
 		return err

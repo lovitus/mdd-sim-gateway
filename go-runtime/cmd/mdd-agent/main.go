@@ -61,6 +61,8 @@ type config struct {
 		PINRevisions   map[string]string `json:"pin_revisions,omitempty"`
 		ModemEnabled   bool              `json:"modem_enabled"`
 		ModemSIMAPDU   bool              `json:"modem_sim_apdu_enabled"`
+		ModemBackend   string            `json:"modem_backend,omitempty"`
+		ModemProfiles  json.RawMessage   `json:"modem_profiles,omitempty"`
 		RawUSBSource   bool              `json:"raw_usb_source_enabled,omitempty"`
 		RawUSBImporter bool              `json:"raw_usb_importer_enabled,omitempty"`
 	} `json:"agent"`
@@ -75,6 +77,8 @@ type config struct {
 }
 
 type modemProberOptions struct {
+	Backend        string
+	Profiles       json.RawMessage
 	Enabled        bool
 	SIMAPDU        bool
 	ManagedRuntime bool
@@ -267,6 +271,12 @@ func (settings *config) validate() error {
 	if settings.Agent.ModemSIMAPDU && !settings.Agent.ModemEnabled {
 		return errors.New("modem_sim_apdu_enabled requires modem_enabled")
 	}
+	if settings.Agent.ModemBackend != "" && settings.Agent.ModemBackend != "auto" && settings.Agent.ModemBackend != "serial" {
+		return errors.New("invalid modem backend")
+	}
+	if settings.Agent.ModemBackend == "serial" && (runtime.GOOS != "linux" || len(settings.Agent.ModemProfiles) == 0 || !json.Valid(settings.Agent.ModemProfiles)) {
+		return errors.New("serial modem backend requires Linux and modem profiles")
+	}
 	if (settings.Agent.RawUSBSource || settings.Agent.RawUSBImporter) && !settings.Agent.ModemEnabled {
 		return errors.New("raw USB modem mode requires modem_enabled")
 	}
@@ -353,6 +363,7 @@ func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 		recoveryOnly = !settings.Agent.ModemEnabled && len(records) != 0
 	}
 	modems, err := newModemProber(modemProberOptions{
+		Backend: settings.Agent.ModemBackend, Profiles: settings.Agent.ModemProfiles,
 		Enabled: settings.Agent.ModemEnabled || recoveryOnly, SIMAPDU: settings.Agent.ModemSIMAPDU,
 		ManagedRuntime: true, AgentID: settings.Agent.ID, RawRecovery: rawRecovery, RecoveryOnly: recoveryOnly,
 	})
@@ -666,7 +677,11 @@ func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.
 	if closer, ok := worker.(io.Closer); ok {
 		defer closer.Close()
 	}
-	controller, err := agentcontrol.New(worker, nil)
+	identity, err := agentcontrol.ModemRuntimeConfig(settings.Agent.ModemBackend, settings.Agent.ModemProfiles, settings.Agent.ModemEnabled, settings.Agent.ModemSIMAPDU)
+	if err != nil {
+		return err
+	}
+	controller, err := agentcontrol.New(worker, nil, identity)
 	if err != nil {
 		return err
 	}

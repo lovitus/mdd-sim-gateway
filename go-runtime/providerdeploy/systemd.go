@@ -103,6 +103,11 @@ func (manager Systemctl) action(ctx context.Context, action, unit string) error 
 }
 
 func (manager Systemctl) run(ctx context.Context, arguments ...string) error {
+	_, err := manager.output(ctx, arguments...)
+	return err
+}
+
+func (manager Systemctl) output(ctx context.Context, arguments ...string) (string, error) {
 	command := exec.CommandContext(ctx, manager.Path, arguments...)
 	command.Env = []string{"LC_ALL=C", "SYSTEMD_COLORS=0"}
 	var output limitedBuffer
@@ -113,9 +118,9 @@ func (manager Systemctl) run(ctx context.Context, arguments ...string) error {
 		if errors.As(err, &exit) {
 			exitCode = exit.ExitCode()
 		}
-		return &CommandError{ExitCode: exitCode, Output: strings.TrimSpace(output.String())}
+		return "", &CommandError{ExitCode: exitCode, Output: strings.TrimSpace(output.String())}
 	}
-	return nil
+	return output.String(), nil
 }
 
 type CommandError struct {

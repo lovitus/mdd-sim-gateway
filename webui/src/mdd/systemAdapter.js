@@ -17,7 +17,7 @@ export function agentCredentialChange(action, agentID, mode) {
     : 'Issue or rotate credential for {agent}? Its Agent configuration must be updated.'}
 }
 
-export function systemSettingsView(preferences = {}, notifications = {}, status = {}, catalog = {}, web = {}) {
+export function systemSettingsView(preferences = {}, notifications = {}, status = {}, catalog = {}, web = {}, host = {}) {
   const audio = preferences.preferences?.call_audio_buffer_ms
   let bind = '', port
   if (web.settings?.listen || status.public?.listen) {
@@ -29,6 +29,9 @@ export function systemSettingsView(preferences = {}, notifications = {}, status 
     } catch { /* An unknown listener is not a fabricated address or port. */ }
   }
   return {timezone:notifications.timezone,cellular_audio_buffer_ms:audio,
+	__hardware_supported:/^[a-f0-9]{64}$/.test(host.revision || '') && ['auto','serial'].includes(host.settings?.modem_backend),
+	__hardware_revision:host.revision,__hardware_runtime:host.runtime_state || 'not_observed',
+	hardware:{modem_backend:host.settings?.modem_backend || '',modem_profiles:structuredClone(host.settings?.modem_profiles || [])},
 	__device_defaults_supported:preferences.new_device_defaults_supported===true,
 	device_defaults:{cellular_enabled:preferences.preferences?.new_device_defaults?.connection_enabled ?? false,
 		vowifi_enabled:preferences.preferences?.new_device_defaults?.vowifi_enabled ?? true,
@@ -93,16 +96,17 @@ export function maintenanceRequest(snapshot, action, leaseID) {
 export const systemAPI = {
   async settings() {
     const sources = ['Audio settings', 'Notification settings', 'Runtime information', 'Line defaults', 'Proxy library','Web access']
-    const results = await Promise.allSettled([go.systemPreferences(),go.notificationConfig(),go.systemRuntime(),go.catalogLines(),go.egressConfig(),go.webSettings()])
+    const results = await Promise.allSettled([go.systemPreferences(),go.notificationConfig(),go.systemRuntime(),go.catalogLines(),go.egressConfig(),go.webSettings(),go.hostModemSettings()])
     const unauthorized = results.find(result => result.status === 'rejected' && [401,403].includes(result.reason?.status))
     if (unauthorized) throw unauthorized.reason
-    const view = systemSettingsView(...results.slice(0,4).map(result => result.status === 'fulfilled' ? result.value : {}),results[5].status==='fulfilled'?results[5].value:{})
+    const view = systemSettingsView(...results.slice(0,4).map(result => result.status === 'fulfilled' ? result.value : {}),results[5].status==='fulfilled'?results[5].value:{},results[6].status==='fulfilled'?results[6].value:{})
+    view.__hardware_error=results[6].status==='rejected' ? results[6].reason?.code || 'host_modem_unavailable' : ''
     view.proxy={profiles:Object.fromEntries(Object.entries(results[4].status==='fulfilled' ? results[4].value.config?.profiles || {} : {})
       .filter(([,profile])=>['socks5','node','subscription','existing'].includes(profile.type)).map(([id,profile])=>[id,{name:profile.name,type:profile.type}]))}
     const savedProfile=view.updates?.proxy_profile_id
     if(savedProfile&&!view.proxy.profiles[savedProfile])view.proxy.profiles[savedProfile]={name:savedProfile,unavailable:true}
     if (view.__voice_supported) cacheCallAudioBufferMS(view.cellular_audio_buffer_ms)
-    view.__load_errors = results.flatMap((result,index) => result.status === 'rejected' && !(index===5 && result.reason?.status===404)
+    view.__load_errors = results.flatMap((result,index) => result.status === 'rejected' && index!==6 && !(index===5 && result.reason?.status===404)
       ? [{source:sources[index],code:result.reason?.code || result.reason?.message || 'settings_unavailable'}] : [])
     return view
   },
@@ -113,6 +117,11 @@ export const systemAPI = {
     return {...draft,__catalog_revision:result.revision,rekey:{minutes:result.defaults.rekey_minutes},__saved_rekey_minutes:result.defaults.rekey_minutes}
   },
   async saveSettings(draft, domain) {
+	if(domain==='hardware'){
+		if(!draft.__hardware_supported || !['auto','serial'].includes(draft.hardware?.modem_backend))throw new Error('host_modem_unavailable')
+		const result=await go.saveHostModemSettings({expected_revision:draft.__hardware_revision,settings:{modem_backend:draft.hardware.modem_backend,modem_profiles:structuredClone(draft.hardware.modem_profiles)}})
+		return {...draft,hardware:structuredClone(result.settings),__hardware_revision:result.revision,__hardware_runtime:result.runtime_state || 'not_observed'}
+	}
 	if(domain==='device-defaults'){
 		if(!draft.__device_defaults_supported)throw new Error('device_defaults_unavailable')
 		const value=draft.device_defaults

@@ -3,6 +3,18 @@ import {readFileSync} from 'node:fs'
 globalThis.window = {location:{pathname:'/'}}
 const {maintenanceLeases, maintenanceRequest, systemAPI, hostView, systemSettingsView,agentCredentialChange} = await import('../src/mdd/systemAdapter.js')
 const {api:go} = await import('../src/api.js')
+go.hostModemSettings=async()=>{throw Object.assign(new Error('unavailable'),{status:404})}
+const hostViewSettings=systemSettingsView({}, {}, {}, {}, {}, {revision:'a'.repeat(64),settings:{modem_backend:'auto',modem_profiles:[{vid:'2c7c',pid:'0125',at_interface:2}]},runtime_state:'not_observed'})
+assert.equal(hostViewSettings.__hardware_supported,true)
+const oldHostSave=go.saveHostModemSettings
+let hostRequest
+go.saveHostModemSettings=async input=>{hostRequest=input;return {revision:'b'.repeat(64),settings:input.settings,runtime_state:'not_observed'}}
+const hostSaved=await systemAPI.saveSettings({...hostViewSettings,hardware:{...hostViewSettings.hardware,modem_backend:'serial'}},'hardware')
+assert.deepEqual(hostRequest.settings.modem_profiles,[{vid:'2c7c',pid:'0125',at_interface:2}])
+assert.equal(hostRequest.expected_revision,'a'.repeat(64))
+assert.equal(hostSaved.__hardware_runtime,'not_observed')
+assert.equal(hostSaved.__hardware_revision,'b'.repeat(64))
+go.saveHostModemSettings=oldHostSave
 const defaultView=systemSettingsView({revision:3,new_device_defaults_supported:true,preferences:{new_device_defaults:{connection_enabled:false,vowifi_enabled:false,flight_mode:true,roaming_enabled:true}}})
 assert.equal(defaultView.__device_defaults_supported,true)
 assert.deepEqual(defaultView.device_defaults,{cellular_enabled:false,vowifi_enabled:false,flight_mode:true,roaming_enabled:true})
