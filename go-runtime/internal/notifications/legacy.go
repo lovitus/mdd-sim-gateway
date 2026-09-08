@@ -236,6 +236,7 @@ func decodeStrictYAMLNode(node *yaml.Node, target any) error {
 
 func legacySubscriptions(input map[string]bool, warnings []string) (Subscriptions, []string) {
 	result := defaultSubscriptions()
+	result.LineUnrecoverable = true
 	for key, enabled := range input {
 		switch key {
 		case EventIncomingSMS:
@@ -249,7 +250,7 @@ func legacySubscriptions(input map[string]bool, warnings []string) (Subscription
 		case "number_changed":
 			warnings = append(warnings, "legacy_number_changed_unsupported")
 		case "line_unrecoverable":
-			warnings = append(warnings, "legacy_line_unrecoverable_unsupported")
+			result.LineUnrecoverable = enabled
 		default:
 			warnings = append(warnings, "legacy_notification_event_ignored")
 		}

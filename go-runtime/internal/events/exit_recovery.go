@@ -12,6 +12,7 @@ import (
 
 var ErrExitRecoveryRevision = errors.New("exit recovery revision changed")
 var ErrExitRecoveryDeleted = errors.New("exit recovery line was permanently deleted")
+var ErrExitRecoveryPending = errors.New("exit recovery selection is unresolved")
 
 type ExitRecoverySnapshot struct {
 	Revision uint64              `json:"revision"`
@@ -25,6 +26,12 @@ func validRecoveryLine(lineID string) bool {
 }
 
 func validExitRecoveryLedger(ledger recovery.ExitLedger) bool {
+	if selection := ledger.Selection; selection != nil {
+		if selection.Request.Validate() != nil || selection.Attempts < 0 ||
+			(selection.State != "pending" && selection.State != "unknown" && selection.State != "applied" && selection.State != "canceled") {
+			return false
+		}
+	}
 	return ledger.Failures >= 0 && ledger.Strikes >= 0 && len(ledger.Tried) <= 128
 }
 
@@ -54,9 +61,17 @@ func (store *BoltStore) ExitRecovery(lineID string) (ExitRecoverySnapshot, error
 	return result, err
 }
 
-// PutExitRecoveryExpected uses the same bbolt/CAS pattern as other durable
-// stores. The caller must first validate generation and observation order.
-// A duplicate decision does not advance the revision or rewrite the state.
+// ActiveExitRecovery protects unresolved requests from destructive line cleanup.
+func (store *BoltStore) ActiveExitRecovery(lineID string) (bool, error) {
+	current, err := store.ExitRecovery(lineID)
+	if errors.Is(err, ErrExitRecoveryDeleted) {
+		return false, nil
+	}
+	return current.Ledger.Selection.Pending(), err
+}
+
+// PutExitRecoveryExpected requires generation/order validation by the caller.
+// Duplicate decisions do not advance the revision or rewrite the state.
 func (store *BoltStore) PutExitRecoveryExpected(lineID string, ledger recovery.ExitLedger, expected uint64) (ExitRecoverySnapshot, error) {
 	if !validRecoveryLine(lineID) || !validExitRecoveryLedger(ledger) {
 		return ExitRecoverySnapshot{}, errors.New("invalid exit recovery state")
@@ -73,6 +88,9 @@ func (store *BoltStore) PutExitRecoveryExpected(lineID string, ledger recovery.E
 		}
 		if current.Revision != expected {
 			return ErrExitRecoveryRevision
+		}
+		if err := putExitNotice(tx, ledger.Notice, lineID); err != nil {
+			return err
 		}
 		previous, _ := json.Marshal(current.Ledger)
 		if bytes.Equal(previous, value) {

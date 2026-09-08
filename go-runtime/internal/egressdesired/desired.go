@@ -26,16 +26,17 @@ const maximumDocumentBytes = 1 << 20
 var ErrRuntimeConfirmationTimeout = errors.New("country exit runtime confirmation timed out")
 
 type Document struct {
-	RefreshID            string              `json:"refresh_id,omitempty"`
-	ExistingConfigSHA256 string              `json:"existing_config_sha256,omitempty"`
-	Version              int                 `json:"version"`
-	Proxy                egressconfig.Config `json:"proxy"`
-	Hardware             json.RawMessage     `json:"hardware,omitempty"`
-	Lines                json.RawMessage     `json:"lines,omitempty"`
-	EgressConfigRevision uint64              `json:"egress_config_revision"`
-	CatalogRevision      uint64              `json:"catalog_revision"`
-	Generation           string              `json:"generation"`
-	UpdatedAt            int64               `json:"updated_at"`
+	RecoverySelections   map[string]egressconfig.RecoveryRequest `json:"recovery_selections,omitempty"`
+	RefreshID            string                                  `json:"refresh_id,omitempty"`
+	ExistingConfigSHA256 string                                  `json:"existing_config_sha256,omitempty"`
+	Version              int                                     `json:"version"`
+	Proxy                egressconfig.Config                     `json:"proxy"`
+	Hardware             json.RawMessage                         `json:"hardware,omitempty"`
+	Lines                json.RawMessage                         `json:"lines,omitempty"`
+	EgressConfigRevision uint64                                  `json:"egress_config_revision"`
+	CatalogRevision      uint64                                  `json:"catalog_revision"`
+	Generation           string                                  `json:"generation"`
+	UpdatedAt            int64                                   `json:"updated_at"`
 }
 
 type Applied struct {

@@ -165,6 +165,7 @@ type fakeRuntime struct {
 	stopRequests []vowifiipc.LifecycleRequest
 	startErr     error
 	stopErr      error
+	observeErr   error
 	actions      chan string
 }
 
@@ -188,7 +189,7 @@ func (clock *fakeClock) Advance(duration time.Duration) {
 func (runtime *fakeRuntime) Observe(context.Context, string) (vowifiipc.Snapshot, mediaauth.ProviderFence, error) {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	return runtime.status, runtime.fence, nil
+	return runtime.status, runtime.fence, runtime.observeErr
 }
 
 func (runtime *fakeRuntime) Start(_ context.Context, _ string, _ mediaauth.ProviderFence, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {

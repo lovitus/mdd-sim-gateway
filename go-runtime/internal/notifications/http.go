@@ -266,7 +266,7 @@ func configView(config Config) ConfigView {
 		PushPlus: PushPlusView{Enabled: config.PushPlus.Enabled, Events: config.PushPlus.Events,
 			Template: config.PushPlus.Template, Channel: config.PushPlus.Channel,
 			Token: SecretView{Configured: config.PushPlus.Token != ""}, Topic: SecretView{Configured: config.PushPlus.Topic != ""}},
-		SupportedEvents: []string{EventIncomingSMS, EventIncomingCall, EventHostAlert, EventActivationReminder},
+		SupportedEvents: []string{EventIncomingSMS, EventIncomingCall, EventHostAlert, EventActivationReminder, EventLineUnrecoverable},
 		UnsupportedReasons: map[string]string{
 			"number_changed":     "no_authoritative_ims_number_source",
 			"line_unrecoverable": "continuous_recovery_has_no_terminal_unrecoverable_state",

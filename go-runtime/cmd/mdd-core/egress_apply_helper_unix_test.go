@@ -53,6 +53,7 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	mux.Handle(egressconfig.SnapshotIPCPath, egressSnapshotHandler)
 	mux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshotHandler)
 	var maintenanceBlocked atomic.Bool
+	var changeConfigOnDrain atomic.Bool
 	var maintenanceMu sync.Mutex
 	var maintenanceTrace []bool
 	maintenanceRequests := func() []bool {
@@ -77,6 +78,22 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 			code := "resumed"
 			if begin {
 				code = "drained"
+				if changeConfigOnDrain.Swap(false) {
+					latest, err := egressStore.Snapshot()
+					if err != nil {
+						t.Error(err)
+						w.WriteHeader(500)
+						return
+					}
+					profile := latest.Config.Profiles["node"]
+					profile.Name = "Changed during drain"
+					latest.Config.Profiles["node"] = profile
+					if _, err := egressStore.PutExpected(latest.Config, latest.Revision); err != nil {
+						t.Error(err)
+						w.WriteHeader(500)
+						return
+					}
+				}
 			}
 			ready := true
 			if begin && maintenanceBlocked.Load() {
@@ -172,6 +189,27 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	result, err = service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
 	if err != nil || result.State != "applied" || result.Generation != expected.Generation {
 		t.Fatalf("first clean apply=%+v err=%v", result, err)
+	}
+	beforeConcurrent, err := os.ReadFile(desiredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changeConfigOnDrain.Store(true)
+	_, err = service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
+	if !errors.As(err, &failure) || failure.Code != "egress_apply_revision_changed" {
+		t.Fatal("configuration changed during drain was applied", err)
+	}
+	afterConcurrent, err := os.ReadFile(desiredPath)
+	if err != nil || string(beforeConcurrent) != string(afterConcurrent) {
+		t.Fatal("stale apply published desired state", err)
+	}
+	trace := maintenanceRequests()
+	if len(trace) < 2 || !trace[len(trace)-2] || trace[len(trace)-1] {
+		t.Fatal("rejected apply did not release its lease", trace)
+	}
+	egressSnapshot, err = egressStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Remove(statusPath); err != nil {
 		t.Fatal(err)

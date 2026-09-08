@@ -42,6 +42,7 @@ type Server struct {
 	catalog            *linecatalog.Store
 	catalogAPI         http.Handler
 	lineDeletion       http.Handler
+	exitRecovery       http.Handler
 	imeiPool           http.Handler
 	lineBootstrap      http.Handler
 	operationAPI       http.Handler
@@ -458,6 +459,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/lines", server.protect(http.HandlerFunc(server.lines)))
 	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
 	server.mux.Handle("GET /v1/lines/{lineID}/availability", server.protect(http.HandlerFunc(server.lineAvailability)))
+	if server.exitRecovery != nil {
+		server.mux.Handle("GET /v1/lines/{lineID}/recovery", server.protect(server.exitRecovery))
+		server.mux.Handle("POST /v1/lines/{lineID}/recovery", server.protect(server.exitRecovery))
+	}
 	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
 	server.mux.Handle("GET /v1/devices", server.protect(http.HandlerFunc(server.devices)))

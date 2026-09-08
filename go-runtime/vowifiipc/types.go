@@ -43,13 +43,22 @@ const (
 )
 
 type RuntimeStatus struct {
-	FailureID         string              `json:"failure_id,omitempty"`
-	Rekey             *ChildSARekeyStatus `json:"rekey,omitempty"`
-	Condition         RuntimeCondition    `json:"condition"`
-	Code              string              `json:"code,omitempty"`
-	PDNFamily         string              `json:"pdn_family,omitempty"`
-	ResponderID       string              `json:"responder_id,omitempty"`
-	RegisterSupported bool                `json:"register_supported,omitempty"`
+	IKE               *IKEExchangeEvidence `json:"ike,omitempty"`
+	FailureID         string               `json:"failure_id,omitempty"`
+	Rekey             *ChildSARekeyStatus  `json:"rekey,omitempty"`
+	Condition         RuntimeCondition     `json:"condition"`
+	Code              string               `json:"code,omitempty"`
+	PDNFamily         string               `json:"pdn_family,omitempty"`
+	ResponderID       string               `json:"responder_id,omitempty"`
+	RegisterSupported bool                 `json:"register_supported,omitempty"`
+}
+
+// IKEExchangeEvidence describes one runtime's outer transport counters.
+// A received datagram is not proof of authentication or a working tunnel.
+type IKEExchangeEvidence struct {
+	RequestsSent      uint64 `json:"requests_sent"`
+	ResponseDatagrams uint64 `json:"response_datagrams"`
+	ResponseTimeouts  uint64 `json:"response_timeouts"`
 }
 
 type ChildSARekeyStatus struct {
@@ -307,6 +316,12 @@ func (snapshot Snapshot) Validate() error {
 	}
 	if id := snapshot.Runtime.FailureID; id != "" && (snapshot.Runtime.Condition != RuntimeFailed || len(id) != 64 || strings.TrimLeft(id, "0123456789abcdef") != "") {
 		return errors.New("snapshot failure identity is invalid")
+	}
+	if ike := snapshot.Runtime.IKE; ike != nil {
+		if (snapshot.Runtime.Condition != RuntimeFailed && snapshot.Runtime.Condition != RuntimeRunning) ||
+			ike.ResponseDatagrams > ike.RequestsSent || ike.ResponseTimeouts > ike.RequestsSent-ike.ResponseDatagrams {
+			return errors.New("snapshot IKE exchange evidence is invalid")
+		}
 	}
 	if rekey := snapshot.Runtime.Rekey; rekey != nil {
 		if snapshot.Runtime.Condition != RuntimeRunning || rekey.PeriodMinutes < 0 || rekey.PeriodMinutes > 1440 || rekey.Enabled != (rekey.PeriodMinutes > 0) ||

@@ -128,6 +128,9 @@ func TestTransportSharesOneAssociationForIKEAndESP(t *testing.T) {
 	if dials.Load() != 1 {
 		t.Fatalf("dial count=%d, want 1", dials.Load())
 	}
+	if got := transport.IKEStats(); got != (IKEExchangeStats{RequestsSent: 1, ResponseDatagrams: 1}) {
+		t.Fatalf("ESP or keepalive counted as IKE: %+v", got)
+	}
 	if transport.LocalNetworkAddr() == nil {
 		t.Fatal("local network address is nil after dial")
 	}
@@ -136,6 +139,54 @@ func TestTransportSharesOneAssociationForIKEAndESP(t *testing.T) {
 	}
 	if connection.closeCount.Load() != 1 {
 		t.Fatalf("connection close count=%d, want 1", connection.closeCount.Load())
+	}
+}
+
+func TestIKEEvidenceCountsResponseTimeoutButNotDialFailure(t *testing.T) {
+	connection := newDatagramConn()
+	transport, err := New(Config{DialContext: func(context.Context, string, string, time.Duration) (net.Conn, error) {
+		return connection, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.Close(context.Background())
+	if err := transport.Bind("192.0.2.10:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	completed := make(chan error, 1)
+	go func() {
+		_, err := transport.ExchangeIKE(t.Context(), []byte("initial"))
+		completed <- err
+	}()
+	receiveDatagram(t, connection.outbound)
+	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("response")...)
+	if err := <-completed; err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := transport.ExchangeIKE(ctx, []byte("unanswered")); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout=%v", err)
+	}
+	if got := transport.IKEStats(); got != (IKEExchangeStats{RequestsSent: 2, ResponseDatagrams: 1, ResponseTimeouts: 1}) {
+		t.Fatalf("exchange evidence=%+v", got)
+	}
+	unreachable, err := New(Config{DialContext: func(context.Context, string, string, time.Duration) (net.Conn, error) {
+		return nil, errors.New("dial rejected")
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unreachable.Close(context.Background())
+	if err := unreachable.Bind("192.0.2.10:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unreachable.ExchangeIKE(t.Context(), []byte("not-sent")); err == nil {
+		t.Fatal("dial unexpectedly succeeded")
+	}
+	if got := unreachable.IKEStats(); got != (IKEExchangeStats{}) {
+		t.Fatalf("unsent request was counted: %+v", got)
 	}
 }
 

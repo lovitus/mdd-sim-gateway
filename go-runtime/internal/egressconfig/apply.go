@@ -149,6 +149,10 @@ func (client *ApplyClient) ApplyEgress(ctx context.Context, configRevision, cata
 }
 
 func (client *ApplyClient) request(ctx context.Context, method string, input, output any) error {
+	return client.requestAt(ctx, method, ApplyPath, input, output)
+}
+
+func (client *ApplyClient) requestAt(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader
 	if input != nil {
 		payload, err := json.Marshal(input)
@@ -157,7 +161,7 @@ func (client *ApplyClient) request(ctx context.Context, method string, input, ou
 		}
 		body = bytes.NewReader(payload)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, "http://mdd-provider-apply"+ApplyPath, body)
+	request, err := http.NewRequestWithContext(ctx, method, "http://mdd-provider-apply"+path, body)
 	if err != nil {
 		return err
 	}

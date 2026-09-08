@@ -782,12 +782,25 @@ jobs:
           curl "${common[@]}" https://localhost:8443/v1/notifications/config |
             jq -e '
               .schema_version == 1 and .revision == 1 and
-              .supported_events == ["incoming_sms","incoming_call","host_alert","activation_reminder"] and
+              .supported_events == ["incoming_sms","incoming_call","host_alert","activation_reminder","line_unrecoverable"] and
+              .webhook.events.line_unrecoverable == false and
+              .telegram.events.line_unrecoverable == false and
+              .pushplus.events.line_unrecoverable == false and
               .webhook.enabled == false and .webhook.url.configured == false and
               .telegram.enabled == false and .telegram.bot_token.configured == false and
               .pushplus.enabled == false and .pushplus.token.configured == false' >/dev/null
           test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/notifications.db)" = mdd:mdd:600
           test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/preferences.db)" = mdd:mdd:600
+          recovery_unauthenticated=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" --resolve localhost:8443:127.0.0.1 \
+            -o /dev/null -w '%{http_code}' https://localhost:8443/v1/lines/nonexistent/recovery)
+          test "$recovery_unauthenticated" = 401
+          recovery_missing=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" --resolve localhost:8443:127.0.0.1 \
+            -b "$cookie_jar" -o "$RUNNER_TEMP/recovery-missing.json" -w '%{http_code}' \
+            https://localhost:8443/v1/lines/nonexistent/recovery)
+          test "$recovery_missing" = 404
+          jq -e '.code == "line_not_found"' "$RUNNER_TEMP/recovery-missing.json" >/dev/null
           unauthenticated_status=$(curl --silent --show-error \
             --cacert "$MDD_CI_CA_PATH" \
             --resolve localhost:8443:127.0.0.1 \

@@ -12,6 +12,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/allowance"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 )
@@ -40,6 +41,10 @@ type AllowanceSource interface {
 }
 
 type CoordinatorConfig struct {
+	Recovery interface {
+		PendingExitRecoveryNotices(int) ([]recovery.ExitNotice, error)
+		AckExitRecoveryNotice(string) error
+	}
 	Context      context.Context
 	Store        *Store
 	Engine       *Engine
@@ -54,6 +59,7 @@ type CoordinatorConfig struct {
 }
 
 type Coordinator struct {
+	nextRecovery  time.Time
 	config        CoordinatorConfig
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -168,6 +174,10 @@ func (coordinator *Coordinator) cycle() error {
 	}
 	appendFailure("sms", coordinator.drainSMS(now))
 	appendFailure("calls", coordinator.drainCalls(now))
+	if !now.Before(coordinator.nextRecovery) {
+		coordinator.nextRecovery = now.Add(30 * time.Second)
+		appendFailure("recovery", coordinator.drainRecovery(now))
+	}
 	defer coordinator.config.Engine.Wake()
 	// SMS and call outboxes contain only post-upgrade real-time facts and must
 	// not be blocked by an unrelated System Status baseline problem. Host and
@@ -294,6 +304,30 @@ func notificationTransportLabel(transport string) string {
 		return "蜂窝 Modem"
 	}
 	return "VoWiFi"
+}
+
+func (coordinator *Coordinator) drainRecovery(now time.Time) error {
+	if coordinator.config.Recovery == nil {
+		return nil
+	}
+	notices, err := coordinator.config.Recovery.PendingExitRecoveryNotices(100)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, notice := range notices {
+		event := Event{SourceID: "exit-recovery-" + notice.ID, Type: EventLineUnrecoverable, LineID: notice.LineID,
+			LineName: notice.LineName, CardID: notice.CardID, MSISDN: notice.MSISDN,
+			Title: "线路持续异常 · " + notice.LineName, Text: notice.Text, OccurredAt: notice.OccurredAt}
+		if _, _, _, err := coordinator.config.Store.Intake(event, now); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if err := coordinator.config.Recovery.AckExitRecoveryNotice(notice.ID); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func (coordinator *Coordinator) linePresentation(lineID, expectedCardID string) (string, string) {

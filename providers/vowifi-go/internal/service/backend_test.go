@@ -657,7 +657,8 @@ func TestBackendLifecycleAndIdempotency(t *testing.T) {
 }
 
 func TestBackendFailedStartIsRetryableByNewOperation(t *testing.T) {
-	factory := &fakeFactory{err: &StageError{Layer: "ims", Code: "ims_register_failed", Err: errors.New("rejected")}}
+	evidence := &vowifiipc.IKEExchangeEvidence{RequestsSent: 4, ResponseDatagrams: 4}
+	factory := &fakeFactory{err: &StageError{Layer: "ims", Code: "ims_register_failed", Err: errors.New("rejected"), IKE: evidence}}
 	backend, err := NewBackend("line-1", "native", "process-1", factory)
 	if err != nil {
 		t.Fatal(err)
@@ -679,12 +680,19 @@ func TestBackendFailedStartIsRetryableByNewOperation(t *testing.T) {
 		t.Fatalf("IMS failure was misattributed to a known tunnel failure: %+v", status)
 	}
 	firstFailure := status.Runtime.FailureID
+	if status.Runtime.IKE == nil || *status.Runtime.IKE != *evidence {
+		t.Fatal("failed start lost its IKE evidence")
+	}
+	status.Runtime.IKE.RequestsSent = 99
 	if len(firstFailure) != 64 {
 		t.Fatal("failure identity missing")
 	}
 	repeated, _ := backend.Status(context.Background())
 	if repeated.Sequence == status.Sequence || repeated.Runtime.FailureID != firstFailure {
 		t.Fatal("reading status changed failure identity")
+	}
+	if repeated.Runtime.IKE.RequestsSent != 4 {
+		t.Fatal("caller mutated retained IKE evidence")
 	}
 	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-failure-2"}); err == nil {
 		t.Fatal("second failure unexpectedly succeeded")
@@ -698,7 +706,7 @@ func TestBackendFailedStartIsRetryableByNewOperation(t *testing.T) {
 	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-2"}); err != nil {
 		t.Fatalf("retry start: %v", err)
 	}
-	if backend.failedLayer != "" || backend.failureID != "" {
+	if backend.failedLayer != "" || backend.failureID != "" || backend.failedIKE != nil {
 		t.Fatal("successful restart retained an old failure layer")
 	}
 }

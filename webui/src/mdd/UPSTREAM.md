@@ -136,3 +136,24 @@ values remain absent rather than becoming a saved default. Runtime listener fact
 populate the original separate address and port fields without exposing key paths.
 Validation and deployment evidence for this batch is tracked in the recovery cursor;
 source adaptation alone does not establish carrier-call or profile-write acceptance.
+
+## Recovery workflow adaptation
+
+The old failover policy and main.py health gates feed generation-fenced durable
+decisions in the existing events database. IKE transport counters are separate
+from the old retransmit input. Only complete unanswered bootstrap evidence is
+eligible; user pins, healthy shared-exit peers, active calls and maintenance
+remain gates. Runtime selections do not overwrite the saved pin policy.
+
+The existing apply helper executes an exact recovery target under its usual
+lock, revision checks and maintenance leases. Requests persist before dispatch,
+use the same identity on retry and require target-node readback. An unresolved
+request retains protection and blocks destructive line cleanup. The original
+verification page shows its status and offers one explicit retry after the
+automatic budget, never a clear-protection shortcut.
+
+The original line_unrecoverable notification uses the existing channels and
+deduplication store, with atomic event outbox publication. Existing Go channel
+settings do not silently subscribe to the newly supported event; legacy import
+preserves the original explicit choice. Deployment and real acceptance remain
+separate evidence gates in the recovery cursor.

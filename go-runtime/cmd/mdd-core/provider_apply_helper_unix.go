@@ -92,6 +92,7 @@ func runProviderApplyHelper(arguments []string) error {
 	mux := http.NewServeMux()
 	mux.Handle(provideradmin.Path, providerHandler)
 	mux.Handle(egressconfig.ApplyPath, egressHandler)
+	mux.Handle(egressconfig.RecoveryPath, egressconfig.RecoveryHandler(service))
 	mux.Handle(adminauth.CredentialPersistencePath, credentialHandler)
 	handlerWithAuth, err := provideradmin.Authenticate(mux, settings.Local.Token)
 	if err != nil {
@@ -154,6 +155,17 @@ func (service *providerApplyService) EgressStatus(ctx context.Context) (egressco
 }
 
 func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevision, catalogRevision uint64) (result egressconfig.ApplyResult, resultErr error) {
+	return service.applyEgress(ctx, configRevision, catalogRevision, nil)
+}
+
+func (service *providerApplyService) RecoverEgress(ctx context.Context, request egressconfig.RecoveryRequest) (egressconfig.ApplyResult, error) {
+	if err := request.Validate(); err != nil {
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusBadRequest, "invalid_egress_recovery_request", err)
+	}
+	return service.applyEgress(ctx, request.ConfigRevision, request.CatalogRevision, &request)
+}
+
+func (service *providerApplyService) applyEgress(ctx context.Context, configRevision, catalogRevision uint64, recoveryRequest *egressconfig.RecoveryRequest) (result egressconfig.ApplyResult, resultErr error) {
 	if !service.mutation.TryLock() {
 		return result, egressFailure(http.StatusConflict, "configuration_apply_in_progress", nil)
 	}
@@ -181,11 +193,27 @@ func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevi
 	if err != nil {
 		return result, egressFailure(http.StatusServiceUnavailable, "egress_maintenance_unavailable", err)
 	}
+	if recoveryRequest != nil {
+		var confirmed *egressconfig.ApplyResult
+		document, confirmed, err = service.recoveryDocument(configSnapshot, catalogSnapshot, document, *recoveryRequest)
+		if err != nil {
+			return result, err
+		}
+		if confirmed != nil {
+			if err := service.resumeRecoveryLease(ctx, address, *recoveryRequest); err != nil {
+				return result, err
+			}
+			return *confirmed, nil
+		}
+	}
 	var identity [16]byte
 	if _, err := rand.Read(identity[:]); err != nil {
 		return result, egressFailure(http.StatusInternalServerError, "egress_maintenance_identity_failed", err)
 	}
 	drain := providerapply.DrainRequest{SchemaVersion: 1, CatalogRevision: catalogRevision, LeaseID: "egress-" + hex.EncodeToString(identity[:])}
+	if recoveryRequest != nil {
+		drain.LeaseID = "recovery-" + recoveryRequest.FailureID
+	}
 	for _, line := range catalogSnapshot.Lines {
 		drain.LineIDs = append(drain.LineIDs, line.ID)
 	}
@@ -218,7 +246,12 @@ func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevi
 			}
 		}()
 	}
-	if configSnapshot.Config.Enabled {
+	if recoveryRequest != nil {
+		if err := service.validateRecoveryPeers(ctx, address, catalogSnapshot, drain.LeaseID, *recoveryRequest); err != nil {
+			return result, err
+		}
+	}
+	if configSnapshot.Config.Enabled && recoveryRequest == nil {
 		for _, exit := range configSnapshot.Config.Exits {
 			if !exit.Enabled || exit.Mode == "direct" || configSnapshot.Config.Profiles[exit.ProfileID].Type != "subscription" {
 				continue
@@ -233,6 +266,14 @@ func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevi
 	}
 	// A publication error can occur after rename; do not reopen admission
 	// unless the requested runtime generation is authoritatively confirmed.
+	latestConfig, err := service.egressSnapshot(ctx)
+	if err != nil || latestConfig.Revision != configRevision {
+		return result, egressFailure(http.StatusPreconditionFailed, "egress_apply_revision_changed", err)
+	}
+	latestCatalog, err := service.catalogSnapshot(ctx)
+	if err != nil || latestCatalog.Revision != catalogRevision {
+		return result, egressFailure(http.StatusPreconditionFailed, "egress_apply_revision_changed", err)
+	}
 	safeToResume = false
 	changed, err := egressdesired.PublishOwned(service.settings.ProviderApply.EgressDesiredPath, document,
 		service.desiredUID, service.gid, 0o640)
@@ -246,6 +287,12 @@ func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevi
 			code = "egress_runtime_confirmation_timeout"
 		}
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusGatewayTimeout, code, err)
+	}
+	if recoveryRequest != nil {
+		actual, err := egressstatus.Load(service.settings.ProviderApply.EgressStatusPath)
+		if err != nil || actual.DesiredGeneration != document.Generation || !actual.Exits[recoveryRequest.Country].Ready || actual.Exits[recoveryRequest.Country].Node != recoveryRequest.ToNode {
+			return result, egressFailure(http.StatusConflict, "egress_recovery_selection_unconfirmed", err)
+		}
 	}
 	safeToResume = true
 	state := "unchanged"

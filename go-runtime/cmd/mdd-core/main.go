@@ -479,7 +479,8 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	notificationCoordinator, err := notifications.NewCoordinator(notifications.CoordinatorConfig{
-		Context: ctx, Store: notificationStore, Engine: notificationEngine,
+		Recovery: store,
+		Context:  ctx, Store: notificationStore, Engine: notificationEngine,
 		SMS: messages, Calls: calls, SystemStatus: statusSampler, Catalog: catalog,
 		Allowance: allowanceStore, Logf: log.Printf,
 	})
@@ -641,8 +642,19 @@ func run(ctx context.Context, settings config) error {
 	if err := cellularSMS.BindAllowanceDispatchAuthorizer(allowanceService); err != nil {
 		return err
 	}
+	var exitRecovery *runtimereconcile.ExitRecoveryConfig
+	var egressClient *egressconfig.ApplyClient
+	if settings.ProviderApply.Enabled {
+		egressClient, err = egressconfig.NewApplyClient(settings.ProviderApply.SocketPath, settings.Local.Token)
+		if err != nil {
+			return err
+		}
+		exitRecovery = &runtimereconcile.ExitRecoveryConfig{Store: store, Config: egressStore, Apply: egressClient,
+			DesiredPath: settings.ProviderApply.EgressDesiredPath, StatusPath: settings.ProviderApply.EgressStatusPath}
+	}
 	runtimeReconciler, err := runtimereconcile.New(runtimereconcile.Config{
-		Context: ctx, Catalog: catalog, Agents: agents, Runtime: control,
+		ExitRecovery: exitRecovery,
+		Context:      ctx, Catalog: catalog, Agents: agents, Runtime: control,
 		Store: store, Replay: replay, Logf: log.Printf,
 	})
 	if err != nil {
@@ -661,6 +673,9 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	lifecycleGuard := linecatalog.LifecycleGuardFunc(func(lineID string) (bool, error) {
+		if active, err := store.ActiveExitRecovery(lineID); err != nil || active {
+			return active, err
+		}
 		if _, current := providers.CurrentGeneration(lineID); current {
 			return true, nil
 		}
@@ -738,10 +753,6 @@ func run(ctx context.Context, settings config) error {
 			return err
 		}
 		egressProbeAPI, err = egressprobe.NewHandler(settings.ProviderApply.EgressStatusPath, 8*time.Second)
-		if err != nil {
-			return err
-		}
-		egressClient, err := egressconfig.NewApplyClient(settings.ProviderApply.SocketPath, settings.Local.Token)
 		if err != nil {
 			return err
 		}
@@ -874,6 +885,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithLineCatalog(catalog, catalogAPI),
 		core.WithLineDiagnostics(store),
 		core.WithLineDeletion(lineDeletionAPI),
+		core.WithExitRecovery(runtimeReconciler.RecoveryHandler()),
 		core.WithOperationStatus(operationAPI),
 		core.WithIMEIPool(imeiPoolAPI),
 		core.WithLineBootstrap(lineBootstrapAPI),

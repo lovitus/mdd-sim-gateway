@@ -88,17 +88,28 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
   const [stabilityTarget, setStabilityTarget] = useState('')
   const [stabilitySeconds, setStabilitySeconds] = useState(50)
   const [stabilityResult, setStabilityResult] = useState(null)
+  const factsRequest = useRef(0)
+  const factsLine = useRef(selectedId)
+  factsLine.current = selectedId
   useEffect(() => {
     if (!selectedId && usable[0]) setSelectedId(String(usable[0].id))
   }, [selectedId, usable])
   const selected = usable.find(item => String(item.id) === String(selectedId))
   const loadFacts = async (passive = false) => {
     if (!selectedId) return
+    const request = ++factsRequest.current
+    const current = () => factsLine.current === selectedId && factsRequest.current === request
     setError(''); setRunning(passive ? 'passive' : 'refresh')
-    try { setFacts(passive ? await api.verifyLinePassive(selectedId) : await api.lineFacts(selectedId)) }
-    catch (e) { setError(e.message) } finally { setRunning('') }
+    try {
+      const result = passive ? await api.verifyLinePassive(selectedId) : await api.lineFacts(selectedId)
+      if (current()) setFacts(result)
+    } catch (e) { if (current()) setError(e.message) } finally { if (current()) setRunning('') }
   }
-  useEffect(() => { if (selectedId) void loadFacts(false) }, [selectedId])
+  useEffect(() => {
+    setFacts(null); setStabilityResult(null)
+    if (selectedId) void loadFacts(false)
+    return () => { ++factsRequest.current }
+  }, [selectedId])
   const testMedia = async () => {
     if (!selectedId) return
     setError(''); setRunning('media')
@@ -158,6 +169,18 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     } catch (e) { setError(e.message) } finally { setRunning('') }
   }
   const entries = Object.entries(facts?.facts || {})
+  const retryRecovery = async () => {
+    const current = facts?.recovery
+    if (!current?.selection || current.selection.attempts < 5 || !!running) return
+    if (!window.confirm(language === 'zh' ? '重试同一个节点恢复请求一次？这可能继续切换出口；不会创建新的请求身份或清除未确认的保护。' : 'Retry the original exit recovery request once? It may continue switching the exit; unresolved protection will not be cleared.')) return
+    const forId = selectedId
+    setRunning('recovery'); setError('')
+    try {
+      const result = await api.retryExitRecovery(forId,current.revision,current.selection.failure_id)
+      if (factsLine.current === forId) setFacts(previous => ({...previous,recovery:result}))
+    } catch (error) {if(factsLine.current === forId)setError(error.message)}
+    finally {if(factsLine.current === forId)setRunning('')}
+  }
   const stateText = { ready: language === 'zh' ? '就绪' : 'Ready', degraded: language === 'zh' ? '异常' : 'Degraded', blocked: language === 'zh' ? '被阻断' : 'Blocked', unknown: language === 'zh' ? '未知' : 'Unknown' }
   return <>
     <h2>{language === 'zh' ? '线路验证与排障' : 'Line verification & troubleshooting'}</h2>
@@ -182,7 +205,20 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     {error && <p className="u-error">{error}</p>}
     {facts && <>
       <div className="u-detail"><span>{language === 'zh' ? '汇总结论' : 'Summary'}</span><b>{stateText[facts.summary?.state] || facts.summary?.state || '—'} · {facts.summary?.code || '—'}</b></div>
-      <div className="u-detail"><span>{language === 'zh' ? 'Engine 世代' : 'Engine generation'}</span><b className="mono">{facts.generation?.engine_run_id || '—'}</b></div>
+      <div className="u-detail"><span>{language === 'zh' ? 'Provider 世代' : 'Provider generation'}</span><b className="mono">{facts.generation?.engine_run_id || '—'}</b></div>
+      {facts.provider_error && <p className="u-error">{facts.provider_error}</p>}
+      {facts.recovery_error && <p className="u-note">{facts.recovery_error}</p>}
+      {facts.recovery && <>
+        <div className="u-detail"><span>{language === 'zh' ? '恢复策略' : 'Recovery policy'}</span><b>{facts.recovery.given_up ? (language === 'zh' ? '已暂停（节点锁定）' : 'Paused (locked node)') : facts.recovery.exhausted ? (language === 'zh' ? '慢速重试' : 'Slow retry') : facts.recovery.decision || '—'}</b></div>
+        <div className="u-detail"><span>{language === 'zh' ? '已记录失败 / 已尝试节点' : 'Recorded failures / tried nodes'}</span><b>{facts.recovery.failures} / {facts.recovery.tried_count}</b></div>
+        {facts.recovery.selection && <>
+          <div className="u-detail"><span>{language === 'zh' ? '出口恢复请求' : 'Exit recovery request'}</span><b>{facts.recovery.selection.state} · {facts.recovery.selection.code}</b></div>
+          <div className="u-detail"><span>{facts.recovery.selection.from_node}</span><b>{facts.recovery.selection.to_node}</b></div>
+          <div className="u-detail"><span>{language === 'zh' ? '请求次数' : 'Request attempts'}</span><b>{facts.recovery.selection.attempts}</b></div>
+          {facts.recovery.selection.state === 'unknown' && facts.recovery.selection.attempts >= 5 && <button className="btn btn-ghost" disabled={!!running} onClick={retryRecovery}>{language === 'zh' ? '重试原恢复请求一次' : 'Retry original recovery once'}</button>}
+        </>}
+      </>}
+      {[["requests_sent", "IKE 实际请求", "IKE requests sent"], ["response_datagrams", "IKE 响应数据包", "IKE response datagrams"], ["response_timeouts", "IKE 等待响应超时", "IKE response timeouts"]].map(([key, zh, en]) => <div className="u-detail" key={key}><span>{language === 'zh' ? zh : en}</span><b>{facts.provider?.runtime?.ike?.[key] ?? '—'}</b></div>)}
       <div className="u-detail"><span>{language === 'zh' ? '状态样本年龄' : 'Status sample age'}</span><b>{facts.status_source?.age_seconds == null ? '—' : `${facts.status_source.age_seconds}s`}</b></div>
       {entries.map(([name, fact]) => <div className="u-detail" key={name}><span>{name}</span><b><Badge state={fact.state === 'ready' ? 'on' : fact.state === 'blocked' ? 'error' : fact.state === 'degraded' ? 'degraded' : 'off'}>{stateText[fact.state] || fact.state}</Badge> <code>{fact.code}</code></b></div>)}
       {!!facts.summary?.blockers?.length && <p className="u-error">{language === 'zh' ? '当前阻断来源：' : 'Current action blockers: '}{facts.summary.blockers.join(', ')}</p>}

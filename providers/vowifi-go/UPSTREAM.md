@@ -48,3 +48,10 @@ to the host network.
 The upstream source remains AGPL-3.0 and retains its original license and
 notices. Do not replace this snapshot without reviewing and replaying the small
 userspace-dial patch against the new exact commit.
+
+MDD outer-UDP evidence records completed writes, received response datagrams,
+and response-wait timeouts in the wrapper, without modifying upstream IKE
+algorithms. These are not retransmit or authentication-success counters.
+Failed startup retains an immutable copy in the optional IPC runtime evidence;
+new startup clears it. Core must accept the new fields before this Provider is
+upgraded. Missing evidence from an older Provider remains unknown.

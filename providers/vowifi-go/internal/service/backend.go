@@ -54,6 +54,7 @@ type Backend struct {
 	code                           string
 	failedLayer                    string
 	failureID                      string
+	failedIKE                      *vowifiipc.IKEExchangeEvidence
 	sequence                       uint64
 	runtime                        Runtime
 	operations                     OperationStore
@@ -161,6 +162,11 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 			}
 		}
 		backend.failedLayer = failure.Layer
+		var stage *StageError
+		if errors.As(err, &stage) && stage.IKE != nil {
+			value := *stage.IKE
+			backend.failedIKE = &value
+		}
 		digest := sha256.Sum256([]byte(backend.lineID + "\x00" + backend.providerID + "\x00" + backend.generation + "\x00" + request.OperationID))
 		backend.failureID = hex.EncodeToString(digest[:])
 		backend.transitionLocked(vowifiipc.RuntimeFailed, failure.Code)
@@ -473,6 +479,7 @@ func (backend *Backend) transitionLocked(condition vowifiipc.RuntimeCondition, c
 	if condition != vowifiipc.RuntimeFailed {
 		backend.failedLayer = ""
 		backend.failureID = ""
+		backend.failedIKE = nil
 	}
 	backend.condition = condition
 	backend.code = code
@@ -495,7 +502,16 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 		}
 	}
 	runtimeStatus := vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code, FailureID: backend.failureID}
+	if backend.failedIKE != nil {
+		value := *backend.failedIKE
+		runtimeStatus.IKE = &value
+	}
 	if backend.runtime != nil && backend.condition == vowifiipc.RuntimeRunning {
+		if evidence, ok := backend.runtime.(interface {
+			IKEEvidence() *vowifiipc.IKEExchangeEvidence
+		}); ok {
+			runtimeStatus.IKE = evidence.IKEEvidence()
+		}
 		_, runtimeStatus.RegisterSupported = backend.runtime.(registrationRuntime)
 		if rekey, ok := backend.runtime.(interface {
 			RekeyStatus() *vowifiipc.ChildSARekeyStatus
@@ -569,6 +585,7 @@ type StageError struct {
 	Layer string
 	Code  string
 	Err   error
+	IKE   *vowifiipc.IKEExchangeEvidence
 }
 
 func (failure *StageError) Error() string { return failure.Layer + ": " + failure.Err.Error() }

@@ -250,8 +250,20 @@ async function saveGoDeviceProfile(id, profile) {
 }
 
 async function goLineFacts(id) {
-  const projection = await j('GET', `/v1/lines/${encodeURIComponent(id)}`)
+  const path = `/v1/lines/${encodeURIComponent(id)}`
+  const [projected, observed, recovered] = await Promise.allSettled([j('GET', path), j('GET', `${path}/vowifi/status`), j('GET', `${path}/recovery`)])
+  if (projected.status === 'rejected') throw projected.reason
+  if (observed.status === 'rejected' && [401,403].includes(observed.reason?.status)) throw observed.reason
+  if (recovered.status === 'rejected' && [401,403].includes(recovered.reason?.status)) throw recovered.reason
+  const projection = projected.value
+  const provider = observed.status === 'fulfilled' && String(observed.value.line_id) === String(id) ? observed.value : null
   return {
+    recovery: recovered.status === 'fulfilled' && String(recovered.value.line_id) === String(id) ? recovered.value : null,
+    recovery_error: recovered.status === 'rejected' ? recovered.reason?.code || 'exit_recovery_unavailable' : String(recovered.value.line_id) !== String(id) ? 'recovery_identity_mismatch' : '',
+    provider,
+    provider_error: provider ? '' : observed.status === 'rejected'
+      ? observed.reason?.code || observed.reason?.message || 'provider_status_unavailable' : 'provider_identity_mismatch',
+    generation: provider ? {engine_run_id:provider.process_generation} : undefined,
     facts: Object.fromEntries((projection.facts || []).map(fact =>
       [fact.layer, { ...fact, state: fact.condition }])),
     summary: {
@@ -474,6 +486,7 @@ Object.assign(api, {
   },
 	softRestartDevice: softRestartGoDevice,
   lineFacts: goLineFacts,
+  retryExitRecovery: (id, revision, failureID) => j('POST', `/v1/lines/${encodeURIComponent(id)}/recovery`, {expected_revision:revision,failure_id:failureID}, {}, 90000),
   verifyLinePassive: goLineFacts,
   agentHealth: async () => {
     const payload = await j('GET', '/v1/agents')

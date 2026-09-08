@@ -21,6 +21,7 @@ const (
 	EventIncomingCall       = "incoming_call"
 	EventHostAlert          = "host_alert"
 	EventActivationReminder = "activation_reminder"
+	EventLineUnrecoverable  = "line_unrecoverable"
 	EventTest               = "test"
 
 	ChannelWebhook  = "webhook"
@@ -41,6 +42,7 @@ const (
 var hexSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type Subscriptions struct {
+	LineUnrecoverable  bool `json:"line_unrecoverable"`
 	IncomingSMS        bool `json:"incoming_sms"`
 	IncomingCall       bool `json:"incoming_call"`
 	HostAlert          bool `json:"host_alert"`
@@ -61,6 +63,8 @@ func (subscriptions Subscriptions) Enabled(event string) bool {
 		return subscriptions.HostAlert
 	case EventActivationReminder:
 		return subscriptions.ActivationReminder
+	case EventLineUnrecoverable:
+		return subscriptions.LineUnrecoverable
 	default:
 		return false
 	}
@@ -304,7 +308,7 @@ func (alert HostAlertInput) Validate() error {
 func (event Event) Validate() error {
 	if event.SchemaVersion != SchemaVersion || !identifier(event.EventID, 200) || !identifier(event.SourceID, 256) ||
 		!oneOf(event.Kind, KindEvent, KindTest) || !oneOf(event.Type, EventIncomingSMS, EventIncomingCall,
-		EventHostAlert, EventActivationReminder, EventTest) || event.OccurredAt.IsZero() || event.IntakeRevision == 0 ||
+		EventHostAlert, EventActivationReminder, EventLineUnrecoverable, EventTest) || event.OccurredAt.IsZero() || event.IntakeRevision == 0 ||
 		len(event.Targets) > 3 || len(event.LineName) > 256 || len(event.MSISDN) > 128 ||
 		len(event.Title) > 1024 || len(event.Text) > 32<<10 || len(event.Peer) > 512 {
 		return errors.New("invalid notification event")
@@ -325,6 +329,10 @@ func (event Event) Validate() error {
 	case EventHostAlert:
 		if event.Kind != KindEvent || event.Reminder != nil {
 			return errors.New("invalid host notification event")
+		}
+	case EventLineUnrecoverable:
+		if event.Kind != KindEvent || !identifier(event.LineID, 128) || (!event.PayloadCleared && !cardID(event.CardID)) || event.Reminder != nil {
+			return errors.New("invalid recovery notification event")
 		}
 	case EventActivationReminder:
 		if event.Kind != KindEvent {
@@ -397,7 +405,7 @@ func (delivery Delivery) Terminal() bool {
 }
 
 func validEventType(value string) bool {
-	return oneOf(value, EventIncomingSMS, EventIncomingCall, EventHostAlert, EventActivationReminder)
+	return oneOf(value, EventIncomingSMS, EventIncomingCall, EventHostAlert, EventActivationReminder, EventLineUnrecoverable)
 }
 
 func identifier(value string, maximum int) bool {

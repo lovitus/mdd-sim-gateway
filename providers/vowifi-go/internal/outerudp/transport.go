@@ -59,6 +59,7 @@ type Transport struct {
 	pending  net.Conn
 	closed   bool
 	failure  error
+	ikeStats IKEExchangeStats
 	done     chan struct{}
 
 	exchange chan struct{}
@@ -159,13 +160,18 @@ func (transport *Transport) ExchangeIKE(ctx context.Context, request []byte) ([]
 	if err := transport.write(ctx, wire); err != nil {
 		return nil, err
 	}
+	transport.recordIKERequest()
 	select {
 	case response := <-transport.ike:
+		transport.recordIKEResult(nil)
 		return response, nil
 	case <-ctx.Done():
+		transport.recordIKEResult(ctx.Err())
 		return nil, ctx.Err()
 	case <-transport.done:
-		return nil, transport.err()
+		err := transport.err()
+		transport.recordIKEResult(err)
+		return nil, err
 	}
 }
 
@@ -436,10 +442,12 @@ func (transport *Transport) exchangeCandidate(ctx context.Context, remote string
 	} else if written != len(wire) {
 		return nil, io.ErrShortWrite
 	}
+	transport.recordIKERequest()
 	buffer := make([]byte, maximumDatagramSize)
 	for {
 		n, err := connection.Read(buffer)
 		if err != nil {
+			transport.recordIKEResult(err)
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
@@ -452,6 +460,7 @@ func (transport *Transport) exchangeCandidate(ctx context.Context, remote string
 		if hasNonESPMarker(packet) {
 			packet = packet[4:]
 		}
+		transport.recordIKEResult(nil)
 		if err := connection.SetDeadline(time.Time{}); err != nil {
 			return nil, err
 		}

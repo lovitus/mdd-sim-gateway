@@ -8,6 +8,9 @@ import (
 	"errors"
 	"slices"
 	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
 const (
@@ -37,19 +40,50 @@ const (
 )
 
 type ExitLedger struct {
-	LastFailureID    string   `json:"last_failure_id,omitempty"`
-	Node             string   `json:"node"`
-	Strikes          int      `json:"strikes"`
-	Tried            []string `json:"tried"`
-	Failures         int      `json:"failures"`
-	GivenUp          bool     `json:"given_up"`
-	Exhausted        bool     `json:"exhausted"`
-	HeldForPeer      bool     `json:"held_for_peer"`
-	Reported         bool     `json:"reported"`
-	CampaignEpoch    string   `json:"campaign_epoch"`
-	SampleGeneration string   `json:"sample_generation"`
-	StableCardKey    string   `json:"stable_card_key"`
-	LineConfigEpoch  string   `json:"line_config_epoch"`
+	LastManualRetryID string         `json:"last_manual_retry_id,omitempty"`
+	Notice            *ExitNotice    `json:"-"`
+	RetryAfter        time.Time      `json:"retry_after,omitempty"`
+	Selection         *ExitSelection `json:"selection,omitempty"`
+	LastSequence      uint64         `json:"last_sequence,omitempty"`
+	LastDecision      ExitAction     `json:"last_decision,omitempty"`
+	LastFailureID     string         `json:"last_failure_id,omitempty"`
+	Node              string         `json:"node"`
+	Strikes           int            `json:"strikes"`
+	Tried             []string       `json:"tried"`
+	Failures          int            `json:"failures"`
+	GivenUp           bool           `json:"given_up"`
+	Exhausted         bool           `json:"exhausted"`
+	HeldForPeer       bool           `json:"held_for_peer"`
+	Reported          bool           `json:"reported"`
+	CampaignEpoch     string         `json:"campaign_epoch"`
+	SampleGeneration  string         `json:"sample_generation"`
+	StableCardKey     string         `json:"stable_card_key"`
+	LineConfigEpoch   string         `json:"line_config_epoch"`
+}
+
+// ExitNotice is published atomically with the decision by the existing event
+// store. It is an outbox value, not part of the persisted policy ledger.
+type ExitNotice struct {
+	ID         string    `json:"id"`
+	LineID     string    `json:"line_id"`
+	LineName   string    `json:"line_name"`
+	CardID     string    `json:"card_id"`
+	MSISDN     string    `json:"msisdn,omitempty"`
+	Text       string    `json:"text"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
+type ExitSelection struct {
+	AttentionRecorded bool                         `json:"attention_recorded,omitempty"`
+	Request           egressconfig.RecoveryRequest `json:"request"`
+	State             string                       `json:"state"`
+	Attempts          int                          `json:"attempts"`
+	NextAttempt       time.Time                    `json:"next_attempt,omitempty"`
+	Code              string                       `json:"code,omitempty"`
+}
+
+func (selection *ExitSelection) Pending() bool {
+	return selection != nil && (selection.State == "pending" || selection.State == "unknown")
 }
 
 type ExitCampaign struct {
@@ -63,7 +97,7 @@ func BeginExitCampaign(current ExitLedger, campaign ExitCampaign) (ExitLedger, e
 	}
 	same := current.CampaignEpoch == campaign.Epoch && current.StableCardKey == campaign.StableCardKey && current.LineConfigEpoch == campaign.LineConfigEpoch
 	if !same {
-		current = ExitLedger{}
+		current = ExitLedger{LastManualRetryID: current.LastManualRetryID}
 	} else if current.SampleGeneration != "" && current.SampleGeneration != campaign.SampleGeneration && !campaign.ControlledRebuild {
 		return current, nil
 	}
@@ -92,6 +126,25 @@ func ClassifyExit(tunnelConnected *bool, retransmits *int, stableFor, stableThre
 		return ExitUnclear
 	}
 	return BlamesElsewhere
+}
+
+// Adapt the old disconnected-SWu rule to MDD's actual single-send transport.
+// Only a completed failed bootstrap whose every sent request timed out is an
+// exit-path candidate. This never treats candidate attempts as retransmits,
+// and does not blame a path for authentication, dial or local cleanup errors.
+func ClassifyProviderFailure(snapshot vowifiipc.Snapshot, stableFor, stableThreshold time.Duration) ExitVerdict {
+	if snapshot.Validate() != nil || snapshot.Runtime.Condition != vowifiipc.RuntimeFailed || snapshot.Runtime.FailureID == "" {
+		return ExitUnclear
+	}
+	ike := snapshot.Runtime.IKE
+	if ike == nil || ike.RequestsSent == 0 || ike.ResponseDatagrams != 0 || ike.ResponseTimeouts != ike.RequestsSent ||
+		snapshot.Runtime.Code != "swu_open_failed" || snapshot.Tunnel.Condition != vowifiipc.LayerBlocked || snapshot.Tunnel.Code != "swu_open_failed" {
+		return ExitUnclear
+	}
+	if stableThreshold > 0 && stableFor >= stableThreshold {
+		return BlamesElsewhere
+	}
+	return BlamesExit
 }
 
 type ExitFailure struct {

@@ -78,6 +78,7 @@ type EventStore interface {
 }
 
 type Config struct {
+	ExitRecovery  *ExitRecoveryConfig
 	Context       context.Context
 	Catalog       Catalog
 	Agents        AgentFacts
@@ -94,11 +95,13 @@ type Config struct {
 }
 
 type Reconciler struct {
-	catalog Catalog
-	agents  AgentFacts
-	runtime RuntimeControl
-	store   EventStore
-	replay  *events.Replay
+	selectionMu  sync.Mutex
+	exitRecovery *ExitRecoveryConfig
+	catalog      Catalog
+	agents       AgentFacts
+	runtime      RuntimeControl
+	store        EventStore
+	replay       *events.Replay
 
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -137,6 +140,7 @@ type lineState struct {
 	recoveryNext     time.Time
 	recoveryEpisode  uint64
 	healthySince     time.Time
+	healthyFence     mediaauth.ProviderFence
 }
 
 type lineObservation struct {
@@ -198,6 +202,9 @@ type agentMatch struct {
 }
 
 func New(config Config) (*Reconciler, error) {
+	if config.ExitRecovery != nil && !config.ExitRecovery.valid() {
+		return nil, errors.New("invalid exit recovery evidence configuration")
+	}
 	if config.Context == nil || config.Catalog == nil || config.Agents == nil || config.Runtime == nil ||
 		config.Store == nil || config.Replay == nil {
 		return nil, errors.New("invalid runtime reconciler dependencies")
@@ -233,7 +240,8 @@ func New(config Config) (*Reconciler, error) {
 	}
 	ctx, cancel := context.WithCancel(config.Context)
 	return &Reconciler{
-		catalog: config.Catalog, agents: config.Agents, runtime: config.Runtime,
+		exitRecovery: config.ExitRecovery,
+		catalog:      config.Catalog, agents: config.Agents, runtime: config.Runtime,
 		store: config.Store, replay: config.Replay, ctx: ctx, cancel: cancel,
 		interval: config.Interval, actionTimeout: config.ActionTimeout,
 		baseBackoff: config.BaseBackoff, maxBackoff: config.MaxBackoff,
@@ -285,6 +293,11 @@ func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, 
 			return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "intent"}
 		}
 		return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "runtime_intent_persist_failed", Layer: "intent"}
+	}
+	if enabled && lineEnabled {
+		if err := reconciler.resetExitPolicyForManualRetry(lineID, operationID); err != nil {
+			return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "exit_recovery_unresolved", Layer: "recovery"}
+		}
 	}
 	reconciler.Wake()
 	if enabled && !lineEnabled {
@@ -427,6 +440,12 @@ func (reconciler *Reconciler) run() {
 func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 	catalog, err := reconciler.catalog.Snapshot()
 	if err != nil {
+		reconciler.mu.Lock()
+		for _, line := range reconciler.lines {
+			line.healthySince = time.Time{}
+			line.healthyFence = mediaauth.ProviderFence{}
+		}
+		reconciler.mu.Unlock()
 		return fmt.Errorf("read line catalog: %w", err)
 	}
 	agents := reconciler.agents.Statuses()
@@ -459,6 +478,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 
 		intent, found, _, intentEpoch, intentErr := reconciler.readIntent(line.ID)
 		if intentErr != nil {
+			reconciler.breakHealthyWindow(line.ID)
 			failures = append(failures, fmt.Errorf("line %s runtime intent: %w", line.ID, intentErr))
 			continue
 		}
@@ -489,10 +509,15 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 		// Adoption is deliberately side-effect free. A later observation may
 		// converge the persisted intent after the current state is visible.
 		if adopted || statusErr != nil {
+			reconciler.breakHealthyWindow(line.ID)
 			continue
+		}
+		if err := reconciler.observeExitRecovery(ctx, catalog, line, observation); err != nil {
+			failures = append(failures, fmt.Errorf("line %s exit recovery evidence: %w", line.ID, err))
 		}
 		reconciler.plan(line, observation)
 	}
+	reconciler.scheduleExitSelection(catalog)
 	return errors.Join(failures...)
 }
 
@@ -572,6 +597,14 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		observation.cardMatches == 1 && observation.providerReady
 	targetPreparing := line.Enabled && observation.intentFound && observation.intentEnabled &&
 		observation.preparation != nil && observation.providerReady
+	if targetRunning && (observation.status.Maintenance.Draining || reconciler.exitPolicyPaused(line, observation)) {
+		return
+	}
+	if !targetRunning || observation.status.Runtime.Condition != vowifiipc.RuntimeRunning ||
+		observation.status.Tunnel.Condition != vowifiipc.LayerReady || !observation.status.Tunnel.Available ||
+		observation.status.IMS.Condition != vowifiipc.LayerReady || !observation.status.IMS.Available {
+		reconciler.breakHealthyWindow(line.ID)
+	}
 	switch {
 	case !targetRunning && (observation.status.Runtime.Condition == vowifiipc.RuntimeRunning ||
 		observation.status.Runtime.Condition == vowifiipc.RuntimeFailed):
@@ -584,7 +617,7 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		reconciler.clearRecovery(line.ID)
 		reconciler.reset(line.ID)
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeFailed:
-		if observation.status.ActiveCall == nil {
+		if observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
 			reconciler.beginRecovery(line, observation)
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
@@ -593,11 +626,11 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning &&
 		observation.status.Tunnel.Condition == vowifiipc.LayerDegraded:
-		if observation.status.ActiveCall == nil {
+		if observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
 			reconciler.beginRecovery(line, observation)
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning:
-		reconciler.observeHealthy(line.ID)
+		reconciler.observeHealthy(line.ID, observation)
 		reconciler.reset(line.ID)
 	}
 }
@@ -656,7 +689,16 @@ func (reconciler *Reconciler) isRecovering(lineID string) bool {
 	return line != nil && line.recovering
 }
 
-func (reconciler *Reconciler) observeHealthy(lineID string) {
+func (reconciler *Reconciler) breakHealthyWindow(lineID string) {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	if line := reconciler.lines[lineID]; line != nil {
+		line.healthySince = time.Time{}
+		line.healthyFence = mediaauth.ProviderFence{}
+	}
+}
+
+func (reconciler *Reconciler) observeHealthy(lineID string, observation lineObservation) {
 	now := reconciler.now().UTC()
 	reconciler.mu.Lock()
 	defer reconciler.mu.Unlock()
@@ -665,8 +707,17 @@ func (reconciler *Reconciler) observeHealthy(lineID string) {
 	// was fenced out or became unnecessary. Keep its backoff history until the
 	// existing stable window proves the recovery durable.
 	line.recovering = false
-	if line.healthySince.IsZero() {
+	// Ported from ec620942 main.py:apply_health's state == OK guard.
+	// A live process with an unregistered IMS is not a healthy stretch.
+	if observation.status.Tunnel.Condition != vowifiipc.LayerReady || !observation.status.Tunnel.Available ||
+		observation.status.IMS.Condition != vowifiipc.LayerReady || !observation.status.IMS.Available {
+		line.healthySince = time.Time{}
+		line.healthyFence = mediaauth.ProviderFence{}
+		return
+	}
+	if line.healthySince.IsZero() || line.healthyFence != observation.fence {
 		line.healthySince = now
+		line.healthyFence = observation.fence
 	}
 	if !now.Before(line.healthySince.Add(recoveryStableWindow)) {
 		line.recoveryFailures = 0
@@ -681,6 +732,7 @@ func (reconciler *Reconciler) clearRecovery(lineID string) {
 	line.recoveryFailures = 0
 	line.recoveryNext = time.Time{}
 	line.healthySince = time.Time{}
+	line.healthyFence = mediaauth.ProviderFence{}
 	reconciler.mu.Unlock()
 }
 
@@ -870,7 +922,7 @@ func (reconciler *Reconciler) validatePlan(ctx context.Context, plan actionPlan)
 		}
 		return nil
 	}
-	if status.ActiveCall != nil {
+	if status.ActiveCall != nil || status.PendingIncomingCall != nil {
 		return errActionPlanChanged
 	}
 	failed := status.Runtime.Condition == vowifiipc.RuntimeFailed

@@ -71,6 +71,14 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 		result.Config = append(payload, '\n')
 		return result, err
 	}
+	for country, selection := range document.RecoverySelections {
+		exit, exists := document.Proxy.Exits[country]
+		if selection.Validate() != nil || country != selection.Country || !exists || !exit.Enabled || exit.Mode == "direct" ||
+			document.Proxy.Profiles[exit.ProfileID].Type != "subscription" || (exit.PinnedNode != "" && exit.PinMode != "prefer") ||
+			selection.ConfigRevision != document.EgressConfigRevision || selection.CatalogRevision != document.CatalogRevision {
+			return result, errors.New("exit recovery selection does not match desired policy")
+		}
+	}
 
 	var inbounds, outbounds, rules []map[string]any
 	allReady := true
@@ -87,7 +95,12 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 			if profile.Type == "existing" {
 				built, status.Node, err = renderExisting(document.Proxy.ExistingSingboxConfig, profile.OutboundTag, "exit-"+country, document.ExistingConfigSHA256)
 			} else if profile.Type == "subscription" {
-				built, status.Candidates, status.Node, err = subscriptionPool(feeds[exit.ProfileID], exit.Keywords, "exit-"+country, exit.PinnedNode, exit.PinMode, running[country])
+				pinned, pinMode := exit.PinnedNode, exit.PinMode
+				if selection, ok := document.RecoverySelections[country]; ok {
+					// Exact runtime choice, not a rewrite of the user's pin policy.
+					pinned, pinMode = selection.ToNode, "lock"
+				}
+				built, status.Candidates, status.Node, err = subscriptionPool(feeds[exit.ProfileID], exit.Keywords, "exit-"+country, pinned, pinMode, running[country])
 				status.CandidateCount = len(status.Candidates)
 			} else {
 				built, status.Node, err = renderProfile(profile, mode, "exit-"+country)

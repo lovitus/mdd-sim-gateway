@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,45 @@ func newFakeBackend() *fakeBackend {
 		Tunnel:  LayerStatus{Condition: LayerStopped}, IMS: LayerStatus{Condition: LayerStopped},
 		Voice: LayerStatus{Condition: LayerStopped}, Messaging: LayerStatus{Condition: LayerStopped},
 	}}
+}
+
+func TestSnapshotIKEEvidencePreservesUnknownAndRejectsImpossibleCounters(t *testing.T) {
+	snapshot := newFakeBackend().snapshot
+	snapshot.Runtime.Condition = RuntimeFailed
+	if snapshot.Runtime.IKE != nil || snapshot.Validate() != nil {
+		t.Fatal("old Provider must keep IKE evidence unknown")
+	}
+	snapshot.Runtime.IKE = &IKEExchangeEvidence{RequestsSent: 3, ResponseDatagrams: 2, ResponseTimeouts: 1}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var copy Snapshot
+	if err := json.Unmarshal(wire, &copy); err != nil {
+		t.Fatal(err)
+	}
+	if copy.Runtime.IKE == nil || *copy.Runtime.IKE != *snapshot.Runtime.IKE {
+		t.Fatal("wire roundtrip lost IKE counters")
+	}
+	snapshot.Runtime.IKE.ResponseTimeouts = 2
+	if snapshot.Validate() == nil {
+		t.Fatal("more outcomes than sent requests were accepted")
+	}
+	snapshot.Runtime.IKE = &IKEExchangeEvidence{ResponseDatagrams: 1}
+	if snapshot.Validate() == nil {
+		t.Fatal("response without request was accepted")
+	}
+	snapshot.Runtime.IKE = &IKEExchangeEvidence{}
+	if snapshot.Validate() != nil {
+		t.Fatal("known zero transport activity was rejected")
+	}
+	snapshot.Runtime.Condition = RuntimeStopped
+	if snapshot.Validate() == nil {
+		t.Fatal("stopped runtime retained exchange evidence")
+	}
 }
 
 func TestSnapshotFailureIdentityIsOptionalAndFailedOnly(t *testing.T) {

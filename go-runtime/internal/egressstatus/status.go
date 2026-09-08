@@ -29,8 +29,9 @@ type Exit struct {
 }
 
 type Snapshot struct {
-	Error string          `json:"error,omitempty"`
-	Exits map[string]Exit `json:"exits"`
+	DesiredGeneration string          `json:"desired_generation,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	Exits             map[string]Exit `json:"exits"`
 }
 
 func Load(path string) (Snapshot, error) {

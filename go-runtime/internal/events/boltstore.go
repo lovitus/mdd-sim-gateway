@@ -322,6 +322,16 @@ func (purger *LinePurger) PurgeLine(lineID string) error {
 		return errors.New("invalid event purge line identity")
 	}
 	err := purger.store.db.Update(func(tx *bolt.Tx) error {
+		recovery, err := readExitRecovery(tx, lineID)
+		if err != nil && !errors.Is(err, ErrExitRecoveryDeleted) {
+			return err
+		}
+		if recovery.Ledger.Selection.Pending() {
+			return ErrExitRecoveryPending
+		}
+		if err := purgeExitNotices(tx, lineID); err != nil {
+			return err
+		}
 		if err := tx.Bucket(bucketPurgedLines).Put([]byte(lineID), []byte{1}); err != nil {
 			return err
 		}

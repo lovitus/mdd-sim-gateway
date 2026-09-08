@@ -36,13 +36,18 @@ type Snapshot struct {
 }
 
 type LineStatus struct {
-	LineID            string                      `json:"line_id"`
-	Code              string                      `json:"code"`
-	ProviderPresent   bool                        `json:"provider_present"`
-	ProcessGeneration string                      `json:"process_generation,omitempty"`
-	Runtime           vowifiipc.RuntimeStatus     `json:"runtime"`
-	Maintenance       vowifiipc.MaintenanceStatus `json:"maintenance"`
-	ActiveCall        *vowifiipc.ActiveCall       `json:"active_call,omitempty"`
+	RuntimeIntentKnown   bool                           `json:"runtime_intent_known"`
+	RuntimeIntentEnabled bool                           `json:"runtime_intent_enabled"`
+	Tunnel               *vowifiipc.LayerStatus         `json:"tunnel,omitempty"`
+	IMS                  *vowifiipc.LayerStatus         `json:"ims,omitempty"`
+	PendingIncomingCall  *vowifiipc.PendingIncomingCall `json:"pending_incoming_call,omitempty"`
+	LineID               string                         `json:"line_id"`
+	Code                 string                         `json:"code"`
+	ProviderPresent      bool                           `json:"provider_present"`
+	ProcessGeneration    string                         `json:"process_generation,omitempty"`
+	Runtime              vowifiipc.RuntimeStatus        `json:"runtime"`
+	Maintenance          vowifiipc.MaintenanceStatus    `json:"maintenance"`
+	ActiveCall           *vowifiipc.ActiveCall          `json:"active_call,omitempty"`
 }
 
 type Handler struct {
@@ -123,6 +128,10 @@ func (handler *Handler) Snapshot(parent context.Context) (Snapshot, error) {
 
 func (handler *Handler) lineStatus(ctx context.Context, lineID string) LineStatus {
 	result := LineStatus{LineID: lineID, Code: "provider_absent"}
+	intent, found, _, intentErr := handler.catalog.RuntimeIntent(lineID)
+	if intentErr == nil {
+		result.RuntimeIntentKnown, result.RuntimeIntentEnabled = found, intent
+	}
 	provider, found := handler.providers.CurrentProvider(lineID)
 	if !found {
 		return result
@@ -149,6 +158,8 @@ func (handler *Handler) lineStatus(ctx context.Context, lineID string) LineStatu
 	result.Code = "provider_reachable"
 	result.ProcessGeneration = status.ProcessGeneration
 	result.Runtime = status.Runtime
+	result.Tunnel, result.IMS = &status.Tunnel, &status.IMS
+	result.PendingIncomingCall = status.PendingIncomingCall
 	result.Maintenance = status.Maintenance
 	result.ActiveCall = status.ActiveCall
 	return result

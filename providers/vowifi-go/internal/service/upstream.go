@@ -147,7 +147,7 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	return &UpstreamFactory{config: config}, nil
 }
 
-func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
+func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runtime, startErr error) {
 	if factory == nil {
 		return nil, errors.New("nil upstream VoWiFi factory")
 	}
@@ -172,6 +172,12 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	if err != nil {
 		return nil, &StageError{Layer: "tunnel", Code: "outer_transport_invalid", Err: err}
 	}
+	defer func() {
+		var stage *StageError
+		if errors.As(startErr, &stage) {
+			stage.IKE = outerIKEEvidence(outer)
+		}
+	}()
 	configuration, selectors := swuPDNConfiguration(effectiveFamily)
 	responderID := responderIdentity(config.IMSAPN, config.IDRMode, config.Profile.MCC, config.Profile.MNC)
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
@@ -317,6 +323,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		}
 	}
 	runtime := &upstreamRuntime{
+		outer:         outer,
 		packetSession: packetSession,
 		stack:         stack, registration: registration, closeTimeout: config.CloseTimeout,
 		deviceID: config.DeviceID, imsi: prepared.Profile.IMSI, localIP: localIP.String(),
@@ -613,6 +620,7 @@ func closeBounded(timeout time.Duration, close func(context.Context) error) erro
 }
 
 type upstreamRuntime struct {
+	outer                *outerudp.Transport
 	packetSession        *provider.Session
 	stack                *usernet.Stack
 	registration         runtimehost.IMSRegistrationResult
@@ -631,6 +639,19 @@ type upstreamRuntime struct {
 
 	faultMu sync.Mutex
 	fault   error
+}
+
+func outerIKEEvidence(transport *outerudp.Transport) *vowifiipc.IKEExchangeEvidence {
+	if transport == nil {
+		return nil
+	}
+	stats := transport.IKEStats()
+	return &vowifiipc.IKEExchangeEvidence{RequestsSent: stats.RequestsSent,
+		ResponseDatagrams: stats.ResponseDatagrams, ResponseTimeouts: stats.ResponseTimeouts}
+}
+
+func (runtime *upstreamRuntime) IKEEvidence() *vowifiipc.IKEExchangeEvidence {
+	return outerIKEEvidence(runtime.outer)
 }
 
 func (runtime *upstreamRuntime) NetworkSelection() (string, string) {

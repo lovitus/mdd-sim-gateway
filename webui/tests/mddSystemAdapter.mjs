@@ -139,5 +139,26 @@ try {
   assert.equal(allowanceWrites.length,3)
   globalThis.fetch = async () => new Response(JSON.stringify({code:'allowance_revision_changed'}),{status:412})
   await assert.rejects(go.saveAllowance('line-a',{revision:7,balance:'10'}),error=>error.status===412 && error.code==='allowance_revision_changed')
+  const provider={line_id:'line-a',process_generation:'process-a',runtime:{condition:'failed',ike:{requests_sent:2,response_datagrams:1,response_timeouts:1}}}
+  const reads=[]
+  globalThis.fetch=async url=>{
+    reads.push(url)
+    return new Response(JSON.stringify(url.endsWith('/vowifi/status') ? provider : url.endsWith('/recovery') ? {line_id:'line-a',revision:1,failures:0} : {facts:[],operations:{}}),{status:200})
+  }
+  const facts=await go.lineFacts('line-a')
+  assert.deepEqual(reads,['/v1/lines/line-a','/v1/lines/line-a/vowifi/status','/v1/lines/line-a/recovery'])
+  assert.equal(facts.recovery.failures,0)
+  assert.equal(facts.provider.runtime.ike.response_timeouts,1)
+  assert.equal(facts.generation.engine_run_id,'process-a')
+  assert.equal(facts.summary.state,'unknown')
+  provider.line_id='other-line'
+  const wrong=await go.lineFacts('line-a')
+  assert.equal(wrong.provider,null)
+  assert.equal(wrong.provider_error,'provider_identity_mismatch')
+  globalThis.fetch=async url=>new Response(JSON.stringify(url.endsWith('/vowifi/status') ? {code:'provider_unavailable'} : {facts:[],operations:{}}),{status:url.endsWith('/vowifi/status')?412:200})
+  const absent=await go.lineFacts('line-a')
+  assert.equal(absent.provider,null)
+  assert.equal(absent.provider_error,'provider_unavailable')
+  assert.equal(absent.generation,undefined)
 } finally {globalThis.fetch=originalFetch}
 console.log('Customized MDD maintenance lease, allowance revision and registration identity adapter contracts passed')
