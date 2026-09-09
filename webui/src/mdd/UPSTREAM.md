@@ -335,6 +335,12 @@ that typed evidence. Per-resolver connection progress now survives until the
 deadline: only attempts with no established connection can blame the proxy.
 Caller cancellation/deadlines and established DNS connections remain excluded.
 
+Recovery preflight and lease resumption use the full authenticated Core preflight
+path. A pending selection can be retired, without deleting its history, after a
+newer user configuration is both published and runtime-confirmed and fresh,
+identity-matched Provider observations show no remaining maintenance hold.
+Saving a configuration alone never clears an uncertain selection.
+
 The old failover policy and main.py health gates feed generation-fenced durable
 decisions in the existing events database. IKE transport counters are separate
 from the old retransmit input. Only complete unanswered bootstrap evidence is

@@ -70,7 +70,7 @@ func (service *providerApplyService) recoveryDocument(config egressconfig.Snapsh
 }
 
 func (service *providerApplyService) validateRecoveryPeers(ctx context.Context, address string, catalog linecatalog.Snapshot, lease string, request egressconfig.RecoveryRequest) error {
-	snapshot, err := providerapply.Fetch(ctx, address, service.settings.Local.Token, nil)
+	snapshot, err := providerapply.Fetch(ctx, address+providerapply.Path, service.settings.Local.Token, nil)
 	if err != nil || snapshot.CatalogRevision != catalog.Revision {
 		return egressFailure(http.StatusConflict, "egress_recovery_preflight_unavailable", err)
 	}
@@ -108,7 +108,7 @@ func (service *providerApplyService) validateRecoveryPeers(ctx context.Context, 
 }
 
 func (service *providerApplyService) resumeRecoveryLease(ctx context.Context, address string, request egressconfig.RecoveryRequest) error {
-	snapshot, err := providerapply.Fetch(ctx, address, service.settings.Local.Token, nil)
+	snapshot, err := providerapply.Fetch(ctx, address+providerapply.Path, service.settings.Local.Token, nil)
 	if err != nil || snapshot.CatalogRevision != request.CatalogRevision {
 		return egressFailure(http.StatusConflict, "egress_recovery_resume_unconfirmed", err)
 	}

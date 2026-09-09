@@ -3,7 +3,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +17,35 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 )
+
+func TestRecoveryPreflightAndResumeUseFullAuthenticatedPath(t *testing.T) {
+	token := strings.Repeat("t", 32)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != providerapply.Path || r.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("unexpected preflight request path=%s", r.URL.Path)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		json.NewEncoder(w).Encode(providerapply.Snapshot{SchemaVersion: 1, CatalogRevision: 7, Lines: []providerapply.LineStatus{}})
+	}))
+	defer server.Close()
+	service := &providerApplyService{}
+	service.settings.Local.Token = token
+	request := egressconfig.RecoveryRequest{CatalogRevision: 7, Country: "gb", FailureID: strings.Repeat("a", 64)}
+	if err := service.validateRecoveryPeers(context.Background(), server.URL, linecatalog.Snapshot{Revision: 7}, "lease", request); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.resumeRecoveryLease(context.Background(), server.URL, request); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
 
 func TestRecoveryDocumentIsFencedAndReplayDoesNotReselect(t *testing.T) {
 	root := t.TempDir()

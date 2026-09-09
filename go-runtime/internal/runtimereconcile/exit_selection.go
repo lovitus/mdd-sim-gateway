@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
@@ -32,6 +34,9 @@ func (reconciler *Reconciler) scheduleExitSelection(catalog linecatalog.Snapshot
 			continue
 		}
 		selection := current.Ledger.Selection
+		if retired, err := reconciler.retireSupersededSelection(line.ID, current); retired || err != nil {
+			continue
+		}
 		if !selection.Pending() || selection.Attempts >= 5 || reconciler.now().Before(selection.NextAttempt) {
 			continue
 		}
@@ -61,6 +66,9 @@ func (reconciler *Reconciler) runExitSelection(lineID string, manual bool) error
 	config := reconciler.exitRecovery
 	current, err := config.Store.ExitRecovery(lineID)
 	if err != nil {
+		return err
+	}
+	if retired, err := reconciler.retireSupersededSelection(lineID, current); retired || err != nil {
 		return err
 	}
 	selection := current.Ledger.Selection
@@ -121,6 +129,56 @@ func (reconciler *Reconciler) runExitSelection(lineID string, manual bool) error
 	}
 	_, err = config.Store.PutExitRecoveryExpected(lineID, claimed.Ledger, claimed.Revision)
 	return err
+}
+
+// A confirmed newer user configuration supersedes the old recovery request,
+// but saving alone or a surviving maintenance lease does not release it.
+func (reconciler *Reconciler) retireSupersededSelection(lineID string, current events.ExitRecoverySnapshot) (bool, error) {
+	selection := current.Ledger.Selection
+	if !selection.Pending() {
+		return false, nil
+	}
+	config := reconciler.exitRecovery
+	snapshot, err := config.Config.Snapshot()
+	if err != nil || snapshot.Revision <= selection.Request.ConfigRevision {
+		return false, err
+	}
+	catalog, err := reconciler.catalog.Snapshot()
+	if err != nil {
+		return false, err
+	}
+	desired, err := egressdesired.Read(config.DesiredPath)
+	if err != nil || desired.EgressConfigRevision != snapshot.Revision || desired.CatalogRevision != catalog.Revision {
+		return false, nil
+	}
+	if prior, found := desired.RecoverySelections[selection.Request.Country]; found && prior.FailureID == selection.Request.FailureID {
+		return false, nil
+	}
+	actual, err := egressstatus.Load(config.StatusPath)
+	if err != nil || actual.DesiredGeneration != desired.Generation || !actual.Exits[selection.Request.Country].Ready {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(reconciler.ctx, 5*time.Second)
+	defer cancel()
+	for _, line := range catalog.Lines {
+		if !line.Enabled || line.Network.EgressCountry != selection.Request.Country {
+			continue
+		}
+		status, fence, err := reconciler.runtime.Observe(ctx, line.ID)
+		if err != nil || status.Validate() != nil || status.LineID != line.ID || status.Maintenance.Draining ||
+			fence.CardID != line.CardID || status.ProviderID != fence.ProviderID || status.ProcessGeneration != fence.Generation ||
+			reconciler.now().Sub(status.ObservedAt) > agentTopologyTTL || status.ObservedAt.After(reconciler.now().Add(5*time.Second)) {
+			return false, nil
+		}
+	}
+	copy := *selection
+	copy.State, copy.Code, copy.NextAttempt = "canceled", "configuration_superseded", time.Time{}
+	current.Ledger.Selection = &copy
+	_, err = config.Store.PutExitRecoveryExpected(lineID, current.Ledger, current.Revision)
+	if err == nil {
+		reconciler.Wake()
+	}
+	return err == nil, err
 }
 
 func recoveryRejectedBeforePublication(code string) bool {

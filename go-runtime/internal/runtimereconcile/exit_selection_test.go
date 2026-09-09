@@ -9,10 +9,98 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
+
+type fixedRecoveryConfig struct{ value egressconfig.Snapshot }
+
+func (config fixedRecoveryConfig) Snapshot() (egressconfig.Snapshot, error) { return config.value, nil }
+
+func TestNewAppliedConfigurationRetiresExhaustedSelection(t *testing.T) {
+	for _, scenario := range []string{"saved_only", "runtime_unconfirmed", "lease_held", "stale", "wrong_generation", "confirmed"} {
+		t.Run(scenario, func(t *testing.T) {
+			r, line := pendingSelectionFixture(t, selectionApplyFunc(func(context.Context, egressconfig.RecoveryRequest) (egressconfig.ApplyResult, error) {
+				t.Fatal("old request was replayed")
+				return egressconfig.ApplyResult{}, nil
+			}))
+			runtime := r.runtime.(*fakeRuntime)
+			stopped := vowifiipc.LayerStatus{Condition: vowifiipc.LayerStopped, Code: "stopped"}
+			runtime.status = vowifiipc.Snapshot{SchemaVersion: vowifiipc.SchemaVersion, LineID: line.ID,
+				ProviderID: runtime.fence.ProviderID, ProcessGeneration: runtime.fence.Generation, Sequence: 1, ObservedAt: r.now(),
+				Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeStopped, Code: "stopped"},
+				Tunnel:  stopped, IMS: stopped, Voice: stopped, Messaging: stopped}
+			if err := runtime.status.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			current, err := r.exitRecovery.Store.ExitRecovery(line.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current.Ledger.Selection.Attempts = 5
+			current, err = r.exitRecovery.Store.PutExitRecoveryExpected(line.ID, current.Ledger, current.Revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config, err := r.exitRecovery.Config.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			config.Revision++
+			exit := config.Config.Exits["gb"]
+			exit.Keywords = []string{"restored-node"}
+			config.Config.Exits["gb"] = exit
+			r.exitRecovery.Config = fixedRecoveryConfig{config}
+			catalog, err := r.catalog.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired, err := egressdesired.Render(config, catalog, r.now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if desired.Generation == current.Ledger.Selection.Request.ExpectedGeneration {
+				t.Fatal("test must change the applied configuration generation")
+			}
+			if scenario != "saved_only" {
+				if _, err := egressdesired.Publish(r.exitRecovery.DesiredPath, desired); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario != "saved_only" && scenario != "runtime_unconfirmed" {
+				wire, _ := json.Marshal(egressstatus.Snapshot{DesiredGeneration: desired.Generation, Exits: map[string]egressstatus.Exit{"gb": {Ready: true, Node: "original"}}})
+				if err := os.WriteFile(r.exitRecovery.StatusPath, wire, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "lease_held" {
+				runtime := r.runtime.(*fakeRuntime)
+				runtime.status.Maintenance.Draining = true
+				runtime.status.Maintenance.LeaseID = "recovery-" + current.Ledger.Selection.Request.FailureID
+			}
+			if scenario == "stale" {
+				r.runtime.(*fakeRuntime).status.ObservedAt = r.now().Add(-agentTopologyTTL - time.Second)
+			}
+			if scenario == "wrong_generation" {
+				r.runtime.(*fakeRuntime).status.ProcessGeneration = "another-process"
+			}
+			retired, err := r.retireSupersededSelection(line.ID, current)
+			if err != nil || retired != (scenario == "confirmed") {
+				t.Fatalf("retired=%t err=%v", retired, err)
+			}
+			after, err := r.exitRecovery.Store.ExitRecovery(line.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "confirmed" && (after.Ledger.Selection.State != "canceled" || after.Ledger.Selection.Request != current.Ledger.Selection.Request || after.Ledger.Failures != current.Ledger.Failures) {
+				t.Fatal("history or request identity changed")
+			}
+		})
+	}
+}
 
 type selectionApplyFunc func(context.Context, egressconfig.RecoveryRequest) (egressconfig.ApplyResult, error)
 
