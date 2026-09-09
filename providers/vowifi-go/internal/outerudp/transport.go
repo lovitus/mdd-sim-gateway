@@ -531,20 +531,21 @@ func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFu
 			dialFailed bool
 		}
 		results := make(chan result, len(proxyDNSServers))
-		for _, server := range proxyDNSServers {
+		progress := make([]struct{ attempted, connected atomic.Bool }, len(proxyDNSServers))
+		for index, server := range proxyDNSServers {
 			server := server
+			state := &progress[index]
 			go func() {
-				var attempted, connected atomic.Bool
 				resolver := &net.Resolver{
 					PreferGo: true,
 					// A non-PacketConn makes net.Resolver use RFC 7766 DNS
 					// framing. DNS-over-TCP avoids relying on UDP support at
 					// the selected SOCKS egress while keeping DNS off the host.
 					Dial: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
-						attempted.Store(true)
+						state.attempted.Store(true)
 						conn, err := dial(dialCtx, proxyURL, server, proxyDNSTimeout)
 						if err == nil {
-							connected.Store(true)
+							state.connected.Store(true)
 						}
 						return conn, err
 					},
@@ -556,7 +557,7 @@ func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFu
 						err = errors.New("DNS response contained no usable addresses")
 					}
 				}
-				results <- result{addresses: addresses, err: err, dialFailed: attempted.Load() && !connected.Load()}
+				results <- result{addresses: addresses, err: err, dialFailed: state.attempted.Load() && !state.connected.Load()}
 			}()
 		}
 		failures := make([]error, 0, len(proxyDNSServers))
@@ -571,6 +572,13 @@ func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFu
 				failures = append(failures, resolved.err)
 				allDialsFailed = allDialsFailed && resolved.dialFailed
 			case <-lookupCtx.Done():
+				unconnected := len(progress) > 0 && ctx.Err() == nil
+				for index := range progress {
+					unconnected = unconnected && progress[index].attempted.Load() && !progress[index].connected.Load()
+				}
+				if unconnected {
+					failures = append(failures, ErrProxyDNSUnavailable)
+				}
 				return nil, errors.Join(append(failures, lookupCtx.Err())...)
 			}
 		}

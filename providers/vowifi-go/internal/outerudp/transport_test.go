@@ -82,6 +82,41 @@ func TestProxyDNSConnectedButFailedLookupIsNotDialFailure(t *testing.T) {
 	}
 }
 
+func TestProxyDNSDeadlineDistinguishesUnconnectedAndConnectedPaths(t *testing.T) {
+	for _, connected := range []bool{false, true} {
+		t.Run(fmt.Sprintf("connected-%t", connected), func(t *testing.T) {
+			t.Parallel()
+			resolver := proxyResolveContext("socks5://127.0.0.1:1080", func(ctx context.Context, _, _ string, _ time.Duration) (net.Conn, error) {
+				if !connected {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				client, server := net.Pipe()
+				go func() { <-ctx.Done(); _ = server.Close() }()
+				go func() { _, _ = io.Copy(io.Discard, server) }()
+				return client, nil
+			})
+			_, err := resolver(context.Background(), "ip", "epdg.example.invalid")
+			if err == nil || errors.Is(err, ErrProxyDNSUnavailable) == connected {
+				t.Fatalf("deadline attribution connected=%t: %v", connected, err)
+			}
+		})
+	}
+}
+
+func TestProxyDNSCallerDeadlineDoesNotBlameExit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	resolver := proxyResolveContext("socks5://127.0.0.1:1080", func(ctx context.Context, _, _ string, _ time.Duration) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	_, err := resolver(ctx, "ip", "epdg.example.invalid")
+	if err == nil || errors.Is(err, ErrProxyDNSUnavailable) {
+		t.Fatalf("caller deadline attributed to exit: %v", err)
+	}
+}
+
 func TestDialContextSendsHostnameToSOCKS5UDPRelay(t *testing.T) {
 	proxyAddress, observed, _, shutdown := startSOCKS5UDPServer(t)
 	defer shutdown()

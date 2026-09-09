@@ -330,6 +330,11 @@ successful connections, DNS answers and cancellation are not classified that way
 Provider and Core carry this pre-IKE exit failure into the existing three-strike
 policy. Integration coverage does not replace a successful hardware recovery run.
 
+Direct-entry DROP testing exposed the resolver's internal timeout path bypassing
+that typed evidence. Per-resolver connection progress now survives until the
+deadline: only attempts with no established connection can blame the proxy.
+Caller cancellation/deadlines and established DNS connections remain excluded.
+
 The old failover policy and main.py health gates feed generation-fenced durable
 decisions in the existing events database. IKE transport counters are separate
 from the old retransmit input. Only complete unanswered bootstrap evidence is
