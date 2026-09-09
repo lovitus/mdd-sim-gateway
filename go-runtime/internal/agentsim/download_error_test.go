@@ -7,9 +7,31 @@ import (
 	euicchttp "github.com/damonto/euicc-go/http"
 	sgp22 "github.com/damonto/euicc-go/v2"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 )
+
+func TestDownloadRSPFailureSurvivesHTTPDecode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gsma/rsp2/es9plus/initiateAuthentication" {
+			t.Errorf("unexpected request path")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"header":{"functionExecutionStatus":{"status":"Failed","statusCodeData":{"subjectCode":"8.8.2","reasonCode":"3.1","message":"secret response text"}}}}`)
+	}))
+	defer server.Close()
+	address, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &euicchttp.Client{Client: server.Client(), AdminProtocolVersion: "2.5.0"}
+	_, err = sgp22.InvokeHTTP(client, address, &sgp22.ES9InitiateAuthenticationRequest{})
+	if got := downloadErrorCode(err); got != "euicc_rsp_8.8.2_3.1" {
+		t.Fatalf("actual HTTP decode lost RSP identity: %s", got)
+	}
+}
 
 func TestDownloadErrorCodesDoNotExposeSecrets(t *testing.T) {
 	for _, test := range []struct {

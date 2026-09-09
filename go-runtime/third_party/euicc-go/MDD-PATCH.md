@@ -17,3 +17,7 @@ closes the response body on that path. It does not expose URLs or response text.
 MDD maps existing RSP subject/reason codes and typed network/TLS failures into the
 existing durable download job code; it does not infer certificate incompatibility
 from a generic error or alter historical receipts.
+
+v2/types.go preserves StatusCodeData as an error instead of flattening it to its
+message. The root agentsim regression uses actual HTTP JSON decoding through
+InvokeHTTP and the production classifier, not only constructed error values.
