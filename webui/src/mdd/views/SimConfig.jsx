@@ -39,7 +39,9 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const [pinConfiguration, setPinConfiguration] = useState(null)
   const [pinBusy, setPinBusy] = useState(false)
   const pinEpoch = useRef(0)
-  useEffect(() => { ++pinEpoch.current; setProof(null); setPinConfiguration(null); setPin('') }, [targetDevice?.id, targetDevice?.sim?.iccid, targetDevice?.go_device?.process_generation, targetDevice?.go_device?.modem?.sim_session_generation, targetDevice?.go_device?.reader?.session_generation, form.id])
+  useEffect(() => {
+    ++pinEpoch.current; setProof(null); setPinConfiguration(null); setPin(''); setPinMsg(''); setCard(null)
+  }, [targetDevice?.id, targetDevice?.sim?.iccid, targetDevice?.sim?.present, targetDevice?.go_device?.process_generation, targetDevice?.go_device?.modem?.sim_session_generation, targetDevice?.go_device?.reader?.session_generation, form.id])
   currentFormID.current = form.id
   currentTarget.current=JSON.stringify([targetDevice?.id,targetDevice?.sim?.iccid])
   // Capability is authoritative; do not depend on a transport/type label that an older
@@ -182,7 +184,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       if (pinEpoch.current !== epoch) return
       setProof(pinProof(result,operation,target)); setPinConfiguration(result.configuration || null)
       setPinMsg(`${result.state} · ${result.attempts_remaining ?? '?'} ${t('attempts remaining')}`)
-    } catch (error) { setPinMsg(error.message) }
+    } catch (error) { if (pinEpoch.current === epoch) setPinMsg(error.message) }
     finally { mutationBusy.current = false; setPinBusy(false) }
   }
   const verifyPin = async (saveOnAgent = false) => {
@@ -202,8 +204,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       setPinConfiguration(result.configuration || null)
       setPinMsg(result.state || 'unknown')
       await refresh()
-    } catch (error) { setPinMsg(error.message) }
-    finally { setPin(''); mutationBusy.current = false; setPinBusy(false) }
+    } catch (error) { if (pinEpoch.current === epoch) setPinMsg(error.message) }
+    finally { if (pinEpoch.current === epoch) setPin(''); mutationBusy.current = false; setPinBusy(false) }
   }
   const save = async () => {
     if (mutationBusy.current) return
@@ -310,7 +312,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       setPinConfiguration(result.configuration || null); setProof(null); setPin('')
       setPinMsg(result.state || 'unknown')
       await refresh()
-    } catch (error) { setPinMsg(error.message) }
+    } catch (error) { if (pinEpoch.current === epoch) setPinMsg(error.message) }
     finally { mutationBusy.current = false; setPinBusy(false) }
   }
   const missing = targetDevice?.provisioning?.missing || []
@@ -349,10 +351,10 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       <div className="card" style={{ padding: 20 }}>
         <h3 style={{ marginTop: 0 }}>{t('SIM card')}</h3>
         <Field label={t('Reader')}>
-          <select value={form.reader_index} disabled={!!targetDevice} onChange={(e) => upd({ reader_index: +e.target.value, reader_port: portForIdx(+e.target.value) || form.reader_port })}>
+          {targetDevice ? <input readOnly value={targetDevice.go_device?.reader?.reader_name || targetDevice.reader || targetDevice.name || ''} /> : <select value={form.reader_index} onChange={(e) => upd({ reader_index: +e.target.value, reader_port: portForIdx(+e.target.value) || form.reader_port })}>
             {readers.map((r, i) => <option key={i} value={i}>{i}: {compactReaderName(r)}{portForIdx(i) ? ` — USB ${portForIdx(i)}` : ''}</option>)}
             {readers.length === 0 && <option>{t('No readers')}</option>}
-          </select>
+          </select>}
         </Field>
         {form.reader_port &&
           <div className="mono" style={{ fontSize: 11, color: 'var(--text-mute)', marginTop: 4 }}>
@@ -365,7 +367,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
               ICCID: {card.iccid || '—'}<br />IMSI: {card.imsi || t('(locked)')}<br />
               {card.reader_port && <>{t('USB port')}: {card.reader_port}<br /></>}
               PIN: {card.pin_enabled == null ? t('Unknown') : card.pin_enabled ? t('enabled, {tries} tries', { tries: card.pin_tries }) : t('disabled')}
-            </>) : (<>{t('No SIM card in reader {reader}.', { reader: card.reader_index })}</>)}
+            </>) : (<>{t('No SIM card in this reader.')}</>)}
           </div>
         )}
         <hr style={{ borderColor: 'var(--border)', margin: '16px 0' }} />
@@ -373,7 +375,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           <input type="password" autoComplete="off" inputMode="numeric" maxLength={8} value={pin} disabled={!proof || pinBusy} onChange={(e) => setPin(e.target.value.replace(/\D/g,''))} placeholder={t('Current SIM PIN')} />
         </Field>
         <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-          <button className="btn btn-ghost" onClick={checkPINStatus} disabled={pinBusy || !targetDevice}>{t('Check PIN status')}</button>
+          <button className="btn btn-ghost" onClick={checkPINStatus} disabled={pinBusy || !targetDevice?.sim?.iccid || targetDevice?.sim?.present === false || targetDevice?.present === false}>{t('Check PIN status')}</button>
           <button className="btn btn-primary" onClick={() => verifyPin(false)} disabled={pinBusy || !proof || !/^\d{4,8}$/.test(pin)}>{t('Verify once')}</button>
           <button className="btn btn-ghost" onClick={() => verifyPin(true)} disabled={pinBusy || !proof || !pinConfiguration?.revision || !/^\d{4,8}$/.test(pin)}>{t('Verify and save on Agent')}</button>
           {pinConfiguration?.configured &&

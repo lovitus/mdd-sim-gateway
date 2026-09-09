@@ -50,7 +50,12 @@ a changed card. Reader readback remains the existing hardware operation. Pending
 readback cannot fill a different selected SIM form. The original two-panel layout
 stacks on narrow screens; actual 390px and 1280px browser measurements are recorded
 in the recovery cursor. These corrections do not prove new-card provisioning or
-PIN hardware acceptance, and remain in the current uncommitted frontend batch.
+PIN hardware acceptance. The bound hardware label now comes from the typed device,
+including empty readers, rather than a saved enumeration index. Card readback and
+PIN feedback are cleared on identity changes; late PIN responses cannot replace
+the newly selected card's feedback. Empty readers do not offer PIN operations.
+Actual browser acceptance covered the production Linux empty reader and switching
+back to an existing SIM without issuing card commands.
 
 User scope decision (2026-09-08): retain the existing balance/data-allowance
 query implementation, but exclude it from current development and proactive

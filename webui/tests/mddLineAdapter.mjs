@@ -5,6 +5,10 @@ assert.ok(!simPage.includes(String.raw`/^\\d{4,8}$/`),'PIN handlers must accept 
 assert.ok(simPage.includes('creating && targetDevice?.present === true && targetDevice?.sim?.iccid'),'new SIM Save must reach the existing claim-and-save adapter')
 assert.ok(!simPage.includes('if (pin) body.pin = pin'),'catalog saves must not submit the separate PIN input')
 assert.ok(simPage.includes('className="mdd-sim-layout"'),'SIM panels must use the responsive layout')
+assert.ok(simPage.includes('readOnly value={targetDevice.go_device?.reader?.reader_name || targetDevice.reader || targetDevice.name'), 'bound hardware must display its actual name, not the first enumerated reader')
+assert.ok(simPage.includes("setPinMsg(''); setCard(null)"), 'changing hardware or card identity must clear the previous readback')
+assert.ok(simPage.includes('disabled={pinBusy || !targetDevice?.sim?.iccid || targetDevice?.sim?.present === false'), 'an empty reader cannot offer a PIN request')
+assert.ok(simPage.includes('if (pinEpoch.current === epoch) setPinMsg(error.message)'), 'late PIN errors must not replace the new target state')
 globalThis.window = {location:{pathname:'/'}}
 const {lineForm,editedCatalogLine,lineAPI,simPINIdentity,pinProof,candidateForDevice,savedCatalogLine,modemProvisionIntent,runtimeNetworkSelection} = await import('../src/mdd/lineAdapter.js')
 const {mapGoSnapshot} = await import('../src/goV1Adapter.js')
