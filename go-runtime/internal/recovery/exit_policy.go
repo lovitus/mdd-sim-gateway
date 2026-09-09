@@ -136,7 +136,13 @@ func ClassifyProviderFailure(snapshot vowifiipc.Snapshot, stableFor, stableThres
 	if snapshot.Validate() != nil || snapshot.Runtime.Condition != vowifiipc.RuntimeFailed || snapshot.Runtime.FailureID == "" {
 		return ExitUnclear
 	}
+	if snapshot.Runtime.Code == "swu_authentication_failed" && snapshot.Tunnel.Condition == vowifiipc.LayerBlocked && snapshot.Tunnel.Code == "swu_authentication_failed" {
+		return BlamesElsewhere
+	}
 	ike := snapshot.Runtime.IKE
+	if snapshot.Runtime.Code == "swu_proxy_dns_unavailable" && snapshot.Tunnel.Condition == vowifiipc.LayerBlocked && snapshot.Tunnel.Code == "swu_proxy_dns_unavailable" {
+		return BlamesExit
+	}
 	if ike == nil || ike.RequestsSent == 0 || ike.ResponseDatagrams != 0 || ike.ResponseTimeouts != ike.RequestsSent ||
 		snapshot.Runtime.Code != "swu_open_failed" || snapshot.Tunnel.Condition != vowifiipc.LayerBlocked || snapshot.Tunnel.Code != "swu_open_failed" {
 		return ExitUnclear

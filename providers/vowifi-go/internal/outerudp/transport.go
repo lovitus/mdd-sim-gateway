@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/boa-z/vowifi-go/engine/swu"
@@ -512,6 +513,8 @@ func (transport *Transport) candidates(ctx context.Context) ([]string, time.Dura
 	return result, timeout, nil
 }
 
+var ErrProxyDNSUnavailable = errors.New("selected proxy could not connect to DNS servers")
+
 func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFunc {
 	return func(ctx context.Context, network, host string) ([]netip.Addr, error) {
 		if network != "ip" || strings.TrimSpace(host) == "" {
@@ -523,20 +526,27 @@ func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFu
 		lookupCtx, cancel := context.WithTimeout(ctx, proxyDNSTimeout)
 		defer cancel()
 		type result struct {
-			addresses []netip.Addr
-			err       error
+			addresses  []netip.Addr
+			err        error
+			dialFailed bool
 		}
 		results := make(chan result, len(proxyDNSServers))
 		for _, server := range proxyDNSServers {
 			server := server
 			go func() {
+				var attempted, connected atomic.Bool
 				resolver := &net.Resolver{
 					PreferGo: true,
 					// A non-PacketConn makes net.Resolver use RFC 7766 DNS
 					// framing. DNS-over-TCP avoids relying on UDP support at
 					// the selected SOCKS egress while keeping DNS off the host.
 					Dial: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
-						return dial(dialCtx, proxyURL, server, proxyDNSTimeout)
+						attempted.Store(true)
+						conn, err := dial(dialCtx, proxyURL, server, proxyDNSTimeout)
+						if err == nil {
+							connected.Store(true)
+						}
+						return conn, err
 					},
 				}
 				addresses, err := resolver.LookupNetIP(lookupCtx, "ip", host)
@@ -546,10 +556,11 @@ func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFu
 						err = errors.New("DNS response contained no usable addresses")
 					}
 				}
-				results <- result{addresses: addresses, err: err}
+				results <- result{addresses: addresses, err: err, dialFailed: attempted.Load() && !connected.Load()}
 			}()
 		}
 		failures := make([]error, 0, len(proxyDNSServers))
+		allDialsFailed := true
 		for range proxyDNSServers {
 			select {
 			case resolved := <-results:
@@ -558,9 +569,13 @@ func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFu
 					return resolved.addresses, nil
 				}
 				failures = append(failures, resolved.err)
+				allDialsFailed = allDialsFailed && resolved.dialFailed
 			case <-lookupCtx.Done():
 				return nil, errors.Join(append(failures, lookupCtx.Err())...)
 			}
+		}
+		if allDialsFailed && len(failures) > 0 && ctx.Err() == nil {
+			failures = append(failures, ErrProxyDNSUnavailable)
 		}
 		return nil, errors.Join(failures...)
 	}

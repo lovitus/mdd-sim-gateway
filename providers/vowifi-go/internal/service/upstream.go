@@ -217,7 +217,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 			err = fmt.Errorf("ePDG endpoint %s: %w", endpoint, err)
 		}
 		_ = closeBounded(config.CloseTimeout, outer.Close)
-		return nil, &StageError{Layer: "tunnel", Code: "swu_open_failed", Err: err}
+		return nil, swuOpenFailure(err)
 	}
 	info := packetSession.Info()
 	if len(config.PCSCF) == 0 && len(info.PCSCFServers) > 0 {
@@ -438,6 +438,16 @@ func pdnFamilyOrder(mode, mcc, mnc string) []string {
 		}
 	}
 	return order
+}
+
+func swuOpenFailure(err error) *StageError {
+	code := "swu_open_failed"
+	if errors.Is(err, ikev2.ErrNotifyAuthenticationFailed) {
+		code = "swu_authentication_failed"
+	} else if errors.Is(err, outerudp.ErrProxyDNSUnavailable) {
+		code = "swu_proxy_dns_unavailable"
+	}
+	return &StageError{Layer: "tunnel", Code: code, Err: err}
 }
 
 func pdnAttempt(mode, mcc, mnc string, attempt uint64) (string, uint64) {

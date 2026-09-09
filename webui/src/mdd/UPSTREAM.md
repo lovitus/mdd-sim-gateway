@@ -310,6 +310,19 @@ source adaptation alone does not establish carrier-call or profile-write accepta
 
 ## Recovery workflow adaptation
 
+The upstream typed IKE authentication rejection is retained as
+`swu_authentication_failed` instead of collapsing into a generic SWu open error.
+The existing recovery ledger counts that failure once as a non-exit cause and
+does not select another proxy. This improves failure attribution; it does not
+certify automatic failover in the production fault-injection scenario.
+
+The failed production injection also exposed failures before IKE: all proxy
+connections to the configured DNS resolvers were unreachable. The existing
+resolver now retains typed evidence only when every resolver connection fails;
+successful connections, DNS answers and cancellation are not classified that way.
+Provider and Core carry this pre-IKE exit failure into the existing three-strike
+policy. Integration coverage does not replace a successful hardware recovery run.
+
 The old failover policy and main.py health gates feed generation-fenced durable
 decisions in the existing events database. IKE transport counters are separate
 from the old retransmit input. Only complete unanswered bootstrap evidence is

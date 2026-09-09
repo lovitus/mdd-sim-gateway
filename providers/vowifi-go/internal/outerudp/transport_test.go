@@ -54,6 +54,34 @@ func TestDialContextUsesSOCKS5UDPAssociation(t *testing.T) {
 	}
 }
 
+func TestProxyDNSConnectionFailuresKeepTypedEvidence(t *testing.T) {
+	resolver := proxyResolveContext("socks5://127.0.0.1:1080", func(context.Context, string, string, time.Duration) (net.Conn, error) {
+		return nil, errors.New("Host unreachable")
+	})
+	_, err := resolver(context.Background(), "ip", "epdg.example.invalid")
+	if !errors.Is(err, ErrProxyDNSUnavailable) {
+		t.Fatalf("missing proxy failure evidence: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = resolver(ctx, "ip", "epdg.example.invalid")
+	if errors.Is(err, ErrProxyDNSUnavailable) {
+		t.Fatal("cancellation blamed proxy")
+	}
+}
+
+func TestProxyDNSConnectedButFailedLookupIsNotDialFailure(t *testing.T) {
+	resolver := proxyResolveContext("socks5://127.0.0.1:1080", func(context.Context, string, string, time.Duration) (net.Conn, error) {
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	})
+	_, err := resolver(context.Background(), "ip", "epdg.example.invalid")
+	if err == nil || errors.Is(err, ErrProxyDNSUnavailable) {
+		t.Fatalf("connected DNS failure misclassified: %v", err)
+	}
+}
+
 func TestDialContextSendsHostnameToSOCKS5UDPRelay(t *testing.T) {
 	proxyAddress, observed, _, shutdown := startSOCKS5UDPServer(t)
 	defer shutdown()

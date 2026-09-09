@@ -165,6 +165,41 @@ func TestExitObserverPersistsOnceAndClosesHealedCampaign(t *testing.T) {
 	}
 }
 
+func TestExitObserverRecordsAuthenticationWithoutSelectingAnotherNode(t *testing.T) {
+	r, catalog, line, observation := exitObserverFixture(t, false)
+	observation.status.Runtime.Code = "swu_authentication_failed"
+	observation.status.Tunnel.Code = "swu_authentication_failed"
+	observation.status.Runtime.IKE = &vowifiipc.IKEExchangeEvidence{RequestsSent: 4, ResponseDatagrams: 4}
+	for i := 0; i < 3; i++ {
+		observation.status.Sequence = uint64(i + 1)
+		if err := r.observeExitRecovery(t.Context(), catalog, line, observation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored, err := r.exitRecovery.Store.ExitRecovery(line.ID)
+	if err != nil || stored.Revision == 0 || stored.Ledger.Failures != 1 || stored.Ledger.Strikes != 0 || stored.Ledger.LastDecision == recovery.ExitSwitch || stored.Ledger.Selection.Pending() {
+		t.Fatalf("authentication observation not recorded safely: %+v %v", stored, err)
+	}
+}
+
+func TestExitObserverCountsPreIKEProxyFailuresTowardSwitch(t *testing.T) {
+	r, catalog, line, observation := exitObserverFixture(t, false)
+	observation.status.Runtime.Code = "swu_proxy_dns_unavailable"
+	observation.status.Tunnel.Code = "swu_proxy_dns_unavailable"
+	observation.status.Runtime.IKE = &vowifiipc.IKEExchangeEvidence{}
+	for i := 0; i < 3; i++ {
+		observation.status.Sequence = uint64(i + 1)
+		observation.status.Runtime.FailureID = strings.Repeat(string(rune('a'+i)), 64)
+		if err := r.observeExitRecovery(t.Context(), catalog, line, observation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored, err := r.exitRecovery.Store.ExitRecovery(line.ID)
+	if err != nil || stored.Ledger.Failures != 3 || stored.Ledger.LastDecision != recovery.ExitSwitch {
+		t.Fatalf("proxy failures did not reach switch decision: %+v %v", stored, err)
+	}
+}
+
 func TestExitObserverRespectsPinnedAndUnknownRuntime(t *testing.T) {
 	r, catalog, line, observation := exitObserverFixture(t, true)
 	for i := 0; i < 3; i++ {

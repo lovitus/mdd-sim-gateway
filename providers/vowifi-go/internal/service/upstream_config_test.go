@@ -12,6 +12,7 @@ import (
 	upstreamswu "github.com/boa-z/vowifi-go/engine/swu"
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/outerudp"
 )
 
 func TestNewUpstreamFactoryValidatesSOCKS5Proxy(t *testing.T) {
@@ -31,6 +32,23 @@ func TestNewUpstreamFactoryValidatesSOCKS5Proxy(t *testing.T) {
 		config.ProxyURL = proxy
 		if _, err := NewUpstreamFactory(config); err == nil {
 			t.Fatalf("invalid proxy %q was accepted", proxy)
+		}
+	}
+}
+
+func TestSWuOpenFailurePreservesTypedAuthenticationFailure(t *testing.T) {
+	proxyFailure := swuOpenFailure(errors.Join(errors.New("resolver context"), outerudp.ErrProxyDNSUnavailable))
+	if proxyFailure.Code != "swu_proxy_dns_unavailable" || !errors.Is(proxyFailure, outerudp.ErrProxyDNSUnavailable) {
+		t.Fatal(proxyFailure)
+	}
+	auth := errors.Join(errors.New("endpoint context"), ikev2.ErrNotifyAuthenticationFailed)
+	result := swuOpenFailure(auth)
+	if result.Code != "swu_authentication_failed" || !errors.Is(result, ikev2.ErrNotifyAuthenticationFailed) {
+		t.Fatal("authentication failure lost its identity", result)
+	}
+	for _, cause := range []error{context.DeadlineExceeded, context.Canceled, errors.New("AUTHENTICATION_FAILED text without typed evidence")} {
+		if got := swuOpenFailure(cause); got.Code != "swu_open_failed" || !errors.Is(got, cause) {
+			t.Fatal("untyped error was reclassified", got)
 		}
 	}
 }

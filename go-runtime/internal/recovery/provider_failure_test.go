@@ -24,6 +24,17 @@ func TestProviderFailureRequiresCompleteUnansweredBootstrap(t *testing.T) {
 	if got := ClassifyProviderFailure(snapshot, 0, time.Minute); got != BlamesExit {
 		t.Fatal(got)
 	}
+	proxyFailure := snapshot
+	proxyFailure.Runtime.Code = "swu_proxy_dns_unavailable"
+	proxyFailure.Tunnel.Code = "swu_proxy_dns_unavailable"
+	proxyFailure.Runtime.IKE = &vowifiipc.IKEExchangeEvidence{}
+	if got := ClassifyProviderFailure(proxyFailure, 0, time.Minute); got != BlamesExit {
+		t.Fatal("pre-IKE proxy failure ignored", got)
+	}
+	proxyFailure.Runtime.FailureID = ""
+	if got := ClassifyProviderFailure(proxyFailure, 0, time.Minute); got != ExitUnclear {
+		t.Fatal("missing failure identity accepted", got)
+	}
 	if got := ClassifyProviderFailure(snapshot, time.Hour, time.Minute); got != BlamesElsewhere {
 		t.Fatal("known healthy history was discarded", got)
 	}
@@ -61,5 +72,35 @@ func TestProviderFailureRequiresCompleteUnansweredBootstrap(t *testing.T) {
 		if duplicate.Failures != ledger.Failures {
 			t.Fatal("one failure was counted twice")
 		}
+	}
+}
+
+func TestAuthenticationFailureIsRecordedWithoutSwitchingExit(t *testing.T) {
+	snapshot := vowifiipc.Snapshot{
+		SchemaVersion: vowifiipc.SchemaVersion, LineID: "line-1", ProviderID: "provider-1",
+		ProcessGeneration: "process-1", Sequence: 1, ObservedAt: time.Now().UTC(),
+		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeFailed, Code: "swu_authentication_failed", FailureID: strings.Repeat("a", 64)},
+		Tunnel:  vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "swu_authentication_failed"},
+		IMS:     vowifiipc.LayerStatus{Condition: vowifiipc.LayerStopped}, Voice: vowifiipc.LayerStatus{Condition: vowifiipc.LayerStopped}, Messaging: vowifiipc.LayerStatus{Condition: vowifiipc.LayerStopped},
+	}
+	if got := ClassifyProviderFailure(snapshot, 0, time.Minute); got != BlamesElsewhere {
+		t.Fatal(got)
+	}
+	ledger, failure := exitFixture(t)
+	failure.Verdict = ClassifyProviderFailure(snapshot, 0, time.Minute)
+	for i := 0; i < 6; i++ {
+		id := strings.Repeat(string(rune('a'+i)), 64)
+		var action ExitAction
+		action, ledger = RecordExitFailureOnce(ledger, failure, id)
+		if action == ExitSwitch || ledger.Strikes != 0 {
+			t.Fatal("authentication failure switched exit", action, ledger)
+		}
+		_, duplicate := RecordExitFailureOnce(ledger, failure, id)
+		if duplicate.Failures != ledger.Failures {
+			t.Fatal("duplicate counted")
+		}
+	}
+	if ledger.Failures != 6 {
+		t.Fatal("authentication failures not counted", ledger)
 	}
 }

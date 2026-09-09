@@ -20,6 +20,8 @@ const REASON_LABEL = {
   tunnel_ike_rekey_timeout: 'Server ePDG did not answer IKE_SA rekey',
   tunnel_rekey_send_error: 'Client failed to send IPsec rekey',
   tunnel_sim_auth: 'Client SIM authentication failed',
+  swu_authentication_failed: 'Server ePDG rejected client network/identity',
+  swu_proxy_dns_unavailable: 'Proxy DNS connection unavailable',
   tunnel_not_authorized: 'Server ePDG rejected client network/identity',
   tunnel_proposal: 'Server ePDG rejected client IKE proposal',
   tunnel_setup: 'Tunnel unavailable — exact cause not captured',
