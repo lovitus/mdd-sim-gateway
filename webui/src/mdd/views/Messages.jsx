@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api.js'
 import { mergeMessagePages } from '../historyAdapter.js'
+import { canComposeSMS, isSMSSubmitKey } from '../smsAdapter.js'
 import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
 import AllowancePanel from './AllowancePanel.jsx'
@@ -67,6 +68,7 @@ function Messages({
   }, [senderID])
   const sendTransport = conversation?.transport || transport
   const cellularAvailable = senderLine?.operations?.cellular_sms?.ready === true
+  const vowifiAvailable = senderLine?.operations?.vowifi_sms?.ready === true
   const cellularPreferred = cellularAvailable && senderLine?.operations?.vowifi_sms?.ready !== true
 
   const loadThreads = useCallback(async (showLoading = false) => {
@@ -162,8 +164,8 @@ function Messages({
     // React state is updated asynchronously, so `sending` alone leaves a short window where
     // a double click or a repeating Enter key can submit the same billable SMS twice.
     if (sendingRef.current) return
-    const to = peer || newTo
-    if (!to || !text || !sendTransport || !senderID) return
+    const to = String(peer || newTo || '').trim()
+    if (!canComposeSMS(senderLine,sendTransport,to,text)) return
     const forId = senderID
     const composeKey = activeConversation.current?.key || ''
     const selectedID = activeId.current
@@ -174,7 +176,7 @@ function Messages({
     try {
       const saved = JSON.parse(localStorage.getItem(operationKey) || 'null')
       if (saved) {
-        if (JSON.stringify(saved.payload) !== JSON.stringify(payload)) {
+        if (JSON.stringify({...saved.payload,to:String(saved.payload?.to || '').trim()}) !== JSON.stringify(payload)) {
           if (window.confirm(tr('Discard only this browser retry identity? This cannot retract a message that may already have been submitted.'))) {
             localStorage.removeItem(operationKey)
           }
@@ -392,7 +394,7 @@ function Messages({
               title={!cellularAvailable ? tr('This line does not have an available cellular modem.') : ''}
               style={{ width: 'auto', minWidth: 150 }}>
               <option value="" disabled>{tr('Send via')}</option>
-              <option value="vowifi">VoWiFi</option>
+              <option value="vowifi" disabled={!vowifiAvailable}>VoWiFi{!vowifiAvailable ? ` — ${tr('Unavailable')}` : ''}</option>
               <option value="cellular" disabled={!cellularAvailable}>
                 {tr('Cellular network (Modem)')}{!cellularAvailable ? ` — ${tr('Unavailable')}` : ''}
               </option>
@@ -401,11 +403,11 @@ function Messages({
           <input placeholder={tr('Type a message…')} value={text} disabled={sending}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key !== 'Enter') return
+              if (!isSMSSubmitKey(e)) return
               e.preventDefault()
-              if (!e.repeat) send()
+              send()
             }} style={{ flex: '1 1 220px' }} />
-          <button className="btn btn-primary" disabled={sending || !senderID || !sendTransport || !text.trim() || (!peer && !newTo)} onClick={send}>{tr('Send')}</button>
+          <button className="btn btn-primary" disabled={sending || !canComposeSMS(senderLine,sendTransport,peer || newTo,text)} onClick={send}>{tr('Send')}</button>
           {receiptAvailable && <button className="btn btn-ghost" disabled={sending} onClick={readReceipt}>{tr('Read stored SMS receipt')}</button>}
         </div>
       </div>
@@ -424,6 +426,8 @@ const visibleProps = (props) => ({
     id: String(item.id || ''), name: item.name || '', carrier: item.carrier || '',
     profile_name: item.profile_name || '', mcc: item.mcc || '', mnc: item.mnc || '',
     msisdn: item.msisdn || '', iccid: item.iccid || '', reader: item.reader || '',
+    card_id: item.card_id || '',
+    sms_ready: [item.operations?.cellular_sms?.ready, item.operations?.vowifi_sms?.ready],
     reader_name: item.reader_name || '', reader_index: item.reader_index ?? null,
     status_state: item.status?.state ?? null,
     status_label: item.status?.label || '',

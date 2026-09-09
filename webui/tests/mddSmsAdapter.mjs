@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict'
 globalThis.window = { location: { pathname: '/' } }
-const { smsRequest, smsAPI } = await import('../src/mdd/smsAdapter.js')
+const { smsRequest, smsAPI, canComposeSMS, isSMSSubmitKey } = await import('../src/mdd/smsAdapter.js')
+assert.equal(isSMSSubmitKey({key:'Enter',nativeEvent:{isComposing:true}}),false)
+assert.equal(isSMSSubmitKey({key:'Enter',nativeEvent:{isComposing:false,keyCode:229}}),false)
+assert.equal(isSMSSubmitKey({key:'Enter',repeat:true}),false)
+assert.equal(isSMSSubmitKey({key:'a'}),false)
+assert.equal(isSMSSubmitKey({key:'Enter',nativeEvent:{keyCode:13}}),true)
+const sender={id:'line',iccid:'fixture-card',operations:{cellular_sms:{ready:true},vowifi_sms:{ready:false}}}
+assert.equal(canComposeSMS(sender,'cellular',' +12025550123 ','body'),true)
+assert.equal(canComposeSMS(sender,'cellular','   ','body'),false)
+assert.equal(canComposeSMS(sender,'cellular','+12025550123','   '),false)
+assert.equal(canComposeSMS(sender,'vowifi','+12025550123','body'),false)
+assert.equal(canComposeSMS({...sender,iccid:''},'cellular','+12025550123','body'),false)
+assert.equal(canComposeSMS({...sender,iccid:'',card_id:'fixture-card'},'cellular','+12025550123','body'),true)
+assert.equal(canComposeSMS({...sender,operations:{}},'cellular','+12025550123','body'),false)
+assert.equal(canComposeSMS(sender,'auto','+12025550123','body'),false)
 const { api: go } = await import('../src/api.js')
 const expected = { operation_id:'fixture-operation', message_id:'fixture-operation',
   expected_card_id:'fixture-card', recipient:'+12025550123', body:'fixture body' }

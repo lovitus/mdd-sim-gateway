@@ -110,6 +110,13 @@ per part and retain their real error fields. Cellular submission history now kee
 the request body after the existing operation-identity validation; old missing
 bodies are not fabricated and retries do not submit again to the Agent.
 
+The copied SMS composer's click and Enter paths now share the same nonblank,
+exact-card and transport-readiness admission. IME composition Enter (including
+keyCode 229 at the composition boundary) never submits. Readiness changes are
+included in the page's semantic memoization without bringing heartbeat timestamps
+back into rendering. Recipient whitespace normalization retains an existing retry
+identity; stored-receipt reconciliation remains separate and does not resend.
+
 ## Network and form-contract batch
 
 The next batch preserves the original `sim_iccid` field in network forms and only

@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const messages = fs.readFileSync(path.join(root, 'src/views/MessagesV1.jsx'), 'utf8')
 const api = fs.readFileSync(path.join(root, 'src/api.js'), 'utf8')
+const mounted = fs.readFileSync(path.join(root, 'src/mdd/views/Messages.jsx'), 'utf8')
+assert.ok(mounted.includes('if (!isSMSSubmitKey(e)) return'))
+assert.ok(mounted.includes('if (!canComposeSMS(senderLine,sendTransport,to,text)) return'))
+assert.ok(mounted.includes('operationId = saved.id'))
+assert.ok(mounted.includes('sms_ready: [item.operations?.cellular_sms?.ready, item.operations?.vowifi_sms?.ready]'))
+assert.ok(mounted.includes("to:String(saved.payload?.to || '').trim()"))
 const send = messages.slice(messages.indexOf('  const dispatch = async value => {'),
   messages.indexOf('  const discard ='))
 
