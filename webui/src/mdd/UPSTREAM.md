@@ -251,6 +251,12 @@ visible without discarding successful profile readback. Core must precede new
 Agent deployment. CI and one actual empty-chip browser refresh are recorded in
 the recovery cursor; this does not certify profile writes or every reader host.
 
+Non-deletion controls consistently use the Agent's profile-management capability;
+download admission uses the selected secure element's download capability. Cache
+failures remain visible rather than appearing as empty chip information. Read
+generations fence cache and post-operation refreshes when the reader/card session
+changes. These changes do not enable deletion or certify production profile writes.
+
 ## Recovery diagnostics and persistence boundary
 
 Known IMS start failures retain the IMS layer; an unconfirmed tunnel state is

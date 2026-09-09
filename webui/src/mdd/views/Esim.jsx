@@ -268,6 +268,8 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
   const [confirmation, setConfirmation] = useState('')
   const [imei, setImei] = useState(imeiDefault || '')
   const [seId, setSeId] = useState(dual ? '' : (ses?.[0]?.id || 'default'))
+  const downloadSE = (ses || []).find(se => se.id === (seId || ses?.[0]?.id))
+  const downloadAvailable = downloadSE?.capabilities?.profile_download === true
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [qrBusy, setQrBusy] = useState(false)
@@ -325,6 +327,7 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
     if (submitting.current) return
     setErr('')
     if (dual && !seId) return setErr(t('Select which eUICC (SE) to install onto.'))
+    if (!downloadAvailable) return setErr(t('Unavailable'))
     const body = {
       reader,
       eid:(ses || []).find(se => se.id === (seId || ses?.[0]?.id))?.eid,
@@ -458,7 +461,7 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
         {err && <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 10 }}>{err}</div>}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button className="btn btn-ghost" onClick={onClose}>{t('Cancel')}</button>
-          <button className="btn btn-primary" disabled={busy || (dual && !seId) || !/^\d{15}$/.test(imei.trim()) || (mode === 'code' ? !parseActivationCode(activation) : !smdp.trim())} onClick={submit}>
+          <button className="btn btn-primary" disabled={busy || !downloadAvailable || (dual && !seId) || !/^\d{15}$/.test(imei.trim()) || (mode === 'code' ? !parseActivationCode(activation) : !smdp.trim())} onClick={submit}>
             {t(busy ? 'Starting…' : 'Download')}
           </button>
         </div>
@@ -581,17 +584,23 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   useEffect(() => {
     if (loaded || loading || ses.length || !reader) return
     let cancelled = false
+    const generation = readGeneration.current
     api.esimChipCached(reader).then((r) => {
-      if (cancelled || !r?.cached) return
+      if (cancelled || readGeneration.current !== generation || !r?.cached) return
       activeEIDs.current = new Set((r.ses || []).map(se=>se.eid).filter(Boolean))
       setSes(r.ses || [])
       setMeta({ imei: r.imei || '' })
       setCachedAt((r.ts || 0) * 1000)
       const download = cachedDownloadReceipt(r.ses || [],rememberedDownload(reader))
       if (download) applyDownload({...download,reader})
-    }).catch(() => {})
+    }).catch(error => {
+      if (!cancelled && readGeneration.current === generation) {
+        setErr(error.message || t('eUICC load failed'))
+        setLoaded(true)
+      }
+    })
     return () => { cancelled = true }
-  }, [loaded, loading, ses.length, reader, selectedCard?.iccid])
+  }, [loaded, loading, ses.length, reader, selectedCard?.iccid, selectedCard?.session_generation, t])
 
   const loadAll = useCallback(async () => {
     if (!reader || activeReader.current !== reader) return
@@ -640,11 +649,14 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     if (operationBusy.current || !window.confirm(t('Enable profile {name} on EID {eid}?', {name:profileDisplayName(profile),eid:se.eid}))) return
     operationBusy.current = true
     setBusyOp('Enable'); setErr('')
+    const generation = readGeneration.current
+    const current = () => activeReader.current === reader && readGeneration.current === generation
     try {
       const result = await api.esimEnable(profile.iccid, seTarget(reader,se,profile))
       showToast?.(result.outcome)
-      await loadAll(); await refresh?.()
-    } catch (error) { showToast?.(error.message); setErr(error.message) }
+      if (current()) await loadAll()
+      await refresh?.()
+    } catch (error) { showToast?.(error.message); if (current()) setErr(error.message) }
     finally { operationBusy.current = false; setBusyOp('') }
   }
   const requestLoad = useCallback(async () => {
@@ -698,14 +710,16 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     if (operationBusy.current) return
     operationBusy.current = true
     setBusyOp(label)
+    const generation = readGeneration.current
+    const current = () => activeReader.current === reader && readGeneration.current === generation
     try {
       const result = await fn()
       showToast?.(result?.outcome || t('{action} OK', { action: t(label) }))
-      await loadAll()
+      if (current()) await loadAll()
       await refresh?.()
     } catch (e) {
       showToast?.(e.message)
-      setErr(e.message)
+      if (current()) setErr(e.message)
     }
     setBusyOp('')
     operationBusy.current = false
@@ -736,7 +750,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
           {t(loading ? 'Loading…' : 'Load')}
         </button>
         <button className="btn btn-primary" onClick={requestDownload}
-          disabled={!readerOnline || !status?.available || !hasEuicc || !!busyOp || !!dl && !dl.done && !dl.error}
+          disabled={!readerOnline || !status?.available || !hasEuicc || !ses.some(se => se.capabilities?.profile_download === true) || !!busyOp || !!dl && !dl.done && !dl.error}
           title={!hasEuicc ? t('Read this eSIM once before downloading a new one.') : ''}>
           {t('Download eSIM')}
         </button>
@@ -954,12 +968,12 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                                 </button>
                               )}
                               {enabled && (
-                                <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline}
+                                <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline || !se.capabilities?.profile_management}
                                   onClick={() => runProfileOp('Disable', () => api.esimDisable(p.iccid, target))}>
                                   {t('Disable')}
                                 </button>
                               )}
-                              <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline}
+                              <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline || !se.capabilities?.profile_management}
                                 onClick={() => setRenameTarget({ se, profile: p })}>
                                 {t('Rename')}
                               </button>
