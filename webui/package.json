@@ -15,7 +15,7 @@
     "test:request-gate": "node tests/latestRequestGate.mjs",
     "test:legacy-surface": "node tests/legacySurfaceContracts.mjs",
     "test:cellular-media": "node tests/cellularMediaMonitor.mjs",
-    "test:go-call-media": "node tests/goCallMedia.mjs && node tests/goCallStability.mjs",
+    "test:go-call-media": "node tests/goCallMedia.mjs && node tests/goCallStability.mjs && node tests/advancedDiagnostics.mjs",
     "test:sms-submission": "node tests/smsSubmissionSafety.mjs",
     "test:vowifi-media": "node tests/vowifiMediaGate.mjs",
     "test:native-incoming-coordinator": "node tests/nativeIncomingCoordinator.mjs",

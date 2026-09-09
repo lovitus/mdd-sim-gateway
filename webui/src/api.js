@@ -675,6 +675,11 @@ Object.assign(api, {
       repository_url: 'https://github.com/MddIdd/mdd-sim-gateway', runtime }
   },
   diagnosticsV1: () => j('GET', '/v1/diagnostics'),
+  advancedDiagnosticRead: resource => {
+    const paths = { diagnostics: '/v1/diagnostics', runtime: '/v1/system/runtime', components: '/v1/system/provider-config', exits: '/v1/egress/exits' }
+    if (!Object.hasOwn(paths, resource)) return Promise.reject(new Error('diagnostic_resource_invalid'))
+    return j('GET', paths[resource], undefined, {}, 15000)
+  },
   lineDiagnosticLogs: (lineID, limit = 200) => j('GET',
     `/v1/diagnostics/lines/${encodeURIComponent(lineID)}/logs?limit=${Number(limit)}`),
   lineDiagnosticExportURL: (lineID, limit = 500) => `${base}/v1/diagnostics/lines/${encodeURIComponent(lineID)}/logs/export?limit=${Number(limit)}`,
