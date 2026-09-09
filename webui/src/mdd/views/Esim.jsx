@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import { euiccReaderKey, downloadView, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch, profileInventoryAvailable } from '../esimAdapter.js'
 import { useI18n } from '../i18n.jsx'
 import { compactReaderName } from '../linePresentation.js'
+import { mergeReportedProfiles } from '../esimAdapter.js'
 
 const DOWNLOAD_STEPS = [
   ['es10a_get_euicc_configured_addresses', 'Read default SM-DP+'],
@@ -532,6 +533,8 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   }, [readers, reader])
 
   const selectedCard = readers.find((c) => c.name === reader)
+  const reportedProfiles = JSON.stringify([selectedCard?.present,selectedCard?.stale,selectedCard?.euicc,selectedCard?.secure_elements])
+  useEffect(()=>{setSes(previous=>mergeReportedProfiles(previous,selectedCard))},[reportedProfiles])
   const readerPresenceUnknown = selectedCard?.card_presence === 'unknown'
   const readerOnline = selectedCard?.present === true && !selectedCard?.stale
   const matchedInst = useMemo(
@@ -602,7 +605,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     return () => { cancelled = true }
   }, [loaded, loading, ses.length, reader, selectedCard?.iccid, selectedCard?.session_generation, t])
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (cached = false) => {
     if (!reader || activeReader.current !== reader) return
     const generation = ++readGeneration.current
     const current = () => activeReader.current === reader && readGeneration.current === generation
@@ -613,7 +616,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
       if (!current()) return
       setStatus(st)
       // One call loads every SE (chip + profiles + notifications).
-      const c = await api.esimChip(reader)
+      const c = await (cached ? api.esimChipCached(reader) : api.esimChip(reader))
       if (!current()) return
       const list = c.ses || []
       if(list.length)setStatus({...st,available:true})
@@ -631,7 +634,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         setErr('')
       }
       setLoaded(true)
-      setCachedAt(0)
+      setCachedAt(cached ? (c.ts || 0) * 1000 : 0)
     } catch (e) {
       if (!current()) return
       // Non-eUICC cards surface as a calm empty state, not a red error banner.
@@ -654,7 +657,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     try {
       const result = await api.esimEnable(profile.iccid, seTarget(reader,se,profile))
       showToast?.(result.outcome)
-      if (current()) await loadAll()
+      if (current()) await loadAll(true)
       await refresh?.()
     } catch (error) { showToast?.(error.message); if (current()) setErr(error.message) }
     finally { operationBusy.current = false; setBusyOp('') }
@@ -715,7 +718,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     try {
       const result = await fn()
       showToast?.(result?.outcome || t('{action} OK', { action: t(label) }))
-      if (current()) await loadAll()
+      if (current()) await loadAll(label === 'Nickname' || label === 'Disable')
       await refresh?.()
     } catch (e) {
       showToast?.(e.message)
@@ -1015,7 +1018,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
           <div style={{ color: 'var(--text-mute)', fontSize: 13 }}>
             {loading
               ? t('Reading…')
-              : !loaded
+              : !ses.length || ses.some(se => se.notifications_read !== true)
                 ? t('Click Load to list notifications.')
                 : hasEuicc
                   ? t('No pending notifications.')

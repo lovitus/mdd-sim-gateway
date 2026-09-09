@@ -58,12 +58,27 @@ export function secureElementView(entry) {
     profiles:(euicc.profiles || []).map(profile => ({...profile,
       profileState:profile.state, profileNickname:profile.nickname || '',
       profileName:profile.profile_name || '', serviceProviderName:profile.service_provider_name || '',
-    })), notifications:[],
+    })), notifications:[], notifications_read:false,
   }
 }
 
 export function profileInventoryAvailable(ses) {
   return ses.length > 0 && ses.every(se => se.capabilities?.profiles_available === true)
+}
+
+export function mergeReportedProfiles(ses, card) {
+  if (!card?.present || card.stale) return ses
+  const facts = card.secure_elements?.length ? card.secure_elements.map(slot=>slot.euicc) : [card.euicc]
+  let changed=false
+  const next=ses.map(se=>{
+    const fact=facts.find(value=>value?.eid===se.eid && value.profiles_available===true)
+    if(!fact)return se
+    const profiles=secureElementView({euicc:fact}).profiles
+    if(JSON.stringify(profiles)===JSON.stringify(se.profiles))return se
+    changed=true
+    return {...se,profiles,notifications:[],notifications_read:false}
+  })
+  return changed ? next : ses
 }
 
 export function profileRequest(action, target, nickname) {
@@ -122,6 +137,7 @@ async function inventory(reader, notifications) {
       try {
         const result = await go.euiccNotifications(se.eid)
         se.notifications = (result.entries || []).map(item => ({...item,seq:item.sequence_number,seqNumber:item.sequence_number,profileManagementOperation:item.event}))
+        se.notifications_read = true
       } catch(error) {se.notification_error=error.message || 'Notification inventory unavailable'}
     } else if(notifications) {
       se.notification_error='Notification inventory unavailable'

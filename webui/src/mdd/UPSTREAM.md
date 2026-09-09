@@ -270,6 +270,14 @@ failures remain visible rather than appearing as empty chip information. Read
 generations fence cache and post-operation refreshes when the reader/card session
 changes. These changes do not enable deletion or certify production profile writes.
 
+One authorized nickname change and restoration was exercised through the original
+page and confirmed by Agent inventory. It exposed a post-write refresh window:
+successful mutations already ask the Agent to refresh its card session. The page
+now reads reported inventory after profile mutations rather than immediately
+issuing another hardware refresh. Existing card snapshots update matching EID
+profiles without added polling; stale reports are ignored. Notification inventory
+has a separate read flag, so an unqueried list is never presented as confirmed empty.
+
 ## Recovery diagnostics and persistence boundary
 
 Known IMS start failures retain the IMS layer; an unconfirmed tunnel state is

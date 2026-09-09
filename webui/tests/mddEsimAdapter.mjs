@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
 globalThis.window = {location:{pathname:'/'}}
+const {mergeReportedProfiles}=await import('../src/mdd/esimAdapter.js')
+const priorProfiles=[{eid:'eid-a',profiles:[],notifications:[{sequence_number:1}],notifications_read:true}]
+const reportedCard={present:true,euicc:{eid:'eid-a',profiles_available:true,profiles:[{iccid:'card-a',state:'disabled',nickname:'reported'}]}}
+assert.equal(mergeReportedProfiles(priorProfiles,{...reportedCard,stale:true}),priorProfiles)
+const reportedView=mergeReportedProfiles(priorProfiles,reportedCard)
+assert.equal(reportedView[0].profiles[0].profileNickname,'reported')
+assert.equal(reportedView[0].notifications_read,false)
+assert.equal(mergeReportedProfiles(reportedView,reportedCard),reportedView)
+assert.equal(mergeReportedProfiles(priorProfiles,{...reportedCard,euicc:{...reportedCard.euicc,eid:'other'}}),priorProfiles)
 const {euiccReaderKey, readerEuiccs, secureElementView, profileRequest, downloadView, notificationEntries, esimAPI,rememberDownload,rememberedDownload,forgetDownload,cachedDownloadReceipt,downloadRejectedBeforeDispatch,profileInventoryAvailable} = await import('../src/mdd/esimAdapter.js')
 const {api:go} = await import('../src/api.js')
 const entries = [
@@ -10,6 +19,7 @@ const entries = [
 assert.equal(readerEuiccs(entries,euiccReaderKey({agent_id:'agent-b',name:'Same reader'}))[0].euicc.eid,'eid-b')
 assert.equal(secureElementView(entries[1]).error,'euicc_profile_inventory_unavailable')
 assert.equal(secureElementView(entries[0]).error,'')
+assert.equal(secureElementView(entries[0]).notifications_read,false)
 assert.equal(profileInventoryAvailable([secureElementView(entries[0])]),true)
 assert.equal(profileInventoryAvailable([secureElementView(entries[1])]),false)
 assert.equal(profileInventoryAvailable(entries.map(secureElementView)),false)
@@ -63,6 +73,17 @@ go.euiccNotifications=async()=>{throw new Error('notification read failed')}
 const partialRead=await esimAPI.esimChip(euiccReaderKey({agent_id:'agent-a',name:'Same reader'}))
 assert.equal(partialRead.ses[0].profiles[0].profileNickname,'fresh')
 assert.equal(partialRead.ses[0].notification_error,'notification read failed')
+assert.equal(partialRead.ses[0].notifications_read,false)
+let notificationReads=0
+go.euiccNotifications=async()=>{notificationReads++;return {entries:[]}}
+const emptyNotifications=await esimAPI.esimChip(euiccReaderKey({agent_id:'agent-a',name:'Same reader'}))
+assert.equal(emptyNotifications.ses[0].notifications_read,true)
+assert.deepEqual(emptyNotifications.ses[0].notifications,[])
+const beforeCachedRefresh=refreshCalls
+const reportedInventory=await esimAPI.esimChipCached(euiccReaderKey({agent_id:'agent-a',name:'Same reader'}))
+assert.equal(reportedInventory.ses[0].notifications_read,false)
+assert.equal(notificationReads,1,'cached inventory must not query card notifications')
+assert.equal(refreshCalls,beforeCachedRefresh,'cached inventory must not trigger an APDU refresh')
 console.log('Customized MDD eSIM identity, typed outcomes and deferred-deletion contracts passed')
 const page=readFileSync(new URL('../src/mdd/views/Esim.jsx',import.meta.url),'utf8')
 assert.ok(page.includes('cancelled || readGeneration.current !== generation || !r?.cached'))
@@ -71,7 +92,10 @@ assert.ok(page.includes('downloadSE?.capabilities?.profile_download === true'))
 assert.ok(page.includes("if (!downloadAvailable) return setErr(t('Unavailable'))"))
 assert.ok(page.includes('disabled={busy || !downloadAvailable'))
 assert.equal((page.match(/disabled=\{!!busyOp \|\| !readerOnline \|\| !se\.capabilities\?\.profile_management\}/g)||[]).length,3,'enable, disable and rename must all respect Agent management capability')
-assert.equal((page.match(/if \(current\(\)\) await loadAll\(\)/g)||[]).length,2,'completed profile operations must not refresh a newly selected card')
+assert.ok(page.includes('if (current()) await loadAll(true)'))
+assert.ok(page.includes("if (current()) await loadAll(label === 'Nickname' || label === 'Disable')"),'notification actions retain their explicit readback')
+assert.ok(page.includes('cached ? api.esimChipCached(reader) : api.esimChip(reader)'))
+assert.ok(page.includes('ses.some(se => se.notifications_read !== true)'))
 assert.ok(page.includes('(required, 15 digits)'))
 assert.equal(page.includes('(lpac default TAC)'),false)
 assert.ok(page.includes('profilesAvailable ? t(\'{count} profile(s)\''))
