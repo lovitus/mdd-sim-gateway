@@ -42,6 +42,20 @@ export function downloadView(job) {
   }
 }
 
+export function downloadFailureLabel(code, t = value => value) {
+  const labels = {
+    'euicc_rsp_8.8.2_3.1': 'SM-DP+ does not support the proposed CI public keys.',
+    'euicc_rsp_8.8.4_3.7': 'SM-DP+ has no authentication certificate for a CI supported by this eUICC.',
+    'euicc_rsp_8.1.2_6.1': 'SM-DP+ rejected the EUM certificate.',
+    'euicc_rsp_8.1.3_6.1': 'SM-DP+ rejected the eUICC certificate.',
+    euicc_tls_certificate_failed: 'HTTPS certificate verification failed.',
+    euicc_dns_failed: 'SM-DP+ hostname resolution failed.',
+    euicc_network_timeout: 'SM-DP+ network request timed out.',
+    euicc_network_failed: 'SM-DP+ network connection failed.',
+  }
+  return labels[code] ? `${t(labels[code])} (${code})` : code
+}
+
 export function readerEuiccs(entries, key) {
   const [agent, reader] = JSON.parse(key)
   if (!agent || !reader) throw new Error('euicc_reader_identity_required')

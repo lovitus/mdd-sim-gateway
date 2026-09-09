@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
-import { euiccReaderKey, downloadView, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch, profileInventoryAvailable } from '../esimAdapter.js'
+import { euiccReaderKey, downloadView, downloadFailureLabel, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch, profileInventoryAvailable } from '../esimAdapter.js'
 import { useI18n } from '../i18n.jsx'
 import { compactReaderName } from '../linePresentation.js'
 import { mergeReportedProfiles } from '../esimAdapter.js'
@@ -819,7 +819,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
               {dl.metadata.iccid ? ` · ${dl.metadata.iccid}` : ''}
             </div>
           )}
-          {dl.error && <div style={{ marginTop: 10, color: '#ef4444', fontSize: 13 }}>{dl.error}</div>}
+          {dl.error && <div style={{ marginTop: 10, color: '#ef4444', fontSize: 13 }}>{downloadFailureLabel(dl.error, t)}</div>}
         </div>
       )}
 

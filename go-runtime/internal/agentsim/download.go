@@ -277,7 +277,7 @@ func (manager *Manager) runEUICCDownload(ctx context.Context, current *session,
 			"euicc_download_install_uncertain", job.snapshot().Metadata)
 		return
 	}
-	state, code := agentlink.EUICCDownloadFailed, "euicc_download_failed"
+	state, code := agentlink.EUICCDownloadFailed, downloadErrorCode(errors.Join(err, endErr))
 	if errors.Is(ctx.Err(), context.Canceled) {
 		state, code = agentlink.EUICCDownloadCanceled, "download_canceled"
 	} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {

@@ -134,3 +134,8 @@ await esimAPI.esimDownload({eid:'test-eid',operation_id:'without-imei',activatio
 assert.equal(downloads[0][1].imei,undefined)
 assert.throws(()=>esimAPI.esimDownload({eid:'test-eid',operation_id:'invalid-imei',imei:'123'}),/euicc_download_identity_required/)
 assert.equal(downloads.length,1)
+
+const {downloadFailureLabel}=await import('../src/mdd/esimAdapter.js')
+assert.match(downloadFailureLabel('euicc_rsp_8.8.2_3.1'),/CI public keys/)
+assert.match(downloadFailureLabel('euicc_rsp_8.8.2_3.1'),/euicc_rsp_8\.8\.2_3\.1/)
+assert.equal(downloadFailureLabel('euicc_download_failed'),'euicc_download_failed')
