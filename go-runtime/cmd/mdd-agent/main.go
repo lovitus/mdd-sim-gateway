@@ -274,8 +274,8 @@ func (settings *config) validate() error {
 	if settings.Agent.ModemBackend != "" && settings.Agent.ModemBackend != "auto" && settings.Agent.ModemBackend != "serial" {
 		return errors.New("invalid modem backend")
 	}
-	if settings.Agent.ModemBackend == "serial" && (runtime.GOOS != "linux" || len(settings.Agent.ModemProfiles) == 0 || !json.Valid(settings.Agent.ModemProfiles)) {
-		return errors.New("serial modem backend requires Linux and modem profiles")
+	if settings.Agent.ModemBackend == "serial" && (runtime.GOOS != "linux" || len(settings.Agent.ModemProfiles) > 0 && !json.Valid(settings.Agent.ModemProfiles)) {
+		return errors.New("serial modem backend requires Linux and valid optional modem profiles")
 	}
 	if (settings.Agent.RawUSBSource || settings.Agent.RawUSBImporter) && !settings.Agent.ModemEnabled {
 		return errors.New("raw USB modem mode requires modem_enabled")

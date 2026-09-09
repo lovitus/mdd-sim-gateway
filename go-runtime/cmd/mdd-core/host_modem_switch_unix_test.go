@@ -80,3 +80,23 @@ func TestHostModemSwitchDoesNotClaimRecoveryWhenConfigRestoreFails(t *testing.T)
 		t.Fatal("failed rollback claimed restoration")
 	}
 }
+
+func TestHostModemSwitchRollbackPreservesActiveDisabledManager(t *testing.T) {
+	fixture := newHostSwitchFixture()
+	mm := fixture.states["ModemManager.service"]
+	mm.UnitFileState = "disabled"
+	fixture.states["ModemManager.service"] = mm
+	fixture.failOnce = "start mdd-agent.service"
+	state, err := switchHostModemServices(context.Background(), "serial", fixture, func() error { return nil }, func(context.Context) error { return nil })
+	if err == nil || state != "rolled_back" || fixture.states["ModemManager.service"].ActiveState != "active" || fixture.states["ModemManager.service"].UnitFileState != "disabled" {
+		t.Fatalf("active disabled manager not restored: %s %v %+v", state, err, fixture.states)
+	}
+}
+
+func TestHostModemSettingsAcceptEmptyLegacySerialProfiles(t *testing.T) {
+	for _, profiles := range [][]hostModemProfile{nil, {}} {
+		if err := validateHostModemSettings(hostModemSettings{Backend: "serial", Profiles: profiles}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

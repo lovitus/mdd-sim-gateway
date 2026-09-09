@@ -170,6 +170,11 @@ Linux migration and exact production host binding are now complete, and Chrome
 shows the original hardware control. No mode transition was performed; binding
 and rendering do not prove switching acceptance.
 
+Real Linux switching exposed an extra Go-only restriction on empty modem profile
+lists. The original ec620942 USB whitelist returns no devices for an empty list;
+Core and Agent now retain that behavior. No default VID/PID or broad serial probe
+is substituted. Actual mode switching remains a separate acceptance step.
+
 The current new-device-defaults batch connects the original General controls to
 CAS preferences, imports the original device defaults without overwriting Go
 choices, and uses the existing Agent policy, draft, preparation, provision and

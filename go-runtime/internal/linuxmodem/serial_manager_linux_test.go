@@ -32,7 +32,13 @@ func TestSerialModeProfilesRetainOriginalDefaultInterface(t *testing.T) {
 	if err != nil || len(profiles) != 1 || profiles[0].ATInterface != nil {
 		t.Fatal("original omitted-interface profile rejected", err)
 	}
-	for _, payload := range []string{`null`, `[]`, `[{"vid":"bad","pid":"0125"}]`, `[{"vid":"2c7c","pid":"0125"},{"vid":"2C7C","pid":"0125"}]`} {
+	for _, payload := range []string{"", `null`, `[]`} {
+		profiles, err := parseSerialProfiles([]byte(payload))
+		if err != nil || len(profiles) != 0 {
+			t.Fatalf("empty legacy profile list rejected: %v", err)
+		}
+	}
+	for _, payload := range []string{`{}`, `[{"vid":"bad","pid":"0125"}]`, `[{"vid":"2c7c","pid":"0125"},{"vid":"2C7C","pid":"0125"}]`} {
 		if _, err := parseSerialProfiles([]byte(payload)); err == nil {
 			t.Fatal("invalid profiles accepted")
 		}

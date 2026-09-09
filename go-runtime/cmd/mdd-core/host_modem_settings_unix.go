@@ -121,9 +121,6 @@ func validateHostModemSettings(settings hostModemSettings) error {
 	if settings.Backend != "auto" && settings.Backend != "serial" {
 		return errors.New("invalid host modem backend")
 	}
-	if settings.Backend == "serial" && len(settings.Profiles) == 0 {
-		return errors.New("serial mode requires configured modem profiles")
-	}
 	if len(settings.Profiles) > 128 {
 		return errors.New("too many host modem profiles")
 	}

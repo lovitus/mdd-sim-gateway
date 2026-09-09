@@ -32,8 +32,12 @@ func ValidateSerialProfiles(payload []byte) error { _, err := parseSerialProfile
 
 func parseSerialProfiles(payload []byte) ([]serialModemProfile, error) {
 	var profiles []serialModemProfile
-	if len(payload) > 1<<20 || json.Unmarshal(payload, &profiles) != nil || len(profiles) == 0 {
-		return nil, errors.New("serial mode requires modem profiles")
+	// The original MDD USB whitelist may be empty: no modem is then selected.
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	if len(payload) > 1<<20 || json.Unmarshal(payload, &profiles) != nil {
+		return nil, errors.New("invalid serial modem profiles")
 	}
 	seen := make(map[string]bool)
 	for _, profile := range profiles {
