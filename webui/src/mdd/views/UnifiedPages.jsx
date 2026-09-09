@@ -479,6 +479,8 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
   const isZh = language === 'zh'
   const [pool, setPool] = useState([])
   const [bindings, setBindings] = useState({})
+  const [poolSnapshot, setPoolSnapshot] = useState(null)
+  const [poolError, setPoolError] = useState('')
   const [draft, setDraft] = useState(EMPTY_IMEI_DRAFT)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
@@ -489,8 +491,10 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
       .then(data => {
         setPool(data?.pool || [])
         setBindings(data?.bindings || {})
+        setPoolSnapshot(data)
+        setPoolError('')
       })
-      .catch(error => showToast?.(`${t('Error')}: ${error.message}`))
+      .catch(error => { setPoolError(error.message); showToast?.(`${t('Error')}: ${error.message}`) })
       .finally(() => setLoading(false))
   }, [showToast, t])
 
@@ -531,13 +535,14 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
   const cleanImei = String(draft.imei || '').replace(/\D/g, '')
 
   const saveEntry = async () => {
+    if (busy || loading || !poolSnapshot) return
     if (!draft.name.trim() || cleanImei.length !== 15) {
       showToast?.(isZh ? '请输入名称和完整的 15 位 IMEI' : 'Enter a name and a complete 15-digit IMEI')
       return
     }
     setBusy('save')
     try {
-      await api.saveImeiPoolEntry({ ...draft, name: draft.name.trim(), imei: cleanImei, notes: draft.notes.trim() })
+      await api.saveImeiPoolEntry({ ...draft, name: draft.name.trim(), imei: cleanImei, notes: draft.notes.trim() }, draft.snapshot || poolSnapshot)
       setDraft(EMPTY_IMEI_DRAFT)
       await load()
       showToast?.(isZh ? 'IMEI 条目已保存' : 'IMEI entry saved')
@@ -546,6 +551,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
   }
 
   const deleteEntry = async (entry) => {
+    if (busy || loading || !poolSnapshot) return
     const used = usedIccids(entry.id)
     if (used.length) {
       showToast?.(isZh ? `该 IMEI 仍绑定 ${used.length} 张 SIM，请先解绑` : `This IMEI is still bound to ${used.length} SIM(s); unbind them first`)
@@ -554,7 +560,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
     if (!window.confirm(isZh ? `删除 IMEI“${entry.name}”？` : `Delete IMEI “${entry.name}”?`)) return
     setBusy(`delete:${entry.id}`)
     try {
-      await api.deleteImeiPoolEntry(entry.id)
+      await api.deleteImeiPoolEntry(entry.id, poolSnapshot)
       if (draft.id === entry.id) setDraft(EMPTY_IMEI_DRAFT)
       await load()
       showToast?.(isZh ? 'IMEI 条目已删除' : 'IMEI entry deleted')
@@ -563,6 +569,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
   }
 
   const changeBinding = async (row, entryId) => {
+    if (busy || loading || !poolSnapshot) return
     const current = bindings[row.iccid]
     if (!entryId || current?.imei_id === entryId) return
     const entry = pool.find(item => item.id === entryId)
@@ -574,7 +581,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
     if (!window.confirm(warning)) return
     setBusy(`bind:${row.iccid}`)
     try {
-      await api.bindImeiToIccid({ iccid: row.iccid, imei_id: entry.id })
+      await api.bindImeiToIccid({ iccid: row.iccid, imei_id: entry.id }, poolSnapshot)
       await Promise.all([load(), refreshDevices?.()])
       showToast?.(running
         ? (isZh ? '绑定已保存；请重启该线路使新 IMEI 生效' : 'Binding saved; restart the line to apply the new IMEI')
@@ -584,11 +591,12 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
   }
 
   const unbind = async (row) => {
+    if (busy || loading || !poolSnapshot) return
     if (!bindings[row.iccid]) return
     if (!window.confirm(isZh ? '解除此 ICCID 的 IMEI 绑定？线路下次启动可能要求重新绑定。' : 'Unbind this ICCID? The line may require a new binding on its next start.')) return
     setBusy(`unbind:${row.iccid}`)
     try {
-      await api.unbindImeiFromIccid(row.iccid)
+      await api.unbindImeiFromIccid(row.iccid, poolSnapshot)
       await Promise.all([load(), refreshDevices?.()])
       showToast?.(isZh ? 'IMEI 绑定已解除' : 'IMEI binding removed')
     } catch (error) { showToast?.(`${t('Error')}: ${error.message}`) }
@@ -596,6 +604,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
   }
 
   return <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div><button className="btn btn-ghost" disabled={!!busy || loading} onClick={load}>{t('Refresh')}</button>{poolError && <p role="alert" className="u-error">{poolError}</p>}</div>
     <div className="card u-panel">
       <div className="u-hardware-intro">
         <h3>{isZh ? 'IMEI 池' : 'IMEI Pool'}</h3>
@@ -610,7 +619,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
           {editingUsedBy.length > 0 && <p className="u-note" style={{ margin: 0 }}>{isZh ? `正被 ${editingUsedBy.length} 张 SIM 使用；解绑前不能修改数字。` : `Used by ${editingUsedBy.length} SIM(s); unbind before changing its digits.`}</p>}
           <textarea rows={2} value={draft.notes} onChange={e => setDraft({ ...draft, notes: e.target.value })} placeholder={isZh ? '备注（可选）' : 'Notes (optional)'} />
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn btn-primary" disabled={busy === 'save' || cleanImei.length !== 15 || !draft.name.trim()} onClick={saveEntry}>{busy === 'save' ? (isZh ? '保存中…' : 'Saving…') : (draft.id ? (isZh ? '保存修改' : 'Save changes') : (isZh ? '添加到池' : 'Add to pool'))}</button>
+            <button className="btn btn-primary" disabled={!!busy || loading || !poolSnapshot || cleanImei.length !== 15 || !draft.name.trim()} onClick={saveEntry}>{busy === 'save' ? (isZh ? '保存中…' : 'Saving…') : (draft.id ? (isZh ? '保存修改' : 'Save changes') : (isZh ? '添加到池' : 'Add to pool'))}</button>
             {draft.id && <button className="btn btn-ghost" onClick={() => setDraft(EMPTY_IMEI_DRAFT)}>{t('Cancel')}</button>}
           </div>
         </div>
@@ -619,7 +628,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
             const used = usedIccids(entry.id)
             return <div key={entry.id} style={{ border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
               <div style={{ minWidth: 0 }}><b>{entry.name}</b><div className="mono" style={{ fontSize: 12, color: 'var(--text-dim)' }}>{entry.imei_masked} · {isZh ? `绑定 ${used.length} 张 SIM` : `${used.length} SIM binding(s)`}</div>{entry.notes && <div style={{ fontSize: 12, color: 'var(--text-mute)' }}>{entry.notes}</div>}</div>
-              <div style={{ display: 'flex', gap: 6 }}><button className="btn btn-ghost" onClick={() => setDraft({ id: entry.id, name: entry.name, imei: entry.imei, notes: entry.notes || '' })}>{isZh ? '编辑' : 'Edit'}</button><button className="btn btn-danger-outline" disabled={used.length > 0 || busy === `delete:${entry.id}`} title={used.length ? (isZh ? '请先解除全部 SIM 绑定' : 'Unbind all SIMs first') : ''} onClick={() => deleteEntry(entry)}>{isZh ? '删除' : 'Delete'}</button></div>
+              <div style={{ display: 'flex', gap: 6 }}><button className="btn btn-ghost" disabled={!!busy} onClick={() => setDraft({ id: entry.id, name: entry.name, imei: entry.imei, notes: entry.notes || '', snapshot: poolSnapshot })}>{isZh ? '编辑' : 'Edit'}</button><button className="btn btn-danger-outline" disabled={used.length > 0 || !!busy} title={used.length ? (isZh ? '请先解除全部 SIM 绑定' : 'Unbind all SIMs first') : ''} onClick={() => deleteEntry(entry)}>{isZh ? '删除' : 'Delete'}</button></div>
             </div>
           })}
         </div>
@@ -634,8 +643,8 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
           const binding = bindings[row.iccid]
           return <div className="mdd-imei-binding" key={row.iccid}>
             <div><b>{row.label || 'SIM'}</b>{row.number && <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{row.number}</div>}<div className="mono" style={{ fontSize: 11, color: 'var(--text-mute)' }}>ICCID {row.iccid}</div></div>
-            <select value={binding?.imei_id || ''} disabled={busy === `bind:${row.iccid}`} onChange={e => changeBinding(row, e.target.value)}><option value="">{isZh ? '— 未绑定 —' : '— Unbound —'}</option>{pool.map(entry => <option key={entry.id} value={entry.id}>{entry.name} ({entry.imei_masked})</option>)}</select>
-            <button className="btn btn-ghost" disabled={!binding || busy === `unbind:${row.iccid}`} onClick={() => unbind(row)}>{isZh ? '解绑' : 'Unbind'}</button>
+            <select value={binding?.imei_id || ''} disabled={!!busy || loading || !poolSnapshot} onChange={e => changeBinding(row, e.target.value)}><option value="">{isZh ? '— 未绑定 —' : '— Unbound —'}</option>{pool.map(entry => <option key={entry.id} value={entry.id}>{entry.name} ({entry.imei_masked})</option>)}</select>
+            <button className="btn btn-ghost" disabled={!binding || !!busy || loading || !poolSnapshot} onClick={() => unbind(row)}>{isZh ? '解绑' : 'Unbind'}</button>
           </div>
         })}
         {!rows.length && <Empty title={isZh ? '没有 SIM 记录' : 'No SIM records'} detail={isZh ? '检测到 ICCID 后会显示在这里。' : 'SIMs appear here after an ICCID is detected.'} />}

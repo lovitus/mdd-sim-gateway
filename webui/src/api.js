@@ -357,8 +357,15 @@ async function goIMEIPool() {
   return oldIMEIPool(await j('GET', '/v1/imei-pool'))
 }
 
-async function saveGoIMEIEntry(entry) {
-  const snapshot = await j('GET', '/v1/imei-pool')
+function requireIMEISnapshot(snapshot) {
+  if (!Number.isSafeInteger(snapshot?.revision) || snapshot.revision < 0 ||
+      !Number.isSafeInteger(snapshot?.catalog_revision) || snapshot.catalog_revision < 0)
+    throw new Error('imei_pool_revision_missing')
+  return snapshot
+}
+
+async function saveGoIMEIEntry(entry, expected) {
+  const snapshot = requireIMEISnapshot(expected)
   const id = String(entry?.id || operationID('imei')).slice(0, 128)
   return j('PUT', `/v1/imei-pool/${encodeURIComponent(id)}`, {
     schema_version: 1, id, name: String(entry?.name || '').trim(),
@@ -366,14 +373,15 @@ async function saveGoIMEIEntry(entry) {
   }, { 'If-Match': `"${snapshot.revision}"` })
 }
 
-async function deleteGoIMEIEntry(id) {
-  const snapshot = await j('GET', '/v1/imei-pool')
+async function deleteGoIMEIEntry(id, expected) {
+  const snapshot = requireIMEISnapshot(expected)
   return j('DELETE', `/v1/imei-pool/${encodeURIComponent(id)}`, {},
     { 'If-Match': `"${snapshot.revision}"` })
 }
 
-async function bindGoIMEI(input) {
-  const [snapshot, catalog] = await Promise.all([j('GET', '/v1/imei-pool'), j('GET', '/v1/catalog/lines')])
+async function bindGoIMEI(input, expected) {
+  const snapshot = requireIMEISnapshot(expected)
+  const catalog = await j('GET', '/v1/catalog/lines')
   const line = (catalog.lines || []).find(value => String(value.card_id) === String(input.iccid))
   if (!line) throw new Error('no configured line owns this ICCID')
   return j('PUT', `/v1/imei-pool/${encodeURIComponent(input.imei_id)}/bindings/${encodeURIComponent(line.id)}`, {
@@ -382,13 +390,13 @@ async function bindGoIMEI(input) {
   }, { 'If-Match': `"${snapshot.revision}"` })
 }
 
-async function unbindGoIMEI(iccid) {
-  const snapshot = await j('GET', '/v1/imei-pool')
-  const binding = (snapshot.bindings || []).find(value => String(value.card_id) === String(iccid))
+async function unbindGoIMEI(iccid, expected) {
+  const snapshot = requireIMEISnapshot(expected)
+  const binding = snapshot.bindings?.[String(iccid)]
   if (!binding) throw new Error('IMEI binding not found')
-  return j('DELETE', `/v1/imei-pool/${encodeURIComponent(binding.entry_id)}/bindings/${encodeURIComponent(binding.line_id)}`, {
+  return j('DELETE', `/v1/imei-pool/${encodeURIComponent(binding.imei_id)}/bindings/${encodeURIComponent(binding.line_id)}`, {
     expected_catalog_revision: snapshot.catalog_revision,
-    expected_card_id: binding.card_id,
+    expected_card_id: String(iccid),
   }, { 'If-Match': `"${snapshot.revision}"` })
 }
 

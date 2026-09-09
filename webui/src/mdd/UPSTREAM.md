@@ -167,13 +167,17 @@ host/Core binding, retained user switches, loaded-config readback and rollback.
 This is not a general remote-Agent switch. A validation Agent cannot be adopted
 through a conventional config filename. The batch passed CI. The user-authorized
 Linux migration and exact production host binding are now complete, and Chrome
-shows the original hardware control. No mode transition was performed; binding
-and rendering do not prove switching acceptance.
+shows the original hardware control. Subsequent production serial/auto switching
+passed with the original configuration restored; evidence is recorded in the
+recovery cursor as linux-mode-verification.BfFEcV. Binding and rendering alone
+were not used as switching evidence.
 
 Real Linux switching exposed an extra Go-only restriction on empty modem profile
 lists. The original ec620942 USB whitelist returns no devices for an empty list;
 Core and Agent now retain that behavior. No default VID/PID or broad serial probe
-is substituted. Actual mode switching remains a separate acceptance step.
+is substituted. Actual Linux serial/auto switching passed after that correction.
+The original ModemManager startup policy was restored (active but disabled), so
+the displayed services_mismatch is retained rather than silently enabling it.
 
 The current new-device-defaults batch connects the original General controls to
 CAS preferences, imports the original device defaults without overwriting Go
@@ -192,7 +196,7 @@ module matrix, not a claim that all other original actions have passed acceptanc
 | Original action | Current boundary | Required closure |
 | --- | --- | --- |
 | New modem 4G/VoWiFi defaults | Deployed in a57bdb0. Original persisted defaults were restored through the production browser; save and re-entry passed, with existing lines and notification configuration unchanged. | Real new-modem automatic provisioning remains unverified. Do not repeat the completed settings-save acceptance. |
-| VoWiFi-only hardware mode | Implementation passed full CI. Linux Agent migration and exact production host binding are complete; Chrome displays the original control. | Real mode switching remains unverified. Current auto mode and all device switches were preserved. |
+| VoWiFi-only hardware mode | Implementation passed full CI. Linux production binding and actual serial/auto switching passed; original startup policy was restored. | No modem was attached, so this does not prove physical serial-modem discovery. Do not repeat the completed mode-switch cycle. |
 | Web bind/port/certificate paths | Saved startup settings are editable through the existing helper; the production browser saved/read back unchanged values. | Changed-value persistence/backup has CI coverage; no production port/certificate change was performed. Domain/self-signed fields remain actual certificate information, not an automatic certificate-issuance feature. |
 | Retry count and interval | Original inputs, Go persistence, per-line overrides and continuous-failure window are connected; the production page saved/read back 3/40. | Fault-window behavior is covered by CI, not a manufactured production failure; exit-recovery strike counts remain separate. |
 | Rekey default | Go catalog/provider and original form are already connected. | Retain existing evidence; do not treat this as another missing implementation merely because it appears beside disabled retry fields. |
@@ -217,8 +221,9 @@ switching discovery/bridges as well as stopping/disabling ModemManager. Current
 devices. Merely adding a helper service-stop action would remove discovery and
 does not restore the original feature. A serial discovery/owner path must exist
 before wiring that old checkbox; readers and remote Windows/macOS are unaffected
-by this original Linux-host control. These are unimplemented requirements, not
-new user decisions or reasons to claim the remaining settings work complete.
+by this original Linux-host control. These were the source requirements for the
+now-delivered serial discovery/owner and mode-switch batch, not outstanding
+implementation work. Physical modem acceptance remains separate.
 
 The original retry controls are consumed by `ec620942 control/app/main.py`
 `_health_recovery_due` and `apply_health`: `max * interval` bounds a continuous
@@ -253,8 +258,10 @@ cancel a card operation, and the UI warns that a new request could duplicate it.
 Results from a different reader/EID do not populate the currently selected card.
 Short-screen download dialogs scroll internally and remain cancellable.
 
-These source contracts still require batch CI and actual non-destructive field
-readback. No profile installation or deletion is implied by the implementation.
+These source contracts passed batch CI and actual non-destructive field readback
+as recorded in the recovery cursor. Download installation acceptance is explicitly
+postponed by the user because no new activation code is available. No profile
+installation or deletion is implied by the implementation.
 
 Explicit chip reading now uses a read-only EID inventory refresh, including an
 empty eUICC, through the existing Agent session and inspection functions. Older
@@ -340,6 +347,13 @@ path. A pending selection can be retired, without deleting its history, after a
 newer user configuration is both published and runtime-confirmed and fresh,
 identity-matched Provider observations show no remaining maintenance hold.
 Saving a configuration alone never clears an uncertain selection.
+
+Production direct-entry fault acceptance subsequently confirmed one automatic
+IP-to-domain selection and IMS readiness on the alternate entry (same upstream,
+not independent redundancy). Restoring the original configuration succeeded,
+but one line needed a single explicit runtime start after the recovery delay.
+The recovery cursor retains both outcomes; successful switching must not be
+presented as proof of fully automatic recovery after configuration restoration.
 
 The old failover policy and main.py health gates feed generation-fenced durable
 decisions in the existing events database. IKE transport counters are separate

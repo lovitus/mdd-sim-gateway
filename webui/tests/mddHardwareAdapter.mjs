@@ -17,3 +17,29 @@ go.saveIMEIEntryExpected=async (entry,revision)=>{assert.equal(revision,3);retur
 go.bindIMEIExpected=async ()=>{throw new Error('catalog changed')}
 await assert.rejects(saveReaderIMEI(device,{...input,name:'renamed'},snapshot),/IMEI pool entry saved; SIM binding failed: catalog changed/)
 console.log('Customized MDD reader IMEI scope and partial-save reporting contracts passed')
+
+const poolRequests=[]
+globalThis.fetch=async (url,options={})=>{
+  poolRequests.push({url,options})
+  if(options.method==='GET'){
+    assert.equal(url,'/v1/catalog/lines')
+    return new Response(JSON.stringify({revision:99,lines:[{id:'line-a',card_id:'fixture-card'}]}),{status:200})
+  }
+  assert.equal(options.headers['If-Match'],'"3"')
+  return new Response(JSON.stringify({code:'revision_conflict'}),{status:409})
+}
+const observed={...snapshot,bindings:{'fixture-card':{imei_id:'entry',line_id:'line-a'}}}
+for(const mutate of [
+  ()=>go.saveImeiPoolEntry(input,observed),
+  ()=>go.deleteImeiPoolEntry('entry',observed),
+  ()=>go.bindImeiToIccid({iccid:'fixture-card',imei_id:'entry'},observed),
+  ()=>go.unbindImeiFromIccid('fixture-card',observed),
+])await assert.rejects(mutate,error=>error.status===409)
+assert.equal(poolRequests.filter(x=>x.options.method!=='GET').length,4)
+for(const request of poolRequests.filter(x=>x.url.includes('/bindings/'))){
+  assert.equal(JSON.parse(request.options.body).expected_catalog_revision,7)
+  assert.equal(JSON.parse(request.options.body).expected_card_id,'fixture-card')
+}
+const count=poolRequests.length
+await assert.rejects(go.saveImeiPoolEntry(input),/imei_pool_revision_missing/)
+assert.equal(poolRequests.length,count)
