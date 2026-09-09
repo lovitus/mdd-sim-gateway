@@ -278,6 +278,13 @@ issuing another hardware refresh. Existing card snapshots update matching EID
 profiles without added polling; stale reports are ignored. Notification inventory
 has a separate read flag, so an unqueried list is never presented as confirmed empty.
 
+Profile disable/enable acceptance exposed a card-session transition that briefly
+reported a default SIM identity without an EID. For a known eUICC's requested
+post-write refresh, the Agent now retains a same-attachment refresh requirement
+and lets the existing reader-worker backoff reopen after failed inspection.
+A new physical session clears that requirement. This does not reset the card,
+replay a profile mutation, or apply the eUICC requirement to ordinary SIMs.
+
 ## Recovery diagnostics and persistence boundary
 
 Known IMS start failures retain the IMS layer; an unconfirmed tunnel state is

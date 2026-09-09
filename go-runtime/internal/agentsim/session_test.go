@@ -126,6 +126,34 @@ func TestManagerAuthenticatesExactLiveCardSession(t *testing.T) {
 	}
 }
 
+func TestProfileRefreshExpectationDoesNotFollowPhysicalCardReplacement(t *testing.T) {
+	card := scriptedCard("8944000000000000001", pinAlreadyVerified)
+	manager, err := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.refreshExpected = map[string]string{"reader": "old-insertion"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Run(ctx, agentreader.Reader{Name: "reader", CardPresent: true, SessionGeneration: "new-insertion"})
+	}()
+	waitForSession(t, manager, "new-insertion")
+	manager.mu.RLock()
+	remaining := len(manager.refreshExpected)
+	manager.mu.RUnlock()
+	if remaining != 0 {
+		t.Fatal("old eUICC expectation survived physical replacement")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("replacement session did not close")
+	}
+}
+
 func TestManagerVerifiesPINOnlyForExactReaderSession(t *testing.T) {
 	const cardID = "8944000000000000001"
 	card := scriptedCard(cardID, pinAcceptedPerTransaction)

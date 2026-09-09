@@ -21,6 +21,45 @@ import (
 
 const testEID = "89049032000000000000000000000001"
 
+func TestProfileRefreshRetriesTransientMissingEUICC(t *testing.T) {
+	card := euiccCard(t, emptyProfileResponse())
+	good := card.handler
+	card.handler = func(command []byte) ([]byte, error) {
+		if len(command) > 1 && command[1] == 0x70 {
+			return []byte{0x68, 0x81}, nil
+		}
+		return good(command)
+	}
+	manager, err := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.refreshExpected = map[string]string{"reader": "insertion-1"}
+	reader := agentreader.Reader{Name: "reader", CardPresent: true, SessionGeneration: "insertion-1"}
+	if err := manager.Run(context.Background(), reader); !errors.Is(err, errEUICCProfileChanged) {
+		t.Fatalf("transition was not retryable: %v", err)
+	}
+	if len(manager.Sessions()) != 0 || card.closes != 1 {
+		t.Fatal("transition published a stable session or leaked card")
+	}
+	card.handler = good
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx, reader) }()
+	waitForSession(t, manager, "insertion-1")
+	views := manager.Sessions()
+	if views[0].EUICC == nil || views[0].EUICC.EID != testEID {
+		t.Fatal("eUICC did not recover")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session did not close")
+	}
+}
+
 func TestEUICCOperationAdmissionDoesNotReadOptionalChipInfo(t *testing.T) {
 	card := euiccCard(t, emptyProfileResponse())
 	fact, err := inspectEUICCWithAID(context.Background(), card, nil)

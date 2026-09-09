@@ -99,6 +99,7 @@ type Manager struct {
 	downloads           map[string]*downloadJob
 	mu                  sync.RWMutex
 	sessions            map[string]*session
+	refreshExpected     map[string]string
 	pinMu               sync.Mutex
 	pinFailed           map[string][sha256.Size]byte
 }
@@ -194,8 +195,17 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 		identity := readReaderSIMIdentity(ctx, card)
 		simIdentity = &identity
 	}
-	secureElements, _ := inspectSecureElements(ctx, card)
+	secureElements, inspectErr := inspectSecureElements(ctx, card)
 	endErr := card.EndTransaction()
+	manager.mu.Lock()
+	expected := manager.refreshExpected[reader.Name] == reader.SessionGeneration
+	if !expected {
+		delete(manager.refreshExpected, reader.Name)
+	}
+	manager.mu.Unlock()
+	if expected && (inspectErr != nil || len(secureElements) == 0) {
+		return errors.Join(errEUICCProfileChanged, inspectErr, endErr, card.Close())
+	}
 	if identityErr == nil {
 		current.cardID = cardID
 		current.simIdentity = simIdentity
@@ -213,6 +223,7 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 		return fmt.Errorf("duplicate SIM session generation %q", current.generation)
 	}
 	manager.sessions[current.generation] = current
+	delete(manager.refreshExpected, reader.Name)
 	manager.mu.Unlock()
 
 	runErr := ctx.Err()
@@ -225,6 +236,12 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 		}
 	}
 	manager.mu.Lock()
+	if errors.Is(runErr, errEUICCProfileChanged) && len(current.secureElements) > 0 {
+		if manager.refreshExpected == nil {
+			manager.refreshExpected = make(map[string]string)
+		}
+		manager.refreshExpected[current.readerName] = current.generation
+	}
 	if manager.sessions[current.generation] == current {
 		delete(manager.sessions, current.generation)
 	}
