@@ -601,6 +601,7 @@ const zh = {
   'Profile inventory unavailable.': '配置文件清单暂不可用。',
   '(required, 15 digits)': '（必填，15 位数字）',
   'Required when downloading': '下载时须填写',
+  'A valid EID is required; IMEI must be 15 digits when provided.': '需要有效 EID；IMEI 可留空，填写时须为 15 位数字。',
   'Audio settings': '通话参数',
   'Notification settings': '通知配置',
   'Runtime information': '运行信息',

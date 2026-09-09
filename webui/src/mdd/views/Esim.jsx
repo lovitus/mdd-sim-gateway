@@ -337,7 +337,7 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
       imei: imei.trim() || undefined,
       confirmation_code: confirmation.trim() || undefined,
     }
-    if (!body.eid || !/^\d{15}$/.test(body.imei || '')) return setErr(t('A valid EID and 15-digit IMEI are required.'))
+    if (!body.eid || (body.imei && !/^\d{15}$/.test(body.imei))) return setErr(t('A valid EID is required; IMEI must be 15 digits when provided.'))
     if (mode === 'code') {
       if (!parseActivationCode(activation)) return setErr(t('Paste an activation code (LPA:1$…).'))
       body.activation_code = activation.trim()
@@ -455,14 +455,14 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
         </label>
         <label style={{ display: 'block', marginBottom: 10 }}>
           <div style={{ fontSize: 12, color: 'var(--text-mute)', marginBottom: 4 }}>
-            IMEI {t(imeiDefault ? '(from matched line — editable)' : '(required, 15 digits)')}
+            IMEI {t(imeiDefault ? '(from matched line — editable)' : '(optional)')}
           </div>
           <input value={imei} onChange={(e) => setImei(e.target.value)} placeholder={t('15-digit IMEI')} style={{ width: '100%' }} />
         </label>
         {err && <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 10 }}>{err}</div>}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button className="btn btn-ghost" onClick={onClose}>{t('Cancel')}</button>
-          <button className="btn btn-primary" disabled={busy || !downloadAvailable || (dual && !seId) || !/^\d{15}$/.test(imei.trim()) || (mode === 'code' ? !parseActivationCode(activation) : !smdp.trim())} onClick={submit}>
+          <button className="btn btn-primary" disabled={busy || !downloadAvailable || (dual && !seId) || (imei.trim() !== '' && !/^\d{15}$/.test(imei.trim())) || (mode === 'code' ? !parseActivationCode(activation) : !smdp.trim())} onClick={submit}>
             {t(busy ? 'Starting…' : 'Download')}
           </button>
         </div>
@@ -886,7 +886,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
             )}
             <div>
               <div style={{ color: 'var(--text-mute)', fontSize: 11 }}>{t('IMEI for download')}</div>
-              <div>{imeiDefault || t('Required when downloading')}</div>
+              <div>{imeiDefault || t('— (lpac default TAC)')}</div>
             </div>
           </div>
         )}

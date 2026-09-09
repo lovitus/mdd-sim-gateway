@@ -6,6 +6,7 @@ source that their licenses require; source checkouts retain the corresponding pa
 
 | Component | Use | License | Source |
 |---|---|---|---|
+| damonto/euicc-go v1.1.2 | eUICC protocol and LPA; minimal optional-IMEI compatibility patch in `go-runtime/third_party/euicc-go/MDD-PATCH.md` | MIT | https://github.com/damonto/euicc-go |
 | MddIdd/mdd-sim-gateway | GPL project lineage and substantial original gateway code | GPL-3.0-only | https://github.com/MddIdd/mdd-sim-gateway |
 | MDD VoWiFi Go Provider (`providers/vowifi-go/**`) | Native VoWiFi runtime and its maintained upstream fork | AGPL-3.0-only | https://github.com/lovitus/mdd-sim-gateway/tree/main/providers/vowifi-go |
 | pagecat/vowifi_gateway | Upstream project this gateway derives from: control-plane, engine and WebUI architecture and substantial code | MIT | https://github.com/pagecat/vowifi_gateway |

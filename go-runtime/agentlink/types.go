@@ -1258,7 +1258,7 @@ func (command EUICCDownloadCommand) Validate() error {
 		return errors.New("invalid eUICC download command identity or action")
 	}
 	if command.Action == EUICCDownloadStart {
-		if !validActivationCode(command.ActivationCode) || len(command.IMEI) != 15 || !validCardID(command.IMEI) ||
+		if !validActivationCode(command.ActivationCode) || (command.IMEI != "" && (len(command.IMEI) != 15 || !validCardID(command.IMEI))) ||
 			!validSecretText(command.ConfirmationCode, 128) {
 			return errors.New("invalid eUICC download start parameters")
 		}

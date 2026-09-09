@@ -337,6 +337,9 @@ jobs:
         working-directory: providers/vowifi-go
         run: go mod verify
 
+      - name: Test optional-IMEI eUICC compatibility
+        run: GOWORK=off go -C go-runtime/third_party/euicc-go test -race ./lpa ./v2 -run TestMDD
+
       - name: Verify patched upstream module
         run: GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go mod verify
 

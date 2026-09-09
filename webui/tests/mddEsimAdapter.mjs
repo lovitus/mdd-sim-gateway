@@ -96,8 +96,8 @@ assert.ok(page.includes('if (current()) await loadAll(true)'))
 assert.ok(page.includes("if (current()) await loadAll(label === 'Nickname' || label === 'Disable')"),'notification actions retain their explicit readback')
 assert.ok(page.includes('cached ? api.esimChipCached(reader) : api.esimChip(reader)'))
 assert.ok(page.includes('ses.some(se => se.notifications_read !== true)'))
-assert.ok(page.includes('(required, 15 digits)'))
-assert.equal(page.includes('(lpac default TAC)'),false)
+assert.ok(page.includes("'(optional)'"))
+assert.equal(page.includes('(lpac default TAC)'),true)
 assert.ok(page.includes('profilesAvailable ? t(\'{count} profile(s)\''))
 assert.ok(page.includes('role="dialog" aria-modal="true" aria-labelledby="esim-download-title"'))
 assert.ok(page.includes("maxHeight: 'calc(100dvh - 32px)', overflowY: 'auto'"))
@@ -127,3 +127,10 @@ assert.ok(page.includes('if (!reader || activeReader.current !== reader) return'
 globalThis.localStorage.setItem=()=>{throw new Error('storage unavailable')}
 assert.throws(()=>rememberDownload('reader-a',pointer),/no request was sent/)
 delete globalThis.localStorage
+
+const downloads=[]
+go.startEuiccDownload=async (...args)=>{downloads.push(args);return {accepted:true}}
+await esimAPI.esimDownload({eid:'test-eid',operation_id:'without-imei',activation_code:'LPA:1$example.com$test'})
+assert.equal(downloads[0][1].imei,undefined)
+assert.throws(()=>esimAPI.esimDownload({eid:'test-eid',operation_id:'invalid-imei',imei:'123'}),/euicc_download_identity_required/)
+assert.equal(downloads.length,1)

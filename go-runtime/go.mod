@@ -2,6 +2,8 @@ module github.com/lovitus/mdd-sim-gateway/go-runtime
 
 go 1.26.0
 
+replace github.com/damonto/euicc-go => ./third_party/euicc-go
+
 replace github.com/sagernet/sing-usbip => github.com/lovitus/sing-usbip v0.0.0-20260831204559-463a80475917
 
 require (
