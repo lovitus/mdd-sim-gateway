@@ -46,6 +46,14 @@ the active `../api.js`. A matching name is not assumed to mean matching fields.
 No copied module is counted as restored until it is wired and exercised through
 the corresponding user actions against actual Go responses.
 
+Provisioning candidates refresh on exact Agent/card-session changes and provide
+an explicit read retry. Unresolved modem operations retain their original request
+in tab-scoped session storage before dispatch, excluding PINs and tokens. Re-entry
+reads the existing Go operation receipt; only unknown receipts permit read-only
+reconciliation, and only terminal receipts clear the pointer. This does not replay
+provisioning or replace the durable Go ledger. It is tab continuity, not discovery
+of every operation from another browser or hardware acceptance.
+
 The original API module now delegates exclusively to the Go adapter. The history
 adapter maps original thread/message/call/log fields while preserving backend
 identities and typed statuses. Scoped clearing uses a Go transaction over the whole
