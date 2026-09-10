@@ -100,7 +100,26 @@ func (service *Service) standardDeletion(w http.ResponseWriter, r *http.Request)
 		}
 		result := make([]map[string]any, 0, len(records))
 		for _, record := range records {
-			result = append(result, map[string]any{"operation": record, "delivery": service.deletionDelivery(record)})
+			var summary *events.EUICCRecoverySummary
+			recovery, found, readErr := service.deletions.EUICCProfileRecovery(eid, record.ICCID)
+			if record.DownloadOperationID != "" {
+				recovery, found, readErr = service.deletions.EUICCDownloadRecoveryByOperation(eid, record.DownloadOperationID)
+			} else if recovery.CreatedAt.After(record.CreatedAt) {
+				found = false
+			}
+			if readErr != nil {
+				writeJSON(w, 500, map[string]string{"code": "profile_recovery_unavailable"})
+				return
+			} else if found && recovery.ICCID == record.ICCID {
+				value := recovery.Summary()
+				summary = &value
+				if record.ProfileName == "" && record.ServiceProviderName == "" {
+					record.ProfileName = value.ProfileName
+					record.ServiceProviderName = value.ServiceProviderName
+					record.MetadataSource = "download_receipt"
+				}
+			}
+			result = append(result, map[string]any{"operation": record, "delivery": service.deletionDelivery(record), "recovery": summary})
 		}
 		writeJSON(w, 200, map[string]any{"deletions": result})
 		return
@@ -196,9 +215,11 @@ func (service *Service) standardDeletion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	matched := false
+	var identity agentlink.EUICCProfileFact
 	for _, p := range inventory.Profiles {
 		if p.ICCID == iccid && p.State == agentlink.EUICCProfileDisabled {
 			matched = true
+			identity = p
 		}
 	}
 	if !matched {
@@ -225,7 +246,14 @@ func (service *Service) standardDeletion(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
-	record, created, err := service.deletions.BeginEUICCDeletion(events.EUICCDeletion{EID: eid, ICCID: iccid, OperationID: input.OperationID, BeforeSequences: sequences})
+	downloadOperation := ""
+	if recovery, found, readErr := service.deletions.EUICCProfileRecovery(eid, iccid); readErr != nil {
+		writeJSON(w, 500, map[string]string{"code": "profile_recovery_unavailable"})
+		return
+	} else if found {
+		downloadOperation = recovery.OperationID
+	}
+	record, created, err := service.deletions.BeginEUICCDeletion(events.EUICCDeletion{EID: eid, ICCID: iccid, OperationID: input.OperationID, BeforeSequences: sequences, ProfileName: identity.ProfileName, ProfileNickname: identity.Nickname, ServiceProviderName: identity.ServiceProviderName, MetadataSource: "card_before_delete", DownloadOperationID: downloadOperation})
 	if err != nil {
 		writeJSON(w, 409, map[string]string{"code": "deletion_requires_reconciliation"})
 		return

@@ -85,10 +85,11 @@ type mutationRequest struct {
 }
 
 type downloadStartRequest struct {
-	OperationID      string `json:"operation_id"`
-	ActivationCode   string `json:"activation_code"`
-	ConfirmationCode string `json:"confirmation_code,omitempty"`
-	IMEI             string `json:"imei"`
+	RetainRecoveryCodes bool   `json:"retain_recovery_codes,omitempty"`
+	OperationID         string `json:"operation_id"`
+	ActivationCode      string `json:"activation_code"`
+	ConfirmationCode    string `json:"confirmation_code,omitempty"`
+	IMEI                string `json:"imei"`
 }
 
 type discoveryRequest struct {
@@ -130,6 +131,10 @@ func New(agents AgentRuntime, options ...Option) (*Service, error) {
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
+	if strings.HasSuffix(request.URL.Path, "/recovery-codes") {
+		service.recoveryCodes(response, request)
+		return
+	}
 	if request.PathValue("action") == "delete" || strings.Contains(request.URL.Path, "/deletions") {
 		service.standardDeletion(response, request)
 		return
@@ -396,6 +401,7 @@ func (service *Service) download(response http.ResponseWriter, request *http.Req
 	eid := strings.TrimSpace(request.PathValue("eid"))
 	operationID := strings.TrimSpace(request.PathValue("operation_id"))
 	var command agentlink.EUICCDownloadCommand
+	retainCodes := false
 	switch {
 	case request.Method == http.MethodPost && operationID == "":
 		mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -413,6 +419,7 @@ func (service *Service) download(response http.ResponseWriter, request *http.Req
 			ActivationCode:   strings.TrimSpace(input.ActivationCode),
 			ConfirmationCode: strings.TrimSpace(input.ConfirmationCode), IMEI: strings.TrimSpace(input.IMEI),
 		}
+		retainCodes = input.RetainRecoveryCodes
 	case request.Method == http.MethodGet && operationID != "":
 		command = agentlink.EUICCDownloadCommand{
 			OperationID: operationID, EID: eid, Action: agentlink.EUICCDownloadStatus,
@@ -444,11 +451,23 @@ func (service *Service) download(response http.ResponseWriter, request *http.Req
 			writeDownloadError(response, err)
 			return
 		}
+		if service.deletions != nil {
+			if err := service.deletions.SaveEUICCDownloadRecovery(command, retainCodes); err != nil {
+				writeJSON(response, 409, map[string]string{"code": "download_recovery_record_failed"})
+				return
+			}
+		}
 	}
 	result, err := service.agents.ExecuteEUICCDownloadCommand(request.Context(), command)
 	if err != nil {
 		writeDownloadError(response, err)
 		return
+	}
+	if service.deletions != nil && result.Job != nil && result.Job.State == agentlink.EUICCDownloadCompleted && result.Job.Metadata != nil {
+		if err := service.deletions.BindEUICCDownloadRecovery(command.EID, command.OperationID, *result.Job.Metadata, result.Job.StartedAt); err != nil {
+			writeJSON(response, 500, map[string]string{"code": "download_completed_recovery_record_unconfirmed"})
+			return
+		}
 	}
 	status := http.StatusOK
 	if result.Job != nil && (result.Job.State == agentlink.EUICCDownloadQueued ||

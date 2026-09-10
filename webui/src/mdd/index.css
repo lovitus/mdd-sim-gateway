@@ -152,6 +152,22 @@ a { color: inherit; }
 .u-modal-backdrop { position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; padding:20px; background:#0008; }
 .u-update-modal { width:440px; max-width:100%; max-height:calc(100vh - 40px); overflow:auto; padding:20px; }
 .u-modal-actions { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+.u-deletion-list { margin:12px 0; }
+.u-deletion-toolbar,.u-deletion-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.u-deletion-toolbar { font-size:13px; color:var(--text-dim); }
+.u-deletion-row { padding:12px 0; border-top:1px solid var(--border); font-size:14px; }
+.u-deletion-row>div { min-width:0; flex:1; overflow-wrap:anywhere; }
+.u-deletion-row>button { flex:none; }
+.u-deletion-dialog { box-sizing:border-box; background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:20px; width:660px; max-width:100%; max-height:calc(100dvh - 40px); overflow-y:auto; font-size:14px; }
+.u-deletion-dialog>header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.u-deletion-dialog h3 { margin:0; font-size:18px; }
+.u-deletion-dialog h4 { margin:18px 0 10px; font-size:14px; }
+.u-deletion-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:16px 0; }
+.u-deletion-fields dt { color:var(--text-dim); font-size:12px; }
+.u-deletion-fields dd { margin:3px 0 0; overflow-wrap:anywhere; }
+.u-deletion-archive { border-top:1px solid var(--border); margin-top:16px; padding-top:4px; }
+.u-deletion-dialog textarea { display:block; width:100%; box-sizing:border-box; margin:6px 0 12px; }
+@media(max-width:600px) { .u-deletion-fields { grid-template-columns:minmax(0,1fr); }.u-deletion-row { align-items:flex-start; } }
 .u-update-note { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .u-update-note .btn { flex-shrink:0; }
 .u-support-actions { display:flex; align-items:center; gap:24px; margin-top:18px; padding-top:18px; border-top:1px solid var(--border); }.u-support-actions>.btn { flex:none; }.u-support-actions b { font-size:13px; }.u-support-actions p { margin:4px 0; color:var(--text-dim); font-size:12px; }.u-support-actions div>a { color:var(--primary); font-size:12px; font-weight:700; text-decoration:none; }

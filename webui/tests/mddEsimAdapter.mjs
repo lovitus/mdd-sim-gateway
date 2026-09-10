@@ -132,8 +132,12 @@ const downloads=[]
 go.startEuiccDownload=async (...args)=>{downloads.push(args);return {accepted:true}}
 await esimAPI.esimDownload({eid:'test-eid',operation_id:'without-imei',activation_code:'LPA:1$example.com$test'})
 assert.equal(downloads[0][1].imei,undefined)
+assert.equal(downloads[0][1].retain_recovery_codes,false)
 assert.throws(()=>esimAPI.esimDownload({eid:'test-eid',operation_id:'invalid-imei',imei:'123'}),/euicc_download_identity_required/)
 assert.equal(downloads.length,1)
+await esimAPI.esimDownload({eid:'test-eid',operation_id:'retain-codes',activation_code:'LPA:1$example.com$test',retain_recovery_codes:true})
+assert.equal(downloads[1][1].retain_recovery_codes,true)
+assert.ok(page.indexOf('{ses.map(se=><DeletionNotifications')>page.indexOf("{t('Notifications')}"),'deletion detail entries belong inside Notifications')
 
 const {downloadFailureLabel}=await import('../src/mdd/esimAdapter.js')
 assert.match(downloadFailureLabel('euicc_rsp_8.8.2_3.1'),/CI public keys/)

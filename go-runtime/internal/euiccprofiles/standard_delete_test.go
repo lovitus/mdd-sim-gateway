@@ -25,7 +25,7 @@ func (f *deletionFixture) ExecuteEUICCProfileCommand(_ context.Context, c agentl
 	if c.Action == agentlink.EUICCProfileRefresh {
 		var profiles []agentlink.EUICCProfileFact
 		if f.present {
-			profiles = []agentlink.EUICCProfileFact{{ICCID: testICCID, State: agentlink.EUICCProfileDisabled}}
+			profiles = []agentlink.EUICCProfileFact{{ICCID: testICCID, State: agentlink.EUICCProfileDisabled, ProfileName: "Original profile", Nickname: "User label", ServiceProviderName: "Original provider"}}
 		}
 		return agentlink.EUICCProfileResponse{OperationID: c.OperationID, SessionGeneration: "fixture", EID: c.EID, Action: c.Action, Outcome: agentlink.EUICCProfileRefreshed, Inventory: &agentlink.EUICCFact{EID: testEID, InventoryRefresh: true, ProfileManagement: true, SoftDelete: true, NotificationInventory: true, ProfilesAvailable: true, ProfileDeletion: true, Profiles: profiles}}, nil
 	}
@@ -119,6 +119,9 @@ func TestStandardDeletionRecoversAfterLostReplyAndArchiveGap(t *testing.T) {
 			}
 			if decoded.Delivery == "receiver_acknowledged" {
 				t.Fatal("old ACK satisfied new deletion")
+			}
+			if decoded.Operation.ProfileName != "Original profile" || decoded.Operation.ProfileNickname != "User label" || decoded.Operation.ServiceProviderName != "Original provider" {
+				t.Fatal("pre-delete profile metadata lost")
 			}
 			if result = post(t, mux, route, body); result.Code != 200 || fixture.deletes != 1 {
 				t.Fatal("duplicate card deletion")

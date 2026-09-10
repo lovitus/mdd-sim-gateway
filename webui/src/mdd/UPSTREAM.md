@@ -277,6 +277,22 @@ remaining backend gap does not authorize a new general TLS-management framework.
 
 ## eSIM information and one-time download tracking
 
+Deletion records now appear as compact rows inside Notifications. The explicit
+details dialog contains the original profile/provider names, pre-delete nickname,
+identity, notification hashes and delivery attempts. Names are captured before
+deletion; legacy missing names may be derived from the matching durable download
+receipt with provenance shown, never guessed from an ICCID. Names are display
+metadata only: commands remain bound to EID, ICCID, operation and archive hash.
+
+New downloads can explicitly opt in to retaining activation/confirmation codes
+in the existing mode-0600 server database. These values are not separately
+encrypted and are sensitive backup contents. Lists return only presence flags;
+an authenticated, CSRF-protected, exact-identity confirmation is required to
+reveal them. They are not added to localStorage, diagnostics or automatic retries.
+Explicit recovery from pre-existing operator records is labelled as such and
+cannot overwrite conflicting saved codes. Possession of saved codes does not
+prove that the operator permits another installation.
+
 The original default SM-DP+ and free-NVM fields map to optional Agent information
 with separate availability flags. Read-only inventory uses the existing
 euicc-go address/Info2 APIs; operation admission does not add these queries.

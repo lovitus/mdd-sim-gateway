@@ -11,15 +11,20 @@ import (
 )
 
 type EUICCDeletion struct {
-	EID             string    `json:"eid"`
-	ICCID           string    `json:"iccid"`
-	OperationID     string    `json:"operation_id"`
-	State           string    `json:"state"`
-	Code            string    `json:"code,omitempty"`
-	BeforeSequences []int64   `json:"before_sequences"`
-	Notifications   []int64   `json:"notifications"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	DownloadOperationID string    `json:"download_operation_id,omitempty"`
+	ProfileName         string    `json:"profile_name,omitempty"`
+	ProfileNickname     string    `json:"profile_nickname,omitempty"`
+	ServiceProviderName string    `json:"service_provider_name,omitempty"`
+	MetadataSource      string    `json:"metadata_source,omitempty"`
+	EID                 string    `json:"eid"`
+	ICCID               string    `json:"iccid"`
+	OperationID         string    `json:"operation_id"`
+	State               string    `json:"state"`
+	Code                string    `json:"code,omitempty"`
+	BeforeSequences     []int64   `json:"before_sequences"`
+	Notifications       []int64   `json:"notifications"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 func deletionOperationKey(eid, id string) []byte {
@@ -42,7 +47,7 @@ func (store *BoltStore) BeginEUICCDeletion(record EUICCDeletion) (EUICCDeletion,
 	if _, err := euiccDeletionKey(record.EID, record.ICCID); err != nil {
 		return record, false, err
 	}
-	if !validRecoveryLine(record.OperationID) || len(record.BeforeSequences) > 128 {
+	if !validRecoveryLine(record.OperationID) || len(record.BeforeSequences) > 128 || len(record.ProfileName) > 256 || len(record.ProfileNickname) > 256 || len(record.ServiceProviderName) > 256 {
 		return record, false, errors.New("invalid deletion operation")
 	}
 	created := false

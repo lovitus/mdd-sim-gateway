@@ -268,6 +268,7 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
   const [smdp, setSmdp] = useState('')
   const [matchingId, setMatchingId] = useState('')
   const [confirmation, setConfirmation] = useState('')
+  const [retainRecoveryCodes,setRetainRecoveryCodes]=useState(false)
   const [imei, setImei] = useState(imeiDefault || '')
   const [seId, setSeId] = useState(dual ? '' : (ses?.[0]?.id || 'default'))
   const downloadSE = (ses || []).find(se => se.id === (seId || ses?.[0]?.id))
@@ -337,6 +338,7 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
       se_id: seId || ses?.[0]?.id || 'default',
       imei: imei.trim() || undefined,
       confirmation_code: confirmation.trim() || undefined,
+      retain_recovery_codes:retainRecoveryCodes,
     }
     if (!body.eid || (body.imei && !/^\d{15}$/.test(body.imei))) return setErr(t('A valid EID is required; IMEI must be 15 digits when provided.'))
     if (mode === 'code') {
@@ -460,6 +462,7 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
           </div>
           <input value={imei} onChange={(e) => setImei(e.target.value)} placeholder={t('15-digit IMEI')} style={{ width: '100%' }} />
         </label>
+        <label style={{display:'flex',gap:8,alignItems:'flex-start',marginBottom:12}}><input type="checkbox" checked={retainRecoveryCodes} onChange={e=>setRetainRecoveryCodes(e.target.checked)}/><span>保留下载恢复码（服务端受限存储，系统备份将包含这些敏感资料）</span></label>
         {err && <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 10 }}>{err}</div>}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button className="btn btn-ghost" onClick={onClose}>{t('Cancel')}</button>
@@ -551,7 +554,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     [ses],
   )
   const notifications = useMemo(
-    () => ses.flatMap((se) => se.notifications || []),
+    () => ses.flatMap((se) => se.notifications || []).filter(note=>note.event!=='delete'),
     [ses],
   )
   const hasEuicc = ses.some((se) => se.eid || se.chip || (se.profiles || []).length)
@@ -895,7 +898,6 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         )}
       </div>
 
-      {ses.map(se=><DeletionNotifications key={se.eid} eid={se.eid} refreshKey={deletionRefresh}/>)}
       <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <div style={{ fontWeight: 700 }}>{t('Profiles')}</div>
@@ -1022,13 +1024,15 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
               if (!window.confirm(t('Send the displayed stored notifications once?'))) return
               return runProfileOp('Process notifications', async () => {
               for (const se of ses) {
-                if (!(se.notifications || []).length) continue
-                await api.esimNotificationsProcess({...seTarget(reader, se),confirmed:true})
+                const ordinary=(se.notifications||[]).filter(note=>note.event!=='delete')
+                if (!ordinary.length) continue
+                await api.esimNotificationsProcess({...seTarget(reader, se),notifications:ordinary,confirmed:true})
               }
             }) }}>
             {t('Process all')}
           </button>
         </div>
+        {ses.map(se=><DeletionNotifications key={se.eid} eid={se.eid} refreshKey={deletionRefresh}/>)}
         {ses.some(se=>se.notification_error) && <p role="alert" className="u-error">{ses.map(se=>se.notification_error?t(se.notification_error):'').filter(Boolean).join(' · ')}</p>}
         {!notifications.length ? (!ses.some(se=>se.notification_error) &&
           <div style={{ color: 'var(--text-mute)', fontSize: 13 }}>
@@ -1043,7 +1047,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {(dual ? ses : [{ ...ses[0], notifications }]).map((se) => {
-              const notes = se.notifications || []
+              const notes = (se.notifications || []).filter(note=>note.event!=='delete')
               if (dual && !notes.length) return null
               return (
                 <div key={`n-${se.id || 'default'}`}>

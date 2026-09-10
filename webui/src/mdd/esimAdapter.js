@@ -182,7 +182,7 @@ export const esimAPI = {
   esimDownload(body) {
     if (!body.eid || !body.operation_id || (body.imei && !/^\d{15}$/.test(body.imei))) throw new Error('euicc_download_identity_required')
     const code = body.activation_code || `LPA:1$${body.smdp || ''}$${body.matching_id || ''}`
-    return go.startEuiccDownload(body.eid,{operation_id:body.operation_id,activation_code:code,imei:body.imei,confirmation_code:body.confirmation_code || ''})
+    return go.startEuiccDownload(body.eid,{operation_id:body.operation_id,activation_code:code,imei:body.imei,confirmation_code:body.confirmation_code || '',retain_recovery_codes:body.retain_recovery_codes===true})
   },
   esimDownloadCancel: target => go.cancelEuiccDownload(target.eid,target.operation_id),
   async esimNotificationsProcess(target) {

@@ -576,6 +576,7 @@ Object.assign(api, {
     : j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/messages/send`, body, {}, 140000),
   euiccs: () => j('GET', '/v1/euiccs'),
   euiccNotificationArchives: eid => j('GET', `/v1/euiccs/${encodeURIComponent(eid)}/notification-archives`),
+  euiccRecoveryCodes: (eid,iccid,body) => j('POST', `/v1/euiccs/${encodeURIComponent(eid)}/profiles/${encodeURIComponent(iccid)}/recovery-codes`,body),
   euiccDeletions: eid => j('GET', `/v1/euiccs/${encodeURIComponent(eid)}/deletions`),
   deleteEuiccProfile: (eid,iccid,body) => j('POST', `/v1/euiccs/${encodeURIComponent(eid)}/profiles/${encodeURIComponent(iccid)}/delete`,body,{},130000),
   recoverEuiccDeletion: (eid,operation) => j('POST', `/v1/euiccs/${encodeURIComponent(eid)}/deletions/${encodeURIComponent(operation)}/recover`,{}, {},130000),
