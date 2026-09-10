@@ -162,7 +162,11 @@ func (prober *Prober) StopData(ctx context.Context, target agentdata.Target) err
 	defer prober.mu.Unlock()
 	current := prober.data[target.EquipmentID]
 	if current == nil {
-		return nil
+		facts, err := prober.probeLocked(ctx)
+		if err != nil || target.SIMSessionGeneration == "" || !matchesDataTarget(facts, target) {
+			return agentpolicyTargetError(err)
+		}
+		return disconnectData(ctx, target.AttachmentID)
 	}
 	if current.target != target {
 		return agentmodem.ErrOperationTargetReplaced

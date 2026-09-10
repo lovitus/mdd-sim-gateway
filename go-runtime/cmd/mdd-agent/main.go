@@ -98,6 +98,12 @@ func main() {
 		fatalf("usage: mdd-agent <config|modem-probe|run|gui|status|topology|raw-modes|raw-mode|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
 	}
 	command := arguments[0]
+	if command == "repair-default-enrollment" {
+		if err := runEnrollmentRepair(arguments[1:], os.Stdout); err != nil {
+			fatalf("repair-default-enrollment: %v", err)
+		}
+		return
+	}
 	if command == "cellular-guard" {
 		if err := runCellularGuardCommand(arguments[1:]); err != nil {
 			fatalf("cellular-guard: %v", err)

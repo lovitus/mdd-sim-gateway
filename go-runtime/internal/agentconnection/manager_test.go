@@ -11,6 +11,21 @@ import (
 
 type testBackend struct{ prepares, stops, stopFailures int }
 
+func TestDisabledConnectionReconcilesHostBearerWithoutLocalOwner(t *testing.T) {
+	backend := &testBackend{stopFailures: 1}
+	manager, _ := New(backend)
+	target := agentdata.Target{AttachmentID: "attachment", EquipmentID: "equipment", CardID: "card", SIMSessionGeneration: "generation"}
+	if err := manager.SetPersistent(context.Background(), target, agentdata.Profile{}, false); err == nil {
+		t.Fatal("host bearer failure was reported as ready")
+	}
+	if err := manager.SetPersistent(context.Background(), target, agentdata.Profile{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if backend.stops != 2 || backend.prepares != 0 || len(manager.OwnedTargets()) != 0 {
+		t.Fatal("off intent created ownership or enabled data")
+	}
+}
+
 func (value *testBackend) PrepareData(context.Context, agentdata.Target, agentdata.Profile) (string, error) {
 	value.prepares++
 	return "carrier", nil

@@ -2,11 +2,142 @@ package agentpolicy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
+
+func TestInitializedDefaultsRemainEligibleAcrossObservationAndReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.db")
+	store, err := Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	const equipment, card = "867530900000002", "8944100000000000001"
+	now := time.Unix(1000, 0)
+	defaults := InitialDefaults{Authority: "fixture", Revision: 7, VoWiFiEnabled: true}
+	if _, err := store.ObserveEquipment(nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.observeEquipment([]string{equipment}, nil, now, &defaults); err != nil {
+		t.Fatal(err)
+	}
+	policy, created, err := store.initializeDiscoveredPolicy(equipment, card, defaults)
+	if err != nil || !created {
+		t.Fatal("initialization failed", err)
+	}
+	check := func(protected bool) {
+		t.Helper()
+		records, err := store.observeEquipment([]string{equipment}, nil, now.Add(time.Hour), &defaults)
+		if err != nil || len(records) != 1 || records[0].Baseline != protected || records[0].InitializedCard != card || !records[0].FirstSeen.Equal(now) {
+			t.Fatal("enrollment provenance changed", records, err)
+		}
+		actual, found, err := store.Get(equipment, card)
+		if err != nil || !found || actual != policy {
+			t.Fatal("observation rewrote policy", err)
+		}
+	}
+	check(false)
+	// Reproduce the legacy bug: an auto-created revision-one policy was marked baseline.
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(discoveryBucket)
+		var record Discovery
+		if err := json.Unmarshal(bucket.Get([]byte(equipment)), &record); err != nil {
+			return err
+		}
+		record.Baseline = true
+		payload, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(equipment), payload)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+	if err := store.RepairDefaultEnrollment(equipment, card, now.Add(time.Second)); err == nil {
+		t.Fatal("wrong first-seen accepted")
+	}
+	if err := store.RepairDefaultEnrollment(equipment, "8944100000000000002", now); err == nil {
+		t.Fatal("wrong card accepted")
+	}
+	if err := store.RepairDefaultEnrollment(equipment, card, now); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+	// An explicit no-op save is still a user choice and must block auto enrollment.
+	policy, err = store.PutExpected(policy, policy.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+	if err := store.RepairDefaultEnrollment(equipment, card, now); err == nil {
+		t.Fatal("explicit user policy repair accepted")
+	}
+}
+
+func TestExplicitModeProtectionSurvivesRemovalAfterInitialization(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "policy.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const equipment, card = "867530900000002", "8944100000000000001"
+	now := time.Unix(1000, 0)
+	defaults := InitialDefaults{Authority: "fixture", Revision: 1, VoWiFiEnabled: true}
+	if _, err := store.ObserveEquipment(nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.observeEquipment([]string{equipment}, nil, now, &defaults); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := store.initializeDiscoveredPolicy(equipment, card, defaults); err != nil || !created {
+		t.Fatal(err)
+	}
+	if _, err := store.observeEquipment([]string{equipment}, []string{equipment}, now, &defaults); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.observeEquipment([]string{equipment}, nil, now, &defaults)
+	if err != nil || len(records) != 1 || !records[0].Baseline || !records[0].ExplicitlyProtected {
+		t.Fatal("explicit mode protection lost", records, err)
+	}
+}
+
+func TestInitializedPolicyRequiresUnchangedOriginalCardAndIntent(t *testing.T) {
+	d := Discovery{EquipmentID: "867530900000002", InitializedCard: "8944100000000000001",
+		Defaults: &InitialDefaults{Authority: "fixture", Revision: 1, VoWiFiEnabled: true}}
+	p := Default(d.EquipmentID, d.InitializedCard)
+	p.Revision = 1
+	if !initializedPolicy(d, p) {
+		t.Fatal("initial policy not recognized")
+	}
+	for _, change := range []func(*Policy){
+		func(p *Policy) { p.CardID = "8944100000000000002" },
+		func(p *Policy) { p.EquipmentID = "867530900000003" },
+		func(p *Policy) { p.Revision++ },
+		func(p *Policy) { p.Desired.CellularEnabled = true },
+		func(p *Policy) { p.Desired.ConnectionEnabled = true },
+		func(p *Policy) { p.Desired.SelectedProfile = "user" },
+	} {
+		changed := p
+		change(&changed)
+		if initializedPolicy(d, changed) {
+			t.Fatal("changed user policy treated as initialization")
+		}
+	}
+}
 
 func TestDiscoveryBaselineReconnectAndPolicyProtection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.db")

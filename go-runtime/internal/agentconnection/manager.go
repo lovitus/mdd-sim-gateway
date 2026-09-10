@@ -42,7 +42,9 @@ func (manager *Manager) SetPersistent(ctx context.Context, target agentdata.Targ
 	current := manager.items[target.EquipmentID]
 	if !enabled {
 		if current == nil {
-			return nil
+			// A host-created bearer can predate this manager's ownership map.
+			// The platform backend must check the exact current SIM before stop.
+			return manager.backend.StopData(ctx, target)
 		}
 		if current.target != target {
 			return agentmodem.ErrOperationTargetReplaced

@@ -132,11 +132,24 @@ func (manager *Manager) DiscoveryFor(equipmentID string) (Discovery, bool, error
 // The first complete inventory establishes a baseline without adopting policy.
 // This record is evidence for enrollment, not permission to touch the device.
 type Discovery struct {
-	EquipmentID     string           `json:"equipment_id"`
-	FirstSeen       time.Time        `json:"first_seen"`
-	Baseline        bool             `json:"baseline"`
-	Defaults        *InitialDefaults `json:"defaults,omitempty"`
-	InitializedCard string           `json:"initialized_card,omitempty"`
+	EquipmentID         string           `json:"equipment_id"`
+	FirstSeen           time.Time        `json:"first_seen"`
+	Baseline            bool             `json:"baseline"`
+	Defaults            *InitialDefaults `json:"defaults,omitempty"`
+	InitializedCard     string           `json:"initialized_card,omitempty"`
+	ExplicitlyProtected bool             `json:"explicitly_protected,omitempty"`
+}
+
+// Initialization writes the policy and InitializedCard in one transaction.
+// A later user save increments the revision, even when its values are unchanged.
+func initializedPolicy(record Discovery, policy Policy) bool {
+	if record.Defaults == nil || record.Defaults.Validate() != nil || record.InitializedCard != policy.CardID ||
+		record.EquipmentID != policy.EquipmentID || policy.Revision != 1 {
+		return false
+	}
+	wanted := Desired{ConnectionEnabled: record.Defaults.ConnectionEnabled,
+		FlightMode: record.Defaults.FlightMode, RoamingEnabled: record.Defaults.RoamingEnabled}
+	return policy.Desired == wanted
 }
 
 func (store *Store) initializeDiscoveredPolicy(equipmentID, cardID string, expected InitialDefaults) (Policy, bool, error) {
@@ -290,7 +303,15 @@ func (store *Store) observeEquipmentForEnrollment(equipment, protected []string,
 			if json.Unmarshal(value, &policy) != nil || policy.normalizeAndValidate() != nil || policy.Revision == 0 {
 				return errors.New("stored modem policy is invalid")
 			}
-			protect[policy.EquipmentID] = true
+			var discovery Discovery
+			if payload := bucket.Get([]byte(policy.EquipmentID)); payload != nil {
+				if json.Unmarshal(payload, &discovery) != nil || discovery.EquipmentID != policy.EquipmentID || discovery.FirstSeen.IsZero() {
+					return errors.New("stored equipment discovery is invalid")
+				}
+			}
+			if !initializedPolicy(discovery, policy) {
+				protect[policy.EquipmentID] = true
+			}
 			return nil
 		}); err != nil {
 			return err
@@ -303,7 +324,7 @@ func (store *Store) observeEquipmentForEnrollment(equipment, protected []string,
 			all[id] = true
 		}
 		for id := range all {
-			record := Discovery{EquipmentID: id, FirstSeen: observedAt.UTC(), Baseline: (baseline && !initialDefaults) || protect[id]}
+			record := Discovery{EquipmentID: id, FirstSeen: observedAt.UTC(), Baseline: (baseline && !initialDefaults) || protect[id], ExplicitlyProtected: protect[id]}
 			if !record.Baseline && defaults != nil {
 				value := *defaults
 				record.Defaults = &value
@@ -320,6 +341,7 @@ func (store *Store) observeEquipmentForEnrollment(equipment, protected []string,
 				// Explicit user policy always outranks potential enrollment.
 				if protect[id] {
 					record.Baseline = true
+					record.ExplicitlyProtected = true
 				}
 			}
 			payload, err := json.Marshal(record)

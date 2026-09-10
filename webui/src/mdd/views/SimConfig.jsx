@@ -341,7 +341,9 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
         </div>}
       {creating && <div className="u-note" style={{ marginBottom: 14 }}>
         <b>{t(form.__catalog_revision ? 'Disabled draft' : 'Unconfigured SIM')}</b><br />
-        {providerOnly
+        {providerOnly && targetDevice?.go_device?.modem?.at_control?.sim_apdu_on_demand
+          ? t('SIM APDU is available on demand. Automatic setup must prepare it and read the card identity before VoWiFi can start; this is not an unsupported modem.')
+          : providerOnly
           ? t('The operating-system modem provider exposes identity and SMS, but not raw APDU access. You can edit and save the number, SMS centre and line metadata; VoWiFi remains unavailable until an APDU-capable function is present.')
           : t('Claim the SIM, save its configuration, then verify and provision the hardware.')}
         {!!missing.length && <div style={{ marginTop: 6 }}>{t('Missing information')}: {missing.map(key => missingLabels[key] || key).join('、')}</div>}
