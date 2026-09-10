@@ -16,6 +16,12 @@ type Transmitter struct {
 	response       *bytes.Buffer
 }
 
+type StatusError struct{ Status uint16 }
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("returned an unexpected response with status %04X", e.Status)
+}
+
 func NewTransmitter(channel SmartCardChannel, AID []byte, MSS int) (io.ReadWriteCloser, error) {
 	var err error
 	if err = channel.Connect(); err != nil {
@@ -71,7 +77,7 @@ func (t *Transmitter) transmit(request *Request) (Response, error) {
 	}
 	response := Response(b)
 	if !response.OK() && !response.HasMore() {
-		err = fmt.Errorf("returned an unexpected response with status %04X", response.SW())
+		err = &StatusError{Status: response.SW()}
 	}
 	return response, err
 }

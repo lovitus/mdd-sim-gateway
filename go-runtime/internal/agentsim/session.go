@@ -735,6 +735,11 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 	mutationErr := manager.mutateProfile(ctx, current.card, target.aid, request.ICCID, request.Action, request.Nickname)
 	endErr := current.card.EndTransaction()
 	if mutationErr == nil {
+		if request.Action == agentlink.EUICCProfileEnable || request.Action == agentlink.EUICCProfileDisable {
+			if power, ok := current.card.(interface{ UnpowerOnClose() }); ok {
+				power.UnpowerOnClose()
+			}
+		}
 		current.requestRefresh()
 		result.Outcome, result.Changed = agentlink.EUICCProfileRefreshPending, true
 		return result
@@ -747,6 +752,7 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 	}
 	current.requestRefresh()
 	result.Outcome = agentlink.EUICCProfileUncertain
+	result.Code = uncertainProfileCode(errors.Join(mutationErr, endErr))
 	return result
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/damonto/euicc-go/apdu"
 	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/lpa"
 	sgp22 "github.com/damonto/euicc-go/v2"
@@ -538,9 +539,9 @@ func mutateEUICCProfile(ctx context.Context, card Card, aid []byte, iccid string
 	defer func() { err = errors.Join(err, client.Close()) }()
 	switch action {
 	case agentlink.EUICCProfileEnable:
-		return client.EnableProfile(identifier, true)
+		return client.EnableProfile(identifier, false)
 	case agentlink.EUICCProfileDisable:
-		return client.DisableProfile(identifier, true)
+		return client.DisableProfile(identifier, false)
 	case agentlink.EUICCProfileNickname:
 		return client.SetNickname(identifier, nickname)
 	default:
@@ -569,6 +570,17 @@ func classifyEUICCProfileError(err error) *agentlink.RemoteError {
 	default:
 		return nil
 	}
+}
+
+func uncertainProfileCode(err error) string {
+	var status *apdu.StatusError
+	if errors.As(err, &status) {
+		return fmt.Sprintf("euicc_profile_apdu_%04x", status.Status)
+	}
+	if errors.Is(err, sgp22.ErrUndefined) {
+		return "euicc_profile_card_undefined_error"
+	}
+	return "euicc_profile_outcome_unconfirmed"
 }
 
 func numeric(value string) bool {

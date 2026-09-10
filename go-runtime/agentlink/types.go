@@ -526,6 +526,7 @@ type EUICCProfileRequest struct {
 // after submission is uncertain. Both cause only the matching card session to
 // reconnect and republish authoritative topology.
 type EUICCProfileResponse struct {
+	Code              string              `json:"code,omitempty"`
 	Inventory         *EUICCFact          `json:"inventory,omitempty"`
 	OperationID       string              `json:"operation_id"`
 	SessionGeneration string              `json:"session_generation"`
@@ -1194,6 +1195,9 @@ func (request EUICCProfileRequest) Validate() error {
 }
 
 func (response EUICCProfileResponse) ValidateFor(request EUICCProfileRequest) error {
+	if response.Code != "" && (response.Outcome != EUICCProfileUncertain || response.Failure != nil || !validIdentifier(response.Code)) {
+		return errors.New("invalid profile uncertainty code")
+	}
 	if response.OperationID != request.OperationID || response.SessionGeneration != request.SessionGeneration ||
 		response.EID != request.EID || response.ICCID != request.ICCID || response.Action != request.Action {
 		return errors.New("eUICC profile response identity does not match request")

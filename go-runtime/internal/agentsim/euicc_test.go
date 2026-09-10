@@ -432,9 +432,10 @@ func TestEUICCProfileEnableUsesExactLiveIdentityAndRefreshesOnlyCardSession(t *t
 	}
 	card.mu.Lock()
 	closes := card.closes
+	unpowers := card.unpowers
 	card.mu.Unlock()
-	if closes != 1 {
-		t.Fatalf("card close count=%d", closes)
+	if closes != 1 || unpowers != 1 {
+		t.Fatalf("card close count=%d unpower=%d", closes, unpowers)
 	}
 }
 

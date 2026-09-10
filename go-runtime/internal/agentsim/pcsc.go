@@ -9,8 +9,9 @@ import (
 type PCSCConnector struct{}
 
 type pcscCard struct {
-	context *scard.Context
-	card    *scard.Card
+	unpowerOnClose bool
+	context        *scard.Context
+	card           *scard.Card
 }
 
 func (PCSCConnector) Connect(readerName string) (Card, error) {
@@ -47,5 +48,12 @@ func (card *pcscCard) Transmit(command []byte) ([]byte, error) {
 }
 
 func (card *pcscCard) Close() error {
-	return errors.Join(card.card.Disconnect(scard.LeaveCard), card.context.Release())
+	disposition := scard.LeaveCard
+	if card.unpowerOnClose {
+		disposition = scard.UnpowerCard
+	}
+	return errors.Join(card.card.Disconnect(disposition), card.context.Release())
 }
+
+// Match lpac's PC/SC power cycle after an explicit profile state change only.
+func (card *pcscCard) UnpowerOnClose() { card.unpowerOnClose = true }

@@ -21,3 +21,9 @@ from a generic error or alter historical receipts.
 v2/types.go preserves StatusCodeData as an error instead of flattening it to its
 message. The root agentsim regression uses actual HTTP JSON decoding through
 InvokeHTTP and the production classifier, not only constructed error values.
+
+apdu/transmitter.go retains unexpected status words as a typed error, without
+including APDU contents. MDD's PC/SC profile operations use refresh=false and
+unpower the owned card on session close after a successful enable/disable, matching
+the original lpac CLI default and PC/SC disconnect behavior. Ordinary reads and
+nickname changes keep their existing card-close disposition.

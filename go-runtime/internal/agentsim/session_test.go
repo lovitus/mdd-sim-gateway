@@ -23,6 +23,7 @@ type fakeCard struct {
 	begins     int
 	ends       int
 	closes     int
+	unpowers   int
 	beginErrAt int
 	endErrAt   int
 }
@@ -61,6 +62,8 @@ func (card *fakeCard) Close() error {
 	card.closes++
 	return nil
 }
+
+func (card *fakeCard) UnpowerOnClose() { card.mu.Lock(); defer card.mu.Unlock(); card.unpowers++ }
 
 type fakeConnector struct {
 	cards map[string]*fakeCard
