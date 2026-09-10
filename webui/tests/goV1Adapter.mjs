@@ -72,6 +72,8 @@ const staleProjection={line_id:'line-a',facts:[{layer:'admission',condition:'blo
 const staleFailure=mapGoSnapshot({lines:[staleProjection],catalog:mapped.go.catalog,devices:[device],egress:{exits:[]}})
 assert.equal(staleFailure.devices[0].facts.summary.state,'unknown','an expired failure is not a current blocked state')
 assert.equal(staleFailure.devices[0].facts.summary.code,'facts_incomplete')
+const missingFresh=mapGoSnapshot({lines:[{...staleProjection,facts:[{layer:'admission',condition:'blocked',code:'unconfirmed_failure'}]}],catalog:mapped.go.catalog,devices:[device],egress:{exits:[]}})
+assert.equal(missingFresh.devices[0].facts.summary.state,'unknown','missing freshness cannot establish a current failure')
 const currentFailure=mapGoSnapshot({lines:[{...staleProjection,facts:[{...staleProjection.facts[0],fresh:true}]}],catalog:mapped.go.catalog,devices:[device],egress:{exits:[]}})
 assert.equal(currentFailure.devices[0].facts.summary.state,'blocked')
 
@@ -142,9 +144,9 @@ assert.equal(unavailableEUICC.count, null)
 assert.deepEqual(unavailableEUICC.profiles, [])
 
 const failedIMS=mapGoSnapshot({catalog:mapped.go.catalog,lines:[{line_id:'line-a',facts:[
-  {layer:'vowifi_runtime',condition:'failed',available:false,code:'ims_register_failed'},
-  {layer:'tunnel',condition:'unknown',available:false,code:'runtime_start_failed'},
-  {layer:'ims',condition:'blocked',available:false,code:'ims_register_failed'},
+  {layer:'vowifi_runtime',condition:'failed',available:false,fresh:true,code:'ims_register_failed'},
+  {layer:'tunnel',condition:'unknown',available:false,fresh:true,code:'runtime_start_failed'},
+  {layer:'ims',condition:'blocked',available:false,fresh:true,code:'ims_register_failed'},
 ],operations:{vowifi_call:{ready:false},vowifi_sms:{ready:false}}}]})
 assert.equal(failedIMS.instances[0].status.label,'ims_register_failed')
 assert.equal(failedIMS.instances[0].facts.facts.ims.state,'blocked')
