@@ -25,6 +25,10 @@ func archivedEUICCNotification(ctx context.Context, card Card, aid []byte, reque
 		return nil, false, err
 	}
 	defer func() { err = errors.Join(err, client.Close()) }()
+	return archivedEUICCNotificationWithClient(ctx, client, request)
+}
+
+func archivedEUICCNotificationWithClient(ctx context.Context, client *lpa.Client, request agentlink.EUICCNotificationRequest) (payload []byte, ack bool, err error) {
 	if request.Action == agentlink.EUICCNotificationArchive {
 		selected, err := retrieveExpectedNotification(client, *request.Expected)
 		if err != nil {
