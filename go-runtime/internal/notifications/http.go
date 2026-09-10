@@ -268,8 +268,7 @@ func configView(config Config) ConfigView {
 			Token: SecretView{Configured: config.PushPlus.Token != ""}, Topic: SecretView{Configured: config.PushPlus.Topic != ""}},
 		SupportedEvents: []string{EventIncomingSMS, EventIncomingCall, EventHostAlert, EventActivationReminder, EventLineUnrecoverable},
 		UnsupportedReasons: map[string]string{
-			"number_changed":     "no_authoritative_ims_number_source",
-			"line_unrecoverable": "continuous_recovery_has_no_terminal_unrecoverable_state",
+			"number_changed": "no_authoritative_ims_number_source",
 		},
 	}
 }

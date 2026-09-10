@@ -8,6 +8,9 @@ const source = { revision:7,timezone:'Asia/Shanghai',supported_events:['incoming
   pushplus:{enabled:false,events:{incoming_sms:true},token:{configured:false},topic:{configured:false}},
 }
 const draft = notificationSettingsView(source,{gb:{enabled:true}})
+const explained=notificationSettingsView({...source,unsupported_reasons:{number_changed:'no_authoritative_ims_number_source'}})
+assert.equal(explained.__unsupported_reasons.number_changed,'no_authoritative_ims_number_source')
+assert.equal(Object.hasOwn(notificationSettingsPatch(explained),'__unsupported_reasons'),false)
 assert.equal(draft.telegram.bot_token,'')
 assert.equal(draft.telegram.__configured.bot_token,true)
 assert.equal(draft.telegram.__configured.chat_id,true)

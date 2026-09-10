@@ -40,8 +40,9 @@ function factSummary(projection) {
   if (operations.vowifi_call?.ready || operations.vowifi_sms?.ready) {
     return { state: 'ready', code: 'vowifi_operation_ready', blockers: [], unknown: [] }
   }
-  const current = Object.values(facts)
-  const unknown = current.filter(fact => !fact.fresh || fact.state === 'unknown').map(fact => fact.layer)
+  const all = Object.values(facts)
+  const current = all.filter(fact => fact.fresh)
+  const unknown = all.filter(fact => !fact.fresh || fact.state === 'unknown').map(fact => fact.layer)
   const failed = current.find(fact => ['failed', 'blocked'].includes(fact.state))
   if (failed) {
     return { state: 'blocked', code: failed.code || `${failed.layer}_blocked`,

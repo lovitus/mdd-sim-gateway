@@ -1,7 +1,20 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { originalCallView, historyCallDraft } from '../src/mdd/callView.js'
-import { lineCallReadinessStatus, intentionalLineStop, unavailableCellularLabel } from '../src/mdd/linePresentation.js'
+import { lineCallReadinessStatus, intentionalLineStop, unavailableCellularLabel, lineFailureReasons } from '../src/mdd/linePresentation.js'
+
+const reasonDevice={facts:{summary:{state:'blocked'},raw:{operations:{vowifi_call:{facts:[
+  {layer:'card',condition:'blocked',fresh:true,code:'card_not_present'},
+  {layer:'card_route',condition:'blocked',fresh:true,code:'card_not_present'},
+  {layer:'tunnel',condition:'failed',fresh:false,code:'old_failure'},
+  {layer:'ims',condition:'ready',fresh:true,code:'ims_registered'},
+]}}}}}
+assert.deepEqual(lineFailureReasons(reasonDevice),[
+  {code:'card_not_present',layers:['card','card_route']},
+  {code:'facts_stale',layers:['tunnel']},
+])
+assert.deepEqual(lineFailureReasons({facts:{summary:{state:'ready'}}}),[])
+assert.deepEqual(lineFailureReasons({facts:{summary:{state:'blocked',code:'vowifi_disabled'},facts:{vowifi_intent:{available:false}}}}),[])
 
 assert.equal(unavailableCellularLabel({device_type:'modem',present:false}),'Device not connected')
 assert.equal(unavailableCellularLabel({device_type:'modem',present:true}),'Cellular modem is unavailable')

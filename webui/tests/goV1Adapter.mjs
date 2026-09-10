@@ -68,6 +68,13 @@ assert.equal(mapped.devices[0].egress.node, 'London')
 assert.equal(mapped.devices[0].sms_diagnostics.recovery.soft_restart.available, true)
 assert.equal(mapped.devices[0].sms_diagnostics.recovery.soft_restart.recommended, true)
 
+const staleProjection={line_id:'line-a',facts:[{layer:'admission',condition:'blocked',fresh:false,code:'old_failure'}],operations:{}}
+const staleFailure=mapGoSnapshot({lines:[staleProjection],catalog:mapped.go.catalog,devices:[device],egress:{exits:[]}})
+assert.equal(staleFailure.devices[0].facts.summary.state,'unknown','an expired failure is not a current blocked state')
+assert.equal(staleFailure.devices[0].facts.summary.code,'facts_incomplete')
+const currentFailure=mapGoSnapshot({lines:[{...staleProjection,facts:[{...staleProjection.facts[0],fresh:true}]}],catalog:mapped.go.catalog,devices:[device],egress:{exits:[]}})
+assert.equal(currentFailure.devices[0].facts.summary.state,'blocked')
+
 const readerCardID = '8944100000000000002'
 const readerMapped = mapGoSnapshot({ lines: [], catalog: { schema_version: 1, revision: 1, lines: [] },
   devices: [{ id: 'reader:agent-r:reader-a', kind: 'reader', mode: 'remote_card', agent_id: 'agent-r',

@@ -9,7 +9,7 @@ const secretNames = {
 }
 
 export function notificationSettingsView(view, exits = {}) {
-  const result = { timezone:view.timezone, proxy:{exits}, __revision:view.revision, __supported_events:view.supported_events || [] }
+  const result = { timezone:view.timezone, proxy:{exits}, __revision:view.revision, __supported_events:view.supported_events || [], __unsupported_reasons:{...view.unsupported_reasons} }
   for (const channel of Object.keys(secretNames)) {
     const source = view[channel] || {}
     const value = {...source, events:{...source.events}, __configured:{}, __clear:{}}

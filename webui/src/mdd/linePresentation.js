@@ -2,6 +2,21 @@ export function compactReaderName(value) {
   return String(value || '').replace(/\bVirtual PCD\b/g, 'V PCD')
 }
 
+export function lineFailureReasons(device) {
+  if (intentionalLineStop(device?.facts) || device?.facts?.summary?.state === 'ready') return []
+  const facts = device?.facts?.raw?.operations?.vowifi_call?.facts || Object.values(device?.facts?.facts || {})
+  const reasons = new Map()
+  for (const fact of facts) {
+    const state = fact.condition || fact.state
+    const code = fact.fresh !== true ? 'facts_stale' : fact.code || (state === 'unknown' ? 'facts_incomplete' : '')
+    if (!code || (fact.fresh === true && !['blocked','failed','degraded','backoff','unknown'].includes(state))) continue
+    if (!reasons.has(code)) reasons.set(code, {code,layers:[]})
+    const item = reasons.get(code)
+    if (fact.layer && !item.layers.includes(fact.layer)) item.layers.push(fact.layer)
+  }
+  return [...reasons.values()]
+}
+
 export function intentionalLineStop(projection) {
   if(projection?.summary?.state!=='blocked')return false
   const code=projection.summary.code

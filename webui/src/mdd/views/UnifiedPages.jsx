@@ -10,7 +10,7 @@ import Maintenance from './Maintenance.jsx'
 import AdvancedDiagnostics from './AdvancedDiagnostics.jsx'
 import { saveReaderIMEI } from '../hardwareAdapter.js'
 import { networkProbeError } from '../networkAdapter.js'
-import { compactReaderName, lineCallReadinessStatus, intentionalLineStop, unavailableCellularLabel } from '../linePresentation.js'
+import { compactReaderName, lineCallReadinessStatus, intentionalLineStop, unavailableCellularLabel, lineFailureReasons } from '../linePresentation.js'
 import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel } from '../agentHealthPresentation.js'
 
 
@@ -309,6 +309,7 @@ function LineActivity({ device, compact = false }) {
   const factState = String(factSummary?.state || '')
   const factCode = String(factSummary?.code || '')
   const expectedStop=intentionalLineStop(device?.facts)
+  const reasons=lineFailureReasons(device)
   const current = expectedStop ? t('Stopped') : factCode || activity.current || status.label || t('Checking line status')
   const next = activity.next || ''
   const actual = expectedStop ? 'off' : factState === 'ready' ? 'on'
@@ -318,8 +319,9 @@ function LineActivity({ device, compact = false }) {
   const retryCount = Number(activity.retry_count || status.retry?.count || 0)
   const retryMax = Number(activity.retry_max || status.retry?.max || 0)
   return <div className={`u-line-activity ${compact ? 'compact' : ''}`}>
-    <div className="u-line-activity-head"><b>{t('VoWiFi backend')}</b><Badge state={actual}>{expectedStop ? t('cap.off') : factState ? `${factState} · ${factCode}` : t(status.label || `cap.${actual}`)}</Badge></div>
-    {!compact && factSummary && <p className="u-line-reason" style={expectedStop?{color:'var(--text-mute)'}:undefined}><b>{t('Reason')}:</b> {factCode}</p>}
+    <div className="u-line-activity-head"><b>{t('VoWiFi backend')}</b><Badge state={actual}>{expectedStop ? t('cap.off') : factState ? t({ready:'Ready',blocked:'Blocked',degraded:'cap.degraded',unknown:'Unknown'}[factState] || factState) : t(status.label || `cap.${actual}`)}</Badge></div>
+    {!compact && factSummary && <p className="u-line-reason" style={expectedStop?{color:'var(--text-mute)'}:undefined}><b>{t('Reason')}:</b> {t(factCode)}</p>}
+    {!compact && reasons.length>0 && <details style={{overflowWrap:'anywhere'}}><summary>{t('Failure details')}</summary><ul>{reasons.map(reason=><li key={reason.code}>{t(reason.code)} <code>{reason.code}</code>{reason.layers.length>0 && <small> ({reason.layers.map(layer=>t(`layer.${layer}`)).join(', ')})</small>}</li>)}</ul></details>}
     {!compact && !factSummary && status.reason && status.state !== 'OK' && <p className="u-line-reason"><b>{t('Reason')}:</b> {t(status.reason)}</p>}
     <div className="u-line-step"><span>{t('Now')}</span><b>{t(current)}</b></div>
     {next && <div className="u-line-step"><span>{t('Next')}</span><b>{t(next, { seconds: activity.seconds || status.automatic_retry_in || 0 })}</b></div>}
@@ -1366,7 +1368,7 @@ export function NotificationsPage({ showToast }) {
       <label><input type="checkbox" checked={cfg.__clear?.[field] === true} onChange={event => setChannel(key, {__clear:{...cfg.__clear,[field]:event.target.checked}})}/>{t('Clear saved value')}</label></div>
   }
   const setEvent = (key, cfg, event, checked) => setChannel(key, { events: { ...(cfg.events || {}), [event]: checked } })
-  const eventOptions = (key, cfg) => <div className="u-event-options"><label>{t('Forward these events')}</label><div className="u-inline">{[['incoming_call', t('Incoming call')], ['incoming_sms', t('Incoming SMS')], ['host_alert', t('Host alert')], ['number_changed', t('Line number changed')], ['line_unrecoverable', t('Line cannot recover')], ['activation_reminder', t('Activation reminder')]].map(([event, label]) => <label key={event}><input type="checkbox" className="u-toggle" checked={cfg.events?.[event] === true} disabled={!s.__supported_events?.includes(event)} onChange={e => setEvent(key, cfg, event, e.target.checked)} />{label}</label>)}</div></div>
+  const eventOptions = (key, cfg) => <div className="u-event-options"><label>{t('Forward these events')}</label><div className="u-inline">{[['incoming_call', t('Incoming call')], ['incoming_sms', t('Incoming SMS')], ['host_alert', t('Host alert')], ['number_changed', t('Line number changed')], ['line_unrecoverable', t('Line cannot recover')], ['activation_reminder', t('Activation reminder')]].map(([event, label]) => <label key={event} title={!s.__supported_events?.includes(event) ? t(s.__unsupported_reasons?.[event] || 'Event not supported') : undefined}><input type="checkbox" className="u-toggle" checked={cfg.events?.[event] === true} disabled={!s.__supported_events?.includes(event)} onChange={e => setEvent(key, cfg, event, e.target.checked)} />{label}</label>)}</div></div>
   const save = () => guard(async () => { setS(await api.saveNotificationSettings(s)); showToast(t('Saved')) })
   return <fieldset className="u-page" disabled={busy} style={{border:0,padding:0,minWidth:0}}>{error && <p role="alert" className="u-error">{error}</p>}{s.__egress_error && <p role="status" className="u-note">{s.__egress_error}</p>}<div className="u-tabs"><button className={tab === 'channels' ? 'active' : ''} onClick={() => setTab('channels')}>{t('Channels')}</button><button className={tab === 'delivery' ? 'active' : ''} onClick={() => setTab('delivery')}>{t('Delivery log')}</button></div>
     {tab === 'channels' && <div className="u-device-grid"><div className="card u-panel"><div className="u-card-head"><div><h2>Webhook</h2><p>{t('Standard GET or POST webhook with optional custom fields.')}</p></div><input type="checkbox" className="u-toggle" checked={!!wh.enabled} onChange={e => setChannel('webhook', { enabled: e.target.checked })} /></div><label>{t('Payload format')}</label><select value={wh.format || 'generic'} onChange={e => setChannel('webhook', { format: e.target.value })}><option value="generic">{t('Standard event fields')}</option><option value="custom">{t('Custom template')}</option></select><label>{t('Webhook URL')}</label>{secretInput('webhook', wh, 'url', false)}<div className="u-form-grid"><div><label>{t('Method')}</label><select value={wh.method || 'POST'} onChange={e => setChannel('webhook', { method: e.target.value })}><option>POST</option><option>GET</option></select></div><div><label>{t('Body format')}</label><select value={wh.body_mode || 'json'} onChange={e => setChannel('webhook', { body_mode: e.target.value })}><option value="json">JSON</option><option value="form">Form</option><option value="raw">Raw</option></select></div></div>{wh.format === 'custom' && <><label>{t('Payload template')}</label>{secretInput('webhook', wh, 'payload_template', false, 5)}</>}<label>{t('Custom headers (JSON)')}</label>{secretInput('webhook', wh, 'headers_json', false, 3)}<label>{t('Remote TLS certificate SHA-256 (optional)')}</label><input value={wh.tls_cert_sha256 || ''} onChange={event => setChannel('webhook',{tls_cert_sha256:event.target.value})}/>{eventOptions('webhook', wh)}<button className="btn btn-ghost" onClick={() => guard(async () => { await api.testWebhook(wh); await loadDeliveries(); showToast(t('Test succeeded')) })}>{t('Test')}</button></div>

@@ -46,6 +46,14 @@ func TestConfigHTTPNeverEchoesSecretsAndAppliesTriStatePatch(t *testing.T) {
 	}
 
 	payload := configPatchPayload(view, map[string]any{})
+	for _, event := range view.SupportedEvents {
+		if _, contradicted := view.UnsupportedReasons[event]; contradicted {
+			t.Fatalf("supported event %q also has an unsupported reason", event)
+		}
+	}
+	if view.UnsupportedReasons["number_changed"] != "no_authoritative_ims_number_source" {
+		t.Fatal("missing unsupported event explanation")
+	}
 	put := httptest.NewRecorder()
 	handler.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/notifications/config", bytes.NewReader(payload)))
 	kept, err := store.Config()
