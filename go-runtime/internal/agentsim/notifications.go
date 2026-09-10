@@ -18,6 +18,10 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 		result.Failure = failure("rejected", "invalid_euicc_notification_request", false)
 		return result
 	}
+	if request.Expected != nil && request.Expected.Event == "delete" && (request.Action == agentlink.EUICCNotificationDeliver || request.Action == agentlink.EUICCNotificationRemove) {
+		result.Failure = failure("rejected", "deletion_notification_must_be_retained", false)
+		return result
+	}
 	manager.mu.RLock()
 	current := manager.sessions[request.SessionGeneration]
 	manager.mu.RUnlock()
@@ -63,6 +67,11 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 		result.Failure = failure("conflict", "euicc_identity_mismatch", false)
 		return result
 	}
+	if (request.Action == agentlink.EUICCNotificationArchive || request.Action == agentlink.EUICCNotificationReplay) && !target.fact.SoftDelete {
+		release()
+		result.Failure = failure("not_ready", "euicc_notification_archive_unavailable", false)
+		return result
+	}
 	live, inspectErr := inspectEUICCWithAID(ctx, current.card, target.aid)
 	liveCapable := live != nil && live.NotificationInventory
 	if request.Action == agentlink.EUICCNotificationDeliver {
@@ -79,6 +88,18 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 		} else {
 			result.Failure = failure("not_ready", "euicc_inventory_unavailable", true)
 		}
+		return result
+	}
+	if request.Action == agentlink.EUICCNotificationArchive || request.Action == agentlink.EUICCNotificationReplay {
+		payload, ack, archiveErr := archivedEUICCNotification(ctx, current.card, target.aid, request)
+		if !release() {
+			return result
+		}
+		if archiveErr != nil {
+			result.Failure = classifyNotificationDeliveryError(ctx, archiveErr, ack)
+			return result
+		}
+		result.Payload, result.Acknowledged = payload, ack
 		return result
 	}
 	if request.Action == agentlink.EUICCNotificationDeliver {

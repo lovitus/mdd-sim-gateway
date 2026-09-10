@@ -61,6 +61,27 @@ selected line rather than only the visible page, and rejects active call records
 The working-tree and production entrypoints use this App and its stylesheet.
 Remaining contracts and acceptance still block a claim of full restoration.
 
+## User-defined eSIM soft deletion
+
+The confirmed marker is `[MDD-DELETED]`. Soft deletion requires a disabled
+profile and three explicit confirmations, persists a local event before marking,
+and only renames the profile. Core and the owning Agent block enable while that
+marker remains. Only an explicit user nickname edit can remove it; no automatic
+enable or physical delete is introduced.
+
+Signed deletion notifications are a separate resource. Reading existing deletion
+notifications archives their original payload and SHA-256 in events.db before
+any replay is offered. Replay requires two warnings plus exact ICCID entry and
+the archive hash; its attempt is persisted before a single send. The original
+payload survives acknowledgement, failure, unknown outcome, restart and line
+cleanup. Duplicate operation IDs do not send again. Card notification removal is
+not part of replay, and ordinary delivery/removal rejects deletion events.
+
+A local marker does not generate a genuine signed deletion notification. The UI
+must show when none exists, never substitute an install/disable event or claim
+operator acknowledgement. The newly authorized BetterRoaming profile is the only
+current hardware deletion-test target; existing business profiles remain intact.
+
 The SIM form retains the original fields while separating catalog saves from
 explicit Agent PIN actions. New-card Save reaches the existing disabled-draft
 claim/save adapter; modem identity refresh reads fresh Go telemetry and rejects
@@ -312,7 +333,20 @@ The copied call history stages the original line, transport and number without
 dialling; current-line readiness must not prevent selecting another line's record.
 Hardware readiness is not a claim that this browser's audio has been verified.
 eSIM profile availability distinguishes a confirmed empty inventory from missing
-facts, and the download form reflects the Go API's required IMEI contract.
+facts. The download form and Core/Agent contracts now restore ec620942's optional
+IMEI behavior: omitted IMEI uses the existing lpac-compatible TAC-only device
+information, without generating an IMEI. Explicit IMEIs retain validation. The
+minimal euicc-go patch, source version and license are recorded in
+`go-runtime/third_party/euicc-go/MDD-PATCH.md`.
+
+The authorized Google test-profile attempt reached real authentication without
+an IMEI. The selected empty eUICC received RSP subject/reason 8.8.2/3.1: the SM-DP+
+does not support its proposed CI public keys. No profile was installed. This is
+not proof that downloads from compatible issuers fail, nor installation or
+deletion acceptance. The original generic failure receipts remain unchanged;
+new failures preserve structured codes through HTTP decoding and the durable
+job, with the production page displaying the specific reason. Existing business
+profiles and pre-existing profiles named TEST remain outside deletion authority.
 
 Settings read independent Go domains separately. A notification or catalog read
 failure does not blank unrelated settings; the affected save remains unavailable,

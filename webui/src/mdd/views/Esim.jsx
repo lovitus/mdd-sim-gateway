@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
+import DeletionNotifications from './DeletionNotifications.jsx'
 import { euiccReaderKey, downloadView, downloadFailureLabel, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch, profileInventoryAvailable } from '../esimAdapter.js'
 import { useI18n } from '../i18n.jsx'
 import { compactReaderName } from '../linePresentation.js'
@@ -648,6 +649,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   }, [reader, t])
 
   const switchProfile = async (profile, se) => {
+    if ((profile.profileNickname || '').includes('[MDD-DELETED]')) { setErr('请先手动重命名，删除 [MDD-DELETED] 标识；系统不会自动移除标识或启用。'); return }
     if (selectedCard?.stale) { setErr(t('Snapshot unavailable')); return }
     if (operationBusy.current || !window.confirm(t('Enable profile {name} on EID {eid}?', {name:profileDisplayName(profile),eid:se.eid}))) return
     operationBusy.current = true
@@ -718,7 +720,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     try {
       const result = await fn()
       showToast?.(result?.outcome || t('{action} OK', { action: t(label) }))
-      if (current()) await loadAll(label === 'Nickname' || label === 'Disable')
+      if (current()) await loadAll(label === 'Nickname' || label === 'Disable' || label === 'Soft delete')
       await refresh?.()
     } catch (e) {
       showToast?.(e.message)
@@ -892,6 +894,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         )}
       </div>
 
+      {ses.map(se=><DeletionNotifications key={se.eid} eid={se.eid}/>)}
       <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <div style={{ fontWeight: 700 }}>{t('Profiles')}</div>
@@ -964,7 +967,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                               </div>
                             </div>
                             <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                              {!enabled && (
+                              {!enabled && !(p.profileNickname || '').includes('[MDD-DELETED]') && (
                                 <button className="btn btn-primary" disabled={!!busyOp || !readerOnline || !se.capabilities?.profile_management}
                                   onClick={() => switchProfile(p, se)}>
                                   {t('Enable')}
@@ -980,11 +983,23 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                                 onClick={() => setRenameTarget({ se, profile: p })}>
                                 {t('Rename')}
                               </button>
-                              <button className="btn btn-ghost" disabled={true}
-                                title={t('Physical deletion on card is permanently disabled by security policy.')}
-                                style={{ opacity: 0.45, cursor: 'not-allowed' }}>
-                                {t('Protected')}
-                              </button>
+                              {(p.profileNickname || '').includes('[MDD-DELETED]')
+                                ? <span role="status">已软删除；启用前请手动重命名去掉 [MDD-DELETED]</span>
+                                : <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline || enabled || !se.capabilities?.soft_delete} title={enabled?'请先禁用此 profile':!se.capabilities?.soft_delete?'需要支持软删除的新 Agent':'物理保留，不会自动通知运营商'}
+                                  onClick={async () => {
+                                    if (operationBusy.current) return
+                                    if (!window.confirm(`软删除 ${profileDisplayName(p)}？配置文件会物理保留，只增加 [MDD-DELETED] 标识。`)) return
+                                    if (!window.confirm('确认禁止在 MDD 内启用，直至你手动重命名去掉标识？这不代表已通知运营商。')) return
+                                    if (window.prompt('请输入此测试/目标 profile 的完整 ICCID 确认：') !== p.iccid) return
+                                    await runProfileOp('Soft delete', async () => {
+                                      const result=await api.softDeleteEuiccProfile(se.eid,p.iccid,{operation_id:`soft-delete-${crypto.randomUUID()}`,expected_nickname:p.profileNickname || '',confirm_iccid:p.iccid,confirm_keep_profile:true,confirm_block_enable:true})
+                                      if(result.event?.state!=='marked')throw new Error('软删除结果未确认，请查看记录，不要重复点击。')
+                                      return result
+                                    })
+                                  }}>软删除</button>}
+                              <button className="btn btn-ghost" disabled={!!busyOp} onClick={async()=>{
+                                try{const result=await api.euiccSoftDeleteRecord(se.eid,p.iccid);window.alert(result.found?`软删除状态：${result.event.state}\n通知状态：${result.event.notification_state}\n原昵称：${result.event.original_nickname}\n操作：${result.event.operation_id}`:'没有本地软删除记录。')}catch(error){showToast?.(error.message)}
+                              }}>删除记录</button>
                             </div>
                           </div>
                         )

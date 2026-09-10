@@ -575,6 +575,10 @@ Object.assign(api, {
     ? j('POST', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, body, {}, 140000)
     : j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/messages/send`, body, {}, 140000),
   euiccs: () => j('GET', '/v1/euiccs'),
+  euiccNotificationArchives: eid => j('GET', `/v1/euiccs/${encodeURIComponent(eid)}/notification-archives`),
+  replayEuiccNotificationArchive: (eid,sequence,body) => j('POST', `/v1/euiccs/${encodeURIComponent(eid)}/notifications/${sequence}/replay`,body,{},130000),
+  softDeleteEuiccProfile: (eid,iccid,body) => j('POST', `/v1/euiccs/${encodeURIComponent(eid)}/profiles/${encodeURIComponent(iccid)}/soft-delete`, body, {}, 130000),
+  euiccSoftDeleteRecord: (eid,iccid) => j('GET', `/v1/euiccs/${encodeURIComponent(eid)}/profiles/${encodeURIComponent(iccid)}/soft-delete`),
   refreshEuiccInventory: eid => j('POST',`/v1/euiccs/${encodeURIComponent(eid)}/refresh`,{operation_id:operationID('react-euicc-read')}),
   mutateEuiccProfile: (eid, iccid, action, body) => j('POST',
     `/v1/euiccs/${encodeURIComponent(eid)}/profiles/${encodeURIComponent(iccid)}/${encodeURIComponent(action)}`,

@@ -72,6 +72,7 @@ type EUICCProfileFact struct {
 // active profile. ProfilesAvailable distinguishes a blank eUICC from a failed
 // profile query.
 type EUICCFact struct {
+	SoftDelete            bool               `json:"soft_delete,omitempty"`
 	InventoryRefresh      bool               `json:"inventory_refresh,omitempty"`
 	Info                  *EUICCInfoFact     `json:"info,omitempty"`
 	EID                   string             `json:"eid"`
@@ -659,12 +660,15 @@ type EUICCNotificationAction string
 const (
 	EUICCNotificationDeliver EUICCNotificationAction = "deliver"
 	EUICCNotificationRemove  EUICCNotificationAction = "remove"
+	EUICCNotificationArchive EUICCNotificationAction = "archive"
+	EUICCNotificationReplay  EUICCNotificationAction = "replay"
 )
 
 // EUICCNotificationCommand is one manual inventory, one explicitly confirmed
 // delivery, or the removal half of a delivery already acknowledged by the
 // receiver. All mutations carry the complete expected card entry.
 type EUICCNotificationCommand struct {
+	Payload     []byte                  `json:"payload,omitempty"`
 	OperationID string                  `json:"operation_id"`
 	EID         string                  `json:"eid"`
 	Action      EUICCNotificationAction `json:"action,omitempty"`
@@ -673,6 +677,7 @@ type EUICCNotificationCommand struct {
 
 // EUICCNotificationRequest adds the exact live insertion selected by Core.
 type EUICCNotificationRequest struct {
+	Payload           []byte                  `json:"payload,omitempty"`
 	OperationID       string                  `json:"operation_id"`
 	SessionGeneration string                  `json:"session_generation"`
 	EID               string                  `json:"eid"`
@@ -705,6 +710,7 @@ func validEUICCNotificationEvent(value string) bool {
 }
 
 type EUICCNotificationResponse struct {
+	Payload           []byte                   `json:"payload,omitempty"`
 	OperationID       string                   `json:"operation_id"`
 	SessionGeneration string                   `json:"session_generation"`
 	EID               string                   `json:"eid"`
@@ -1359,14 +1365,24 @@ func (command EUICCNotificationCommand) Validate() error {
 		return errors.New("invalid eUICC notification command")
 	}
 	if command.Action == "" {
-		if command.Expected != nil {
+		if command.Expected != nil || len(command.Payload) != 0 {
 			return errors.New("eUICC notification inventory contains delivery fields")
 		}
 		return nil
 	}
-	if (command.Action != EUICCNotificationDeliver && command.Action != EUICCNotificationRemove) ||
+	if (command.Action != EUICCNotificationDeliver && command.Action != EUICCNotificationRemove && command.Action != EUICCNotificationArchive && command.Action != EUICCNotificationReplay) ||
 		command.Expected == nil || command.Expected.Validate() != nil {
 		return errors.New("invalid eUICC notification command")
+	}
+	if command.Action == EUICCNotificationReplay {
+		if command.Expected.Event != "delete" || len(command.Payload) == 0 || len(command.Payload) > 65536 {
+			return errors.New("invalid archived notification replay")
+		}
+	} else if len(command.Payload) != 0 {
+		return errors.New("unexpected notification payload")
+	}
+	if command.Action == EUICCNotificationArchive && command.Expected.Event != "delete" {
+		return errors.New("only deletion notifications are archived")
 	}
 	return nil
 }
@@ -1375,6 +1391,7 @@ func (command EUICCNotificationCommand) requestFor(sessionGeneration string) EUI
 	return EUICCNotificationRequest{
 		OperationID: command.OperationID, SessionGeneration: sessionGeneration, EID: command.EID,
 		Action: command.Action, Expected: cloneEUICCNotificationEntry(command.Expected),
+		Payload: append([]byte(nil), command.Payload...),
 	}
 }
 
@@ -1382,6 +1399,7 @@ func (request EUICCNotificationRequest) Validate() error {
 	command := EUICCNotificationCommand{
 		OperationID: request.OperationID, EID: request.EID, Action: request.Action,
 		Expected: cloneEUICCNotificationEntry(request.Expected),
+		Payload:  append([]byte(nil), request.Payload...),
 	}
 	if !validIdentifier(request.SessionGeneration) || command.Validate() != nil {
 		return errors.New("invalid eUICC notification request")
@@ -1398,8 +1416,23 @@ func (response EUICCNotificationResponse) ValidateFor(request EUICCNotificationR
 		invalidOutcome := response.Removed ||
 			request.Action == EUICCNotificationRemove && response.Acknowledged ||
 			request.Action == "" && (response.Acknowledged || response.Removed)
-		if response.Failure.Validate() != nil || len(response.Entries) != 0 || invalidOutcome {
+		if response.Failure.Validate() != nil || len(response.Payload) != 0 || len(response.Entries) != 0 || invalidOutcome {
 			return errors.New("invalid failed eUICC notification response")
+		}
+		return nil
+	}
+	if request.Action == EUICCNotificationArchive {
+		if len(response.Payload) == 0 || len(response.Payload) > 65536 || response.Acknowledged || response.Removed || len(response.Entries) != 0 {
+			return errors.New("invalid notification archive response")
+		}
+		return nil
+	}
+	if len(response.Payload) != 0 {
+		return errors.New("unexpected notification response payload")
+	}
+	if request.Action == EUICCNotificationReplay {
+		if !response.Acknowledged || response.Removed || len(response.Entries) != 0 {
+			return errors.New("invalid retained replay response")
 		}
 		return nil
 	}
@@ -2631,6 +2664,7 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 		info = &value
 	}
 	return &EUICCFact{
+		SoftDelete:       source.SoftDelete,
 		InventoryRefresh: source.InventoryRefresh,
 		Info:             info,
 		EID:              source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,

@@ -715,7 +715,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	defer runtimeReconciler.Close()
-	euiccProfiles, err := euiccprofiles.New(agents, euiccprofiles.WithDownloadSafety(catalog, control))
+	euiccProfiles, err := euiccprofiles.New(agents, euiccprofiles.WithDownloadSafety(catalog, control), euiccprofiles.WithDeletionStore(store))
 	if err != nil {
 		return err
 	}

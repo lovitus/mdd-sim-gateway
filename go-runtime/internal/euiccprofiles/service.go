@@ -16,9 +16,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
@@ -34,6 +36,8 @@ type AgentRuntime interface {
 }
 
 type Service struct {
+	replayMu  sync.Mutex
+	deletions *events.BoltStore
 	agents    AgentRuntime
 	catalog   LineCatalog
 	providers ProviderStatus
@@ -125,6 +129,14 @@ func New(agents AgentRuntime, options ...Option) (*Service, error) {
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
+	if strings.HasSuffix(request.URL.Path, "/notification-archives") || strings.HasSuffix(request.URL.Path, "/replay") {
+		service.archivedNotifications(response, request)
+		return
+	}
+	if strings.HasSuffix(request.URL.Path, "/soft-delete") {
+		service.softDelete(response, request)
+		return
+	}
 	if strings.HasSuffix(request.URL.Path, "/refresh") {
 		service.refreshInventory(response, request)
 		return
@@ -209,6 +221,10 @@ func (service *Service) removeAcknowledgedNotification(response http.ResponseWri
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "notification_removal_confirmation_required"})
 		return
 	}
+	if input.Event == "delete" {
+		writeJSON(response, 403, map[string]string{"code": "deletion_notification_must_be_retained"})
+		return
+	}
 	sequence, err := strconv.ParseInt(request.PathValue("sequence"), 10, 64)
 	if err != nil || sequence < 0 {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_notification_removal_request"})
@@ -252,6 +268,10 @@ func (service *Service) deliverNotification(response http.ResponseWriter, reques
 	var input notificationDeliveryRequest
 	if decodeStrict(request, &input) != nil || !input.Confirmed {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "notification_delivery_confirmation_required"})
+		return
+	}
+	if input.Event == "delete" {
+		writeJSON(response, 403, map[string]string{"code": "use_archived_notification_replay"})
 		return
 	}
 	sequence, err := strconv.ParseInt(request.PathValue("sequence"), 10, 64)
@@ -312,6 +332,14 @@ func (service *Service) notifications(response http.ResponseWriter, request *htt
 	if err != nil {
 		writeEUICCError(response, err, "euicc_notification_operation_failed")
 		return
+	}
+	for _, entry := range result.Entries {
+		if entry.Event == "delete" {
+			if err := service.archiveDeletionNotification(request, command.EID, entry); err != nil {
+				writeJSON(response, 502, map[string]string{"code": "deletion_notification_archive_failed"})
+				return
+			}
+		}
 	}
 	writeJSON(response, http.StatusOK, result)
 }
@@ -529,6 +557,24 @@ func (service *Service) mutate(response http.ResponseWriter, request *http.Reque
 		return
 	}
 	if action == agentlink.EUICCProfileEnable || action == agentlink.EUICCProfileDisable {
+		if action == agentlink.EUICCProfileEnable {
+			for _, status := range service.agents.Statuses() {
+				if status.Topology != nil {
+					for _, reader := range status.Topology.Readers {
+						for _, slot := range agentlink.ReaderEUICCs(reader) {
+							if slot.EUICC.EID == command.EID {
+								for _, profile := range slot.EUICC.Profiles {
+									if profile.ICCID == command.ICCID && agentlink.EUICCProfileSoftDeleted(profile.Nickname) {
+										writeJSON(response, 409, map[string]string{"code": "euicc_profile_soft_deleted"})
+										return
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 		if err := service.profileMutationSafe(request.Context(), command.ICCID); err != nil {
 			writeEUICCError(response, err, "euicc_profile_line_active")
 			return

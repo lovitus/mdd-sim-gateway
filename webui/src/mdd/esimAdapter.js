@@ -97,6 +97,7 @@ export function mergeReportedProfiles(ses, card) {
 
 export function profileRequest(action, target, nickname) {
   if (!target.eid || !target.profile) throw new Error('euicc_profile_identity_required')
+  if (action === 'enable' && (target.profile.profileNickname || '').includes('[MDD-DELETED]')) throw new Error('euicc_profile_soft_deleted')
   const request = {operation_id:operationID(`mdd-euicc-${action}`)}
   if (action === 'nickname') return {...request,nickname,expected_nickname:target.profile.profileNickname || ''}
   if (!['enable','disable'].includes(action)) throw new Error('euicc_profile_action_unavailable')

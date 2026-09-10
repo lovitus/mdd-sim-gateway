@@ -194,6 +194,7 @@ func inspectEUICCDetails(ctx context.Context, card Card, aid []byte, includeInfo
 	}
 	fact.ProfilesAvailable = true
 	fact.ProfileManagement = true
+	fact.SoftDelete = true
 	fact.ProfileDownload = true
 	fact.ProfileDiscovery = true
 	fact.NotificationInventory = true

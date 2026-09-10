@@ -697,6 +697,8 @@ func (server *Server) resolveEUICCNotificationTarget(eid string, action EUICCNot
 					capable = slot.EUICC.NotificationDelivery
 				} else if action == EUICCNotificationRemove {
 					capable = slot.EUICC.NotificationRemoval
+				} else if action == EUICCNotificationArchive || action == EUICCNotificationReplay {
+					capable = slot.EUICC.SoftDelete && slot.EUICC.NotificationInventory
 				}
 				if slot.EUICC.EID == eid && capable {
 					matches = append(matches, EUICCNotificationTarget{

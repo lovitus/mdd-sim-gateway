@@ -360,6 +360,31 @@ func TestMalformedProfileResponseCannotCrashAgentOrEraseEID(t *testing.T) {
 	}
 }
 
+func TestSoftDeletedProfileCannotBeEnabled(t *testing.T) {
+	const iccid = "8944000000000000001"
+	card := euiccCard(t, profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled, "[MDD-DELETED] test")))
+	manager, err := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := 0
+	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction, string) error {
+		mutations++
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Run(ctx, agentreader.Reader{Name: "reader", CardPresent: true, SessionGeneration: "insertion-1"})
+	}()
+	defer func() { cancel(); <-done }()
+	waitForSession(t, manager, "insertion-1")
+	result := manager.ExecuteEUICCProfile(ctx, agentlink.EUICCProfileRequest{OperationID: "enable-deleted", SessionGeneration: "insertion-1", EID: testEID, ICCID: iccid, Action: agentlink.EUICCProfileEnable, ExpectedState: agentlink.EUICCProfileDisabled})
+	if result.Failure == nil || result.Failure.Code != "euicc_profile_soft_deleted" || mutations != 0 {
+		t.Fatalf("deleted profile enabled: %+v writes=%d", result, mutations)
+	}
+}
+
 func TestEUICCProfileEnableUsesExactLiveIdentityAndRefreshesOnlyCardSession(t *testing.T) {
 	const iccid = "8944000000000000001"
 	card := euiccCard(t, profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled)))

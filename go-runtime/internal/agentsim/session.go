@@ -531,6 +531,7 @@ func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 		info = &value
 	}
 	return &agentlink.EUICCFact{
+		SoftDelete:       source.SoftDelete,
 		InventoryRefresh: source.InventoryRefresh,
 		Info:             info,
 		EID:              source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
@@ -682,6 +683,20 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 		}
 	}
 	manager.mu.Unlock()
+	if request.Action == agentlink.EUICCProfileEnable && agentlink.EUICCProfileSoftDeleted(profile.Nickname) {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		result.Failure = failure("conflict", "euicc_profile_soft_deleted", false)
+		return result
+	}
+	if request.Action == agentlink.EUICCProfileNickname && agentlink.EUICCProfileSoftDeleted(request.Nickname) && profile.State != agentlink.EUICCProfileDisabled {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		result.Failure = failure("conflict", "euicc_soft_delete_requires_disabled_profile", false)
+		return result
+	}
 	if request.Action == agentlink.EUICCProfileNickname {
 		if profile.Nickname == request.Nickname {
 			if !releaseEUICCTransaction(current, &result) {

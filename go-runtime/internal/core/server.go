@@ -566,6 +566,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.euiccProfiles != nil {
 		server.mux.Handle("GET /v1/euiccs", server.protect(server.euiccProfiles))
+		server.mux.Handle("GET /v1/euiccs/{eid}/notification-archives", server.protect(server.euiccProfiles))
+		server.mux.Handle("POST /v1/euiccs/{eid}/notifications/{sequence}/replay", server.protect(server.euiccProfiles))
+		server.mux.Handle("GET /v1/euiccs/{eid}/profiles/{iccid}/soft-delete", server.protect(server.euiccProfiles))
 		server.mux.Handle("POST /v1/euiccs/{eid}/refresh", server.protect(server.euiccProfiles))
 		server.mux.Handle("POST /v1/euiccs/{eid}/profiles/{iccid}/{action}", server.protect(server.euiccProfiles))
 		server.mux.Handle("POST /v1/euiccs/{eid}/downloads", server.protect(server.euiccProfiles))
