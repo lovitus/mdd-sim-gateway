@@ -72,6 +72,7 @@ type EUICCProfileFact struct {
 // active profile. ProfilesAvailable distinguishes a blank eUICC from a failed
 // profile query.
 type EUICCFact struct {
+	ProfileDeletion       bool               `json:"profile_deletion,omitempty"`
 	SoftDelete            bool               `json:"soft_delete,omitempty"`
 	InventoryRefresh      bool               `json:"inventory_refresh,omitempty"`
 	Info                  *EUICCInfoFact     `json:"info,omitempty"`
@@ -481,6 +482,7 @@ type EUICCProfileAction string
 
 const (
 	EUICCProfileEnable   EUICCProfileAction = "enable"
+	EUICCProfileDelete   EUICCProfileAction = "delete"
 	EUICCProfileDisable  EUICCProfileAction = "disable"
 	EUICCProfileNickname EUICCProfileAction = "nickname"
 	EUICCProfileRefresh  EUICCProfileAction = "refresh"
@@ -1246,7 +1248,7 @@ func (response EUICCProfileResponse) ValidateFor(request EUICCProfileRequest) er
 	}
 	switch response.Outcome {
 	case EUICCProfileAlreadyApplied:
-		if response.State != desired || response.Changed {
+		if request.Action == EUICCProfileDelete || response.State != desired || response.Changed {
 			return errors.New("invalid already-applied eUICC profile response")
 		}
 	case EUICCProfileRefreshPending:
@@ -2668,6 +2670,7 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 		info = &value
 	}
 	return &EUICCFact{
+		ProfileDeletion:  source.ProfileDeletion,
 		SoftDelete:       source.SoftDelete,
 		InventoryRefresh: source.InventoryRefresh,
 		Info:             info,
@@ -2786,7 +2789,7 @@ func validEID(value string) bool {
 }
 
 func validEUICCProfileAction(action EUICCProfileAction) bool {
-	return action == EUICCProfileEnable || action == EUICCProfileDisable || action == EUICCProfileNickname || action == EUICCProfileRefresh
+	return action == EUICCProfileEnable || action == EUICCProfileDisable || action == EUICCProfileDelete || action == EUICCProfileNickname || action == EUICCProfileRefresh
 }
 
 func validProfileNickname(value string) bool {

@@ -63,6 +63,18 @@ Remaining contracts and acceptance still block a claim of full restoration.
 
 ## User-defined eSIM soft deletion
 
+Superseded by the user's standard-deletion decision. Historical markers and
+records remain readable, but new soft-delete POSTs return 410. The physical
+DeleteProfile workflow records intent before dispatch, never automatically
+repeats an uncertain deletion, and tracks on-card deletion separately from
+notification capture and HTTP acknowledgement. A manual recovery action reads
+the original eUICC and archives its retained notifications without deleting again.
+Original notification payloads and confirmed replay attempts remain durable.
+No UI claims atomicity between card deletion and remote delivery, or equates
+HTTP 204 with permission to download on a different device. All actual deletion
+testing remains restricted to the explicitly authorized BetterRoaming profile.
+The paragraphs below document the retired soft-delete behavior, not the new path.
+
 The confirmed marker is `[MDD-DELETED]`. Soft deletion requires a disabled
 profile and three explicit confirmations, persists a local event before marking,
 and only renames the profile. Core and the owning Agent block enable while that

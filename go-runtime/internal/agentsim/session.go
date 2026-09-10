@@ -531,6 +531,7 @@ func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 		info = &value
 	}
 	return &agentlink.EUICCFact{
+		ProfileDeletion:  source.ProfileDeletion,
 		SoftDelete:       source.SoftDelete,
 		InventoryRefresh: source.InventoryRefresh,
 		Info:             info,
@@ -717,7 +718,7 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 		if request.Action == agentlink.EUICCProfileDisable {
 			desired = agentlink.EUICCProfileDisabled
 		}
-		if profile.State == desired {
+		if request.Action != agentlink.EUICCProfileDelete && profile.State == desired {
 			if !releaseEUICCTransaction(current, &result) {
 				return result
 			}

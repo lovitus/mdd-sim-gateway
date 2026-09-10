@@ -522,6 +522,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   const [renameTarget, setRenameTarget] = useState(null) // { se, profile }
   const [replayTarget, setReplayTarget] = useState(null) // { se, notification }
   const [busyOp, setBusyOp] = useState('')
+  const [deletionRefresh,setDeletionRefresh]=useState(0)
   const operationBusy = useRef(false)
   const activeReader = useRef(reader)
   const readGeneration = useRef(0)
@@ -719,8 +720,8 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     const current = () => activeReader.current === reader && readGeneration.current === generation
     try {
       const result = await fn()
-      showToast?.(result?.outcome || t('{action} OK', { action: t(label) }))
-      if (current()) await loadAll(label === 'Nickname' || label === 'Disable' || label === 'Soft delete')
+      showToast?.(label==='Delete'?'卡内删除已执行；请检查通知送达状态。':result?.outcome || t('{action} OK', { action: t(label) }))
+      if (current()) await loadAll(label === 'Nickname' || label === 'Disable' || label === 'Soft delete' || label === 'Delete')
       await refresh?.()
     } catch (e) {
       showToast?.(e.message)
@@ -894,7 +895,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         )}
       </div>
 
-      {ses.map(se=><DeletionNotifications key={se.eid} eid={se.eid}/>)}
+      {ses.map(se=><DeletionNotifications key={se.eid} eid={se.eid} refreshKey={deletionRefresh}/>)}
       <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <div style={{ fontWeight: 700 }}>{t('Profiles')}</div>
@@ -983,20 +984,20 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                                 onClick={() => setRenameTarget({ se, profile: p })}>
                                 {t('Rename')}
                               </button>
-                              {(p.profileNickname || '').includes('[MDD-DELETED]')
-                                ? <span role="status">已软删除；启用前请手动重命名去掉 [MDD-DELETED]</span>
-                                : <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline || enabled || !se.capabilities?.soft_delete} title={enabled?'请先禁用此 profile':!se.capabilities?.soft_delete?'需要支持软删除的新 Agent':'物理保留，不会自动通知运营商'}
+                              {(p.profileNickname || '').includes('[MDD-DELETED]') && <span role="status">历史软删除标识：启用前请手动去标识</span>}
+                              <button className="btn btn-danger-outline" disabled={!!busyOp || !readerOnline || enabled || !se.capabilities?.profile_deletion} title={enabled?'请先禁用此 profile':!se.capabilities?.profile_deletion?'需要支持标准删除的新 Agent':'永久删除卡内 profile，通知可能暂未送达'}
                                   onClick={async () => {
                                     if (operationBusy.current) return
-                                    if (!window.confirm(`软删除 ${profileDisplayName(p)}？配置文件会物理保留，只增加 [MDD-DELETED] 标识。`)) return
-                                    if (!window.confirm('确认禁止在 MDD 内启用，直至你手动重命名去掉标识？这不代表已通知运营商。')) return
+                                    if (!window.confirm(`永久删除 ${profileDisplayName(p)}？卡内 profile 将被实际删除，无法在本机撤销。`)) return
+                                    if (!window.confirm('删除后网络可能中断，通知可能待送达或结果未知。通知会保留，不能保证服务商已开放重新下载。确认继续？')) return
                                     if (window.prompt('请输入此测试/目标 profile 的完整 ICCID 确认：') !== p.iccid) return
-                                    await runProfileOp('Soft delete', async () => {
-                                      const result=await api.softDeleteEuiccProfile(se.eid,p.iccid,{operation_id:`soft-delete-${crypto.randomUUID()}`,expected_nickname:p.profileNickname || '',confirm_iccid:p.iccid,confirm_keep_profile:true,confirm_block_enable:true})
-                                      if(result.event?.state!=='marked')throw new Error('软删除结果未确认，请查看记录，不要重复点击。')
+                                    await runProfileOp('Delete', async () => {
+                                      let result
+                                      try{result=await api.deleteEuiccProfile(se.eid,p.iccid,{operation_id:`delete-${crypto.randomUUID()}`,confirm_iccid:p.iccid,confirm_permanent_delete:true,confirm_delivery_may_be_pending:true})}finally{setDeletionRefresh(value=>value+1)}
+                                      if(!['deleted','deleted_observed'].includes(result.operation?.state))throw new Error('删除结果未确认；请从删除记录恢复状态，不要重复删除。')
                                       return result
                                     })
-                                  }}>软删除</button>}
+                                  }}>永久删除</button>
                               <button className="btn btn-ghost" disabled={!!busyOp} onClick={async()=>{
                                 try{const result=await api.euiccSoftDeleteRecord(se.eid,p.iccid);window.alert(result.found?(result.history||[result.event]).map(event=>`时间：${event.created_at}\n软删除状态：${event.state}\n通知状态：${event.notification_state}\n原昵称：${event.original_nickname}\n操作：${event.operation_id}`).join('\n\n'):'没有本地软删除记录。')}catch(error){showToast?.(error.message)}
                               }}>删除记录</button>

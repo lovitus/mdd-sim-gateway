@@ -36,6 +36,7 @@ type AgentRuntime interface {
 }
 
 type Service struct {
+	deleteMu  sync.Mutex
 	replayMu  sync.Mutex
 	deletions *events.BoltStore
 	agents    AgentRuntime
@@ -129,11 +130,19 @@ func New(agents AgentRuntime, options ...Option) (*Service, error) {
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
+	if request.PathValue("action") == "delete" || strings.Contains(request.URL.Path, "/deletions") {
+		service.standardDeletion(response, request)
+		return
+	}
 	if strings.HasSuffix(request.URL.Path, "/notification-archives") || strings.HasSuffix(request.URL.Path, "/replay") {
 		service.archivedNotifications(response, request)
 		return
 	}
 	if strings.HasSuffix(request.URL.Path, "/soft-delete") {
+		if request.Method != http.MethodGet {
+			writeJSON(response, http.StatusGone, map[string]string{"code": "soft_delete_retired_use_standard_delete"})
+			return
+		}
 		service.softDelete(response, request)
 		return
 	}

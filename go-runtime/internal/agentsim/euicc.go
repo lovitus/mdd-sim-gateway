@@ -195,6 +195,7 @@ func inspectEUICCDetails(ctx context.Context, card Card, aid []byte, includeInfo
 	}
 	fact.ProfilesAvailable = true
 	fact.ProfileManagement = true
+	fact.ProfileDeletion = true
 	fact.SoftDelete = true
 	fact.ProfileDownload = true
 	fact.ProfileDiscovery = true
@@ -542,6 +543,8 @@ func mutateEUICCProfile(ctx context.Context, card Card, aid []byte, iccid string
 		return client.EnableProfile(identifier, false)
 	case agentlink.EUICCProfileDisable:
 		return client.DisableProfile(identifier, false)
+	case agentlink.EUICCProfileDelete:
+		return client.DeleteProfile(identifier)
 	case agentlink.EUICCProfileNickname:
 		return client.SetNickname(identifier, nickname)
 	default:
