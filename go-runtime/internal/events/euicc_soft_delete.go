@@ -1,8 +1,10 @@
 package events
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"sort"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -68,16 +70,36 @@ func (store *BoltStore) BeginEUICCSoftDelete(event EUICCSoftDeleteEvent) (EUICCS
 	event.UpdatedAt = event.CreatedAt
 	err = store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketMetadata)
+		historyKey := append(append([]byte("euicc-delete-history-v1\x00"), key...), []byte("\x00"+event.OperationID)...)
+		if raw := bucket.Get(historyKey); raw != nil {
+			var prior EUICCSoftDeleteEvent
+			if err := json.Unmarshal(raw, &prior); err != nil {
+				return err
+			}
+			if prior.OriginalNickname != event.OriginalNickname || prior.Marker != event.Marker {
+				return errors.New("eUICC deletion operation changed")
+			}
+			return errors.New("historical eUICC deletion operation cannot be replayed")
+		}
 		if raw := bucket.Get(key); raw != nil {
 			var prior EUICCSoftDeleteEvent
 			if err := json.Unmarshal(raw, &prior); err != nil {
 				return err
 			}
-			if prior.OperationID != event.OperationID || prior.OriginalNickname != event.OriginalNickname || prior.Marker != event.Marker {
-				return errors.New("eUICC deletion event already exists")
+			if prior.OperationID == event.OperationID {
+				if prior.OriginalNickname != event.OriginalNickname || prior.Marker != event.Marker {
+					return errors.New("eUICC deletion event already exists")
+				}
+				event = prior
+				return nil
 			}
-			event = prior
-			return nil
+			if prior.State != "marked" {
+				return errors.New("previous eUICC deletion is unresolved")
+			}
+			priorKey := append(append([]byte("euicc-delete-history-v1\x00"), key...), []byte("\x00"+prior.OperationID)...)
+			if err := bucket.Put(priorKey, raw); err != nil {
+				return err
+			}
 		}
 		raw, err := json.Marshal(event)
 		if err != nil {
@@ -86,6 +108,36 @@ func (store *BoltStore) BeginEUICCSoftDelete(event EUICCSoftDeleteEvent) (EUICCS
 		return bucket.Put(key, raw)
 	})
 	return event, err
+}
+
+func (store *BoltStore) EUICCSoftDeleteHistory(eid, iccid string) ([]EUICCSoftDeleteEvent, error) {
+	key, err := euiccDeletionKey(eid, iccid)
+	if err != nil {
+		return nil, err
+	}
+	var history []EUICCSoftDeleteEvent
+	err = store.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketMetadata)
+		prefix := append(append([]byte("euicc-delete-history-v1\x00"), key...), 0)
+		cursor := bucket.Cursor()
+		for k, v := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = cursor.Next() {
+			var event EUICCSoftDeleteEvent
+			if err := json.Unmarshal(v, &event); err != nil {
+				return err
+			}
+			history = append(history, event)
+		}
+		if raw := bucket.Get(key); raw != nil {
+			var event EUICCSoftDeleteEvent
+			if err := json.Unmarshal(raw, &event); err != nil {
+				return err
+			}
+			history = append(history, event)
+		}
+		return nil
+	})
+	sort.Slice(history, func(i, j int) bool { return history[i].CreatedAt.Before(history[j].CreatedAt) })
+	return history, err
 }
 
 func (store *BoltStore) FinishEUICCSoftDelete(eid, iccid, operationID, state string) (EUICCSoftDeleteEvent, error) {

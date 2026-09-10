@@ -38,6 +38,18 @@ func TestEUICCDeletionEventPersistsWithoutCarrierAcknowledgement(t *testing.T) {
 	if err = purger.PurgeLine("unrelated-line"); err != nil {
 		t.Fatal(err)
 	}
+	second := event
+	second.OperationID = "second-delete"
+	second.OriginalNickname = "manually restored"
+	if _, err = store.BeginEUICCSoftDelete(second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.BeginEUICCSoftDelete(event); err == nil {
+		t.Fatal("historical operation reused")
+	}
+	if _, err = store.FinishEUICCSoftDelete(second.EID, second.ICCID, second.OperationID, "marked"); err != nil {
+		t.Fatal(err)
+	}
 	if err = store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +59,11 @@ func TestEUICCDeletionEventPersistsWithoutCarrierAcknowledgement(t *testing.T) {
 	}
 	defer store.Close()
 	got, found, err := store.EUICCSoftDelete(event.EID, event.ICCID)
-	if err != nil || !found || got.State != "marked" || got.NotificationState != "signed_delete_notification_unavailable" || got.OriginalNickname != "original" {
+	if err != nil || !found || got.State != "marked" || got.NotificationState != "signed_delete_notification_unavailable" || got.OriginalNickname != "manually restored" {
 		t.Fatalf("event lost or carrier result invented: %+v %v", got, err)
+	}
+	history, err := store.EUICCSoftDeleteHistory(event.EID, event.ICCID)
+	if err != nil || len(history) != 2 || history[0].OriginalNickname != "original" || history[1].OperationID != "second-delete" {
+		t.Fatalf("deletion history lost: %+v %v", history, err)
 	}
 }

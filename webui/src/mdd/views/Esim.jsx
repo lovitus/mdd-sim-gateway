@@ -998,7 +998,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                                     })
                                   }}>软删除</button>}
                               <button className="btn btn-ghost" disabled={!!busyOp} onClick={async()=>{
-                                try{const result=await api.euiccSoftDeleteRecord(se.eid,p.iccid);window.alert(result.found?`软删除状态：${result.event.state}\n通知状态：${result.event.notification_state}\n原昵称：${result.event.original_nickname}\n操作：${result.event.operation_id}`:'没有本地软删除记录。')}catch(error){showToast?.(error.message)}
+                                try{const result=await api.euiccSoftDeleteRecord(se.eid,p.iccid);window.alert(result.found?(result.history||[result.event]).map(event=>`时间：${event.created_at}\n软删除状态：${event.state}\n通知状态：${event.notification_state}\n原昵称：${event.original_nickname}\n操作：${event.operation_id}`).join('\n\n'):'没有本地软删除记录。')}catch(error){showToast?.(error.message)}
                               }}>删除记录</button>
                             </div>
                           </div>

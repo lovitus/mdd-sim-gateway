@@ -3,6 +3,7 @@ package euiccprofiles
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"net/http"
@@ -23,7 +24,7 @@ func TestArchivedReplayNeedsAllConfirmationsAndNeverResendsOperation(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	agents := &fakeAgents{notificationResult: agentlink.EUICCNotificationResponse{Acknowledged: true}}
+	agents := &fakeAgents{notificationResult: agentlink.EUICCNotificationResponse{Acknowledged: true}, notificationErr: errors.New("card transaction release failed after ACK")}
 	service, err := New(agents, WithDeletionStore(store))
 	if err != nil {
 		t.Fatal(err)
@@ -61,5 +62,44 @@ func TestArchivedReplayNeedsAllConfirmationsAndNeverResendsOperation(t *testing.
 	got, err := store.EUICCNotificationArchive(testEID, 0)
 	if err != nil || len(got.Payload) == 0 || got.Attempts[0].State != "acknowledged" {
 		t.Fatal("ack removed archive")
+	}
+}
+
+func TestSoftDeleteAfterManualRenameRetainsBothEvents(t *testing.T) {
+	store, err := events.OpenBoltStore(filepath.Join(t.TempDir(), "events.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	topo := topology("reader", "generation", testEID, []agentlink.EUICCProfileFact{{ICCID: testICCID, State: agentlink.EUICCProfileDisabled, Nickname: "before"}})
+	topo.Readers[0].EUICC.SoftDelete = true
+	agents := &fakeAgents{statuses: []agentlink.ConnectionStatus{{AgentID: "agent", Topology: topo}}, result: agentlink.EUICCProfileResponse{Outcome: agentlink.EUICCProfileRefreshPending, Changed: true}}
+	service, err := New(agents, WithDeletionStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/euiccs/{eid}/profiles/{iccid}/soft-delete", service)
+	route := "/v1/euiccs/" + testEID + "/profiles/" + testICCID + "/soft-delete"
+	request := func(id, nickname string) map[string]any {
+		return map[string]any{"operation_id": id, "expected_nickname": nickname, "confirm_iccid": testICCID, "confirm_keep_profile": true, "confirm_block_enable": true}
+	}
+	if w := post(t, mux, route, request("first", "before")); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	topo.Readers[0].EUICC.Profiles[0].Nickname = "[MDD-DELETED] before"
+	if w := post(t, mux, route, request("first", "before")); w.Code != 200 || len(agents.commands) != 1 {
+		t.Fatal("duplicate changed card")
+	}
+	if w := post(t, mux, route, request("second", "before")); w.Code != 409 || len(agents.commands) != 1 {
+		t.Fatal("stale page created another event")
+	}
+	topo.Readers[0].EUICC.Profiles[0].Nickname = "manually restored"
+	if w := post(t, mux, route, request("second", "manually restored")); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	history, err := store.EUICCSoftDeleteHistory(testEID, testICCID)
+	if err != nil || len(history) != 2 || history[0].OperationID != "first" || history[1].OperationID != "second" || len(agents.commands) != 2 {
+		t.Fatalf("history=%+v err=%v", history, err)
 	}
 }

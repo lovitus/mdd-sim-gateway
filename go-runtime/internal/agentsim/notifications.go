@@ -92,6 +92,7 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 	}
 	if request.Action == agentlink.EUICCNotificationArchive || request.Action == agentlink.EUICCNotificationReplay {
 		payload, ack, archiveErr := archivedEUICCNotification(ctx, current.card, target.aid, request)
+		result.Acknowledged = ack
 		if !release() {
 			return result
 		}

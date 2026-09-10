@@ -32,7 +32,12 @@ func (service *Service) softDelete(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 500, map[string]string{"code": "euicc_deletion_read_failed"})
 			return
 		}
-		writeJSON(w, 200, map[string]any{"found": found, "event": event})
+		history, err := service.deletions.EUICCSoftDeleteHistory(eid, iccid)
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"code": "euicc_deletion_read_failed"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"found": found, "event": event, "history": history})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -86,6 +91,13 @@ func (service *Service) softDelete(w http.ResponseWriter, r *http.Request) {
 	if profile == nil || profile.State != agentlink.EUICCProfileDisabled {
 		writeJSON(w, 409, map[string]string{"code": "euicc_soft_delete_requires_disabled_profile"})
 		return
+	}
+	if profile.Nickname != input.ExpectedNickname {
+		prior, found, err := service.deletions.EUICCSoftDelete(eid, iccid)
+		if err != nil || !found || prior.OperationID != input.OperationID || profile.Nickname != nickname {
+			writeJSON(w, 409, map[string]string{"code": "euicc_profile_nickname_changed"})
+			return
+		}
 	}
 	if err := service.profileMutationSafe(r.Context(), iccid); err != nil {
 		writeEUICCError(w, err, "euicc_profile_line_active")
