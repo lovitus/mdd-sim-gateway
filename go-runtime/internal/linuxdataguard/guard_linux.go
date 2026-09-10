@@ -174,12 +174,8 @@ func (guard *Guard) Apply(ctx context.Context) error {
 	if _, err := guard.run(ctx, nil, "udevadm", "control", "--reload"); err != nil {
 		return fmt.Errorf("reload MDD cellular udev policy: %w", err)
 	}
-	// NetworkManager may be absent on a small service host. A present daemon
-	// must reload the strict snippet, while an absent service is already safe.
-	if _, err := guard.run(ctx, nil, "systemctl", "is-active", "--quiet", "NetworkManager.service"); err == nil {
-		if _, err := guard.run(ctx, nil, "systemctl", "reload", "NetworkManager.service"); err != nil {
-			return fmt.Errorf("reload NetworkManager cellular policy: %w", err)
-		}
+	if err := guard.reloadNetworkManager(ctx); err != nil {
+		return err
 	}
 	if err := guard.protectExistingNetdevs(ctx); err != nil {
 		return err
@@ -188,6 +184,20 @@ func (guard *Guard) Apply(ctx context.Context) error {
 		return err
 	}
 	return guard.VerifyContract(ctx)
+}
+
+func (guard *Guard) reloadNetworkManager(ctx context.Context) error {
+	// At boot an inactive daemon reads the snippet when it starts. During a
+	// guard-unit start, a systemd reload job would wait for our Before= ordering.
+	if _, err := guard.run(ctx, nil, "systemctl", "is-active", "--quiet", "NetworkManager.service"); err != nil {
+		return nil
+	}
+	// NetworkManager.Reload flag 1 reloads configuration only, not connections.
+	if _, err := guard.run(ctx, nil, "busctl", "--system", "call", "org.freedesktop.NetworkManager",
+		"/org/freedesktop/NetworkManager", "org.freedesktop.NetworkManager", "Reload", "u", "1"); err != nil {
+		return fmt.Errorf("reload NetworkManager cellular policy: %w", err)
+	}
+	return nil
 }
 
 func (guard *Guard) VerifyContract(ctx context.Context) error {

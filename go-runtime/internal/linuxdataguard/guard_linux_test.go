@@ -9,9 +9,53 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestGuardReloadDoesNotQueueNetworkManagerOrderedAfterIt(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		for _, failReload := range []bool{false, true} {
+			var calls [][]string
+			failure := errors.New("D-Bus reload failed")
+			guard := newGuard("/sys", "/etc", "/var/lib/mdd-agent", func(_ context.Context, _ []byte, command string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string{command}, args...))
+				if command == "systemctl" {
+					if !reflect.DeepEqual(args, []string{"is-active", "--quiet", "NetworkManager.service"}) {
+						t.Fatal("guard queued an ordered systemd job", args)
+					}
+					if !active {
+						return nil, errors.New("inactive")
+					}
+					return nil, nil
+				}
+				if command != "busctl" || !reflect.DeepEqual(args, []string{"--system", "call", "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager", "org.freedesktop.NetworkManager", "Reload", "u", "1"}) {
+					t.Fatal("unexpected reload request", command, args)
+				}
+				if failReload {
+					return nil, failure
+				}
+				return nil, nil
+			})
+			err := guard.reloadNetworkManager(context.Background())
+			if active && failReload {
+				if !errors.Is(err, failure) {
+					t.Fatal("reload failure was hidden", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			want := 1
+			if active {
+				want = 2
+			}
+			if len(calls) != want {
+				t.Fatal("unexpected reload count", calls)
+			}
+		}
+	}
+}
 
 func TestMergedConfigRequiresExactStrictGSMDeviceSpec(t *testing.T) {
 	valid := []byte("# merged\n[keyfile]\nunmanaged-devices=interface-name:wwan0;type:gsm\n")
