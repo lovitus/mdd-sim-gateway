@@ -1,11 +1,38 @@
 package windowsmbn
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"syscall"
+	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
+
+func waitDataState(ctx context.Context, wanted agentmodem.DataState, probe func() (agentmodem.DataState, error)) error {
+	if wanted == agentmodem.DataDisconnected {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+	}
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		state, err := probe()
+		if err != nil {
+			return err
+		}
+		if state == wanted {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("MBN connection wait: wanted=%s observed=%s: %w", wanted, state, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
 
 // HRESULT_FROM_WIN32(ERROR_NOT_FOUND) is the documented IMbnInterface::GetConnection
 // result when no connection is available or the device is not registered. In either

@@ -256,8 +256,11 @@ func disconnectData(ctx context.Context, attachmentID string) error {
 			return "", err
 		}
 		takeBSTR(profile)
-		if state == mbn.MBN_ACTIVATION_STATE_DEACTIVATED || state == mbn.MBN_ACTIVATION_STATE_NONE {
+		if state == mbn.MBN_ACTIVATION_STATE_DEACTIVATED {
 			return "", nil
+		}
+		if state == mbn.MBN_ACTIVATION_STATE_NONE {
+			return "", errors.New("MBN connection state unavailable; disconnect is unconfirmed")
 		}
 		var requestID uint32
 		if state != mbn.MBN_ACTIVATION_STATE_DEACTIVATING {
@@ -404,26 +407,15 @@ func selectProfile(requested, current string, profiles []mbnProfileXML) (string,
 }
 
 func waitConnection(ctx context.Context, connection *mbn.IMbnConnection, wanted mbn.MBN_ACTIVATION_STATE) error {
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
+	return waitDataState(ctx, dataState(wanted), func() (agentmodem.DataState, error) {
 		var state mbn.MBN_ACTIVATION_STATE
 		var profile foundation.BSTR
 		if err := connection.GetConnectionState(&state, &profile); err != nil {
-			return err
+			return agentmodem.DataUnknown, err
 		}
 		takeBSTR(profile)
-		if state == wanted {
-			return nil
-		}
-		if wanted == mbn.MBN_ACTIVATION_STATE_ACTIVATED && state == mbn.MBN_ACTIVATION_STATE_DEACTIVATED { /* async request may not have started yet */
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
-	}
+		return dataState(state), nil
+	})
 }
 
 func interfaceSources(value *net.Interface) (map[bool]netip.Addr, error) {
