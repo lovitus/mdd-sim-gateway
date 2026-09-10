@@ -12,11 +12,12 @@ import (
 )
 
 type fakeProvisionHardware struct {
-	calls       int
-	err         error
-	badReadback bool
-	entered     chan struct{}
-	release     chan struct{}
+	calls          int
+	err            error
+	badReadback    bool
+	readbackNumber *string
+	entered        chan struct{}
+	release        chan struct{}
 }
 
 type rejectingProvisionAuxiliary struct{}
@@ -39,6 +40,9 @@ func (hardware *fakeProvisionHardware) ApplyProvision(_ context.Context, request
 	if hardware.badReadback {
 		readback.SMSC = "wrong"
 	}
+	if hardware.readbackNumber != nil {
+		readback.MSISDN = *hardware.readbackNumber
+	}
 	return "apply", readback, nil
 }
 
@@ -60,7 +64,44 @@ func (hardware *fakeProvisionHardware) ReadProvision(_ context.Context, request 
 	if hardware.badReadback {
 		readback.SMSC = "wrong"
 	}
+	if hardware.readbackNumber != nil {
+		readback.MSISDN = *hardware.readbackNumber
+	}
 	return "readback", readback, nil
+}
+
+func TestProvisionMSISDNMatchesOnlyOptionalPlusAcrossBothPaths(t *testing.T) {
+	for _, number := range []struct {
+		requested, observed string
+		match               bool
+	}{
+		{"447700900123", "+447700900123", true},
+		{"+447700900123", "447700900123", true},
+		{"447700900123", "447700900123", true},
+		{"447700900123", "+447700900124", false},
+		{"447700900123", "", false},
+		{"07700900123", "+447700900123", false},
+		{"00447700900123", "+447700900123", false},
+		{"447700900123", "++447700900123", false},
+	} {
+		for _, readOnly := range []bool{true, false} {
+			hardware := &fakeProvisionHardware{readbackNumber: &number.observed}
+			worker, request := provisionTestWorker(t, hardware)
+			request.MSISDN = number.requested
+			var response agentlink.ProvisionResponse
+			if readOnly {
+				response = worker.ReconcileProvision(context.Background(), request)
+			} else {
+				response = worker.ExecuteProvision(context.Background(), request)
+			}
+			if (response.State == agentlink.ProvisionApplied) != number.match || hardware.calls != 1 {
+				t.Fatalf("readOnly=%t match=%t response=%+v calls=%d", readOnly, number.match, response, hardware.calls)
+			}
+			if !number.match && response.State != agentlink.ProvisionUnknown {
+				t.Fatal("mismatch did not fail closed", response)
+			}
+		}
+	}
 }
 
 func provisionTestRequest(generation string) agentlink.ProvisionRequest {

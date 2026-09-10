@@ -204,7 +204,9 @@ func validateProvisionReadback(request agentlink.ProvisionRequest, readback Prov
 		code      string
 	}{
 		{want.IMEISV != "", readback.IMEISV == want.IMEISV, "provision_imeisv_readback_mismatch"},
-		{want.MSISDN != "", readback.MSISDN == want.MSISDN, "provision_msisdn_readback_mismatch"},
+		// Windows MBN omits '+' while the same SIM's CNUM includes it.
+		// Compare identical digits only; never infer a country or strip trunk prefixes.
+		{want.MSISDN != "", strings.TrimPrefix(readback.MSISDN, "+") == strings.TrimPrefix(want.MSISDN, "+"), "provision_msisdn_readback_mismatch"},
 		{want.ReaderPort != "", readback.ReaderPort == want.ReaderPort, "provision_reader_readback_mismatch"},
 		{want.APN != "", readback.APN == want.APN, "provision_apn_readback_mismatch"},
 	}
