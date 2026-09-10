@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { parse } from '@babel/parser'
 import {
   runNotificationTest,
 } from '../src/notificationTestTracker.js'
@@ -11,6 +12,17 @@ import {
 } from '../src/browserPreferences.js'
 
 const read = file => fs.readFileSync(new URL('../src/' + file, import.meta.url), 'utf8')
+const translationTree = parse(read('mdd/i18n.jsx'), { sourceType: 'module', plugins: ['jsx'] })
+const zhObject = translationTree.program.body.find(node => node.type === 'VariableDeclaration' && node.declarations[0]?.id?.name === 'zh').declarations[0].init
+const zhKeys = new Set(zhObject.properties.map(property => property.key.value ?? property.key.name))
+assert.equal(zhKeys.size, zhObject.properties.length, 'duplicate Chinese translation keys hide earlier entries')
+for (const key of ['Close', 'Incoming cellular call', 'Call termination could not be confirmed',
+  'Delete ALL messages on this line? This cannot be undone.', 'Clear the entire call history for this line?',
+  'Verify hardware state', 'Read back and reconcile', 'Current SIM PIN', 'attempts remaining',
+  'Move to Recycle Bin (Soft Delete)', 'Move to Recycle Bin', 'Permanently Delete SIM line',
+  'Request submitted', 'Replay', 'Delete conversation with {peer}', 'runtime_intent_uninitialized', 'policy_ready', 'provider_apply_blocked']) {
+  assert.ok(zhKeys.has(key), `missing Chinese action/status translation: ${key}`)
+}
 const entry = read('main.jsx')
 const apiSource = read('api.js')
 const appSource = read('mdd/App.jsx')

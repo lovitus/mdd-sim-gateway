@@ -15,7 +15,7 @@ const projection = {
   line_id: 'line-a',
   facts: [
     { layer: 'vowifi_intent', condition: 'ready', available: true, fresh: true, code: 'vowifi_enabled' },
-    { layer: 'vowifi_runtime', condition: 'ready', available: true, fresh: true, code: 'runtime_running' },
+    { layer: 'vowifi_runtime', condition: 'ready', available: true, fresh: true, code: 'runtime_running', detail: 'rekey_minutes=30;rekey_state=scheduled' },
     { layer: 'ims', condition: 'ready', available: true, fresh: true, code: 'ims_registered' },
   ],
   operations: {
@@ -54,6 +54,11 @@ assert.equal(mapped.instances[0].id, 'line-a')
 assert.equal(mapped.instances[0].status.state, 'OK')
 assert.equal(mapped.devices.length, 1)
 assert.equal(mapped.devices[0].instance_id, 'line-a')
+assert.equal(mapped.devices[0].imei, '862547055201716')
+assert.equal(mapped.devices[0].imei_masked, '***********1716', 'copied hardware panel requires the legacy masked field')
+assert.equal(mapped.devices[0].vowifi.rekey_minutes, 30, 'final device mapping must preserve rekey facts')
+assert.equal(mapped.devices[0].vowifi.rekey_state, 'scheduled')
+assert.equal(mapped.devices[0].vowifi.ims, 'ims_registered')
 assert.equal(mapped.devices[0].capabilities.cellular.desired, true)
 assert.equal(mapped.devices[0].capabilities.cellular.actual, 'on')
 assert.equal(mapped.devices[0].capabilities.roaming.desired, true)
@@ -71,6 +76,7 @@ const readerMapped = mapGoSnapshot({ lines: [], catalog: { schema_version: 1, re
       sim: { identity_state: 'ready', imsi: '234100000000002', mcc: '234', mnc: '10', smsc: '+447785016005' } },
     endpoints: [{ association: 'unmatched', operation_candidate: true, card_ids: [readerCardID] }] }], agents: [], egress: { exits: [] } })
 assert.equal(readerMapped.devices[0].sim.imsi, '234100000000002')
+assert.equal(readerMapped.devices[0].imei_masked, '', 'missing IMEI must remain missing')
 assert.equal(readerMapped.devices[0].sim.mcc, '234')
 assert.equal(readerMapped.devices[0].sim.mnc, '10')
 assert.equal(readerMapped.devices[0].sim.smsc, '+447785016005')

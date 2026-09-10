@@ -293,7 +293,7 @@ function Messages({
               <div style={{ fontSize:12 }}>{instances.find(line => String(line.id) === t.line_id)?.name || t.line_id} · {t.transport}</div>
               <div style={{ fontSize: 12, color: 'var(--text-mute)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.last_body}</div>
             </div>
-            <button className="row-del" title="Delete conversation" aria-label={`Delete conversation with ${t.peer}`}
+            <button className="row-del" title={tr('Delete conversation')} aria-label={tr('Delete conversation with {peer}', { peer: t.peer })}
               onClick={(e) => deleteThread(t, e)}>🗑</button>
           </div>
         ))}
@@ -319,7 +319,7 @@ function Messages({
               <>
                 <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }}
                   onClick={() => setSelMode(true)}>{tr('Select')}</button>
-                <button className="btn btn-ghost" title="Delete conversation" style={{ padding: '4px 10px', fontSize: 12, color: '#ef4444' }}
+                <button className="btn btn-ghost" title={tr('Delete conversation')} style={{ padding: '4px 10px', fontSize: 12, color: '#ef4444' }}
                   onClick={() => deleteThread(conversation)}>{tr('Delete all')}</button>
               </>
             )
@@ -355,7 +355,7 @@ function Messages({
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6,
                     flexDirection: m.direction === 'out' ? 'row' : 'row-reverse' }}>
-                    {failed && <span title={m.error || 'Delivery failed'}
+                    {failed && <span title={m.error || tr('Delivery failed')}
                       style={{ color: '#ef4444', fontWeight: 800, cursor: 'help', fontSize: 15 }}>❗</span>}
                     {uncertain && <span title={m.error || tr('Delivery unknown')}
                       style={{ color: '#f59e0b', fontWeight: 800, cursor: 'help', fontSize: 15 }}>⚠</span>}

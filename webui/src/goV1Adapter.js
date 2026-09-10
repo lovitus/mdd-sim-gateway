@@ -177,6 +177,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
   const cardIDs = endpoint?.card_ids || []
   const iccid = text(sim.iccid || device?.reader?.card_id || (cardIDs.length === 1 ? cardIDs[0] : ''))
   const msisdn = (Array.isArray(sim.msisdns) ? sim.msisdns.find(Boolean) : '') || line?.sim?.msisdn || ''
+  const imei = text(modem?.equipment_id || line?.sim?.imei)
   const policyAvailable = adapted && !!policy && sim.state === 'ready'
 	const borrowActual = policyAvailable ? (policy?.desired?.cellular_enabled ? 'on' : 'off') : 'unsupported'
   return {
@@ -208,13 +209,14 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
       pin_attempts_remaining: sim.pin_attempts_remaining,
       apdu_available: modem?.at_control?.sim_apdu === true || device?.kind === 'reader',
     },
-    imei: text(modem?.equipment_id || line?.sim?.imei),
+    imei,
+    // ec620942 control/app/main.py::_masked_identifier, used by the copied hardware panel.
+    imei_masked: imei ? '*'.repeat(Math.max(0, imei.length - 4)) + imei.slice(-4) : '',
     model: modem?.model || '',
     manufacturer: modem?.manufacturer || '',
     firmware: modem?.firmware || '',
     condition: device?.condition || '',
     condition_code: device?.code || '',
-    vowifi:runtimeRekeyView(projection),
 	capabilities: {
 	  cellular: policyCapability(policy, 'cellular_enabled', borrowActual, policyAvailable),
 	  connection: policyCapability(policy, 'connection_enabled', policy?.connection_active === true ? 'on' : 'off', policyAvailable && policy?.connection_available === true),
@@ -253,7 +255,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
       data_guard_detail: modem?.network?.data_guard_detail || '',
       data_lease: policy?.data_lease || null,
     } : null,
-    vowifi: lineID ? { ims: factsByLayer(projection).ims?.code || '', epdg: factsByLayer(projection).tunnel?.code || '' } : null,
+    vowifi: lineID ? { ...runtimeRekeyView(projection), ims: factsByLayer(projection).ims?.code || '', epdg: factsByLayer(projection).tunnel?.code || '' } : null,
     facts: projection ? { facts: factsByLayer(projection), summary: factSummary(projection), raw: projection } : null,
     status: projection ? lineStatus(projection) : null,
     egress: line ? {
