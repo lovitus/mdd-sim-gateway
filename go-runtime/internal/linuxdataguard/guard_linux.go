@@ -1534,7 +1534,29 @@ func sameUSBTree(path, physical string) bool {
 }
 
 func runCommand(ctx context.Context, input []byte, name string, arguments ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, name, arguments...)
+	path := name
+	const systemPath = "/usr/sbin:/usr/bin:/sbin:/bin"
+	// udev RUN supplies device properties, not the daemon's environment.
+	// Resolve only standard system tools when PATH is absent; do not mutate
+	// the Agent environment or override an explicitly configured search path.
+	missingPath := os.Getenv("PATH") == ""
+	if missingPath && !strings.ContainsRune(name, '/') {
+		path = ""
+		for _, directory := range filepath.SplitList(systemPath) {
+			candidate := filepath.Join(directory, name)
+			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+				path = candidate
+				break
+			}
+		}
+		if path == "" {
+			return nil, fmt.Errorf("%s: %w", name, exec.ErrNotFound)
+		}
+	}
+	command := exec.CommandContext(ctx, path, arguments...)
+	if missingPath {
+		command.Env = append(os.Environ(), "PATH="+systemPath)
+	}
 	if input != nil {
 		command.Stdin = bytes.NewReader(input)
 	}

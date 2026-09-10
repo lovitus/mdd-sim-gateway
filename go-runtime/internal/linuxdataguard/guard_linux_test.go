@@ -8,11 +8,38 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestGuardCommandsWorkWithoutUdevPATHWithoutChangingProcessEnvironment(t *testing.T) {
+	t.Setenv("PATH", "")
+	output, err := runCommand(context.Background(), nil, "sh", "-c", "printf '%s' \"$PATH\"")
+	if err != nil || string(output) != "/usr/sbin:/usr/bin:/sbin:/bin" {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	if os.Getenv("PATH") != "" {
+		t.Fatal("guard changed its process environment")
+	}
+	if _, err := runCommand(context.Background(), nil, "mdd-nonexistent-command-fixture"); !errors.Is(err, exec.ErrNotFound) {
+		t.Fatal("missing command was not rejected", err)
+	}
+}
+
+func TestGuardCommandsPreserveExplicitPATH(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "guard-fixture"), []byte("#!/bin/sh\nprintf 'explicit'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	output, err := runCommand(context.Background(), nil, "guard-fixture")
+	if err != nil || string(output) != "explicit" {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+}
 
 func TestGuardReloadDoesNotQueueNetworkManagerOrderedAfterIt(t *testing.T) {
 	for _, active := range []bool{false, true} {
