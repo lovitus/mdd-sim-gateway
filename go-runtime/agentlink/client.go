@@ -41,6 +41,7 @@ type Client struct {
 	Events              ModemEventSource
 	OperationTimeout    time.Duration
 	Connected           func()
+	HealthReported      func()
 	Health              func() TopologySnapshot
 	HealthEvery         time.Duration
 }
@@ -66,7 +67,7 @@ const defaultHealthEvery = 10 * time.Second
 
 const ModemEventRetryEvery = 5 * time.Second
 
-func (client Client) Run(ctx context.Context) error {
+func (client Client) Run(ctx context.Context) (result error) {
 	if err := client.validate(); err != nil {
 		return err
 	}
@@ -179,10 +180,14 @@ func (client Client) Run(ctx context.Context) error {
 	defer func() {
 		stopReports()
 		if reportDone != nil {
-			<-reportDone
+			if err := <-reportDone; err != nil && !errors.Is(err, context.Canceled) {
+				result = errors.Join(result, fmt.Errorf("Agent health report failed: %w", err))
+			}
 		}
 		if eventDone != nil {
-			<-eventDone
+			if err := <-eventDone; err != nil && !errors.Is(err, context.Canceled) {
+				result = errors.Join(result, fmt.Errorf("Agent event report failed: %w", err))
+			}
 		}
 	}()
 	var workers sync.WaitGroup
@@ -742,6 +747,9 @@ func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, w
 			return err
 		}
 		lastRevision = revision
+		if client.HealthReported != nil {
+			client.HealthReported()
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

@@ -420,10 +420,10 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 				return err
 			}
 		}
-		var connected atomic.Bool
-		health := worker.Topology
+		var healthySince atomic.Int64
+		health := func() agentlink.TopologySnapshot { return reportTopology(worker.Topology()) }
 		if rawUSB != nil {
-			health = func() agentlink.TopologySnapshot { return rawUSB.Topology(worker.Topology()) }
+			health = func() agentlink.TopologySnapshot { return rawUSB.Topology(reportTopology(worker.Topology())) }
 		}
 		modems := agentlink.ModemExecutor(worker)
 		authenticator := agentlink.Authenticator(worker)
@@ -471,7 +471,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Downloads: manager, Discovery: manager, Notifications: manager,
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
-			Connected:        func() { connected.Store(true) }, Health: health,
+			HealthReported:   func() { healthySince.CompareAndSwap(0, time.Now().UnixNano()) }, Health: health,
 		}).Run(ctx)
 		if rawUSB != nil {
 			_ = rawUSB.Close()
@@ -488,11 +488,14 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if connected.Load() {
+		if since := healthySince.Load(); since != 0 && time.Since(time.Unix(0, since)) >= 30*time.Second {
 			attempt = 0
 		}
 		attempt++
-		decision, policyErr := worker.config.Recovery.Decide(recovery.Failure{
+		transportRecovery := worker.config.Recovery
+		transportRecovery.Base = max(transportRecovery.Base, 30*time.Second)
+		transportRecovery.Cap = max(transportRecovery.Cap, 120*time.Second)
+		decision, policyErr := transportRecovery.Decide(recovery.Failure{
 			Attempt: attempt, Recoverable: true, Action: recovery.ActionReconnect,
 		})
 		if policyErr != nil || !decision.Retry {

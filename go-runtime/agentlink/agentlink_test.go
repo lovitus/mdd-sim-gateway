@@ -1563,6 +1563,32 @@ func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *test
 	}
 }
 
+func TestInvalidHealthPreservesValidationCauseAndNeverReportsHealthy(t *testing.T) {
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	healthy := false
+	err := (Client{
+		URL:   strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent",
+		Token: testToken, Hello: Hello{SchemaVersion: 1, AgentID: "bad-health-agent", ProcessGeneration: "process"},
+		Authenticator: &fakeAuthenticator{}, OperationTimeout: time.Second,
+		HealthReported: func() { healthy = true },
+		Health: func() TopologySnapshot {
+			return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+				ReaderName: "reader", IdentityState: CardAbsent, CardID: "private-invalid-card",
+			}}}
+		},
+	}).Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "Agent topology contains an invalid card fact") || healthy {
+		t.Fatalf("validation cause lost or invalid report counted healthy: %v healthy=%t", err, healthy)
+	}
+	if strings.Contains(err.Error(), "private-invalid-card") {
+		t.Fatal("raw identity leaked into validation error")
+	}
+}
+
 func TestTopologyRevisionRejectsAmbiguousOrUnsortedFacts(t *testing.T) {
 	valid := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{
 		{ReaderName: "reader-a", IdentityState: CardAbsent},
