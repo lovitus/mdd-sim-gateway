@@ -234,7 +234,7 @@ export default function Softphone({
       <div style={{ flexShrink: 0 }}>
         <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
           setSelected={setSelected} callCoordinator={callCoordinator}
-          showVoiceReadiness />
+          service="call" />
       </div>
       <div className="mdd-phone-layout">
       {globalIncoming && <div className="u-note" style={{ margin: '0 0 8px', color: GREEN }}>

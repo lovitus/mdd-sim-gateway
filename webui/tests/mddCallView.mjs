@@ -31,7 +31,7 @@ assert.deepEqual(historyCallDraft(historyRecord, lines), {lineID:'2', transport:
 assert.equal(historyCallDraft({...historyRecord,line_id:'missing'}, lines), null)
 assert.equal(historyCallDraft({...historyRecord,transport:'unknown'}, lines), null)
 assert.equal(historyCallDraft({...historyRecord,peer:''}, lines), null)
-assert.equal(lineCallReadinessStatus({id:'2'}, [{instance_id:'2',present:true,capabilities:{call:{actual:'on',available:true}}}]).browserVoiceLabel,
+assert.equal(lineCallReadinessStatus({id:'2',operations:{cellular_call:{ready:true}}}, [{instance_id:'2',present:true,capabilities:{call:{actual:'on',available:true}}}]).browserVoiceLabel,
   'Modem voice hardware ready; browser audio is checked per call.')
 
 const source = { phase:'start_unknown', mode:'cellular', line_id:'fixture-line',

@@ -271,7 +271,7 @@ function Messages({
       <div style={{ flexShrink: 0 }}>
         <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
           setSelected={setSelected} callCoordinator={callCoordinator}
-          showVoiceReadiness />
+          service="sms" />
       </div>
       {senderID && <AllowancePanel instanceId={String(senderID)} mode="messages" transport={sendTransport} showToast={showToast} />}
       {cellularPreferred && <div className="u-note" style={{ marginBottom: 12 }}>{tr('Cellular SMS is ready. VoWiFi may remain stopped because the host operating system owns this SIM.')}</div>}

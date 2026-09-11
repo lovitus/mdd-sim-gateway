@@ -464,7 +464,8 @@ function deviceSimLine(d, t, language) {
   const name = simName(d, t)
   if (d.present === false || d.sim?.present === false || d.sim?.presence === 'unknown') return name
   const country = d.egress?.detected_country || d.egress?.country
-  return country ? `${name} · ${countryName(country, language)}` : name
+  const number = d.sim?.number || d.number
+  return [name, number, country && countryName(country, language)].filter(Boolean).join(' · ')
 }
 function deviceIdentityLine(d, t) {
   if (d.sim?.presence === 'unknown') return t('SIM state unknown')

@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react'
 import { useI18n } from '../i18n.jsx'
-import { lineEndpointLabel, lineCompositeStatus } from '../linePresentation.js'
+import { deviceForLine, lineEndpointLabel, lineCompositeStatus, lineServiceStatus } from '../linePresentation.js'
 
 // Per-page SIM/line picker for multi-SIM setups.
 // Clearly labels each option with:
@@ -14,6 +14,7 @@ export default function SimSelector({
   label = 'Active SIM / line',
   callCoordinator,
   showVoiceReadiness = false,
+  service,
 }) {
   const { t } = useI18n()
 
@@ -27,14 +28,14 @@ export default function SimSelector({
       String(c.matched) === String(inst.id) ||
       (c.iccid && inst.iccid && String(c.iccid) === String(inst.iccid))
     ))
-    const device=devices.find(d=>String(d.instance_id || '')===String(inst.id))
+    const device=deviceForLine(inst, devices)
     const isOnline = !!card || device?.present === true
     const endpoint=lineEndpointLabel(card,device,inst,t)
     const profileName = (card ? (card.spn || card.profile_name || card.carrier) : '') ||
       inst.carrier || inst.profile_name || inst.name ||
       (inst.mcc && inst.mnc ? `${inst.mcc}-${inst.mnc}` : '') || t('SIM')
     const tail = inst.msisdn ? ` · ${inst.msisdn}` : (inst.iccid ? ` · ICCID: ••••${String(inst.iccid).slice(-4)}` : '')
-    const statusText = ` — ${lineCompositeStatus(inst, devices, t, {
+    const statusText = ` — ${service ? lineServiceStatus(inst, service, t) : lineCompositeStatus(inst, devices, t, {
       includeBrowserVoice: showVoiceReadiness,
       coordinatorLine: callCoordinator?.line?.(inst.id),
     })}`

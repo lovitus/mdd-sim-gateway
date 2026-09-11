@@ -35,12 +35,21 @@ export function lineEndpointLabel(card, device, line, translate) {
   return Number.isInteger(index) && index>=0 ? `[${translate('Slot')} ${index}] ${name}` : name
 }
 
-function deviceForLine(line, devices) {
+export function deviceForLine(line, devices) {
   const iid = String(line?.id || '')
   const iccid = String(line?.iccid || '')
-  return (devices || []).find((device) =>
+  const matches = (devices || []).filter((device) =>
     (iid && String(device.instance_id || '') === iid) ||
     (iccid && String(device.sim?.iccid || device.iccid || '') === iccid))
+  return matches.find(device => device.present === true && String(device.instance_id || '') === iid) ||
+    matches.find(device => device.present === true) || matches[0]
+}
+
+export function lineServiceStatus(line, service, translate = value => value) {
+  const ready = transport => line?.operations?.[`${transport}_${service}`]?.ready === true
+  return service === 'sms'
+    ? `VoWiFi ${translate('SMS')}: ${translate(ready('vowifi') ? 'Ready' : 'Unavailable')} · ${translate('4G SMS')}: ${translate(ready('cellular') ? 'Ready' : 'Unavailable')}`
+    : `VoWiFi: ${translate(ready('vowifi') ? 'Ready' : line?.operations?.vowifi_call?.code || 'Voice unavailable')} · ${translate('Cellular modem')}: ${translate(ready('cellular') ? 'Modem voice hardware ready' : 'Voice unavailable')}`
 }
 
 export function lineCallReadinessStatus(line, devices, options = {}, translate = (value) => value) {
@@ -88,9 +97,7 @@ export function lineCallReadinessStatus(line, devices, options = {}, translate =
   const coordinatorLine = options.coordinatorLine || {}
   const prov = coordinatorLine.prov || null
   const nativeOutbound = prov?.browser_media?.outbound === true
-  const cellularCall = device?.capabilities?.call || device?.ims_capabilities?.voice || {}
-  const cellularBrowserVoiceReady = device?.present !== false &&
-    cellularCall.actual === 'on' && cellularCall.available !== false
+  const cellularBrowserVoiceReady = line?.operations?.cellular_call?.ready === true
   const vowifiBrowserVoiceReady = nativeOutbound
   const browserVoiceReady = vowifiBrowserVoiceReady || cellularBrowserVoiceReady
   let vowifiBrowserVoiceLabel

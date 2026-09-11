@@ -1,5 +1,17 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { deviceForLine, lineServiceStatus } from '../src/mdd/linePresentation.js'
+
+const currentLine = { id: 'current', iccid: 'card', operations: {
+  cellular_call: { ready: true }, vowifi_call: { ready: false, code: 'vowifi_disabled' },
+  cellular_sms: { ready: true }, vowifi_sms: { ready: false },
+} }
+const retiredDevice = { instance_id: 'current', sim: { iccid: 'card' }, present: false }
+const currentDevice = { instance_id: 'current', sim: { iccid: 'card' }, present: true }
+assert.equal(deviceForLine(currentLine, [retiredDevice, currentDevice]), currentDevice)
+assert.equal(lineServiceStatus(currentLine, 'call'), 'VoWiFi: vowifi_disabled · Cellular modem: Modem voice hardware ready')
+assert.equal(lineServiceStatus(currentLine, 'sms'), 'VoWiFi SMS: Unavailable · 4G SMS: Ready')
+assert.equal(lineServiceStatus({ operations: {} }, 'call'), 'VoWiFi: Voice unavailable · Cellular modem: Voice unavailable')
 import {
   compactReaderName,
   callOccupancy,
