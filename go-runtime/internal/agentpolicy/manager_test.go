@@ -267,6 +267,36 @@ func TestPolicyReconcileReleasesStaleConnectionBeforeNewSIMIsReady(t *testing.T)
 	}
 }
 
+func TestProfileSelectionCanReturnRunningConnectionToAutomatic(t *testing.T) {
+	manager, _, _ := testManager(t)
+	connection := &testConnection{}
+	if err := manager.BindConnection(connection); err != nil {
+		t.Fatal(err)
+	}
+	response := manager.Execute(context.Background(), policyRequest(0, agentlink.ModemPolicyPatch{ConnectionEnabled: boolPointer(true)}))
+	if response.Failure != nil {
+		t.Fatalf("enable: %+v", response)
+	}
+	request := policyRequest(response.Policy.Revision, agentlink.ModemPolicyPatch{})
+	request.Action = agentlink.ModemPolicyProfileSave
+	request.Profile = agentlink.ModemProfileInput{Name: "explicit", APN: "internet", Auth: "NONE", PasswordSet: true}
+	response = manager.Execute(context.Background(), request)
+	if response.Failure != nil || response.Policy.Desired.SelectedProfile != "explicit" {
+		t.Fatalf("save: %+v", response)
+	}
+	automatic := ""
+	request = policyRequest(response.Policy.Revision, agentlink.ModemPolicyPatch{SelectedProfile: &automatic})
+	response = manager.Execute(context.Background(), request)
+	if response.Failure != nil || response.Policy.Desired.SelectedProfile != "" || !response.Policy.Desired.ConnectionEnabled {
+		t.Fatalf("restore automatic: %+v", response)
+	}
+	connection.mu.Lock()
+	defer connection.mu.Unlock()
+	if connection.profile.APN != "" || connection.profile.Name != "" || !connection.calls[len(connection.calls)-1] {
+		t.Fatalf("old APN retained: %+v calls=%v", connection.profile, connection.calls)
+	}
+}
+
 func TestDataProbeRequiresBothSwitchesWithoutChangingPolicy(t *testing.T) {
 	manager, _, _ := testManager(t)
 	target := agentdata.Target{AttachmentID: "attachment-a", EquipmentID: "862547055201716", CardID: "8985200000000000001"}

@@ -266,9 +266,6 @@ func (manager *Manager) executeLocked(ctx context.Context, request agentlink.Mod
 		}
 		if request.Patch.SelectedProfile != nil {
 			name := strings.TrimSpace(*request.Patch.SelectedProfile)
-			if name == "" {
-				return errors.New("selected profile is empty")
-			}
 			next.Desired.SelectedProfile = name
 		}
 		next, err = manager.config.Store.PutExpected(next, request.ExpectedRevision)
@@ -290,7 +287,8 @@ func (manager *Manager) executeLocked(ctx context.Context, request agentlink.Mod
 			}
 		}
 		if !next.Desired.FlightMode && (next.Desired.ConnectionEnabled != policy.Desired.ConnectionEnabled ||
-			next.Desired.RoamingEnabled != policy.Desired.RoamingEnabled || policy.Desired.FlightMode) {
+			next.Desired.RoamingEnabled != policy.Desired.RoamingEnabled ||
+			next.Desired.SelectedProfile != policy.Desired.SelectedProfile || policy.Desired.FlightMode) {
 			if err := manager.setPersistentConnection(ctx, target, next, next.Desired.ConnectionEnabled); err != nil {
 				manager.setFailure(next.EquipmentID, next.CardID, "cellular_connection_reconcile_failed")
 				response.Policy = pointerPolicy(manager.View(next.EquipmentID, next.CardID))
