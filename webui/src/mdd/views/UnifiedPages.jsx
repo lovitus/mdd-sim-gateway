@@ -429,7 +429,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     ? t('Not applied')
     : !displayedDesired && displayedState === 'on' ? t('Still running') : null
   const detail = c.actual === 'on'
-    ? t(kind === 'cellular' ? 'Mobile data is connected.' : kind === 'flight' ? 'Modem RF is disabled.' : kind === 'roaming' ? 'Mobile data may connect while roaming.' : 'Working — connected to the carrier over Wi-Fi.')
+    ? t(kind === 'connection' ? 'Mobile data is connected.' : kind === 'cellular' ? 'Data borrowing is allowed.' : kind === 'flight' ? 'Modem RF is disabled.' : kind === 'roaming' ? 'Mobile data may connect while roaming.' : 'Working — connected to the carrier over Wi-Fi.')
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
     <div><b>{title}</b><div className="u-cap-detail">{detail}</div></div>

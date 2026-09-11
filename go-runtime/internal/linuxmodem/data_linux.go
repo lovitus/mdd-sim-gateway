@@ -14,12 +14,14 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpolicy"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linuxdataguard"
 	"golang.org/x/sys/unix"
 )
 
 type dataClaim struct {
 	target                                                    agentdata.Target
+	profiles                                                  []agentpolicy.ProfileView
 	uid                                                       string
 	bearer                                                    dataBearer
 	route                                                     linuxdataguard.DataRoute
@@ -88,11 +90,16 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 			return "", errors.New("modem call state is not authoritatively idle")
 		}
 	}
+	// Read candidates while we still own AT; an active bearer must not be
+	// interrupted merely to render its profile selector.
+	profilePayload, _ := prober.at.Exchange(ctx, target.EquipmentID, "AT+CGDCONT?", 3*time.Second)
+	profiles := agentpolicy.ParsePDPContexts(profilePayload)
+	profiles = append(profiles, agentpolicy.ProviderAPNCandidates(selected.SIM.IMSI)...)
 	permit, err := prober.guard.OpenDataPermit(ctx, target.EquipmentID+"\x00"+target.CardID)
 	if err != nil {
 		return "", err
 	}
-	claim := &dataClaim{target: target, uid: owned.snapshot.UID, route: linuxdataguard.DataRoute{Permit: permit}}
+	claim := &dataClaim{target: target, profiles: profiles, uid: owned.snapshot.UID, route: linuxdataguard.DataRoute{Permit: permit}}
 	prober.data[target.EquipmentID] = claim
 	rollback := func(cause error) (string, error) {
 		claim.cleanup = true

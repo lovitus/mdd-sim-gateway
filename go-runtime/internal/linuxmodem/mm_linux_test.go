@@ -13,11 +13,42 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpolicy"
 )
 
 type testPortTuple struct {
 	Name string
 	Kind uint32
+}
+
+func TestActiveProfileReadbackKeepsExactSessionAndCopiesValues(t *testing.T) {
+	target := agentpolicy.Target{EquipmentID: "modem", AttachmentID: "usb", CardID: "card", SIMSessionGeneration: "generation"}
+	claim := &dataClaim{target: agentdata.Target{EquipmentID: target.EquipmentID, AttachmentID: target.AttachmentID,
+		CardID: target.CardID, SIMSessionGeneration: target.SIMSessionGeneration},
+		profiles: []agentpolicy.ProfileView{{Name: "CID 1", APN: "internet", Source: "modem"}}}
+	profiles, ok := claim.policyProfiles(target)
+	if !ok || len(profiles) != 1 || profiles[0].APN != "internet" {
+		t.Fatalf("readback: %v %v", profiles, ok)
+	}
+	profiles[0].APN = "changed"
+	if claim.profiles[0].APN != "internet" {
+		t.Fatal("readback mutated the active session")
+	}
+	for _, field := range []*string{&target.EquipmentID, &target.AttachmentID, &target.CardID, &target.SIMSessionGeneration} {
+		before := *field
+		*field = "replacement"
+		if _, ok := claim.policyProfiles(target); ok {
+			t.Fatal("replacement received previous session profiles")
+		}
+		*field = before
+	}
+	claim.cleanup = true
+	if _, ok := claim.policyProfiles(target); ok {
+		t.Fatal("cleanup claim returned active profiles")
+	}
+	if _, ok := (*dataClaim)(nil).policyProfiles(target); ok {
+		t.Fatal("missing claim returned profiles")
+	}
 }
 
 func TestDataCleanupAllowsATOnlyAfterDataOwnershipReleased(t *testing.T) {

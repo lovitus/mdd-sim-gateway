@@ -103,6 +103,9 @@ func (prober *Prober) ListPolicyProfiles(ctx context.Context, target agentpolicy
 	if err != nil || !exactPolicyTarget(facts, target) {
 		return nil, errors.Join(err, agentmodem.ErrOperationTargetReplaced)
 	}
+	if profiles, ok := prober.data[target.EquipmentID].policyProfiles(target); ok {
+		return profiles, nil
+	}
 	for _, fact := range facts {
 		if fact.AttachmentID == target.AttachmentID && fact.AT.State != agentmodem.ATControlReady {
 			return nil, agentmodem.ErrOperationUnavailable
@@ -120,6 +123,15 @@ func (prober *Prober) ListPolicyProfiles(ctx context.Context, target agentpolicy
 		}
 	}
 	return profiles, nil
+}
+
+func (claim *dataClaim) policyProfiles(target agentpolicy.Target) ([]agentpolicy.ProfileView, bool) {
+	if claim == nil || claim.cleanup || claim.target.EquipmentID != target.EquipmentID ||
+		claim.target.AttachmentID != target.AttachmentID || claim.target.CardID != target.CardID ||
+		claim.target.SIMSessionGeneration != target.SIMSessionGeneration {
+		return nil, false
+	}
+	return append([]agentpolicy.ProfileView{}, claim.profiles...), true
 }
 
 func (prober *Prober) SavePolicyProfile(ctx context.Context, target agentpolicy.Target, _ agentpolicy.Profile) error {
