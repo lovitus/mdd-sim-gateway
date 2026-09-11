@@ -259,7 +259,7 @@ func (guard *Guard) VerifyContract(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read MDD cellular nftables table: %w", err)
 	}
-	if err := verifyNFTContract(output, permits); err != nil {
+	if err := guard.verifyInstalledNFT(ctx, output, permits); err != nil {
 		return fmt.Errorf("verify MDD cellular nftables quarantine: %w", err)
 	}
 	return nil
@@ -692,7 +692,7 @@ func (guard *Guard) installNetfilterLocked(ctx context.Context) error {
 			activePermits[mark] = permit.Interface
 		}
 	}
-	if err := verifyNFTContract(output, activePermits); err != nil {
+	if err := guard.verifyInstalledNFT(ctx, output, activePermits); err != nil {
 		return fmt.Errorf("verify installed MDD cellular nftables quarantine: %w", err)
 	}
 	return nil
@@ -1167,10 +1167,77 @@ type nftChain struct {
 }
 
 type nftRule struct {
+	Handle uint64            `json:"handle,omitempty"`
 	Family string            `json:"family"`
 	Table  string            `json:"table"`
 	Chain  string            `json:"chain"`
 	Expr   []json.RawMessage `json:"expr"`
+}
+
+func (guard *Guard) verifyInstalledNFT(ctx context.Context, payload []byte, permits map[uint32]string) error {
+	err := verifyNFTContract(payload, permits)
+	if err == nil || len(permits) == 0 {
+		return err
+	}
+	text, readErr := guard.run(ctx, nil, "nft", "--handle", "list", "table", "inet", nftTableName)
+	if readErr != nil {
+		return errors.Join(err, readErr)
+	}
+	return verifyNFTContract(withVerifiedCGroupLevels(payload, string(text)), permits)
+}
+
+// Older nft JSON omits the socket ancestor level. Recover only that field
+// from the same rule handle, never infer it from the desired configuration.
+func withVerifiedCGroupLevels(payload []byte, text string) []byte {
+	var document nftDocument
+	if json.Unmarshal(payload, &document) != nil {
+		return payload
+	}
+	for _, item := range document.NFTables {
+		var rule nftRule
+		if json.Unmarshal(item["rule"], &rule) != nil || rule.Handle == 0 ||
+			rule.Family != "inet" || rule.Table != nftTableName || rule.Chain != "output" {
+			continue
+		}
+		matched := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasSuffix(strings.TrimSpace(line), "# handle "+strconv.FormatUint(rule.Handle, 10)) &&
+				strings.Count(line, "socket cgroupv2") == 1 &&
+				strings.Contains(line, ` socket cgroupv2 level 2 "`+agentCGroup+`" `) {
+				matched++
+			}
+		}
+		if matched != 1 {
+			continue
+		}
+		for index, raw := range rule.Expr {
+			var fields map[string]json.RawMessage
+			if json.Unmarshal(raw, &fields) != nil || len(fields) != 1 || fields["match"] == nil {
+				continue
+			}
+			var expr struct {
+				Match struct {
+					Op   string `json:"op"`
+					Left struct {
+						Socket map[string]json.RawMessage `json:"socket"`
+					} `json:"left"`
+					Right string `json:"right"`
+				} `json:"match"`
+			}
+			if json.Unmarshal(raw, &expr) != nil || expr.Match.Op != "==" || expr.Match.Right != agentCGroup ||
+				string(expr.Match.Left.Socket["key"]) != `"cgroupv2"` || len(expr.Match.Left.Socket) != 1 {
+				continue
+			}
+			expr.Match.Left.Socket["level"] = json.RawMessage("2")
+			rule.Expr[index], _ = json.Marshal(expr)
+		}
+		item["rule"], _ = json.Marshal(rule)
+	}
+	result, err := json.Marshal(document)
+	if err != nil {
+		return payload
+	}
+	return result
 }
 
 func verifyNFTContract(payload []byte, permits map[uint32]string) error {

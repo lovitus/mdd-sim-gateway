@@ -163,6 +163,18 @@ func TestNFTContractAcceptsOnlyDeclaredSocketMarkPermits(t *testing.T) {
 	if err := verifyNFTContract(payload, nil); err == nil {
 		t.Fatal("undeclared socket permit was accepted")
 	}
+	legacy := strings.Replace(string(payload), `"chain":"output","expr"`, `"chain":"output","handle":4,"expr"`, 1)
+	legacy = strings.Replace(legacy, `"cgroupv2","level":2`, `"cgroupv2"`, 1)
+	text := `meta oifgroup 5063748 meta oifname "wwan0" socket cgroupv2 level 2 "system.slice/mdd-agent.service" meta mark 1291911169 counter packets 0 bytes 0 accept # handle 4`
+	if err := verifyNFTContract(withVerifiedCGroupLevels([]byte(legacy), text), map[uint32]string{mark: "wwan0"}); err != nil {
+		t.Fatalf("verified legacy nft output rejected: %v", err)
+	}
+	for _, invalid := range []string{"", strings.Replace(text, "level 2", "level 1", 1),
+		strings.Replace(text, "handle 4", "handle 5", 1), strings.Replace(text, agentCGroup, "system.slice/other.service", 1), text + "\n" + text} {
+		if err := verifyNFTContract(withVerifiedCGroupLevels([]byte(legacy), invalid), map[uint32]string{mark: "wwan0"}); err == nil {
+			t.Fatal("missing or mismatched cgroup-level evidence accepted")
+		}
+	}
 }
 
 func TestExistingVHCIParentRequiresExactDurableIdentity(t *testing.T) {
