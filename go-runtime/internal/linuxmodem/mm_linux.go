@@ -147,7 +147,52 @@ func (manager *dbusModemManager) Inventory(ctx context.Context) ([]modemSnapshot
 	if err := manager.root.CallWithContext(ctx, objectManager, 0).Store(&objects); err != nil {
 		return nil, fmt.Errorf("inventory ModemManager objects: %w", err)
 	}
+	if err := readReferencedObjects(objects, func(path dbus.ObjectPath, iface string) (map[string]dbus.Variant, error) {
+		var properties map[string]dbus.Variant
+		err := manager.connection.Object(mmService, path).CallWithContext(ctx, dbusProperties, 0, iface).Store(&properties)
+		return properties, err
+	}); err != nil {
+		return nil, err
+	}
 	return parseManagedObjects(objects)
+}
+
+// Like libmm-glib's mm_modem_get_sim, follow the modem's object reference:
+// ObjectManager exports modems, not their SIM/bearer properties.
+func readReferencedObjects(objects managedObjects, read func(dbus.ObjectPath, string) (map[string]dbus.Variant, error)) error {
+	for _, interfaces := range objects {
+		modem, ok := interfaces[mmModem]
+		if !ok {
+			continue
+		}
+		paths := []struct {
+			path  dbus.ObjectPath
+			iface string
+		}{{objectPathProperty(modem, "Sim"), mmSIM}}
+		for _, path := range objectPathSliceProperty(modem, "Bearers") {
+			paths = append(paths, struct {
+				path  dbus.ObjectPath
+				iface string
+			}{path, mmBearer})
+		}
+		for _, reference := range paths {
+			if reference.path == "" || reference.path == "/" {
+				continue
+			}
+			if objects[reference.path][reference.iface] != nil {
+				continue
+			}
+			properties, err := read(reference.path, reference.iface)
+			if err != nil {
+				return fmt.Errorf("read referenced ModemManager %s: %w", reference.iface, err)
+			}
+			if objects[reference.path] == nil {
+				objects[reference.path] = make(map[string]map[string]dbus.Variant)
+			}
+			objects[reference.path][reference.iface] = properties
+		}
+	}
+	return nil
 }
 
 func (manager *dbusModemManager) SIMEpoch(modemPath, simPath dbus.ObjectPath) (string, bool) {
@@ -466,7 +511,9 @@ func parseManagedObjects(objects managedObjects) ([]modemSnapshot, error) {
 		}
 		unlockRequired := uint32Property(properties, "UnlockRequired")
 		switch {
-		case value.ICCID != "" && unlockRequired == 1:
+		// Match ModemManager set_lock_status: PIN2/PUK2 do not prevent
+		// ordinary operation. Never attempt to unlock these ancillary codes.
+		case value.ICCID != "" && (unlockRequired == 1 || unlockRequired == 3 || unlockRequired == 5):
 			value.SIMState = agentmodem.SIMReady
 		case unlockRequired > 1:
 			value.SIMState = agentmodem.SIMLocked

@@ -137,6 +137,51 @@ func TestParseManagedObjectsPreservesTypedModemFacts(t *testing.T) {
 	}
 }
 
+func TestInventoryReadsSIMOutsideObjectManagerAndPreservesPINLocks(t *testing.T) {
+	modemPath := dbus.ObjectPath("/org/freedesktop/ModemManager1/Modem/1")
+	simPath := dbus.ObjectPath("/org/freedesktop/ModemManager1/SIM/1")
+	for _, lock := range []uint32{0, 1, 2, 3, 4, 5, 8} {
+		objects := managedObjects{modemPath: {mmModem: {
+			"Device":              dbus.MakeVariant("/sys/devices/usb1/1-6"),
+			"EquipmentIdentifier": dbus.MakeVariant("864819055504383"),
+			"Ports":               dbus.MakeVariant([]testPortTuple{{"ttyUSB2", mmPortAT}}),
+			"Sim":                 dbus.MakeVariant(simPath), "UnlockRequired": dbus.MakeVariant(lock),
+		}}}
+		calls := 0
+		err := readReferencedObjects(objects, func(path dbus.ObjectPath, iface string) (map[string]dbus.Variant, error) {
+			calls++
+			if path != simPath || iface != mmSIM {
+				t.Fatalf("unexpected reference: %s %s", path, iface)
+			}
+			return map[string]dbus.Variant{"SimIdentifier": dbus.MakeVariant("8985200000000000001"), "Imsi": dbus.MakeVariant("455070000000001")}, nil
+		})
+		if err != nil || calls != 1 {
+			t.Fatalf("SIM fetch: calls=%d err=%v", calls, err)
+		}
+		facts, err := parseManagedObjects(objects)
+		if err != nil || len(facts) != 1 {
+			t.Fatalf("parse: %v %v", facts, err)
+		}
+		want := agentmodem.SIMLocked
+		if lock == 0 {
+			want = agentmodem.SIMUnknown
+		}
+		if lock == 1 || lock == 3 || lock == 5 {
+			want = agentmodem.SIMReady
+		}
+		if facts[0].SIMState != want || facts[0].ICCID != "8985200000000000001" {
+			t.Fatalf("lock %d: %+v", lock, facts[0])
+		}
+	}
+	objects := managedObjects{modemPath: {mmModem: {"Sim": dbus.MakeVariant(simPath)}}}
+	want := errors.New("SIM disappeared")
+	if err := readReferencedObjects(objects, func(dbus.ObjectPath, string) (map[string]dbus.Variant, error) {
+		return nil, want
+	}); !errors.Is(err, want) {
+		t.Fatalf("missing SIM was silently accepted: %v", err)
+	}
+}
+
 func TestModemManagerSIMEventsAreFilteredAndObjectScoped(t *testing.T) {
 	manager := &dbusModemManager{connection: &dbus.Conn{}, epochs: map[dbus.ObjectPath]uint64{}, epochReady: true}
 	modemPath := dbus.ObjectPath("/org/freedesktop/ModemManager1/Modem/0")
