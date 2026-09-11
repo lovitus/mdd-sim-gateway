@@ -170,6 +170,10 @@ func main() {
 		return
 	}
 	if command == "service" || strings.HasPrefix(command, "service-") {
+		if command == "service-restart" {
+			deadline := time.AfterFunc(90*time.Second, func() { os.Exit(1) })
+			defer deadline.Stop()
+		}
 		if err := runOSService(command, *configPath, settings, os.Stdout); err != nil {
 			fatalf("%s: %v", command, err)
 		}
@@ -627,6 +631,7 @@ func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 		PINs:           settings.Agent.PINs,
 		PINCredentials: pinCredentials,
 		HostHealth:     hostHealth.Snapshot,
+		RestartHost:    hostRestartCallback(settings, hostMode),
 		ScanEvery:      time.Duration(settings.ScanIntervalMS) * time.Millisecond,
 		Recovery:       recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
 	})

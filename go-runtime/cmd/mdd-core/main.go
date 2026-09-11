@@ -964,6 +964,24 @@ func run(ctx context.Context, settings config) error {
 		core.WithRawModem(rawModemAPI),
 		core.WithCellularMedia(cellularMedia),
 		core.WithAgentFacts(agents),
+		core.WithAgentRestartBusyCheck(func(lineID string) (bool, error) {
+			if active, err := store.ActiveExitRecovery(lineID); err != nil || active {
+				return active, err
+			}
+			if active, err := rawModemAPI.ActiveLine(lineID); err != nil || active {
+				return active, err
+			}
+			if active, err := calls.ActiveLine(lineID); err != nil || active {
+				return active, err
+			}
+			if active, err := router.ActiveLine(lineID); err != nil || active {
+				return active, err
+			}
+			if active, err := allowanceStore.ActiveLine(lineID); err != nil || active {
+				return active, err
+			}
+			return cellularData.ActiveLine(lineID)
+		}),
 		core.WithModemPolicies(agents),
 		core.WithProviderFacts(providers),
 		core.WithRuntimeInfo(runtimeInfo),

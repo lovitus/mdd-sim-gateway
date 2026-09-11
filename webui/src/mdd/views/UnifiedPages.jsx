@@ -1565,7 +1565,31 @@ function HostPanel({ host, alerts, loading, clearing, onClear, t }) {
   </div>
 }
 
-function AgentHostsPanel({ agents, loading, now, language }) {
+function AgentLocationDetails({ agent, language }) {
+  const zh = language === 'zh'
+  const meta = agent?.meta || {}
+  const missing = zh ? '未上报' : 'Not reported'
+  return <div style={{ overflowWrap: 'anywhere', minWidth: 0 }}>
+    <div className="u-detail"><span>{zh ? '主机名' : 'Hostname'}</span><b>{meta.hostname || missing}</b></div>
+    <div className="u-detail"><span>{zh ? '系统版本' : 'Operating system'}</span><b>{[meta.os_name, meta.os_version].filter(Boolean).join(' ') || missing}</b></div>
+    <div className="u-detail"><span>{zh ? '内核版本' : 'Kernel'}</span><b>{meta.kernel_version || missing}</b></div>
+    <div className="u-detail"><span>IP</span><b>{meta.addresses?.length ? meta.addresses.map(address => <div key={address}>{address}</div>) : missing}</b></div>
+    <div className="u-detail"><span>Agent ID</span><b>{agent?.id || missing}</b></div>
+    <div className="u-detail"><span>{zh ? 'Agent 版本' : 'Agent version'}</span><b>{meta.agent_version || missing}</b></div>
+  </div>
+}
+
+function DiagnosticDeviceDetails({ device, language }) {
+  const { t } = useI18n()
+  return <div style={{ overflowWrap: 'anywhere', minWidth: 0 }}>
+    <p>{deviceIdentityLine(device, t)}</p>
+    <div className="u-detail"><span>{language === 'zh' ? '线路 ID' : 'Line ID'}</span><b>{device.instance_id || '—'}</b></div>
+    <div className="u-detail"><span>ICCID</span><b>{device.sim?.iccid ? `••••${String(device.sim.iccid).slice(-4)}` : '—'}</b></div>
+    <div className="u-detail"><span>{language === 'zh' ? '设备路径' : 'Device path'}</span><b>{device.stable_path || '—'}</b></div>
+  </div>
+}
+
+function AgentHostsPanel({ agents, devices = [], loading, now, language, restarting, onRestart }) {
   const isZh = language === 'zh'
   if (loading && !agents.length) return <div className="card u-panel"><p>{isZh ? '正在读取 Agent 状态…' : 'Loading Agent health…'}</p></div>
   if (!agents.length) return <Empty title={isZh ? '尚无 Agent 健康上报' : 'No Agent health reports'} detail={isZh ? '新版 Windows、macOS Agent 接入后会显示在这里；旧版 Agent 的设备功能不受影响。' : 'Updated Windows and macOS Agents appear here. Older Agent device functions are unaffected.'} />
@@ -1580,6 +1604,14 @@ function AgentHostsPanel({ agents, loading, now, language }) {
       const platform = { windows: 'Windows', macos: 'macOS', linux: 'Linux' }[meta.platform] || (isZh ? '旧版' : 'Legacy')
       return <div className="card u-panel" key={agent.id}>
         <div className="u-section-title"><div><h3>{platform} Agent · {agent.display_id}</h3><p>{meta.arch || '—'}{meta.agent_version ? ` · v${meta.agent_version}` : ''}</p></div><Badge state={view.state}>{view.label}</Badge></div>
+        <AgentLocationDetails agent={agent} language={language} />
+        <button className="btn btn-ghost" disabled={!!restarting || !agent.capabilities?.includes('agent-process-restart-v1')}
+          title={!agent.capabilities?.includes('agent-process-restart-v1') ? (isZh ? '当前 Agent 未提供受控进程重启能力' : 'Managed process restart is unavailable on this Agent') : undefined}
+          onClick={() => onRestart(agent)}>{restarting === agent.id ? (isZh ? '正在等待重新接入…' : 'Waiting for reconnection…') : (isZh ? '软重启 Agent' : 'Restart Agent')}</button>
+        {devices.filter(device => device.agent_id === agent.id).map(device => <section key={device.id}>
+          <h4>{device.name}</h4><DiagnosticDeviceDetails device={device} language={language} />
+          <Badge state={device.present ? 'on' : 'off'}>{isZh ? (device.present ? '在线' : '离线') : (device.present ? 'Online' : 'Offline')}</Badge>
+        </section>)}
         <div className="u-detail"><span>{isZh ? '运行状态' : 'Runtime'}</span><b>{agentHealthEnumLabel('runtime', runtime.state || (isZh ? '未上报' : 'not reported'), language)}</b></div>
         <div className="u-detail"><span>{isZh ? '宿主方式' : 'Host mode'}</span><b>{agentHealthEnumLabel('manager', manager.kind || meta.manager, language)}</b></div>
         <div className="u-detail"><span>{isZh ? '最后心跳' : 'Last heartbeat'}</span><b>{agentHeartbeatAge(agent.seen_at, now, language)}</b></div>
@@ -1601,6 +1633,22 @@ export function DiagnosticsPage(props) {
   const [agents, setAgents] = useState([])
   const [agentsLoading, setAgentsLoading] = useState(true)
   const [agentsError, setAgentsError] = useState('')
+  const [restartingAgent, setRestartingAgent] = useState('')
+  const restartAgent = async agent => {
+    const name = agent.meta?.hostname || agent.display_id || agent.id
+    const question = language === 'zh'
+      ? `软重启 ${name} 的 Agent 进程？该主机下的设备将短暂断开，电脑不会重启。`
+      : `Restart the Agent process on ${name}? Its devices will briefly disconnect. The computer will not reboot.`
+    if (!window.confirm(question)) return
+    setRestartingAgent(agent.id)
+    try {
+      await api.restartAgent(agent.id, agent.process_generation)
+      props.showToast(language === 'zh' ? 'Agent 已以新进程重新接入' : 'Agent reconnected with a new process')
+      await loadAgents()
+    } catch (error) {
+      props.showToast(`${language === 'zh' ? '未确认重启完成' : 'Restart completion unconfirmed'}: ${error.message}`)
+    } finally { setRestartingAgent('') }
+  }
   const [hostError, setHostError] = useState('')
   const agentReadBusy = useRef(false)
   const hostReadBusy = useRef(false)
@@ -1644,8 +1692,11 @@ export function DiagnosticsPage(props) {
   const run = async d => { try { const result = await api.deviceDiagnostics(d.id); setResults(x => ({ ...x, [d.id]: result })); props.showToast(result.ok ? t('Diagnostics passed') : t('Diagnostics found problems')) } catch (e) { props.showToast(e.message) } }
   return <div className="u-page"><div className="u-tabs"><button className={tab === 'health' ? 'active' : ''} onClick={() => setTab('health')}>{t('Health')}</button><button className={tab === 'agents' ? 'active' : ''} onClick={() => setTab('agents')}>{language === 'zh' ? 'Agent 主机' : 'Agent hosts'}</button><button className={tab === 'host' ? 'active' : ''} onClick={() => setTab('host')}>{language === 'zh' ? '网关主机' : 'Gateway host'}{!!hostAlerts.length && <i className={`u-nav-dot ${hostAlerts.some(a => a.severity === 'critical') ? 'critical' : 'warning'}`} />}</button><button className={tab === 'logs' ? 'active' : ''} onClick={() => setTab('logs')}>{t('Live logs')}</button><button className={tab === 'bundle' ? 'active' : ''} onClick={() => setTab('bundle')}>{t('Support bundle')}</button><button className={tab==='advanced'?'active':''} onClick={()=>setTab('advanced')}>{language==='zh'?'高级诊断':'Advanced diagnostics'}</button></div>
     {tab === 'advanced' && <AdvancedDiagnostics {...props} />}
-    {tab === 'health' && <div className="u-device-grid">{devices.map((d, i) => <div className="card u-panel" key={d.id}><h3>{deviceTitle(d, i)}</h3><div className="u-detail"><span>{t('4G network')}</span><Badge state={capability(d, 'connection').actual} /></div><div className="u-detail"><span>VoWiFi / IMS</span><Badge state={capability(d, 'vowifi').actual} /></div><button className="btn btn-ghost" onClick={() => run(d)}>{t('Run diagnostics')}</button>{results[d.id]?.checks?.map(check => <div className="u-detail" key={check.name}><span>{check.name}</span><b>{check.ok ? '✓' : '✕'} {check.detail}</b></div>)}</div>)}</div>}
-    {tab === 'agents' && <><button className="btn btn-ghost" disabled={agentsLoading} onClick={loadAgents}>{t('Refresh')}</button>{agentsError && <p role="alert" className="u-error">{agentsError}</p>}{(!agentsError || agents.length>0) && <AgentHostsPanel agents={agents} loading={agentsLoading} now={agentNow} language={language} />}</>}
+    {tab === 'health' && <div className="u-device-grid">{devices.map((d, i) => <div className="card u-panel" key={d.id}>
+      <h3>{deviceTitle(d, i)}</h3><DiagnosticDeviceDetails device={d} language={language} />
+      <AgentLocationDetails agent={agents.find(agent => agent.id === d.agent_id)} language={language} />
+      <div className="u-detail"><span>{t('4G network')}</span><Badge state={capability(d, 'connection').actual} /></div><div className="u-detail"><span>VoWiFi / IMS</span><Badge state={capability(d, 'vowifi').actual} /></div><button className="btn btn-ghost" onClick={() => run(d)}>{t('Run diagnostics')}</button>{results[d.id]?.checks?.map(check => <div className="u-detail" key={check.name}><span>{check.name}</span><b>{check.ok ? '✓' : '✕'} {check.detail}</b></div>)}</div>)}</div>}
+    {tab === 'agents' && <><button className="btn btn-ghost" disabled={agentsLoading} onClick={loadAgents}>{t('Refresh')}</button>{agentsError && <p role="alert" className="u-error">{agentsError}</p>}{(!agentsError || agents.length>0) && <AgentHostsPanel agents={agents} devices={devices} loading={agentsLoading} now={agentNow} language={language} restarting={restartingAgent} onRestart={restartAgent} />}</>}
     {tab === 'host' && <><button className="btn btn-ghost" disabled={hostLoading} onClick={loadHost}>{t('Refresh')}</button>{hostError && <p role="alert" className="u-error">{hostError}</p>}{(!hostError || system) && <HostPanel host={host} alerts={hostAlerts} loading={hostLoading && !system} clearing={clearingAlerts} onClear={clearHostAlerts} t={t} />}</>}
     {tab === 'logs' && <Logs {...props} />}
     {tab === 'bundle' && <div className="card u-panel"><h2>{t('Redacted support bundle')}</h2><p>{t('Contains status, configuration shape and bounded logs. SIM identities, phone numbers, credentials and cryptographic material are removed.')}</p><div className="u-support-actions"><a className="btn btn-primary" href={api.supportBundleUrl}>{t('Download support bundle')}</a><div><b>{t('Found a problem or have a suggestion?')}</b><p>{t('Open a GitHub Issue. For faults, attach the redacted support bundle when appropriate.')}</p><a href={issueUrl} target="_blank" rel="noreferrer">{t('Submit an Issue')} ↗</a></div></div></div>}

@@ -68,7 +68,9 @@ export function normalizeCoreAgentHealth(agent, snapshotAt) {
     reporting,
     connection,
     seen_at: Number.isFinite(seenMs) ? seenMs / 1000 : null,
-		meta: { platform: host?.platform || '', arch: host?.architecture || '', agent_version: host?.build_version || '' },
+		meta: { platform: host?.platform || '', arch: host?.architecture || '', agent_version: host?.build_version || '',
+      hostname: host?.hostname || '', os_name: host?.os_name || '', os_version: host?.os_version || '',
+      kernel_version: host?.kernel_version || '', addresses: host?.addresses || [] },
 		attachments: { modems_online: modems.length, readers_online: readers.length },
     topology,
     snapshot: {

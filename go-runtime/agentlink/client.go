@@ -44,6 +44,7 @@ type Client struct {
 	HealthReported      func()
 	Health              func() TopologySnapshot
 	HealthEvery         time.Duration
+	PrepareRestart      func(context.Context, AgentRestartRequest) (func(context.Context) error, error)
 }
 
 const maximumConcurrentRequests = 16
@@ -106,6 +107,9 @@ func (client Client) Run(ctx context.Context) (result error) {
 	if client.HostHealth {
 		capabilities = append(capabilities, agentHostHealthFeature)
 	}
+	if client.PrepareRestart != nil {
+		capabilities = append(capabilities, AgentRestartFeature)
+	}
 	if client.DeviceDefaults != nil {
 		capabilities = append(capabilities, deviceDefaultsFeature)
 		reset := func() {
@@ -134,6 +138,7 @@ func (client Client) Run(ctx context.Context) (result error) {
 	simAPDUPrepareEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemSIMAPDUPrepareFeature)
 	hostHealthEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), agentHostHealthFeature)
 	defaultsEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), deviceDefaultsFeature)
+	restartEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), AgentRestartFeature)
 	defer socket.CloseNow()
 	socket.SetReadLimit(maximumMessage)
 	if err := writeEnvelope(ctx, socket, envelope{Kind: kindHello, Hello: &client.Hello}); err != nil {
@@ -220,6 +225,46 @@ func (client Client) Run(ctx context.Context) (result error) {
 				return fmt.Errorf("apply modem event acknowledgement: %w", err)
 			}
 			continue
+		}
+		if message.Kind == kindAgentRestartRequest {
+			request := *message.AgentRestartRequest
+			result := AgentRestartResponse{OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration}
+			var commit func(context.Context) error
+			switch {
+			case !restartEnabled || client.PrepareRestart == nil:
+				result.Failure = &RemoteError{Kind: "not_ready", Code: "agent_restart_unavailable"}
+			case request.ProcessGeneration != client.Hello.ProcessGeneration:
+				result.Failure = &RemoteError{Kind: "conflict", Code: "agent_generation_changed"}
+			case len(slots) != 0:
+				result.Failure = &RemoteError{Kind: "conflict", Code: "agent_busy"}
+			default:
+				checkContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+				var prepareErr error
+				commit, prepareErr = client.PrepareRestart(checkContext, request)
+				cancel()
+				if prepareErr != nil || commit == nil {
+					result.Failure = &RemoteError{Kind: "conflict", Code: "agent_restart_not_safe"}
+				} else {
+					result.Accepted = true
+				}
+			}
+			writes.Lock()
+			writeErr := writeEnvelope(ctx, socket, envelope{Kind: kindAgentRestartResponse, RequestID: message.RequestID, AgentRestartResult: &result})
+			writes.Unlock()
+			if writeErr != nil {
+				return writeErr
+			}
+			if !result.Accepted {
+				continue
+			}
+			restartContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+			commitErr := commit(restartContext)
+			if commitErr == nil {
+				<-restartContext.Done()
+				commitErr = errors.New("Agent supervisor did not replace the process before the restart deadline")
+			}
+			cancel()
+			return commitErr
 		}
 		if message.Kind == kindDeviceDefaults {
 			if !defaultsEnabled || client.DeviceDefaults == nil {

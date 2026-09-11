@@ -270,6 +270,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	if agentHostHealthCapable {
 		features = append(features, agentHostHealthFeature)
 	}
+	if featureEnabled(request.Header.Get(agentCapabilitiesHeader), AgentRestartFeature) {
+		features = append(features, AgentRestartFeature)
+	}
 	if len(features) != 0 {
 		response.Header().Set(agentFeaturesHeader, strings.Join(features, ","))
 	}
@@ -1444,7 +1447,11 @@ func (server *Server) roundTrip(ctx context.Context, connection *serverConnectio
 	requestID := fmt.Sprintf("req-%d", server.nextID.Add(1))
 	reply := make(chan envelope, 1)
 	server.mu.RLock()
-	if server.maintenance[connection.hello.AgentID] != "" {
+	lease := server.maintenance[connection.hello.AgentID]
+	restart := message.Kind == kindAgentRestartRequest && message.AgentRestartRequest != nil &&
+		message.AgentRestartRequest.OperationID == lease && lease != "" &&
+		message.AgentRestartRequest.ProcessGeneration == connection.hello.ProcessGeneration
+	if (lease != "" && !restart) || (message.Kind == kindAgentRestartRequest && !restart) {
 		server.mu.RUnlock()
 		return envelope{}, ErrAgentMaintenance
 	}
@@ -1471,7 +1478,14 @@ func (server *Server) roundTrip(ctx context.Context, connection *serverConnectio
 	case <-ctx.Done():
 		return envelope{}, ctx.Err()
 	case <-connection.closed:
-		return envelope{}, ErrAgentOffline
+		// A process restart may close immediately after its acknowledgement.
+		// Preserve an already-dispatched response instead of racing it with EOF.
+		select {
+		case response := <-reply:
+			return response, nil
+		default:
+			return envelope{}, ErrAgentOffline
+		}
 	case response := <-reply:
 		return response, nil
 	}
@@ -1623,7 +1637,7 @@ func (server *Server) readLoop(ctx context.Context, connection *serverConnection
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindReaderReadbackResponse && message.Kind != kindProvisionResponse && message.Kind != kindModemRecoveryResponse &&
+		if message.Kind != kindAgentRestartResponse && message.Kind != kindReaderReadbackResponse && message.Kind != kindProvisionResponse && message.Kind != kindModemRecoveryResponse &&
 			message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindSIMPINResponse && message.Kind != kindMediaResponse &&
 			message.Kind != kindDataResponse && message.Kind != kindPolicyResponse && message.Kind != kindRawUSBResponse &&
 			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse &&

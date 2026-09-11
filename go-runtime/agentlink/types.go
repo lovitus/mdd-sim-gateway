@@ -252,6 +252,11 @@ type AgentStorageFact struct {
 // and its configuration filesystem. Hardware truth remains in Readers and
 // Modems; this fact must never probe or mutate a device.
 type AgentHostFact struct {
+	Hostname        string           `json:"hostname,omitempty"`
+	OSName          string           `json:"os_name,omitempty"`
+	OSVersion       string           `json:"os_version,omitempty"`
+	KernelVersion   string           `json:"kernel_version,omitempty"`
+	Addresses       []string         `json:"addresses,omitempty"`
 	SchemaVersion   int              `json:"schema_version"`
 	Platform        string           `json:"platform"`
 	Architecture    string           `json:"architecture"`
@@ -2513,6 +2518,7 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 	}
 	if topology.Host != nil {
 		host := *topology.Host
+		host.Addresses = append([]string(nil), topology.Host.Addresses...)
 		result.Host = &host
 	}
 	copy(result.Readers, topology.Readers)
@@ -2604,6 +2610,19 @@ func validateReaderSIM(sim *ReaderSIMFact) error {
 }
 
 func (fact AgentHostFact) Validate() error {
+	for _, value := range []string{fact.Hostname, fact.OSName, fact.OSVersion, fact.KernelVersion} {
+		if !validSecretText(value, 256) {
+			return errors.New("Agent topology contains invalid host display metadata")
+		}
+	}
+	if len(fact.Addresses) > 32 {
+		return errors.New("Agent topology contains too many host addresses")
+	}
+	for _, address := range fact.Addresses {
+		if net.ParseIP(address) == nil {
+			return errors.New("Agent topology contains an invalid host address")
+		}
+	}
 	if fact.SchemaVersion != 1 || !oneOf(fact.Platform, "windows", "macos", "linux") ||
 		!oneOf(fact.HostMode, "service", "gui", "cli") ||
 		!oneOf(fact.Manager, "scm", "systemd", "gui", "cli") ||

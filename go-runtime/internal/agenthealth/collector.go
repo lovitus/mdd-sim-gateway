@@ -4,11 +4,18 @@
 package agenthealth
 
 import (
+	"context"
 	"errors"
 	"math"
+	"net"
+	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"time"
+
+	"github.com/shirou/gopsutil/v4/host"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/buildidentity"
@@ -29,7 +36,10 @@ type Config struct {
 	diskUsage       diskUsageFunc
 }
 
-type Collector struct{ config Config }
+type Collector struct {
+	config                                     Config
+	hostname, osName, osVersion, kernelVersion string
+}
 
 func New(config Config) (*Collector, error) {
 	if config.Platform == "" {
@@ -49,6 +59,11 @@ func New(config Config) (*Collector, error) {
 		config.diskUsage = platformDiskUsage
 	}
 	collector := &Collector{config: config}
+	collector.hostname, _ = os.Hostname()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	collector.osName, _, collector.osVersion, _ = host.PlatformInformationWithContext(ctx)
+	collector.kernelVersion, _ = host.KernelVersionWithContext(ctx)
 	if err := collector.Snapshot().Validate(); err != nil {
 		return nil, err
 	}
@@ -67,6 +82,8 @@ func (collector *Collector) Snapshot() agentlink.AgentHostFact {
 		}
 	}
 	fact := agentlink.AgentHostFact{
+		Hostname: collector.hostname, OSName: collector.osName, OSVersion: collector.osVersion,
+		KernelVersion: collector.kernelVersion, Addresses: hostAddresses(),
 		SchemaVersion: 1, Platform: config.Platform, Architecture: config.Architecture,
 		BuildVersion: config.Identity.DisplayVersion(), HostMode: config.HostMode,
 		Manager: manager, SessionScope: scope, ConfigState: "ok",
@@ -89,4 +106,36 @@ func (collector *Collector) Snapshot() agentlink.AgentHostFact {
 		UsedPercent: usedPercent,
 	}
 	return fact
+}
+
+func hostAddresses() []string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			ip, _, err := net.ParseCIDR(address.String())
+			if err == nil && ip.IsGlobalUnicast() {
+				seen[ip.String()] = true
+			}
+		}
+	}
+	values := make([]string, 0, len(seen))
+	for value := range seen {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	if len(values) > 32 {
+		values = values[:32]
+	}
+	return values
 }

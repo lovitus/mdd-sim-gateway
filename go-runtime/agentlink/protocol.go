@@ -73,6 +73,8 @@ const (
 )
 
 type envelope struct {
+	AgentRestartRequest   *AgentRestartRequest       `json:"agent_restart_request,omitempty"`
+	AgentRestartResult    *AgentRestartResponse      `json:"agent_restart_response,omitempty"`
 	DeviceDefaults        *deviceDefaultsUpdate      `json:"device_defaults,omitempty"`
 	Kind                  string                     `json:"kind"`
 	RequestID             string                     `json:"request_id,omitempty"`
@@ -194,6 +196,12 @@ func writeEnvelope(ctx context.Context, socket *websocket.Conn, message envelope
 }
 
 func (message envelope) validate() error {
+	if message.Kind == kindAgentRestartRequest || message.Kind == kindAgentRestartResponse {
+		return validateAgentRestartEnvelope(message)
+	}
+	if message.AgentRestartRequest != nil || message.AgentRestartResult != nil {
+		return errors.New("unexpected Agent restart fields")
+	}
 	if message.Kind == kindDeviceDefaults {
 		if message.DeviceDefaults == nil {
 			return errors.New("missing device defaults payload")

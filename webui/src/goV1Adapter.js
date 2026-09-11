@@ -183,6 +183,8 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
 	const borrowActual = policyAvailable ? (policy?.desired?.cellular_enabled ? 'on' : 'off') : 'unsupported'
   return {
     id: text(device?.id),
+    agent_id: text(device?.agent_id),
+    process_generation: text(device?.process_generation),
     name: modem?.model || modem?.manufacturer || device?.reader?.reader_name || 'Communication device',
     device_type: device?.kind === 'reader' ? 'reader' : 'modem',
     mode: device?.mode || '',

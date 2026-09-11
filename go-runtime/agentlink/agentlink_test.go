@@ -1589,6 +1589,31 @@ func TestInvalidHealthPreservesValidationCauseAndNeverReportsHealthy(t *testing.
 	}
 }
 
+func TestHostLocationDisplayFactsValidateAndClone(t *testing.T) {
+	fact := AgentHostFact{SchemaVersion: 1, Platform: "linux", Architecture: "amd64", BuildVersion: "test",
+		HostMode: "service", Manager: "systemd", SessionScope: "machine", ConfigState: "ok", TokenConfigured: true,
+		Storage:  AgentStorageFact{State: "unknown", ErrorCode: "unavailable"},
+		Hostname: "modem-host", OSName: "Ubuntu", OSVersion: "24.04", KernelVersion: "6.8",
+		Addresses: []string{"192.0.2.10", "2001:db8::1"}}
+	if err := fact.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	copy := NormalizeTopology(TopologySnapshot{Host: &fact})
+	copy.Host.Addresses[0] = "192.0.2.20"
+	if fact.Addresses[0] != "192.0.2.10" {
+		t.Fatal("host address slice aliases diagnostic input")
+	}
+	fact.Addresses = []string{"not-an-ip"}
+	if fact.Validate() == nil {
+		t.Fatal("invalid host address accepted")
+	}
+	fact.Addresses = nil
+	fact.Hostname = "invalid\nhost"
+	if fact.Validate() == nil {
+		t.Fatal("control character in host label accepted")
+	}
+}
+
 func TestTopologyRevisionRejectsAmbiguousOrUnsortedFacts(t *testing.T) {
 	valid := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{
 		{ReaderName: "reader-a", IdentityState: CardAbsent},

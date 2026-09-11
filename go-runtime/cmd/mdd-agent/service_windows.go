@@ -17,8 +17,17 @@ import (
 	"github.com/kardianos/service"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsdataguard"
+	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+func supervisedRestartAvailable(hostMode string) bool {
+	if hostMode != "service" {
+		return false
+	}
+	serviceMode, err := svc.IsWindowsService()
+	return err == nil && serviceMode
+}
 
 const (
 	windowsServiceName       = "MDDAgent"
@@ -145,7 +154,7 @@ func runOSServiceWithExecutable(command, configPath, executable string, settings
 	switch command {
 	case "service":
 		return current.Run()
-	case "service-install", "service-uninstall", "service-start", "service-stop":
+	case "service-install", "service-uninstall", "service-start", "service-stop", "service-restart":
 		if command == "service-uninstall" {
 			status, statusErr := current.Status()
 			if statusErr != nil && !errors.Is(statusErr, service.ErrNotInstalled) {

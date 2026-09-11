@@ -60,6 +60,7 @@ type Config struct {
 	PINs                  map[string]string
 	PINCredentials        PINCredentialStore
 	HostHealth            func() agentlink.AgentHostFact
+	RestartHost           func(context.Context) error
 	ScanEvery             time.Duration
 	Recovery              recovery.Policy
 }
@@ -425,6 +426,42 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if rawUSB != nil {
 			health = func() agentlink.TopologySnapshot { return rawUSB.Topology(reportTopology(worker.Topology())) }
 		}
+		var prepareRestart func(context.Context, agentlink.AgentRestartRequest) (func(context.Context) error, error)
+		if worker.config.RestartHost != nil {
+			check := func(checkContext context.Context) error {
+				if err := manager.CheckRestartSafe(); err != nil {
+					return err
+				}
+				topology := health()
+				if err := topology.Validate(); err != nil {
+					return err
+				}
+				if len(topology.RawUSBSessions) != 0 {
+					return errors.New("raw USB session is active")
+				}
+				coordinator := composeAuxiliary(data, worker.config.ModemAuxiliary)
+				for _, modem := range topology.Modems {
+					if coordinator == nil || modem.Network.DataGuard != "protected" {
+						return errors.New("modem restart protection unavailable")
+					}
+					if err := coordinator.DoAuxiliary(checkContext, modem.EquipmentID, func(context.Context) error { return nil }); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			prepareRestart = func(checkContext context.Context, _ agentlink.AgentRestartRequest) (func(context.Context) error, error) {
+				if err := check(checkContext); err != nil {
+					return nil, err
+				}
+				return func(restartContext context.Context) error {
+					if err := check(restartContext); err != nil {
+						return err
+					}
+					return worker.config.RestartHost(restartContext)
+				}, nil
+			}
+		}
 		modems := agentlink.ModemExecutor(worker)
 		authenticator := agentlink.Authenticator(worker)
 		var modemEvents agentlink.ModemEventSource
@@ -472,6 +509,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
 			HealthReported:   func() { healthySince.CompareAndSwap(0, time.Now().UnixNano()) }, Health: health,
+			PrepareRestart: prepareRestart,
 		}).Run(ctx)
 		if rawUSB != nil {
 			_ = rawUSB.Close()

@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
 import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel, normalizeCoreAgentHealth } from '../src/agentHealthPresentation.js'
 
+const location = normalizeCoreAgentHealth({ agent_id: 'agent-a', topology: { host: {
+  platform: 'linux', hostname: 'modem-host', os_name: 'Ubuntu', os_version: '24.04',
+  kernel_version: '6.8', addresses: ['192.0.2.10'], build_version: 'revision-a',
+} } })
+assert.equal(location.meta.hostname, 'modem-host')
+assert.equal(location.meta.os_version, '24.04')
+assert.deepEqual(location.meta.addresses, ['192.0.2.10'])
+assert.deepEqual(normalizeCoreAgentHealth({agent_id:'legacy'}).meta.addresses, [])
+
 const agent = (connection, overall = 'healthy', reporting = true) => ({
   reporting, connection, snapshot: { overall },
 })

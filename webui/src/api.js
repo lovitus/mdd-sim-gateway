@@ -500,6 +500,9 @@ Object.assign(api, {
     const payload = await j('GET', '/v1/agents')
 		return { at: payload.at, agents: (payload.agents || []).map(agent => normalizeCoreAgentHealth(agent, payload.at)) }
   },
+  restartAgent: (id, generation) => j('POST', `/v1/agents/${encodeURIComponent(id)}/restart`, {
+    operation_id: `restart-${crypto.randomUUID()}`, process_generation: generation,
+  }, {}, 270000),
   egressStatus: goEgressStatus,
   egressConfig: goEgressConfig,
   saveEgressConfig: saveGoEgressConfig,

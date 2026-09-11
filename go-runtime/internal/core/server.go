@@ -77,6 +77,8 @@ type Server struct {
 	modemRecovery      http.Handler
 	systemBackup       http.Handler
 	systemMaintenance  http.Handler
+	agentRestart       http.Handler
+	agentRestartBusy   func(string) (bool, error)
 	systemUpdate       http.Handler
 	notifications      http.Handler
 	providers          ProviderFacts
@@ -217,6 +219,14 @@ func WithSystemBackup(handler http.Handler) Option {
 
 func WithSystemMaintenance(handler http.Handler) Option {
 	return func(server *Server) { server.systemMaintenance = handler }
+}
+
+func WithAgentRestart(handler http.Handler) Option {
+	return func(server *Server) { server.agentRestart = handler }
+}
+
+func WithAgentRestartBusyCheck(check func(string) (bool, error)) Option {
+	return func(server *Server) { server.agentRestartBusy = check }
 }
 
 func WithSystemUpdate(handler http.Handler) Option {
@@ -631,6 +641,17 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.systemBackup != nil {
 		server.mux.Handle("POST /v1/system/backups", server.protect(server.systemBackup))
+	}
+	if server.agentRestart != nil {
+		server.mux.Handle("POST /v1/agents/{agentID}/restart", server.protect(server.agentRestart))
+	}
+	if server.agentRestart == nil && server.agentRestartBusy != nil {
+		if runtime, ok := server.agents.(AgentRestartRuntime); ok {
+			handler, err := NewAgentRestartHandler(runtime, agentRestartGuardFunc(server.prepareAgentRestart))
+			if err == nil {
+				server.mux.Handle("POST /v1/agents/{agentID}/restart", server.protect(handler))
+			}
+		}
 	}
 	if server.systemMaintenance != nil {
 		server.mux.Handle("GET /v1/system/maintenance", server.protect(server.systemMaintenance))
