@@ -1028,15 +1028,17 @@ jobs:
             sudo /usr/libexec/mdd/mdd-agent config set token --stdin \
               -config "$agent_config_dir/config.json" >/dev/null
           sudo systemctl restart mdd-agent.service
-          for attempt in $(seq 1 30); do
-            if curl "${common[@]}" https://localhost:8443/v1/agents |
+          agent_replaced=false
+          for delay in 30 60 120; do
+            sleep "$delay"
+            if curl --max-time 15 "${common[@]}" https://localhost:8443/v1/agents |
                 jq -e --arg old "$old_generation" 'any(.agents[];
                   .agent_id == "ci-linux-agent" and .process_generation != $old)' >/dev/null; then
+              agent_replaced=true
               break
             fi
-            test "$attempt" -lt 30
-            sleep 1
           done
+          test "$agent_replaced" = true || { echo 'Agent generation did not recover after credential update'; exit 1; }
           curl "${common[@]}" -H 'Content-Type: application/json' \
             -H "X-MDD-CSRF-Token: $csrf" \
             --data-binary '{"action":"set_mode","mode":"scoped"}' \
@@ -1058,14 +1060,16 @@ jobs:
           test "$rogue_status" = 401
           test "$(sudo stat -c '%U:%G:%a' /etc/mdd/auth.json)" = mdd:mdd:600
           test -z "$(sudo find /etc/mdd -maxdepth 1 -type f -name '.auth.json-*' -print)"
-          for attempt in $(seq 1 30); do
-            if curl "${common[@]}" https://localhost:8443/v1/agents |
+          scoped_agent_connected=false
+          for delay in 30 60 120; do
+            sleep "$delay"
+            if curl --max-time 15 "${common[@]}" https://localhost:8443/v1/agents |
                 jq -e 'any(.agents[]; .agent_id == "ci-linux-agent")' >/dev/null; then
+              scoped_agent_connected=true
               break
             fi
-            test "$attempt" -lt 30
-            sleep 1
           done
+          test "$scoped_agent_connected" = true || { echo 'Agent did not recover after scoped-credential cutover'; exit 1; }
           config_digest=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
             /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
           printf 'config_digest_before=%s\n' "$config_digest" >> "$GITHUB_ENV"
