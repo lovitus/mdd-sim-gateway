@@ -994,16 +994,18 @@ jobs:
           common=(--fail --silent --show-error --cacert "$MDD_CI_CA_PATH" \
             --resolve localhost:8443:127.0.0.1 -b "$cookie_jar")
           agent_config_dir=/var/lib/mdd-agent
-          for attempt in $(seq 1 30); do
-            if curl "${common[@]}" https://localhost:8443/v1/agents |
+          agent_reconnected=false
+          for delay in 30 60 120; do
+            sleep "$delay"
+            if curl --max-time 15 "${common[@]}" https://localhost:8443/v1/agents |
                 jq -e 'any(.agents[]; .agent_id == "ci-linux-agent" and
                   (.process_generation | length) > 0 and
                   .topology.reader_condition == "ready" and .topology.readers == [])' >/dev/null; then
+              agent_reconnected=true
               break
             fi
-            test "$attempt" -lt 30
-            sleep 1
           done
+          test "$agent_reconnected" = true
 
           # The Core runs as mdd while /etc/mdd remains root-owned 0755.
           # Exercise the authenticated root helper instead of accepting a
