@@ -140,6 +140,48 @@ func TestTopologyUnavailableIsExplicit(t *testing.T) {
 	}
 }
 
+func TestInvalidTopologyReportsRuleWithoutRawFacts(t *testing.T) {
+	controller, err := New(&fakeWorker{ready: true, exit: make(chan error)}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := NewAPI(controller, testControlToken, time.Second, staticTopology{agentlink.TopologySnapshot{
+		ReaderCondition: agentlink.ReaderReady,
+		Readers:         []agentlink.ReaderFact{{ReaderName: "private-reader", IdentityState: agentlink.CardAbsent, CardID: "private-card"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	client, err := NewClient(server.URL, testControlToken, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer client.Stop(context.Background())
+	_, err = client.Topology(context.Background())
+	var failure *APIError
+	if !errors.As(err, &failure) || failure.Status != http.StatusInternalServerError ||
+		failure.Code != "topology_invalid" || failure.Detail != "Agent topology contains an invalid card fact" {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "private-") || !strings.Contains(err.Error(), failure.Detail) {
+		t.Fatalf("missing rule or exposed private facts: %v", err)
+	}
+	response, err := server.Client().Get(server.URL + "/v1/topology")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusUnauthorized || strings.Contains(string(body), "detail") {
+		t.Fatalf("unauthenticated topology response: %d %s", response.StatusCode, body)
+	}
+}
+
 func TestServiceCLIAndGUIClientShareOneController(t *testing.T) {
 	worker := &fakeWorker{ready: true, exit: make(chan error)}
 	api, _ := testAPI(t, worker)

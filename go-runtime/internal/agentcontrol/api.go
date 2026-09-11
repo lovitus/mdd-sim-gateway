@@ -109,7 +109,10 @@ func (api *API) currentTopology(response http.ResponseWriter, _ *http.Request) {
 	}
 	topology := agentlink.NormalizeTopology(api.topology.Topology())
 	if err := topology.Validate(); err != nil {
-		writeAPIError(response, http.StatusInternalServerError, "topology_invalid")
+		// Validate returns fixed rule descriptions, never raw topology or credentials.
+		writeAPIJSON(response, http.StatusInternalServerError, map[string]string{
+			"code": "topology_invalid", "detail": err.Error(),
+		})
 		return
 	}
 	writeAPIJSON(response, http.StatusOK, topology)

@@ -27,9 +27,13 @@ type Client struct {
 type APIError struct {
 	Status int
 	Code   string
+	Detail string
 }
 
 func (err *APIError) Error() string {
+	if err.Detail != "" {
+		return fmt.Sprintf("Agent control request failed: HTTP %d (%s): %s", err.Status, err.Code, err.Detail)
+	}
 	return fmt.Sprintf("Agent control request failed: HTTP %d (%s)", err.Status, err.Code)
 }
 
@@ -142,12 +146,13 @@ func (client *Client) requestBody(ctx context.Context, method, path string, body
 	}
 	var failure struct {
 		Code   string   `json:"code"`
+		Detail string   `json:"detail"`
 		Status Snapshot `json:"status"`
 	}
 	if err := json.Unmarshal(responseBody, &failure); err != nil || failure.Code == "" {
 		failure.Code = "invalid_error_response"
 	}
-	return failure.Status, &APIError{Status: response.StatusCode, Code: failure.Code}
+	return failure.Status, &APIError{Status: response.StatusCode, Code: failure.Code, Detail: failure.Detail}
 }
 
 func decodeControlJSON(body []byte, result any) error {
