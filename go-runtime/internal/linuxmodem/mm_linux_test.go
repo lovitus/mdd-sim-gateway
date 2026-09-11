@@ -20,6 +20,29 @@ type testPortTuple struct {
 	Kind uint32
 }
 
+func TestDataCleanupAllowsATOnlyAfterDataOwnershipReleased(t *testing.T) {
+	claim := &dataClaim{cleanup: true, permitClosed: true, routeCleaned: true, bearerDisconnected: true, inhibited: true}
+	prober := &Prober{
+		devices: map[string]*ownedDevice{"usb": {snapshot: modemSnapshot{EquipmentID: "modem", ATPorts: []string{"ttyUSB2"}}}},
+		data:    map[string]*dataClaim{"modem": claim},
+	}
+	for _, field := range []*bool{&claim.cleanup, &claim.permitClosed, &claim.routeCleaned, &claim.bearerDisconnected, &claim.inhibited} {
+		*field = false
+		candidates, err := prober.enumerateAT()
+		if err != nil || len(candidates) != 0 {
+			t.Fatalf("AT exposed before data cleanup finished: %v %v", candidates, err)
+		}
+		*field = true
+	}
+	candidates, err := prober.enumerateAT()
+	if err != nil || len(candidates) != 1 || candidates[0].Name != "ttyUSB2" {
+		t.Fatalf("completed cleanup cannot recover AT: %v %v", candidates, err)
+	}
+	if prober.data["modem"] != claim {
+		t.Fatal("enumeration must not discard the retained cleanup claim")
+	}
+}
+
 type testSignalTuple struct {
 	Quality uint32
 	Recent  bool

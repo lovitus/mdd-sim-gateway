@@ -356,7 +356,10 @@ func (prober *Prober) enumerateAT() ([]agentat.Candidate, error) {
 		if _, exported := prober.raw[current.snapshot.EquipmentID]; exported {
 			continue
 		}
-		if prober.data[current.snapshot.EquipmentID] != nil {
+		// Cleanup retains its claim until AT recovery. Once every data-side
+		// release is confirmed, enumeration must allow that recovery to finish.
+		if claim := prober.data[current.snapshot.EquipmentID]; claim != nil &&
+			!(claim.cleanup && claim.permitClosed && claim.routeCleaned && claim.bearerDisconnected && claim.inhibited) {
 			continue
 		}
 		result = append(result, linuxATCandidates(current.snapshot, current.usb.PhysicalID)...)
