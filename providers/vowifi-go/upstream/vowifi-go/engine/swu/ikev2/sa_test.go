@@ -103,7 +103,12 @@ func TestValidateSelectedSARejectsUnofferedIKETransform(t *testing.T) {
 func TestValidateSelectedSARejectsUnofferedESPAttribute(t *testing.T) {
 	offered := DefaultESPProposal([]byte{0xca, 0xfe, 0xba, 0xbe})
 	selected := DefaultESPProposal([]byte{0xde, 0xad, 0xbe, 0xef})
-	selected.Proposals[0].Transforms[0].Attributes = []TransformAttribute{KeyLengthAttribute(256)}
+	// The MDD offer includes both AES-128 and AES-256, but not AES-192.
+	selected.Proposals[0].Transforms = []Transform{
+		{Type: TransformENCR, ID: ENCR_AES_CBC, Attributes: []TransformAttribute{KeyLengthAttribute(192)}},
+		{Type: TransformINTEG, ID: INTEG_HMAC_SHA1_96},
+		{Type: TransformESN, ID: ESNNo},
+	}
 	err := ValidateSelectedSA(offered, selected)
 	if !errors.Is(err, ErrUnsupportedSASelection) {
 		t.Fatalf("ValidateSelectedSA() err=%v, want ErrUnsupportedSASelection", err)

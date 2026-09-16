@@ -129,6 +129,11 @@ response at every AUTH round and verifies four completed exchanges, eight wire
 attempts and exactly one SIM AKA call. This is loss tolerance, not evidence
 that a historical carrier timeout was definitely packet loss.
 
+CI directly race-tests and vets the nested module's `engine/swu/...` and
+`runtimehost/...`; parent-module tests alone do not execute these suites.
+The unoffered ESP key-length regression selects AES-192, since MDD's existing
+offer includes both AES-128 and AES-256. Production selection checks are unchanged.
+
 ## MDD Operation Ownership
 
 The service wrapper keeps paid SMS receipts in `paid-message-operations-v1`
