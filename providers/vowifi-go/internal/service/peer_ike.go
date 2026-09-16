@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -25,16 +26,17 @@ type peerIKECache struct {
 }
 
 type peerIKEResponder struct {
-	mu              sync.Mutex
-	init            ikev2.InitResult
-	profile         identity.Profile
-	child           ikev2.ChildSAResult
-	updatePCSCF     func([]string)
-	cache           map[uint32]peerIKECache
-	order           []uint32
-	last            uint32
-	seen            bool
-	recoveryPending bool
+	mu                sync.Mutex
+	init              ikev2.InitResult
+	profile           identity.Profile
+	child             ikev2.ChildSAResult
+	previousRemoteSPI []byte
+	updatePCSCF       func([]string)
+	cache             map[uint32]peerIKECache
+	order             []uint32
+	last              uint32
+	seen              bool
+	recoveryPending   bool
 }
 
 func newPeerIKEResponder(init ikev2.InitResult, profile identity.Profile, updatePCSCF func([]string)) *peerIKEResponder {
@@ -44,6 +46,9 @@ func newPeerIKEResponder(init ikev2.InitResult, profile identity.Profile, update
 func (peer *peerIKEResponder) setChild(local, remote []byte) {
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
+	if len(peer.child.RemoteSPI) > 0 && !bytes.Equal(peer.child.RemoteSPI, remote) {
+		peer.previousRemoteSPI = append([]byte(nil), peer.child.RemoteSPI...)
+	}
 	peer.child.LocalSPI = append([]byte(nil), local...)
 	peer.child.RemoteSPI = append([]byte(nil), remote...)
 }
@@ -80,9 +85,7 @@ func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 	case ikev2.ExchangeINFORMATIONAL:
 		payloads, addresses, abort, err = peer.informational(inner)
 	case ikev2.ExchangeCREATE_CHILD_SA:
-		// Do not silently accept an unimplemented peer-initiated rekey.
-		// RFC 7296 section 4 permits this explicit, protected rejection.
-		payloads = []ikev2.Payload{ikev2.NotifyWithZeroSPI(ikev2.NotifyNoAdditionalSAs, nil)}
+		payloads = []ikev2.Payload{ikev2.NotifyWithZeroSPI(peer.classifyCreateChild(inner), nil)}
 	default:
 		err = errors.New("unsupported peer IKE exchange")
 	}
@@ -123,6 +126,51 @@ func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 	}
 	peer.last, peer.seen = header.MessageID, true
 	return clonePeerReply(reply), nil
+}
+
+// Preserve ec620942 state_epdg_create_sa/_handle_epdg_esp_rekey's default
+// refusal policy. In-place peer ESP acceptance was experimental and off by
+// default; peer IKE acceptance was not implemented in that baseline.
+func (peer *peerIKEResponder) classifyCreateChild(inner []ikev2.Payload) uint16 {
+	var protocol uint8
+	var rekey *ikev2.Notify
+	for _, payload := range inner {
+		switch payload.Type {
+		case ikev2.PayloadSA:
+			sa, err := ikev2.ParseSecurityAssociation(payload.Body)
+			if err != nil || len(sa.Proposals) == 0 {
+				return ikev2.NotifyNoProposalChosen
+			}
+			for _, proposal := range sa.Proposals {
+				if protocol != 0 && protocol != proposal.ProtocolID {
+					return ikev2.NotifyNoProposalChosen
+				}
+				protocol = proposal.ProtocolID
+			}
+		case ikev2.PayloadNotify:
+			notify, err := ikev2.ParseNotify(payload.Body)
+			if err != nil {
+				return ikev2.NotifyNoProposalChosen
+			}
+			if notify.NotifyType == ikev2.NotifyRekeySA {
+				if rekey != nil {
+					return ikev2.NotifyInvalidSPI
+				}
+				rekey = &notify
+			}
+		}
+	}
+	if protocol != ikev2.ProtocolESP {
+		return ikev2.NotifyNoProposalChosen
+	}
+	if rekey == nil {
+		return ikev2.NotifyNoAdditionalSAs
+	}
+	if rekey.ProtocolID != ikev2.ProtocolESP || len(rekey.SPI) != 4 ||
+		(!bytes.Equal(rekey.SPI, peer.child.RemoteSPI) && !bytes.Equal(rekey.SPI, peer.previousRemoteSPI)) {
+		return ikev2.NotifyInvalidSPI
+	}
+	return ikev2.NotifyNoProposalChosen
 }
 
 func clonePeerReply(reply outerudp.PeerReply) outerudp.PeerReply {

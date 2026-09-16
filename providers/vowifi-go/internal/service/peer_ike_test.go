@@ -228,7 +228,7 @@ func TestPeerCookieEchoAndExplicitRekeyRejection(t *testing.T) {
 		t.Fatal("rekey rejection has wrong exchange identity")
 	}
 	notify, err = ikev2.ParseNotify(inner[0].Body)
-	if err != nil || notify.NotifyType != ikev2.NotifyNoAdditionalSAs || reply.Abort != nil {
+	if err != nil || notify.NotifyType != ikev2.NotifyNoProposalChosen || reply.Abort != nil {
 		t.Fatal("unsupported rekey pretended success or tore down current SA")
 	}
 }

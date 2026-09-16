@@ -86,8 +86,13 @@ this event to tunnel or country-exit failure. The restoration
 it does not rewrite desired configuration or use the host network. Configured
 IMEI/IMEISV uses the legacy BCD format; absent IMEISV derives configured SVN 00
 from the configured IMEI, never an invented hardware readback or global identity.
-Peer-initiated CREATE_CHILD_SA is explicitly rejected with NO_ADDITIONAL_SAS;
-this is not full responder-side rekey support. Fragmented peer requests and
+Peer-initiated CREATE_CHILD_SA follows the original MDD default classification:
+additional bearers receive NO_ADDITIONAL_SAS, unknown ESP rekey SPIs receive
+INVALID_SPI, and known ESP/IKE rekey requests receive NO_PROPOSAL_CHOSEN.
+The existing SA is untouched. The original peer ESP in-place acceptance branch
+was experimental and disabled by default; peer IKE in-place acceptance was not
+implemented. Do not describe either as a fully enabled legacy capability.
+Fragmented peer requests and
 network-supplied recovery backoff remain separate compatibility boundaries.
 
 ## MDD Operation Ownership
