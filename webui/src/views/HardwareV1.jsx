@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
@@ -20,7 +21,7 @@ export default function HardwareV1({ device, showToast, refreshDevices }) {
   useEffect(() => { void load() }, [load])
   const enable = async () => {
     const selected = raw?.candidates?.find(value => value.candidate_id === candidate)
-    if (!selected || !importer || !window.confirm(t('Persist whole-modem passthrough for this exact ICCID and equipment? The source OS will remain fenced until you explicitly disable it.'))) return
+    if (!selected || !importer || !(await dialogs.confirm(t('Persist whole-modem passthrough for this exact ICCID and equipment? The source OS will remain fenced until you explicitly disable it.')))) return
     setBusy(true)
     try {
       await api.saveRawModemBinding(lineID, {
@@ -33,7 +34,7 @@ export default function HardwareV1({ device, showToast, refreshDevices }) {
     } catch (error) { showToast(error.message); await load() } finally { setBusy(false) }
   }
   const disable = async () => {
-    if (!raw?.binding || !window.confirm(t('Disable persistent passthrough and return this modem/SIM pair to adapted mode?'))) return
+    if (!raw?.binding || !(await dialogs.confirm(t('Disable persistent passthrough and return this modem/SIM pair to adapted mode?')))) return
     setBusy(true)
     try {
       await api.saveRawModemBinding(lineID, {

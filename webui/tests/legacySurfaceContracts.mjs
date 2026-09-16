@@ -53,7 +53,7 @@ assert.equal(allowance.includes('setInterval'), false, 'allowance reply reads mu
 assert.ok(allowance.includes('setTimeout(observe,30000)'), 'first reply read must use the low-frequency timer')
 assert.ok(allowance.includes('Date.now() + 600000'), 'reply observation must be bounded')
 const allowanceQuery = allowance.slice(allowance.indexOf('const query = async'))
-assert.ok(allowanceQuery.indexOf("!['cellular','vowifi'].includes(sendTransport)") < allowanceQuery.indexOf('window.confirm'),
+assert.ok(allowanceQuery.indexOf("!['cellular','vowifi'].includes(sendTransport)") < allowanceQuery.indexOf('dialogs.confirm'),
   'reject missing transport before asking for a paid SMS confirmation')
 assert.ok(allowanceQuery.includes('if (operationBusy.current) return'))
 assert.ok(allowance.includes("aria-label={t('Allowance SMS transport')}"))

@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
@@ -39,7 +40,7 @@ export default function DiagnosticsV1({ instances, devices, callCoordinator, sho
 	const registerSupported = String(runtimeFact?.detail || '').split(';').includes('manual_register=true')
 	const manualRegister = async () => {
 		if (!selectedLine?.iccid || !registerSupported || registering ||
-			!window.confirm(t('Send one IMS REGISTER on the selected line? This does not place a call or send SMS.'))) return
+			!(await dialogs.confirm(t('Send one IMS REGISTER on the selected line? This does not place a call or send SMS.')))) return
 		setRegistering(true)
 		try {
 			await api.registerV1(lineID, selectedLine.iccid || selectedLine.card_id)

@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { simPINIdentity, pinProof, runtimeNetworkSelection } from '../lineAdapter.js'
@@ -243,7 +244,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       if(e.createdDraft && currentFormID.current===forId && currentTarget.current===forTarget) {
         setForm({...emptyInstance(),...e.createdDraft});setSavedLineId(String(e.createdDraft.id));setSelected(String(e.createdDraft.id))
       }
-      alert(e.message)
+      (await dialogs.alert(e.message))
     }
     setSaving(false)
     mutationBusy.current = false
@@ -255,10 +256,10 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     const warning = deleteHistory
       ? t('Delete this SIM line and all of its messages and call records?')
       : t('Delete this SIM line? Messages and call records will be preserved.')
-    if (!confirm(`${t('You are deleting SIM line “{name}” (ID {id}).', { name: lineLabel, id: form.id })}\n\n${warning}\n\n${t('If the SIM is still inserted, automatic setup pauses until it is removed and inserted again.')}`)) return
-    const typed = prompt(t('Type the line ID “{id}” to confirm deletion.', { id: form.id }), '')
+    if (!(await dialogs.confirm(`${t('You are deleting SIM line “{name}” (ID {id}).', { name: lineLabel, id: form.id })}\n\n${warning}\n\n${t('If the SIM is still inserted, automatic setup pauses until it is removed and inserted again.')}`))) return
+    const typed = (await dialogs.prompt(t('Type the line ID “{id}” to confirm deletion.', { id: form.id }), ''))
     if (String(typed || '').trim() !== String(form.id)) {
-      if (typed !== null) alert(t('Line ID did not match. Nothing was deleted.'))
+      if (typed !== null) (await dialogs.alert(t('Line ID did not match. Nothing was deleted.')))
       return
     }
     setDeleting(true)
@@ -275,14 +276,14 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       setForm(emptyInstance())
       await refresh()
       setPinMsg(t(deleteHistory ? 'SIM line and history deleted.' : 'SIM line deleted; history preserved.'))
-    } catch (error) { alert(error.message) }
+    } catch (error) { (await dialogs.alert(error.message)) }
     finally { mutationBusy.current = false; setDeleting(false) }
   }
 
   const softDel = async () => {
     if (mutationBusy.current) return
     const lineLabel = form.name || `${form.mcc || ''}-${form.mnc || ''}` || form.id
-    if (!confirm(t('Move SIM line “{name}” to Recycle Bin (Soft Delete)?\n\nThe line will be stopped and hidden, but all settings, messages, and call history are preserved and can be restored at any time.', { name: lineLabel }))) return
+    if (!(await dialogs.confirm(t('Move SIM line “{name}” to Recycle Bin (Soft Delete)?\n\nThe line will be stopped and hidden, but all settings, messages, and call history are preserved and can be restored at any time.', { name: lineLabel })))) return
     setDeleting(true)
     mutationBusy.current = true
     const forId = form.id
@@ -294,14 +295,14 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       setForm(emptyInstance())
       await refresh()
       setPinMsg(t('SIM line moved to Recycle Bin (Soft-deleted).'))
-    } catch (error) { alert(error.message) }
+    } catch (error) { (await dialogs.alert(error.message)) }
     finally { mutationBusy.current = false; setDeleting(false) }
   }
 
 
   const deleteSavedPin = async () => {
     if (mutationBusy.current || !pinConfiguration?.configured || !pinConfiguration.revision) return
-    if (!window.confirm(t('Remove the saved PIN from this Agent? The SIM card itself will not be changed.'))) return
+    if (!(await dialogs.confirm(t('Remove the saved PIN from this Agent? The SIM card itself will not be changed.')))) return
     mutationBusy.current = true; setPinBusy(true)
     const epoch = pinEpoch.current
     try {

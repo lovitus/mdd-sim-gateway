@@ -11,7 +11,7 @@
     "test:agent-health": "node tests/agentHealthPresentation.mjs",
     "test:live-status": "node tests/liveStatus.mjs",
     "test:control-ws": "node tests/controlWebSocket.mjs",
-    "test:line-presentation": "node tests/linePresentation.mjs",
+    "test:line-presentation": "node tests/linePresentation.mjs && node tests/dialogs.mjs",
     "test:request-gate": "node tests/latestRequestGate.mjs",
     "test:legacy-surface": "node tests/legacySurfaceContracts.mjs",
     "test:cellular-media": "node tests/cellularMediaMonitor.mjs",

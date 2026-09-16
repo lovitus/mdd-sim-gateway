@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
@@ -25,7 +26,7 @@ export default function AgentCredentials({ showToast }) {
     let command
     try { command=agentCredentialChange(action,id,credentials?.mode) }
     catch (failure) {setError(failure.message);return}
-    if (!window.confirm(t(command.confirmation,{agent:id}))) return
+    if (!(await dialogs.confirm(t(command.confirmation,{agent:id})))) return
     inFlight.current = true; setBusy(true); setError(''); setIssued(null)
     try {
       const result = await api.updateAgentCredentials(command.payload)

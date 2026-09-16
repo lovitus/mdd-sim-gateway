@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { candidateForDevice, claimedDraftForm, savedCatalogLine, modemProvisionIntent } from '../lineAdapter.js'
@@ -75,7 +76,7 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
   }
   const claim = () => run(async epoch => {
     if (!candidate?.can_claim || candidate.configured_line_id) throw new Error('line_candidate_unavailable')
-    if (!window.confirm(t('Create a disabled draft for this exact SIM?'))) return
+    if (!(await dialogs.confirm(t('Create a disabled draft for this exact SIM?')))) return
     const name = form.name || candidate.observed?.msisdn || ''
     const key = JSON.stringify([candidate.candidate_id,name])
     if (!claimOperation.current || claimOperation.current.key !== key) claimOperation.current = {key,id:crypto.randomUUID()}
@@ -95,7 +96,7 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
   const provision = () => run(async epoch => {
     if (unresolved) throw new Error('provision_reconcile_required')
     savedCatalogLine(form)
-    if (!window.confirm(t('Provision this exact saved SIM configuration? The line will not start automatically.'))) return
+    if (!(await dialogs.confirm(t('Provision this exact saved SIM configuration? The line will not start automatically.')))) return
     let result
     if (device?.device_type === 'reader') {
       if (device.sim?.iccid !== form.iccid) throw new Error('reader_card_identity_changed')
@@ -113,7 +114,7 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
   })
   const apply = () => run(async epoch => {
     savedCatalogLine(form)
-    if (!window.confirm(t('Apply this exact catalog revision to VoWiFi Providers? Changed lines may restart.'))) return
+    if (!(await dialogs.confirm(t('Apply this exact catalog revision to VoWiFi Providers? Changed lines may restart.')))) return
     const result = await api.applyProviderConfig(form.__catalog_revision)
     if (epoch === generation.current) setMessage([result.state || 'unknown',result.code || ''].filter(Boolean).join(' · '))
     await refresh?.()

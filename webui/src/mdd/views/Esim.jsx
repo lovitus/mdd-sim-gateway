@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import DeletionNotifications from './DeletionNotifications.jsx'
@@ -349,7 +350,7 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
       body.smdp = smdp.trim()
       body.matching_id = matchingId.trim() || undefined
     }
-    if (!window.confirm(t('Start this one-time profile download on the exact EID? It will not be retried automatically.'))) return
+    if (!(await dialogs.confirm(t('Start this one-time profile download on the exact EID? It will not be retried automatically.')))) return
     submitting.current = true; setBusy(true)
     let attempted = false
     try {
@@ -655,7 +656,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   const switchProfile = async (profile, se) => {
     if ((profile.profileNickname || '').includes('[MDD-DELETED]')) { setErr('请先手动重命名，删除 [MDD-DELETED] 标识；系统不会自动移除标识或启用。'); return }
     if (selectedCard?.stale) { setErr(t('Snapshot unavailable')); return }
-    if (operationBusy.current || !window.confirm(t('Enable profile {name} on EID {eid}?', {name:profileDisplayName(profile),eid:se.eid}))) return
+    if (operationBusy.current || !(await dialogs.confirm(t('Enable profile {name} on EID {eid}?', {name:profileDisplayName(profile),eid:se.eid})))) return
     operationBusy.current = true
     setBusyOp('Enable'); setErr('')
     const generation = readGeneration.current
@@ -812,8 +813,8 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
               {(dl.done || dl.error) && (
                 <button className="btn btn-ghost" onClick={() => setDl(null)}>{t('Dismiss')}</button>
               )}
-              {!downloadReceipt?.job && <button className="btn btn-ghost" onClick={()=>{
-                if(!window.confirm(t('Stop local tracking? This does not cancel the operation. A new download may duplicate it.')))return
+              {!downloadReceipt?.job && <button className="btn btn-ghost" onClick={async ()=>{
+                if(!(await dialogs.confirm(t('Stop local tracking? This does not cancel the operation. A new download may duplicate it.'))))return
                 forgetDownload(reader,downloadReceipt);receiptRef.current=null;setDownloadReceipt(null);setDl(null)
               }}>{t('Stop local tracking')}</button>}
             </div>
@@ -990,9 +991,9 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                               <button className="btn btn-danger-outline" disabled={!!busyOp || !readerOnline || enabled || !se.capabilities?.profile_deletion} title={enabled?'请先禁用此 profile':!se.capabilities?.profile_deletion?'需要支持标准删除的新 Agent':'永久删除卡内 profile，通知可能暂未送达'}
                                   onClick={async () => {
                                     if (operationBusy.current) return
-                                    if (!window.confirm(`永久删除 ${profileDisplayName(p)}？卡内 profile 将被实际删除，无法在本机撤销。`)) return
-                                    if (!window.confirm('删除后网络可能中断，通知可能待送达或结果未知。通知会保留，不能保证服务商已开放重新下载。确认继续？')) return
-                                    if (window.prompt('请输入此测试/目标 profile 的完整 ICCID 确认：') !== p.iccid) return
+                                    if (!(await dialogs.confirm(`永久删除 ${profileDisplayName(p)}？卡内 profile 将被实际删除，无法在本机撤销。`))) return
+                                    if (!(await dialogs.confirm('删除后网络可能中断，通知可能待送达或结果未知。通知会保留，不能保证服务商已开放重新下载。确认继续？'))) return
+                                    if ((await dialogs.prompt('请输入此测试/目标 profile 的完整 ICCID 确认：')) !== p.iccid) return
                                     await runProfileOp('Delete', async () => {
                                       let result
                                       try{result=await api.deleteEuiccProfile(se.eid,p.iccid,{operation_id:`delete-${crypto.randomUUID()}`,confirm_iccid:p.iccid,confirm_permanent_delete:true,confirm_delivery_may_be_pending:true})}finally{setDeletionRefresh(value=>value+1)}
@@ -1001,7 +1002,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                                     })
                                   }}>永久删除</button>
                               <button className="btn btn-ghost" disabled={!!busyOp} onClick={async()=>{
-                                try{const result=await api.euiccSoftDeleteRecord(se.eid,p.iccid);window.alert(result.found?(result.history||[result.event]).map(event=>`时间：${event.created_at}\n软删除状态：${event.state}\n通知状态：${event.notification_state}\n原昵称：${event.original_nickname}\n操作：${event.operation_id}`).join('\n\n'):'没有本地软删除记录。')}catch(error){showToast?.(error.message)}
+                                try{const result=await api.euiccSoftDeleteRecord(se.eid,p.iccid);(await dialogs.alert(result.found?(result.history||[result.event]).map(event=>`时间：${event.created_at}\n软删除状态：${event.state}\n通知状态：${event.notification_state}\n原昵称：${event.original_nickname}\n操作：${event.operation_id}`).join('\n\n'):'没有本地软删除记录。'))}catch(error){showToast?.(error.message)}
                               }}>删除记录</button>
                             </div>
                           </div>
@@ -1020,8 +1021,8 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <div style={{ fontWeight: 700 }}>{t('Notifications')}</div>
           <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline || !notifications.length || notifications.some(item => item.event === 'delete')}
-            onClick={() => {
-              if (!window.confirm(t('Send the displayed stored notifications once?'))) return
+            onClick={async () => {
+              if (!(await dialogs.confirm(t('Send the displayed stored notifications once?')))) return
               return runProfileOp('Process notifications', async () => {
               for (const se of ses) {
                 const ordinary=(se.notifications||[]).filter(note=>note.event!=='delete')
@@ -1078,11 +1079,11 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                               {t('Replay')}
                             </button>
                             <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline || n.event === 'delete'}
-                              onClick={() => { if (window.confirm(t('Send this exact stored notification once?'))) runProfileOp('Process', () => api.esimNotificationsProcess({...target,confirmed:true})) }}>
+                              onClick={async () => { if ((await dialogs.confirm(t('Send this exact stored notification once?')))) runProfileOp('Process', () => api.esimNotificationsProcess({...target,confirmed:true})) }}>
                               {t('Send')}
                             </button>
                             <button className="btn btn-ghost" disabled={!!busyOp || !readerOnline || n.event === 'delete'}
-                              onClick={() => { if (window.confirm(t('Confirm the receiver acknowledged this notification and remove it from the card?'))) runProfileOp('Remove', () => api.esimNotificationRemove(n.seqNumber ?? n.seq, {...target,confirmed:true,receiver_acknowledged:true})) }}>
+                              onClick={async () => { if ((await dialogs.confirm(t('Confirm the receiver acknowledged this notification and remove it from the card?')))) runProfileOp('Remove', () => api.esimNotificationRemove(n.seqNumber ?? n.seq, {...target,confirmed:true,receiver_acknowledged:true})) }}>
                               {t('Remove')}
                             </button>
                           </div>

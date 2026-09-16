@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from '../api.js'
 import { getCallAudioBufferMS } from '../../browserPreferences.js'
@@ -150,12 +151,12 @@ export default function Softphone({
       }
     } catch (error) { toast(error.message) }
   }
-  const deleteSelectedCalls = () => {
-    if (callSel.size && window.confirm(t('Delete selected calls?'))) void removeCalls({ ids:[...callSel] })
+  const deleteSelectedCalls = async () => {
+    if (callSel.size && (await dialogs.confirm(t('Delete selected calls?')))) void removeCalls({ ids:[...callSel] })
   }
   const deleteOneCall = (record, event) => { event?.stopPropagation(); void removeCalls({ ids:[record.id] }, record.line_id) }
-  const clearAllCalls = () => {
-    if (calls.length && window.confirm(t('Clear the entire call history for this line?'))) void removeCalls({ all:true })
+  const clearAllCalls = async () => {
+    if (calls.length && (await dialogs.confirm(t('Clear the entire call history for this line?')))) void removeCalls({ all:true })
   }
   const verifyMedia = async () => {
     if (!browserMediaAvailable || owned || mediaTest === 'running') return
@@ -217,7 +218,7 @@ export default function Softphone({
     const target = normalizeDialTarget(number)
     if (!target) { toast(t('Use a service short code or international format, for example +8613800138000.')); return }
     if (callTransport === 'vowifi' ? !vowifiReady : !cellularReady) { toast(t('Voice unavailable')); return }
-    if (callTransport === 'cellular' && !window.confirm(t('Place this call through the cellular modem? Normal call charges may apply.'))) return
+    if (callTransport === 'cellular' && !(await dialogs.confirm(t('Place this call through the cellular modem? Normal call charges may apply.')))) return
     try {
       await callCoordinator.startOutgoing(id, callTransport, target, getCallAudioBufferMS())
     } catch (error) { toast(error.message) }

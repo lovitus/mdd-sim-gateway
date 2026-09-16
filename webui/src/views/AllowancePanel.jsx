@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
@@ -86,7 +87,7 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
       return
     }
     const { recipient, body } = rule.effective
-    if (!window.confirm(t('Send “{body}” to {recipient} to query the allowance? SMS charges may apply.', { body, recipient }))) return
+    if (!(await dialogs.confirm(t('Send “{body}” to {recipient} to query the allowance? SMS charges may apply.', { body, recipient })))) return
     setBusy(true)
     const previousTs = value.updated_ts
     try {
@@ -112,7 +113,7 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
   }
 
   const resetRule = async () => {
-    if (!window.confirm(t('Restore this carrier’s default allowance query method?'))) return
+    if (!(await dialogs.confirm(t('Restore this carrier’s default allowance query method?')))) return
     setBusy(true)
     try {
       const result = await api.resetAllowanceQueryRule(instanceId)

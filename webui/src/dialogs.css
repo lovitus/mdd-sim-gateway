@@ -1,0 +1,16 @@
+.mdd-dialog {
+  box-sizing: border-box; width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px); margin: auto; padding: 24px;
+  color: var(--text, #17202b); background: var(--panel, #fff);
+  border: 1px solid var(--border, #d5dbe3); border-radius: 8px;
+  box-shadow: 0 12px 40px #0003; overflow: auto; font-size: 14px;
+  letter-spacing: 0;
+}
+.mdd-dialog::backdrop { background: #0008; }
+.mdd-dialog h2 { margin: 0 0 16px; font-size: 18px; line-height: 1.4; }
+.mdd-dialog-message { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.mdd-dialog input { display: block; box-sizing: border-box; width: 100%; margin-top: 16px; min-height: 40px; }
+.mdd-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.mdd-dialog-actions button { min-height: 40px; min-width: 80px; }
+.mdd-dialog :focus-visible { outline: 2px solid #2874ee; outline-offset: 3px; }
+@media (max-width: 480px) { .mdd-dialog { padding: 18px; } }

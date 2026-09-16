@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useState } from 'react'
 import { api, downloadSystemBackup } from '../api.js'
 import UpdateV1 from './UpdateV1.jsx'
@@ -68,16 +69,16 @@ export default function SystemV1({ showToast, setSystemMeta, setCallAudioBufferM
 	const updateAgentCredential = async (action, selectedAgentID = '') => {
 		const normalized = String(selectedAgentID || agentID).trim()
 		if (action !== 'set_mode' && !normalized) { showToast(t('Enter an Agent ID')); return }
-		if (action === 'revoke' && !window.confirm(t('Revoke this Agent credential and disconnect its active sessions?'))) return
-		if (action === 'unenroll' && !window.confirm(t('Return this Agent to the legacy shared fallback?'))) return
+		if (action === 'revoke' && !(await dialogs.confirm(t('Revoke this Agent credential and disconnect its active sessions?')))) return
+		if (action === 'unenroll' && !(await dialogs.confirm(t('Return this Agent to the legacy shared fallback?')))) return
 		setBusy(true)
 		try {
 			const payload = action === 'set_mode'
 				? { action, mode: agentCredentials?.mode === 'scoped' ? 'transition' : 'scoped' }
 				: { action, agent_id: normalized }
-			if (action === 'set_mode' && !window.confirm(t(payload.mode === 'scoped'
+			if (action === 'set_mode' && !(await dialogs.confirm(t(payload.mode === 'scoped'
 				? 'Disable the shared fallback? Agents without an active scoped credential will disconnect.'
-				: 'Re-enable the legacy shared fallback? Unknown Agent IDs will be able to authenticate with the shared token.'))) return
+				: 'Re-enable the legacy shared fallback? Unknown Agent IDs will be able to authenticate with the shared token.')))) return
 			const result = await api.updateAgentCredentials(payload)
 			setAgentCredentials(result.credentials || await api.authAgentCredentials())
 			setConnectedAgents(current => action === 'set_mode' ? [] : current.filter(agent => agent.agent_id !== normalized))
@@ -90,7 +91,7 @@ export default function SystemV1({ showToast, setSystemMeta, setCallAudioBufferM
 		catch { showToast(t('Clipboard unavailable')) }
 	}
   const runMaintenance = async action => {
-    if (!window.confirm(t(action === 'begin' ? 'Drain all active VoWiFi providers for maintenance?' : 'Resume all drained VoWiFi providers?'))) return
+    if (!(await dialogs.confirm(t(action === 'begin' ? 'Drain all active VoWiFi providers for maintenance?' : 'Resume all drained VoWiFi providers?')))) return
     setBusy(true)
     try {
       const catalog = await api.catalogLines()

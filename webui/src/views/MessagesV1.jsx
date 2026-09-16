@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api.js'
 import { operationID } from '../goV1Adapter.js'
@@ -163,8 +164,8 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
     setPending(value); savePending(value)
     await dispatch(value)
   }
-  const discard = () => {
-    if (!window.confirm(t('Discard only this browser retry identity? This cannot retract a message that may already have been submitted.'))) return
+  const discard = async () => {
+    if (!(await dialogs.confirm(t('Discard only this browser retry identity? This cannot retract a message that may already have been submitted.')))) return
     savePending(null); setPending(null); setRecipient(''); setBody('')
   }
 	useEffect(() => {
@@ -174,7 +175,7 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
 	const visibleMessages = messages
 	const deleteHistory = async (scope) => {
 		if (!selectedConversation || loading || sending || pending ||
-			!window.confirm(t(scope === 'all' ? 'Delete all history for this line and transport?' : 'Delete this conversation history?'))) return
+			!(await dialogs.confirm(t(scope === 'all' ? 'Delete all history for this line and transport?' : 'Delete this conversation history?')))) return
 		const token = loadGate.current.begin(historyRoute)
 		try {
 			await api.deleteMessageHistoryV1({ line_id: selectedConversation.line_id, transport: selectedConversation.transport,
@@ -184,7 +185,7 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
 	}
 	const deleteSelected = async () => {
 		if (!selectedConversation || loading || sending || pending || !selectedEvents.size ||
-			!window.confirm(t('Delete selected message records?'))) return
+			!(await dialogs.confirm(t('Delete selected message records?')))) return
 		const token = loadGate.current.begin(historyRoute)
 		try {
 			await api.deleteMessageHistoryV1({ line_id: selectedConversation.line_id, transport: selectedConversation.transport, event_ids: [...selectedEvents] })

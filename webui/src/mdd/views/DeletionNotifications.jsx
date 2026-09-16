@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, {useEffect,useRef,useState} from 'react'
 import {createPortal} from 'react-dom'
 import {api} from '../api.js'
@@ -27,9 +28,9 @@ export default function DeletionNotifications({eid,refreshKey=0}) {
   }
   const replay=async archive=>{
     if(lock.current)return
-    if(!window.confirm(`${archive.attempts?.length?'重发':'发送'} ${selected?.name||''}（ICCID ${archive.entry.iccid}）的删除通知至 ${archive.entry.address}？运营商可能据此永久停用服务。`))return
-    if(!window.confirm('确认这是一次新的发送尝试？成功、失败或未知结果均保留原始通知，不会自动重试。'))return
-    if(window.prompt('输入完整 ICCID，确认本次发送：')!==archive.entry.iccid)return
+    if(!(await dialogs.confirm(`${archive.attempts?.length?'重发':'发送'} ${selected?.name||''}（ICCID ${archive.entry.iccid}）的删除通知至 ${archive.entry.address}？运营商可能据此永久停用服务。`)))return
+    if(!(await dialogs.confirm('确认这是一次新的发送尝试？成功、失败或未知结果均保留原始通知，不会自动重试。')))return
+    if((await dialogs.prompt('输入完整 ICCID，确认本次发送：'))!==archive.entry.iccid)return
     lock.current=true;setBusy(true);setError('')
     try{
       const result=await api.replayEuiccNotificationArchive(eid,archive.entry.sequence_number,{operation_id:`replay-${crypto.randomUUID()}`,archive_sha256:archive.sha256,confirm_iccid:archive.entry.iccid,confirm_operator_deactivation:true,confirm_retain_notification:true})
@@ -43,7 +44,7 @@ export default function DeletionNotifications({eid,refreshKey=0}) {
   const detail=selected&&rows.find(row=>row.key===selected.key)
   const reveal=async()=>{
     if(!detail||lock.current)return
-    if(!window.confirm('显示敏感的下载恢复码？请勿将详情截图或代码转发给他人。'))return
+    if(!(await dialogs.confirm('显示敏感的下载恢复码？请勿将详情截图或代码转发给他人。')))return
     const current=epoch.current;lock.current=true;setBusy(true)
     try{const result=await api.euiccRecoveryCodes(eid,detail.iccid,{confirmed:true,confirm_iccid:detail.iccid,download_operation_id:detail.recovery?.download_operation_id});if(epoch.current===current)setCodes(result)}catch(e){if(epoch.current===current)setError(e.message)}finally{lock.current=false;setBusy(false)}
   }

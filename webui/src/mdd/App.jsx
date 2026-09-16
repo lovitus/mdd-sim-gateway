@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import DialogHost from '../DialogHost.jsx'
 import { api, connectWs, setCsrf, setAuthToken } from './api.js'
 import Softphone from './views/Softphone.jsx'
 import Messages from './views/Messages.jsx'
@@ -67,7 +68,7 @@ function legacyDevices(instances, cards) {
 }
 
 export default function App() {
-  const { t } = useI18n()
+  const { t, language } = useI18n()
   const [view, setView] = useState(viewFromHash); const [menuOpen, setMenuOpen] = useState(false)
   const [instances, setInstances] = useState([]); const [cards, setCards] = useState([]); const [devices, setDevices] = useState([])
   // Sessions live in memory, so signing in normally happens seconds after the control plane
@@ -216,6 +217,7 @@ export default function App() {
   }[view]
   const issueUrl = `${(systemMeta.repository_url || 'https://github.com/MddIdd/mdd-sim-gateway').replace(/\/$/, '')}/issues/new/choose`
   return <div className="u-shell">
+    <DialogHost language={language} />
     <GlobalGoCallOverlay coordinator={callCoordinator} translate={t} />
     <aside className={`u-sidebar ${menuOpen?'open':''}`}>
       <div className="u-brand"><img src="/logo.svg" alt="" /><div>MDD Sim Gateway<small>{t('4G + VoWiFi unified')}</small></div></div>

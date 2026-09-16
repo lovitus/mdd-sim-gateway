@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
@@ -61,7 +62,7 @@ export default function UpdateV1() {
   }
   const begin = async () => {
     if (requestBusy.current || active(status) || !release?.comparison_known || !release?.update_available || status?.state === 'unknown') return
-    if (!window.confirm(t('Install version {version}? Services may be interrupted; sign in again after restart.', { version: release.latest }))) return
+    if (!(await dialogs.confirm(t('Install version {version}? Services may be interrupted; sign in again after restart.', { version: release.latest })))) return
     requestBusy.current = true; setBusy(true); setError('')
     const priorOperation = status?.operation_id || ''
     try {

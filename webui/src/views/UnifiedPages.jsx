@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
@@ -106,9 +107,9 @@ function SmsAdvisory({ device, refreshDevices, showToast }) {
   const restart = recovery.soft_restart || {}
   if (!diagnostics || (!advisory.length && !diagnostics.service_center && !refresh.recommended && !restart.recommended)) return null
   const run = async (kind) => {
-    if (kind === 'restart' && !window.confirm(isZh
+    if (kind === 'restart' && !(await dialogs.confirm(isZh
       ? '软重启会短暂中断该模块的数据、短信和通话。继续吗？'
-      : 'Soft restart briefly interrupts this modem\'s data, SMS and calls. Continue?')) return
+      : 'Soft restart briefly interrupts this modem\'s data, SMS and calls. Continue?'))) return
     setBusy(kind)
     try {
       const result = kind === 'restart'
@@ -216,7 +217,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
 	  : kind === 'connection'
 	  ? t('Change the persistent 4G data connection? This may use metered or roaming data; only MDD sockets can use the guarded bearer.')
       : t('{action} {name}? The UI will wait for the real device state.', { action: next ? t('Enable') : t('Disable'), name: title })
-    if (!window.confirm(impact)) return
+    if (!(await dialogs.confirm(impact))) return
     setPendingTarget(next)
     setSubmitting(true)
     try {
@@ -395,7 +396,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
       showToast?.(isZh ? `该 IMEI 仍绑定 ${used.length} 张 SIM，请先解绑` : `This IMEI is still bound to ${used.length} SIM(s); unbind them first`)
       return
     }
-    if (!window.confirm(isZh ? `删除 IMEI“${entry.name}”？` : `Delete IMEI “${entry.name}”?`)) return
+    if (!(await dialogs.confirm(isZh ? `删除 IMEI“${entry.name}”？` : `Delete IMEI “${entry.name}”?`))) return
     setBusy(`delete:${entry.id}`)
     try {
       await api.deleteImeiPoolEntry(entry.id)
@@ -415,7 +416,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
     const warning = running
       ? (isZh ? '该线路正在运行。换绑会立即保存，但需要重启线路后才使用新 IMEI。继续？' : 'This line is running. The binding is saved now but takes effect after a line restart. Continue?')
       : (isZh ? `将此 SIM 绑定到“${entry.name}”？` : `Bind this SIM to “${entry.name}”?`)
-    if (!window.confirm(warning)) return
+    if (!(await dialogs.confirm(warning))) return
     setBusy(`bind:${row.iccid}`)
     try {
       await api.bindImeiToIccid({ iccid: row.iccid, imei_id: entry.id })
@@ -429,7 +430,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
 
   const unbind = async (row) => {
     if (!bindings[row.iccid]) return
-    if (!window.confirm(isZh ? '解除此 ICCID 的 IMEI 绑定？线路下次启动可能要求重新绑定。' : 'Unbind this ICCID? The line may require a new binding on its next start.')) return
+    if (!(await dialogs.confirm(isZh ? '解除此 ICCID 的 IMEI 绑定？线路下次启动可能要求重新绑定。' : 'Unbind this ICCID? The line may require a new binding on its next start.'))) return
     setBusy(`unbind:${row.iccid}`)
     try {
       await api.unbindImeiFromIccid(row.iccid)

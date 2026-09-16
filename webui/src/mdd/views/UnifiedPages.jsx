@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
@@ -141,7 +142,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     const text = language === 'zh'
       ? '仅在没有活动通话时发送一次 IMS REGISTER；不会拨号或发短信。继续吗？'
       : 'Send one IMS REGISTER only when the line is proven idle? This does not dial or send SMS.'
-    if (!window.confirm(text)) return
+    if (!(await dialogs.confirm(text))) return
     setError(''); setRunning('register')
     try {
       await api.register(selectedId)
@@ -160,7 +161,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     const confirmText = language === 'zh'
       ? `将通过当前线路 VoWiFi 拨打 ${target}，接通后最多测试 ${seconds} 秒，可能产生费用。系统会挂断该通话，并核对持久通话记录和线路空闲状态。继续吗？`
       : `Call ${target} through VoWiFi for up to ${seconds}s after answer? Charges may apply. The exact call will hang up, and durable call history plus line idle state will be verified. Continue?`
-    if (!window.confirm(confirmText)) return
+    if (!(await dialogs.confirm(confirmText))) return
     setError(''); setStabilityResult(null); setRunning('stability')
     try {
       if (!callCoordinator?.runStabilityTest) throw new Error('Browser call coordinator is unavailable')
@@ -175,7 +176,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
   const retryRecovery = async () => {
     const current = facts?.recovery
     if (!current?.selection || current.selection.attempts < 5 || !!running) return
-    if (!window.confirm(language === 'zh' ? '重试同一个节点恢复请求一次？这可能继续切换出口；不会创建新的请求身份或清除未确认的保护。' : 'Retry the original exit recovery request once? It may continue switching the exit; unresolved protection will not be cleared.')) return
+    if (!(await dialogs.confirm(language === 'zh' ? '重试同一个节点恢复请求一次？这可能继续切换出口；不会创建新的请求身份或清除未确认的保护。' : 'Retry the original exit recovery request once? It may continue switching the exit; unresolved protection will not be cleared.'))) return
     const forId = selectedId
     setRunning('recovery'); setError('')
     try {
@@ -269,9 +270,9 @@ function SmsAdvisory({ device, refreshDevices, showToast }) {
   const restart = recovery.soft_restart || {}
   if (!diagnostics || (!advisory.length && !diagnostics.service_center && !refresh.recommended && !restart.recommended)) return null
   const run = async (kind) => {
-    if (kind === 'restart' && !window.confirm(isZh
+    if (kind === 'restart' && !(await dialogs.confirm(isZh
       ? '软重启会短暂中断该模块的数据、短信和通话。继续吗？'
-      : 'Soft restart briefly interrupts this modem\'s data, SMS and calls. Continue?')) return
+      : 'Soft restart briefly interrupts this modem\'s data, SMS and calls. Continue?'))) return
     setBusy(kind)
     try {
       const result = kind === 'restart'
@@ -382,7 +383,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
       : kind === 'connection'
       ? t('Change the persistent 4G data connection? This may use metered or roaming data; only MDD sockets can use the guarded bearer.')
       : t('{action} {name}? The UI will wait for the real device state.', { action: next ? t('Enable') : t('Disable'), name: title })
-    if (!window.confirm(impact)) return
+    if (!(await dialogs.confirm(impact))) return
     setPendingTarget(next)
     setSubmitting(true)
     try {
@@ -560,7 +561,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
       showToast?.(isZh ? `该 IMEI 仍绑定 ${used.length} 张 SIM，请先解绑` : `This IMEI is still bound to ${used.length} SIM(s); unbind them first`)
       return
     }
-    if (!window.confirm(isZh ? `删除 IMEI“${entry.name}”？` : `Delete IMEI “${entry.name}”?`)) return
+    if (!(await dialogs.confirm(isZh ? `删除 IMEI“${entry.name}”？` : `Delete IMEI “${entry.name}”?`))) return
     setBusy(`delete:${entry.id}`)
     try {
       await api.deleteImeiPoolEntry(entry.id, poolSnapshot)
@@ -581,7 +582,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
     const warning = running
       ? (isZh ? '该线路正在运行。换绑会立即保存，但需要重启线路后才使用新 IMEI。继续？' : 'This line is running. The binding is saved now but takes effect after a line restart. Continue?')
       : (isZh ? `将此 SIM 绑定到“${entry.name}”？` : `Bind this SIM to “${entry.name}”?`)
-    if (!window.confirm(warning)) return
+    if (!(await dialogs.confirm(warning))) return
     setBusy(`bind:${row.iccid}`)
     try {
       await api.bindImeiToIccid({ iccid: row.iccid, imei_id: entry.id }, poolSnapshot)
@@ -596,7 +597,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
   const unbind = async (row) => {
     if (busy || loading || !poolSnapshot) return
     if (!bindings[row.iccid]) return
-    if (!window.confirm(isZh ? '解除此 ICCID 的 IMEI 绑定？线路下次启动可能要求重新绑定。' : 'Unbind this ICCID? The line may require a new binding on its next start.')) return
+    if (!(await dialogs.confirm(isZh ? '解除此 ICCID 的 IMEI 绑定？线路下次启动可能要求重新绑定。' : 'Unbind this ICCID? The line may require a new binding on its next start.'))) return
     setBusy(`unbind:${row.iccid}`)
     try {
       await api.unbindImeiFromIccid(row.iccid, poolSnapshot)
@@ -716,7 +717,7 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
 
   const forget = async () => {
     if (device.present !== false) { showToast(t('Disconnect this device before hiding it')); return }
-    if (!window.confirm(t('Hide this offline device? All matching data is preserved, and a normal heartbeat will show it again.'))) return
+    if (!(await dialogs.confirm(t('Hide this offline device? All matching data is preserved, and a normal heartbeat will show it again.')))) return
     try {
       await api.deleteDevice(device)
       await refreshDevices()
@@ -1376,7 +1377,7 @@ export function NotificationsPage({ showToast }) {
       <div className="card u-panel"><div className="u-card-head"><div><h2>Telegram</h2><p>{t('Direct, manual proxy, or an existing country exit.')}</p></div><input type="checkbox" className="u-toggle" checked={!!tg.enabled} onChange={e => setChannel('telegram', { enabled: e.target.checked })} /></div><label>{t('Bot token')}</label>{secretInput('telegram', tg, 'bot_token', true)}<label>{t('Chat / Channel ID')}</label>{secretInput('telegram', tg, 'chat_id', false)}<label>{t('Connection')}</label><select value={tg.proxy_mode || 'direct'} onChange={e => setChannel('telegram', { proxy_mode: e.target.value })}><option value="direct">{t('Direct')}</option><option value="manual">{t('Manual HTTP/SOCKS proxy')}</option><option value="country">{t('Use country exit')}</option></select>{tg.proxy_mode === 'manual' && <><label>{t('Proxy URL')}</label>{secretInput('telegram', tg, 'proxy_url', false)}</>}{tg.proxy_mode === 'country' && <><label>{t('Country exit')}</label><select value={tg.proxy_country || ''} onChange={e => setChannel('telegram', { proxy_country: e.target.value })}><option value="">{t('Select a country/region…')}</option>{[...new Set([...Object.keys(s.proxy?.exits || {}),tg.proxy_country].filter(Boolean))].map(country => <option key={country} value={country}>{country.toUpperCase()}</option>)}</select></>}{eventOptions('telegram', tg)}<button className="btn btn-ghost" onClick={() => guard(async () => { await api.testTelegram(tg); await loadDeliveries(); showToast(t('Test succeeded')) })}>{t('Test')}</button>
       </div>
       <div className="card u-panel"><div className="u-card-head"><div><h2>PushPlus</h2><p>{t('Push through the official PushPlus service.')}</p></div><input type="checkbox" className="u-toggle" checked={!!pp.enabled} onChange={e => setChannel('pushplus', { enabled: e.target.checked })} /></div><label>{t('PushPlus token')}</label>{secretInput('pushplus', pp, 'token', true)}<label>{t('Topic code (optional)')}</label>{secretInput('pushplus', pp, 'topic', false)}<div className="u-form-grid"><div><label>{t('Message template')}</label><select value={pp.template || 'html'} onChange={e => setChannel('pushplus', { template: e.target.value })}><option value="html">HTML</option><option value="txt">{t('Plain text')}</option><option value="markdown">Markdown</option><option value="json">JSON</option></select></div><div><label>{t('PushPlus channel')}</label><select value={pp.channel || 'wechat'} onChange={e => setChannel('pushplus', { channel: e.target.value })}><option value="wechat">{t('WeChat')}</option><option value="app">App</option><option value="mail">{t('Email')}</option><option value="webhook">Webhook</option><option value="cp">{t('WeCom')}</option><option value="clawbot">ClawBot</option></select></div></div>{eventOptions('pushplus', pp)}<button className="btn btn-ghost" onClick={() => guard(async () => { await api.testPushPlus(pp); await loadDeliveries(); showToast(t('Test succeeded')) })}>{t('Test')}</button></div></div>}
-    {tab === 'delivery' && <div className="card u-panel"><div className="u-card-head"><div><h2>{t('Delivery log')}</h2></div><div className="u-inline"><button className="btn btn-ghost" onClick={loadDeliveries}>{t('Refresh')}</button><button className="btn btn-ghost" onClick={() => { if (window.confirm(t('Clear notification history?'))) guard(async () => { await api.clearNotificationDeliveries(); await loadDeliveries() }) }}>{t('Clear')}</button></div></div>{deliveries.pending.map(row => <div className="u-detail" key={row.id}><span>{row.channel} · {row.event}</span><b>{row.status} · {row.attempts}</b></div>)}{deliveries.history.map(row => <div className="u-detail" key={row.id}><span>{row.finished_at ? new Date(row.finished_at * 1000).toLocaleString() : t('Unknown')} · {row.channel} · {row.event}</span><b>{row.status} · {row.attempts} · {row.code || ''}</b></div>)}{!deliveries.pending.length && !deliveries.history.length && <p className="u-muted">{t('No delivery records')}</p>}</div>}
+    {tab === 'delivery' && <div className="card u-panel"><div className="u-card-head"><div><h2>{t('Delivery log')}</h2></div><div className="u-inline"><button className="btn btn-ghost" onClick={loadDeliveries}>{t('Refresh')}</button><button className="btn btn-ghost" onClick={async () => { if ((await dialogs.confirm(t('Clear notification history?')))) guard(async () => { await api.clearNotificationDeliveries(); await loadDeliveries() }) }}>{t('Clear')}</button></div></div>{deliveries.pending.map(row => <div className="u-detail" key={row.id}><span>{row.channel} · {row.event}</span><b>{row.status} · {row.attempts}</b></div>)}{deliveries.history.map(row => <div className="u-detail" key={row.id}><span>{row.finished_at ? new Date(row.finished_at * 1000).toLocaleString() : t('Unknown')} · {row.channel} · {row.event}</span><b>{row.status} · {row.attempts} · {row.code || ''}</b></div>)}{!deliveries.pending.length && !deliveries.history.length && <p className="u-muted">{t('No delivery records')}</p>}</div>}
     {tab !== 'delivery' && <button className="btn btn-primary" onClick={save}>{t('Save')}</button>}
   </fieldset>
 }
@@ -1413,7 +1414,7 @@ export function SystemPage({ showToast, openUpdateDialog, instances, callCoordin
   const tabs = [['general', t('General')], ['web', t('Web access')], ['voice', t('Calls & VoWiFi')], ['verification', language === 'zh' ? '验证与排障' : 'Verification'], ['security', t('Security')], ['backup', t('Backup & updates')], ['maintenance', t('Maintenance')]]
   const saveDomain = async domain => {
     if (settingsLock.current) return
-    if(domain==='hardware' && !window.confirm(t(s.hardware?.modem_backend==='serial'?'serialModeEnableConfirm':'serialModeDisableConfirm')))return
+    if(domain==='hardware' && !(await dialogs.confirm(t(s.hardware?.modem_backend==='serial'?'serialModeEnableConfirm':'serialModeDisableConfirm'))))return
     settingsLock.current = true;setSettingsBusy(true);setSettingsError('')
     try {setS(await api.saveSettings(s,domain));showToast(t('Saved'))}
     catch (error) {setSettingsError(error.message)}
@@ -1428,7 +1429,7 @@ export function SystemPage({ showToast, openUpdateDialog, instances, callCoordin
     finally{settingsLock.current=false;setSettingsBusy(false)}
   }
   const applyRekey = async () => {
-    if(settingsLock.current || !window.confirm(t('Apply this exact catalog revision to VoWiFi Providers? Changed lines may restart.')))return
+    if(settingsLock.current || !(await dialogs.confirm(t('Apply this exact catalog revision to VoWiFi Providers? Changed lines may restart.'))))return
     settingsLock.current=true;setSettingsBusy(true);setSettingsError('')
     try {const result=await api.applyProviderConfig(s.__catalog_revision);showToast(result.state+' · '+(result.code || ''))}
     catch(error){setSettingsError(error.message)}
@@ -1639,7 +1640,7 @@ export function DiagnosticsPage(props) {
     const question = language === 'zh'
       ? `软重启 ${name} 的 Agent 进程？该主机下的设备将短暂断开，电脑不会重启。`
       : `Restart the Agent process on ${name}? Its devices will briefly disconnect. The computer will not reboot.`
-    if (!window.confirm(question)) return
+    if (!(await dialogs.confirm(question))) return
     setRestartingAgent(agent.id)
     try {
       await api.restartAgent(agent.id, agent.process_generation)

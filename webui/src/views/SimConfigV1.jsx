@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
@@ -85,8 +86,8 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
   const addAPN = () => setDraft(current => ({ ...current, network: { ...current.network, apn_profiles: [...(current.network.apn_profiles || []), { id: `custom-${Date.now()}`, name: '', apn: '', auth: 'NONE', username: '', password: '', password_set: false }] } }))
   const removeAPN = index => setDraft(current => ({ ...current, network: { ...current.network, apn_profiles: (current.network.apn_profiles || []).filter((_, position) => position !== index), active_apn: current.network.active_apn === current.network.apn_profiles?.[index]?.id ? '' : current.network.active_apn } }))
   const patchIMS = value => setDraft(current => ({ ...current, ims: { ...current.ims, ...value } }))
-	const useCurrentReaderIdentity = () => {
-		if (!draft || !readerIdentityReady || !window.confirm(t('Use the current reader identity in this draft? Save is still required.'))) return
+	const useCurrentReaderIdentity = async () => {
+		if (!draft || !readerIdentityReady || !(await dialogs.confirm(t('Use the current reader identity in this draft? Save is still required.')))) return
 		patchSIM({ imsi: readerSIM.imsi, mcc: readerSIM.mcc, mnc: readerSIM.mnc,
 			smsc: readerSIM.smsc || draft.sim.smsc })
 		setProvisionProof(null)
@@ -110,7 +111,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
   }
   const claim = async candidate => {
     if (!candidates || !candidate.can_claim) return
-    const name = window.prompt(t('Line name'), candidate.observed?.msisdn || `SIM-${candidate.card_id.slice(-4)}`)
+    const name = (await dialogs.prompt(t('Line name'), candidate.observed?.msisdn || `SIM-${candidate.card_id.slice(-4)}`))
     if (name === null) return
     setBusy(`claim:${candidate.candidate_id}`); setMessage('')
     try {
@@ -124,7 +125,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     } finally { setBusy('') }
   }
   const softDelete = async () => {
-    if (!draft || draft.enabled || !catalog || !window.confirm(t('Move this disabled line to the recycle bin? History and card identity are retained.'))) return
+    if (!draft || draft.enabled || !catalog || !(await dialogs.confirm(t('Move this disabled line to the recycle bin? History and card identity are retained.')))) return
     setBusy('delete'); setMessage('')
     try {
       await api.softDeleteCatalogLine(draft.id, catalog.revision)
@@ -133,7 +134,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     finally { setBusy('') }
   }
   const restore = async lineID => {
-    if (!deletedCatalog || !window.confirm(t('Restore this line as disabled? It will not start automatically.'))) return
+    if (!deletedCatalog || !(await dialogs.confirm(t('Restore this line as disabled? It will not start automatically.')))) return
     setBusy(`restore:${lineID}`); setMessage('')
     try { await api.restoreCatalogLine(lineID, deletedCatalog.revision); await load(); setMessage(t('Line restored as disabled. Review it before enabling or applying.')) }
     catch (error) { setMessage(error.message); if (error.status === 412) await load() }
@@ -143,8 +144,8 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
 		const warning = retainHistory[lineID]
 			? 'Permanently delete this recycled line while retaining ended message and call history? The line cannot be restored.'
 			: 'Permanently delete this recycled line and its history? This cannot be undone.'
-		if (!deletedCatalog || !window.confirm(t(warning))) return
-		if (window.prompt(t('Type the exact line ID to confirm permanent deletion.')) !== lineID) {
+		if (!deletedCatalog || !(await dialogs.confirm(t(warning)))) return
+		if ((await dialogs.prompt(t('Type the exact line ID to confirm permanent deletion.'))) !== lineID) {
 			setMessage(t('Permanent deletion was not confirmed.'))
 			return
 		}
@@ -173,7 +174,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
 	}
   const setRuntime = async action => {
     const lineID = String(draft?.id || targetDevice?.instance_id || '')
-    if (!lineID || !draft?.enabled || !window.confirm(t(action === 'start' ? 'Start this line VoWiFi runtime now?' : 'Stop this line VoWiFi runtime now?'))) return
+    if (!lineID || !draft?.enabled || !(await dialogs.confirm(t(action === 'start' ? 'Start this line VoWiFi runtime now?' : 'Stop this line VoWiFi runtime now?')))) return
     setRuntimeBusy(action); setMessage('')
     try { await api.setLineRuntime(lineID, action); await refresh?.(); setMessage(t(action === 'start' ? 'Start requested; review the live typed state.' : 'Stop requested; review the live typed state.')) }
     catch (error) { setMessage(error.message) }
@@ -230,7 +231,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     finally { setBusy('') }
   }
   const applyNow = async () => {
-    if (!catalog || !apply?.pending || !window.confirm(t('Apply this exact catalog revision to VoWiFi Providers? Changed lines may restart.'))) return
+    if (!catalog || !apply?.pending || !(await dialogs.confirm(t('Apply this exact catalog revision to VoWiFi Providers? Changed lines may restart.')))) return
     setBusy('apply'); setMessage('')
     try {
       const result = await api.applyProviderConfig(catalog.revision)
@@ -287,7 +288,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
 			setMessage(t('Save catalog changes before provisioning this reader line.'))
 			return
 		}
-		if (!window.confirm(t('Verify this exact reader and promote the disabled draft? The line will remain stopped.'))) return
+		if (!(await dialogs.confirm(t('Verify this exact reader and promote the disabled draft? The line will remain stopped.')))) return
 		setBusy('reader-provision'); setMessage('')
 		try {
 			const result = await api.readerProvisionV1(targetDevice, draft.id, catalog.revision)
@@ -301,7 +302,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
 	const removeSavedPIN = async () => {
 		const target = pinTarget()
 		if (!target || !pinConfiguration?.configured || !pinConfiguration.revision ||
-			!window.confirm(t('Remove the saved PIN from this Agent? The SIM card itself will not be changed.'))) return
+			!(await dialogs.confirm(t('Remove the saved PIN from this Agent? The SIM card itself will not be changed.')))) return
 		setBusy('pin-remove'); setMessage('')
 		try {
 			const result = await api.simPIN({ operation_id: `react-sim-pin-remove-${Date.now()}`, ...target,

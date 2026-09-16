@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { runNotificationTest } from '../notificationTestTracker.js'
@@ -133,7 +134,7 @@ export default function NotificationsV1({ showToast }) {
   }
   const test = async channel => {
 	if (dirty) { showToast(t('Save notification changes before testing.')); return }
-    if (!window.confirm(t('Send one real test through this configured channel?'))) return
+    if (!(await dialogs.confirm(t('Send one real test through this configured channel?')))) return
     setBusy(`test-${channel}`)
     try {
       const result = await runNotificationTest({

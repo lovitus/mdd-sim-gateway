@@ -1,3 +1,4 @@
+import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { euiccProfileInventory, operationID } from '../goV1Adapter.js'
@@ -50,7 +51,7 @@ function DownloadForm({ entry, onStarted, onCancel, showToast }) {
     event.preventDefault()
     const code = parseActivationCode(activation)
     if (!code || !/^\d{15}$/.test(imei)) { showToast(t('A valid activation code and 15-digit IMEI are required.')); return }
-    if (!window.confirm(t('Start this one-time profile download on the exact EID? It will not be retried automatically.'))) return
+    if (!(await dialogs.confirm(t('Start this one-time profile download on the exact EID? It will not be retried automatically.')))) return
     setBusy(true)
     try {
       const operation = operationID('react-euicc-download')
@@ -103,7 +104,7 @@ function EUICCCard({ entry, reload, showToast }) {
   }, [download, eid, showToast])
   const mutate = async (profile, action, nickname) => {
     const verb = action === 'nickname' ? t('change the nickname of') : action === 'enable' ? t('enable') : t('disable')
-    if (!window.confirm(`${verb} ${profile.iccid}?`)) return
+    if (!(await dialogs.confirm(`${verb} ${profile.iccid}?`))) return
     setBusy(`${action}:${profile.iccid}`)
     try {
       const body = { operation_id: operationID(`react-euicc-${action}`), expected_state: profile.state }
@@ -121,7 +122,7 @@ function EUICCCard({ entry, reload, showToast }) {
     catch (error) { showToast(error.message) } finally { setBusy('') }
   }
   const deliver = async item => {
-    if (!window.confirm(t('Send this exact stored notification to the carrier server once?'))) return
+    if (!(await dialogs.confirm(t('Send this exact stored notification to the carrier server once?')))) return
     setBusy(`deliver:${item.sequence_number}`)
     try {
       await api.deliverEuiccNotification(eid, item.sequence_number, {
@@ -131,7 +132,7 @@ function EUICCCard({ entry, reload, showToast }) {
     } catch (error) { showToast(error.message) } finally { setBusy('') }
   }
   const remove = async item => {
-    if (!window.confirm(t('Remove only this already acknowledged notification from the card?'))) return
+    if (!(await dialogs.confirm(t('Remove only this already acknowledged notification from the card?')))) return
     setBusy(`remove:${item.sequence_number}`)
     try {
       await api.removeEuiccNotification(eid, item.sequence_number, {
@@ -142,7 +143,7 @@ function EUICCCard({ entry, reload, showToast }) {
     } catch (error) { showToast(error.message) } finally { setBusy('') }
   }
   const discover = async () => {
-    if (!window.confirm(t('Query SM-DS for this EID? This does not download or install a profile.'))) return
+    if (!(await dialogs.confirm(t('Query SM-DS for this EID? This does not download or install a profile.')))) return
     setBusy('discovery')
     try { setDiscovery(await api.discoverEuicc(eid, { operation_id: operationID('react-euicc-discovery'), smds: '', imei: '' })) }
     catch (error) { showToast(error.message) } finally { setBusy('') }
@@ -151,7 +152,7 @@ function EUICCCard({ entry, reload, showToast }) {
     <div className="u-detail"><span>EID</span><span className="u-inline"><b className="mono">{eid}</b><button className="btn btn-ghost" onClick={() => copyText(eid, showToast, t)}>{t('Copy')}</button></span></div><div className="u-detail"><span>{t('Profiles')}</span><b>{inventory.available ? inventory.count : t('Inventory unavailable')}</b></div>
     <div className="u-profile-list">{inventory.profiles.map(profile => <div className="u-detail" key={profile.iccid}><span><b>{profile.nickname || profile.profile_name || profile.service_provider_name || profile.iccid}</b><small className="mono">{profile.iccid}</small></span><span className="u-inline"><span className={`u-badge ${profile.state === 'enabled' ? 'cap-on' : 'cap-off'}`}>{profile.state}</span>
       <button className="btn btn-ghost" disabled={!!busy || !entry.euicc.profile_management} onClick={() => mutate(profile, profile.state === 'enabled' ? 'disable' : 'enable')}>{t(profile.state === 'enabled' ? 'Disable' : 'Enable')}</button>
-      <button className="btn btn-ghost" disabled={!!busy || !entry.euicc.profile_management} onClick={() => { const name = window.prompt(t('Nickname'), profile.nickname || ''); if (name !== null) void mutate(profile, 'nickname', name.trim()) }}>{t('Rename')}</button></span></div>)}</div>
+      <button className="btn btn-ghost" disabled={!!busy || !entry.euicc.profile_management} onClick={async () => { const name = (await dialogs.prompt(t('Nickname'), profile.nickname || '')); if (name !== null) void mutate(profile, 'nickname', name.trim()) }}>{t('Rename')}</button></span></div>)}</div>
     {!inventory.profiles.length && <p className="u-muted">{inventory.available ? t('This eUICC has no profiles.') : t('Profile inventory is not available.')}</p>}
     <div className="u-inline"><button className="btn btn-ghost" disabled={!entry.euicc.profile_download || !!busy} onClick={() => setShowDownload(value => !value)}>{t('Download eSIM')}</button>
       <button className="btn btn-ghost" disabled={!entry.euicc.profile_discovery || !!busy} onClick={discover}>{t('SM-DS discovery')}</button>

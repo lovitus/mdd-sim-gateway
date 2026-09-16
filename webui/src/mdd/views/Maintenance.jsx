@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { maintenanceLeases, maintenanceRequest } from '../systemAdapter.js'
@@ -16,7 +17,7 @@ export default function Maintenance({showToast}) {
   useEffect(() => { void load() }, [load])
   const run = async (action, leaseID = '') => {
     if (inFlight.current) return
-    if (!window.confirm(t(action === 'begin' ? 'Drain active providers for maintenance?' : 'Resume this maintenance lease?'))) return
+    if (!(await dialogs.confirm(t(action === 'begin' ? 'Drain active providers for maintenance?' : 'Resume this maintenance lease?')))) return
     inFlight.current = true; setBusy(true); setError('')
     try {
       const current = await api.systemMaintenanceStatus()
@@ -29,7 +30,7 @@ export default function Maintenance({showToast}) {
     finally { inFlight.current = false; setBusy(false) }
   }
   const tool = async action => {
-    if (inFlight.current || !window.confirm(t(action === 'egress' ? 'Refresh country exits?' : 'Clear notification history?'))) return
+    if (inFlight.current || !(await dialogs.confirm(t(action === 'egress' ? 'Refresh country exits?' : 'Clear notification history?')))) return
     inFlight.current = true; setBusy(true); setError('')
     try {
       if (action === 'egress') {

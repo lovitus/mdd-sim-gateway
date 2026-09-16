@@ -1,3 +1,4 @@
+import { dialogs } from '../../dialogs.js'
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api.js'
 import { mergeMessagePages } from '../historyAdapter.js'
@@ -177,7 +178,7 @@ function Messages({
       const saved = JSON.parse(localStorage.getItem(operationKey) || 'null')
       if (saved) {
         if (JSON.stringify({...saved.payload,to:String(saved.payload?.to || '').trim()}) !== JSON.stringify(payload)) {
-          if (window.confirm(tr('Discard only this browser retry identity? This cannot retract a message that may already have been submitted.'))) {
+          if ((await dialogs.confirm(tr('Discard only this browser retry identity? This cannot retract a message that may already have been submitted.')))) {
             localStorage.removeItem(operationKey)
           }
           return
@@ -205,7 +206,7 @@ function Messages({
     } catch (e) {
       if(activeSender.current===forId)setReceiptAvailable(payload.transport==='cellular')
       const msg = 'SMS failed: ' + [...new Set([e.code,e.data?.diagnostic_code,e.message].filter(Boolean))].join(' · ') + '. ' + tr('Retry uses the same request identity; do not create a second send.')
-      showToast ? showToast(msg) : alert(msg)
+      showToast ? showToast(msg) : (await dialogs.alert(msg))
     } finally {
       sendingRef.current = false
       setSending(false)
@@ -247,18 +248,18 @@ function Messages({
       await loadThreads()
     } catch (error) { toast(error.message) }
   }
-  const deleteSelected = () => {
+  const deleteSelected = async () => {
     if (!conversation || !selIds.size) return
-    if (window.confirm(tr('Delete selected messages?'))) void removeHistory(conversation, { ids:[...selIds] })
+    if ((await dialogs.confirm(tr('Delete selected messages?')))) void removeHistory(conversation, { ids:[...selIds] })
   }
-  const deleteThread = (target, event) => {
+  const deleteThread = async (target, event) => {
     event?.stopPropagation()
     if (!target) return
-    if (window.confirm(tr('Delete the entire conversation with {peer}?', { peer:target.peer }))) void removeHistory(target, { peer:target.peer })
+    if ((await dialogs.confirm(tr('Delete the entire conversation with {peer}?', { peer:target.peer })))) void removeHistory(target, { peer:target.peer })
   }
   const clearAll = async () => {
     if (historyScope !== 'line' || !id) return
-    if (!window.confirm(tr('Delete ALL messages on this line? This cannot be undone.'))) return
+    if (!(await dialogs.confirm(tr('Delete ALL messages on this line? This cannot be undone.')))) return
     const forId = id
     try {
       await api.deleteMessages(forId, { all:true })
