@@ -1,0 +1,115 @@
+name: Review regressions
+
+on:
+  push:
+    branches: ['codex/review-*']
+  pull_request:
+    branches: [main, 'codex/mdd-custom-ui-batch']
+    paths:
+      - 'go-runtime/**'
+      - 'providers/vowifi-go/**'
+      - 'agent/call-audio-helper/**'
+      - 'webui/**'
+      - '.github/workflows/review-regressions.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-regressions-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: Retain exact reviewed source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Archive the exact test input
+        run: git archive --format=tar.gz --output=review-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v7
+        with:
+          name: review-source-${{ github.sha }}
+          path: review-source.tar.gz
+          retention-days: 7
+  boundaries:
+    name: Race-test Core and Provider boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            providers/vowifi-go/go.sum
+            providers/vowifi-go/upstream/vowifi-go/go.sum
+            agent/call-audio-helper/go.sum
+      - name: Install native test dependencies
+        run: |
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pkg-config xorg-dev
+      - name: Verify modules
+        run: |
+          go -C go-runtime mod verify
+          go -C providers/vowifi-go mod verify
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go mod verify
+      - name: Test Core
+        run: |
+          set -o pipefail
+          go -C go-runtime test -json -count=1 -timeout 3m ./... 2>&1 | tee core-tests.jsonl
+      - name: Race-test reviewed boundaries
+        run: |
+          set -o pipefail
+          go -C go-runtime test -json -race -count=3 -timeout 5m ./adminauth ./agentlink ./mediaauth ./providercontrol ./internal/agentdata ./internal/agentmedia ./internal/agentusbip ./internal/runtimereconcile ./internal/linecatalog 2>&1 | tee boundary-tests.jsonl
+      - name: Test Provider and protocol simulators
+        run: |
+          set -o pipefail
+          go -C providers/vowifi-go test -json -race -count=1 -timeout 5m ./... 2>&1 | tee provider-tests.jsonl
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go test -json -race -count=1 -timeout 5m ./engine/swu/... ./runtimehost/... 2>&1 | tee upstream-tests.jsonl
+          GOWORK=off go -C agent/call-audio-helper test -race -count=1 ./...
+      - name: Vet all selected modules
+        run: |
+          go -C go-runtime vet ./...
+          go -C providers/vowifi-go vet ./...
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go vet ./engine/swu/... ./runtimehost/...
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: review-test-evidence-${{ github.sha }}
+          path: '*-tests.jsonl'
+          retention-days: 7
+          if-no-files-found: warn
+  webui:
+    name: Test WebUI adapters and embedded build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+          package-manager-cache: false
+      - name: Test and build WebUI
+        working-directory: webui
+        run: |
+          npm ci
+          npm run test:all
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+          git diff --exit-code -- ../go-runtime/internal/webui/assets
