@@ -29,6 +29,7 @@ type HostModemSnapshot struct {
 	Revision        string            `json:"revision"`
 	Settings        HostModemSettings `json:"settings"`
 	RuntimeState    string            `json:"runtime_state"`
+	RuntimeDetail   string            `json:"runtime_detail,omitempty"`
 }
 type HostModemRequest struct {
 	ExpectedRevision string            `json:"expected_revision"`

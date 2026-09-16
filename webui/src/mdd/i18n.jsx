@@ -86,6 +86,10 @@ const zh = {
   'Read stored SMS receipt': '读取已存发送回执',
   'Stored Agent receipt confirms submission; no SMS was resent.': 'Agent 已存回执确认提交，未重发短信。',
   'Rekey minutes (0 disables)': 'Rekey 周期（分钟，0 关闭）',
+  'modem_manager_running_boot_disabled': 'ModemManager 正在运行，但开机启动未启用；当前可用不代表重启后会恢复。',
+  'modem_manager_not_running': 'ModemManager 未运行，与当前自动模式不一致。',
+  'modem_manager_boot_unconfirmed': 'ModemManager 正在运行，但开机启动策略尚未确认。',
+  'modem_manager_serial_policy_mismatch': 'ModemManager 服务状态与纯串口模式要求不一致。',
   'CHILD rekey minutes (0 disables)': 'CHILD 换钥周期（分钟，0 关闭）',
   'IKE rekey minutes (0 disables)': 'IKE 换钥周期（分钟，0 关闭）',
   'Save rekey default': '保存 Rekey 默认值',
@@ -863,6 +867,10 @@ const zh = {
 }
 
 const en = {
+  'modem_manager_running_boot_disabled': 'ModemManager is running, but boot startup is disabled; current availability does not confirm recovery after reboot.',
+  'modem_manager_not_running': 'ModemManager is not running as required by automatic mode.',
+  'modem_manager_boot_unconfirmed': 'ModemManager is running, but its boot policy is unconfirmed.',
+  'modem_manager_serial_policy_mismatch': 'ModemManager service state does not match serial-only mode.',
   'vowifi_disabled': 'VoWiFi is disabled',
   'line_disabled': 'The line is disabled',
   'facts_stale': 'The state sample is stale, not evidence of a current failure',

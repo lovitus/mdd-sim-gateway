@@ -6,6 +6,9 @@ const {api:go} = await import('../src/api.js')
 go.hostModemSettings=async()=>{throw Object.assign(new Error('unavailable'),{status:404})}
 const hostViewSettings=systemSettingsView({}, {}, {}, {}, {}, {revision:'a'.repeat(64),settings:{modem_backend:'auto',modem_profiles:[{vid:'2c7c',pid:'0125',at_interface:2}]},runtime_state:'not_observed'})
 assert.equal(hostViewSettings.__hardware_supported,true)
+const bootWarning=systemSettingsView({}, {}, {}, {}, {}, {revision:'a'.repeat(64),settings:{modem_backend:'auto'},runtime_state:'services_mismatch',runtime_detail:'modem_manager_running_boot_disabled'})
+assert.equal(bootWarning.__hardware_runtime,'services_mismatch')
+assert.equal(bootWarning.__hardware_detail,'modem_manager_running_boot_disabled')
 const oldHostSave=go.saveHostModemSettings
 let hostRequest
 go.saveHostModemSettings=async input=>{hostRequest=input;return {revision:'b'.repeat(64),settings:input.settings,runtime_state:'not_observed'}}

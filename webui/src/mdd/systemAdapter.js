@@ -31,6 +31,7 @@ export function systemSettingsView(preferences = {}, notifications = {}, status 
   return {timezone:notifications.timezone,cellular_audio_buffer_ms:audio,
 	__hardware_supported:/^[a-f0-9]{64}$/.test(host.revision || '') && ['auto','serial'].includes(host.settings?.modem_backend),
 	__hardware_revision:host.revision,__hardware_runtime:host.runtime_state || 'not_observed',
+	__hardware_detail:host.runtime_detail || '',
 	hardware:{modem_backend:host.settings?.modem_backend || '',modem_profiles:structuredClone(host.settings?.modem_profiles || [])},
 	__device_defaults_supported:preferences.new_device_defaults_supported===true,
 	device_defaults:{cellular_enabled:preferences.preferences?.new_device_defaults?.connection_enabled ?? false,
@@ -128,7 +129,7 @@ export const systemAPI = {
 	if(domain==='hardware'){
 		if(!draft.__hardware_supported || !['auto','serial'].includes(draft.hardware?.modem_backend))throw new Error('host_modem_unavailable')
 		const result=await go.saveHostModemSettings({expected_revision:draft.__hardware_revision,settings:{modem_backend:draft.hardware.modem_backend,modem_profiles:structuredClone(draft.hardware.modem_profiles)}})
-		return {...draft,hardware:structuredClone(result.settings),__hardware_revision:result.revision,__hardware_runtime:result.runtime_state || 'not_observed'}
+		return {...draft,hardware:structuredClone(result.settings),__hardware_revision:result.revision,__hardware_runtime:result.runtime_state || 'not_observed',__hardware_detail:result.runtime_detail || ''}
 	}
 	if(domain==='device-defaults'){
 		if(!draft.__device_defaults_supported)throw new Error('device_defaults_unavailable')

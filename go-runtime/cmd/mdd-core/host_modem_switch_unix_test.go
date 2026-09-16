@@ -17,6 +17,22 @@ type hostSwitchFixture struct {
 	failOnce string
 }
 
+func TestHostModemReadinessSeparatesRunningFromBootPolicy(t *testing.T) {
+	for _, test := range []struct{ backend, active, boot, state, detail string }{
+		{"auto", "active", "enabled", "applied", ""},
+		{"auto", "active", "disabled", "services_mismatch", "modem_manager_running_boot_disabled"},
+		{"auto", "inactive", "enabled", "services_mismatch", "modem_manager_not_running"},
+		{"auto", "active", "enabled-runtime", "services_mismatch", "modem_manager_boot_unconfirmed"},
+		{"serial", "inactive", "disabled", "applied", ""},
+		{"serial", "active", "disabled", "services_mismatch", "modem_manager_serial_policy_mismatch"},
+	} {
+		state, detail := hostModemServiceReadiness(test.backend, providerdeploy.HostServiceState{LoadState: "loaded", ActiveState: test.active, UnitFileState: test.boot})
+		if state != test.state || detail != test.detail {
+			t.Fatalf("%+v => %s/%s", test, state, detail)
+		}
+	}
+}
+
 func (fixture *hostSwitchFixture) HostModemServiceState(_ context.Context, unit string) (providerdeploy.HostServiceState, error) {
 	return fixture.states[unit], nil
 }

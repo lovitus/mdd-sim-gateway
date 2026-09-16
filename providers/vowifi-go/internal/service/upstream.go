@@ -216,6 +216,8 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 		SA:                    swuIKEProposalForDH(ikev2.DHGroup2048BitMODP),
 		InitRunner:            runSWUIKEInit,
 		AuthRunner: func(ctx context.Context, cfg ikev2.FullAuthConfig) (ikev2.FullAuthResult, error) {
+			// Retransmit an already encrypted request, never redo its SIM AKA work.
+			cfg.Transport = ikev2.RetransmitTransport{Transport: cfg.Transport}
 			result, err := ikev2.RunIKE_AUTH_Full(ctx, cfg)
 			if err == nil {
 				peer = newPeerIKEResponder(cfg.Init, config.Profile, func(addresses []string) {

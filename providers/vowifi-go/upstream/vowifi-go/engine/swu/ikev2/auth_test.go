@@ -289,6 +289,14 @@ func TestIdentityForEAPRequestSelectsRequestedIdentity(t *testing.T) {
 }
 
 func TestRunIKEAuthFullCompletesAKAWithNotification(t *testing.T) {
+	testRunIKEAuthFullCompletesAKAWithNotification(t, false)
+}
+
+func TestMDDLostAuthResponsesRetransmitWithoutRepeatingAKA(t *testing.T) {
+	testRunIKEAuthFullCompletesAKAWithNotification(t, true)
+}
+
+func testRunIKEAuthFullCompletesAKAWithNotification(t *testing.T, loseResponses bool) {
 	init := fakeInitResult(t)
 	identity := "310280233641503@nai.epc.mnc280.mcc310.3gppnetwork.org"
 	aka := simAKAResult()
@@ -403,10 +411,36 @@ func TestRunIKEAuthFullCompletesAKAWithNotification(t *testing.T) {
 		}
 	})
 
+	var wireTransport InitTransport = transport
+	wireAttempts := 0
+	if loseResponses {
+		type cached struct{ request, response []byte }
+		cache := map[uint32]cached{}
+		wireTransport = RetransmitTransport{Transport: InitTransportFunc(func(ctx context.Context, request []byte) ([]byte, error) {
+			wireAttempts++
+			header, err := ParseHeader(request)
+			if err != nil {
+				return nil, err
+			}
+			if prior, found := cache[header.MessageID]; found {
+				if !bytes.Equal(prior.request, request) {
+					t.Fatal("AUTH retransmission changed encrypted request")
+				}
+				return append([]byte(nil), prior.response...), nil
+			}
+			response, err := transport.ExchangeIKE(ctx, request)
+			if err != nil {
+				return nil, err
+			}
+			cache[header.MessageID] = cached{append([]byte(nil), request...), append([]byte(nil), response...)}
+			return nil, context.DeadlineExceeded
+		})}
+	}
+	provider := &countingAuthProvider{akaProviderStub: akaProviderStub{result: aka}}
 	res, err := RunIKE_AUTH_Full(context.Background(), FullAuthConfig{
-		Transport:   transport,
+		Transport:   wireTransport,
 		Init:        init,
-		SIM:         akaProviderStub{result: aka},
+		SIM:         provider,
 		InitiatorID: Identity{Type: IDRFC822Addr, Data: []byte(identity)},
 		EAPIdentity: identity,
 		Random:      random,
@@ -416,6 +450,9 @@ func TestRunIKEAuthFullCompletesAKAWithNotification(t *testing.T) {
 	}
 	if exchanges != 4 {
 		t.Fatalf("exchanges=%d, want 4", exchanges)
+	}
+	if provider.calls != 1 || (loseResponses && wireAttempts != 8) {
+		t.Fatalf("AKA calls=%d wire attempts=%d", provider.calls, wireAttempts)
 	}
 	if len(res.IdentityExchanges) != 0 || len(res.AKAChallenges) != 1 || len(res.EAPNotifications) != 1 {
 		t.Fatalf("identity exchanges=%d aka=%d notifications=%d", len(res.IdentityExchanges), len(res.AKAChallenges), len(res.EAPNotifications))
@@ -1888,6 +1925,16 @@ func fakeInitResult(t *testing.T) InitResult {
 type akaProviderStub struct {
 	result sim.AKAResult
 	err    error
+}
+
+type countingAuthProvider struct {
+	akaProviderStub
+	calls int
+}
+
+func (p *countingAuthProvider) CalculateAKA(rand16, autn16 []byte) (sim.AKAResult, error) {
+	p.calls++
+	return p.akaProviderStub.CalculateAKA(rand16, autn16)
 }
 
 func (p akaProviderStub) CalculateAKA(rand16, autn16 []byte) (sim.AKAResult, error) {

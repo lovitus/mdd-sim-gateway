@@ -122,6 +122,13 @@ in the settings page. Absent/zero remains disabled on upgrade. The retired
 implementation's 600-minute IKE default is an available explicit setting, not
 permission to silently enable a new timer on existing production lines.
 
+Initial IKE_AUTH uses the same bounded exact-wire retransmission wrapper as
+rekey. Retries resend the already protected packet; they do not call the SIM
+again or regenerate EAP answers. The full authenticated test drops the first
+response at every AUTH round and verifies four completed exchanges, eight wire
+attempts and exactly one SIM AKA call. This is loss tolerance, not evidence
+that a historical carrier timeout was definitely packet loss.
+
 ## MDD Operation Ownership
 
 The service wrapper keeps paid SMS receipts in `paid-message-operations-v1`

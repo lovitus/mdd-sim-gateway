@@ -254,12 +254,31 @@ func (service *providerApplyService) HostModemSettings(ctx context.Context) (pro
 				snapshot.RuntimeState = "services_unconfirmed"
 			} else if mm, err := manager.HostModemServiceState(ctx, "ModemManager.service"); err != nil {
 				snapshot.RuntimeState = "services_unconfirmed"
-			} else if snapshot.Settings.Backend == "serial" && !(mm.LoadState == "not-found" || mm.ActiveState == "inactive" && (mm.UnitFileState == "disabled" || mm.UnitFileState == "masked")) || snapshot.Settings.Backend == "auto" && (mm.ActiveState != "active" || mm.UnitFileState != "enabled") {
-				snapshot.RuntimeState = "services_mismatch"
+			} else {
+				snapshot.RuntimeState, snapshot.RuntimeDetail = hostModemServiceReadiness(snapshot.Settings.Backend, mm)
 			}
 		}
 	}
 	return snapshot, err
+}
+
+func hostModemServiceReadiness(backend string, mm providerdeploy.HostServiceState) (string, string) {
+	if backend == "serial" {
+		if mm.LoadState == "not-found" || mm.ActiveState == "inactive" && (mm.UnitFileState == "disabled" || mm.UnitFileState == "masked") {
+			return "applied", ""
+		}
+		return "services_mismatch", "modem_manager_serial_policy_mismatch"
+	}
+	if mm.ActiveState != "active" {
+		return "services_mismatch", "modem_manager_not_running"
+	}
+	if mm.UnitFileState == "disabled" {
+		return "services_mismatch", "modem_manager_running_boot_disabled"
+	}
+	if mm.UnitFileState != "enabled" {
+		return "services_mismatch", "modem_manager_boot_unconfirmed"
+	}
+	return "applied", ""
 }
 func (service *providerApplyService) SaveHostModemSettings(ctx context.Context, input provideradmin.HostModemRequest) (provideradmin.HostModemSnapshot, error) {
 	service.mutation.Lock()
