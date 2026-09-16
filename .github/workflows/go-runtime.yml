@@ -353,13 +353,23 @@ jobs:
         working-directory: providers/vowifi-go
         run: go test -race ./...
 
-      - name: Test patched upstream runtime
-        run: >-
-          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go
-          test -race -timeout 2m ./runtimehost/...
+      - name: Race-test patched upstream SWu and runtime
+        run: |
+          set -o pipefail
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go \
+            test -v -race -count=1 -timeout 5m ./engine/swu/... ./runtimehost/... \
+            2>&1 | tee patched-upstream-tests.log
 
-      - name: Vet patched upstream runtime
-        run: GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go vet ./runtimehost/...
+      - name: Vet patched upstream SWu and runtime
+        run: GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go vet ./engine/swu/... ./runtimehost/...
+
+      - name: Preserve patched upstream test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: patched-upstream-test-evidence
+          path: patched-upstream-tests.log
+          if-no-files-found: warn
 
       - name: Vet Provider
         working-directory: providers/vowifi-go
