@@ -143,16 +143,22 @@ type ModemSIMFact struct {
 }
 
 type ModemNetworkFact struct {
-	Registration    string  `json:"registration"`
-	OperatorID      string  `json:"operator_id,omitempty"`
-	OperatorName    string  `json:"operator_name,omitempty"`
-	SignalPercent   *uint32 `json:"signal_percent,omitempty"`
-	SoftwareRadio   string  `json:"software_radio"`
-	HardwareRadio   string  `json:"hardware_radio"`
-	Data            string  `json:"data"`
-	Profile         string  `json:"profile,omitempty"`
-	DataGuard       string  `json:"data_guard,omitempty"`
-	DataGuardDetail string  `json:"data_guard_detail,omitempty"`
+	Interface         string  `json:"interface,omitempty"`
+	Address           string  `json:"address,omitempty"`
+	APN               string  `json:"apn,omitempty"`
+	CountersAvailable bool    `json:"counters_available,omitempty"`
+	RXBytes           uint64  `json:"rx_bytes,omitempty"`
+	TXBytes           uint64  `json:"tx_bytes,omitempty"`
+	Registration      string  `json:"registration"`
+	OperatorID        string  `json:"operator_id,omitempty"`
+	OperatorName      string  `json:"operator_name,omitempty"`
+	SignalPercent     *uint32 `json:"signal_percent,omitempty"`
+	SoftwareRadio     string  `json:"software_radio"`
+	HardwareRadio     string  `json:"hardware_radio"`
+	Data              string  `json:"data"`
+	Profile           string  `json:"profile,omitempty"`
+	DataGuard         string  `json:"data_guard,omitempty"`
+	DataGuardDetail   string  `json:"data_guard_detail,omitempty"`
 }
 
 type ModemATControlFact struct {
@@ -2353,6 +2359,12 @@ func (topology TopologySnapshot) validateModems() error {
 			return errors.New("Agent topology contains an invalid modem fact")
 		}
 		previous = modem.AttachmentID
+		if len(modem.Network.Interface) > 64 || !validSecretText(modem.Network.Interface, 64) ||
+			len(modem.Network.APN) > 256 || !validSecretText(modem.Network.APN, 256) ||
+			modem.Network.Address != "" && net.ParseIP(modem.Network.Address) == nil ||
+			!modem.Network.CountersAvailable && (modem.Network.RXBytes != 0 || modem.Network.TXBytes != 0) {
+			return errors.New("Agent topology contains invalid data connection readback")
+		}
 		if modem.Condition != "ready" && modem.Condition != "degraded" ||
 			modem.Condition == "ready" && modem.Detail != "" || modem.Condition == "degraded" && modem.Detail == "" {
 			return errors.New("Agent topology contains an inconsistent modem condition")

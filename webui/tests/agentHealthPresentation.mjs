@@ -84,3 +84,25 @@ assert.equal(delayed.snapshot.overall, 'degraded')
 assert.equal(delayed.snapshot.runtime.last_error_code, 'PC/SC unavailable')
 
 console.log('Agent health presentation tests passed')
+
+const withoutModem = { ...core, agent_id: 'reader-host', last_report: '2026-08-28T12:00:08Z',
+  topology: { ...core.topology, modems: [] } }
+const noModemBefore = JSON.stringify(withoutModem)
+const present = snapshot => normalizeCoreAgentHealth(snapshot, '2026-08-28T12:00:10Z')
+assert.equal(present(withoutModem).snapshot.isolation.state, 'not_applicable')
+assert.equal(present(withoutModem).snapshot.overall, 'healthy')
+assert.equal(JSON.stringify(withoutModem), noModemBefore, 'presentation must never change retained modem policy')
+assert.equal(withoutModem.topology.host.modem_enabled, true, 'removing hardware must not disable future isolation')
+for (const [guard, expected] of [['protected', 'healthy'], ['failed', 'degraded'], ['unmanaged', 'degraded'], ['', 'degraded']]) {
+  const reinserted = {...withoutModem, topology: {...withoutModem.topology, modems: [{network:{data_guard:guard}}]}}
+  assert.equal(present(reinserted).snapshot.overall, expected, `reinserted ${guard} must be re-evaluated`)
+}
+const mixed = {...withoutModem, topology: {...withoutModem.topology, modems: [{network:{data_guard:'protected'}},{network:{data_guard:'unmanaged'}}]}}
+assert.equal(present(mixed).snapshot.overall, 'degraded', 'one protected modem cannot hide an unprotected modem')
+const diskWarning = {...withoutModem, topology:{...withoutModem.topology, host:{...core.topology.host, storage:{state:'warning',used_percent:88,free_bytes:30*1024**3}}}}
+assert.deepEqual(present(diskWarning).snapshot.issues.map(issue=>issue.code), ['storage_warning'])
+assert.equal(present(diskWarning).snapshot.issues[0].automatic,false)
+const unknownDiscovery = {...withoutModem, topology:{...withoutModem.topology, modem_condition:'recovering',modem_detail:'probe failed'}}
+assert.equal(present(unknownDiscovery).snapshot.overall,'degraded', 'failed discovery is not proof of hardware absence')
+const {agentHealthPresentation: copiedPresentation} = await import('../src/mdd/agentHealthPresentation.js')
+assert.equal(copiedPresentation, agentHealthPresentation, 'both UIs must use the same health logic')

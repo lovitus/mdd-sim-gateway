@@ -17,12 +17,17 @@ func TestModemTopologyMapsFactsWithoutConflatingAttachmentAndSIM(t *testing.T) {
 		AT:                  agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: "COM16", SIMAPDUOnDemand: true},
 		SIM:                 agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "8944100000000000001", IMSI: "234100000000001", MSISDNs: []string{"+441"}},
 		Network: agentmodem.NetworkFact{
+			Interface: "wwan0", Address: "192.0.2.1", APN: "carrier", CountersAvailable: true, RXBytes: 123, TXBytes: 456,
 			Registration: agentmodem.RegistrationRoaming, SignalPercent: &signal,
 			SoftwareRadio: agentmodem.RadioOn, HardwareRadio: agentmodem.RadioOn, Data: agentmodem.DataConnected,
 			Guard: agentmodem.DataGuardFact{State: agentmodem.DataGuardProtected},
 		},
 	}}})
 	condition, detail, modems := state.snapshot()
+	if len(modems) != 1 || modems[0].Network.Interface != "wwan0" || modems[0].Network.Address != "192.0.2.1" ||
+		modems[0].Network.APN != "carrier" || !modems[0].Network.CountersAvailable || modems[0].Network.RXBytes != 123 || modems[0].Network.TXBytes != 456 {
+		t.Fatalf("data readback lost: %+v", modems)
+	}
 	if condition != agentlink.ModemReady || detail != "" || len(modems) != 1 ||
 		modems[0].AttachmentID != "mbn-interface" || modems[0].SIM.ICCID != "8944100000000000001" ||
 		modems[0].SIM.SessionGeneration == "" || modems[0].AT.SIMAPDU || !modems[0].AT.SIMAPDUOnDemand ||

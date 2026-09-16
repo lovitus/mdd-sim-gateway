@@ -121,6 +121,8 @@ func (state *modemTopologyState) snapshot() (agentlink.ModemCondition, string, [
 				SMSC:       modem.SIM.SMSC, SMSError: modem.SIM.SMSError,
 			},
 			Network: agentlink.ModemNetworkFact{
+				Interface: modem.Network.Interface, Address: modem.Network.Address, APN: modem.Network.APN,
+				CountersAvailable: modem.Network.CountersAvailable, RXBytes: modem.Network.RXBytes, TXBytes: modem.Network.TXBytes,
 				Registration: string(modem.Network.Registration), OperatorID: modem.Network.OperatorID,
 				OperatorName: modem.Network.OperatorName, SignalPercent: cloneSignal(modem.Network.SignalPercent),
 				SoftwareRadio: string(modem.Network.SoftwareRadio), HardwareRadio: string(modem.Network.HardwareRadio),

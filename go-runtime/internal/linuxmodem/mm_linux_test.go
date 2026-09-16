@@ -287,8 +287,9 @@ func TestInventoryFailureInvalidatesSIMInsertionGeneration(t *testing.T) {
 func TestParseDataBearerRequiresConnectedStaticIPv4(t *testing.T) {
 	path := dbus.ObjectPath("/org/freedesktop/ModemManager1/Bearer/7")
 	properties := map[string]dbus.Variant{
-		"Connected": dbus.MakeVariant(true),
-		"Interface": dbus.MakeVariant("wwan0"),
+		"Connected":  dbus.MakeVariant(true),
+		"Properties": dbus.MakeVariant(map[string]dbus.Variant{"apn": dbus.MakeVariant("CTNET")}),
+		"Interface":  dbus.MakeVariant("wwan0"),
 		"Ip4Config": dbus.MakeVariant(map[string]dbus.Variant{
 			"method": dbus.MakeVariant(uint32(2)), "address": dbus.MakeVariant("10.1.2.3"),
 			"prefix": dbus.MakeVariant(uint32(30)), "gateway": dbus.MakeVariant("10.1.2.4"),
@@ -296,7 +297,7 @@ func TestParseDataBearerRequiresConnectedStaticIPv4(t *testing.T) {
 		}),
 	}
 	bearer, err := parseDataBearer(path, properties)
-	if err != nil || bearer.ObjectPath != path || bearer.Interface != "wwan0" || bearer.Address != "10.1.2.3" ||
+	if err != nil || bearer.APN != "CTNET" || bearer.ObjectPath != path || bearer.Interface != "wwan0" || bearer.Address != "10.1.2.3" ||
 		bearer.Prefix != 30 || bearer.Gateway != "10.1.2.4" || len(bearer.DNS) != 2 {
 		t.Fatalf("bearer=%+v err=%v", bearer, err)
 	}

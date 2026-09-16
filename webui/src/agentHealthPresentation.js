@@ -54,11 +54,25 @@ export function normalizeCoreAgentHealth(agent, snapshotAt) {
 	const modemCondition = String(topology?.modem_condition || '')
 	const storageState = String(host?.storage?.state || 'unknown')
 	const dataGuards = modems.map(modem => String(modem?.network?.data_guard || '')).filter(Boolean)
-	const isolationState = !host?.modem_enabled ? 'ok'
+	const isolationState = modems.length === 0 && ['ready', 'disabled'].includes(modemCondition) ? 'not_applicable'
 		: dataGuards.includes('failed') ? 'error'
-			: dataGuards.includes('protected') ? 'ok' : 'unsupported'
+			: modems.length > 0 && modems.every(modem => modem.network?.data_guard === 'protected') ? 'ok' : 'unsupported'
+	const issues = []
+	const addIssue = (code, detail = '', automatic = false) => issues.push({code, detail, automatic})
+	if (readerCondition === 'recovering') addIssue('reader_recovering', topology.reader_detail, true)
+	if (modemCondition === 'recovering') addIssue('modem_recovering', topology.modem_detail, true)
+	for (const reader of readers) {
+		if (reader.card_present && reader.identity_state === 'identity_unavailable') addIssue('reader_identity_unavailable', `${reader.reader_name}: ${reader.identity_detail || ''}`)
+	}
+	for (const modem of modems) {
+		if (modem.condition === 'degraded') addIssue('modem_degraded', modem.detail)
+		if (modem.policy?.state === 'recovering') addIssue('policy_recovering', modem.policy.code, true)
+	}
+	if (isolationState === 'error') addIssue('isolation_failed')
+	if (isolationState === 'unsupported') addIssue('isolation_unconfirmed')
+	if (['unknown', 'warning', 'critical'].includes(storageState)) addIssue(`storage_${storageState}`, host?.storage?.error_code)
 	const overall = !host ? 'unsupported'
-		: readerCondition === 'recovering' || modemCondition === 'recovering' || isolationState !== 'ok' || ['unknown', 'warning', 'critical'].includes(storageState) ? 'degraded'
+		: issues.length > 0 ? 'degraded'
 			: readerCondition === 'starting' || modemCondition === 'starting' ? 'starting' : 'healthy'
   const seenMs = Date.parse(agent.last_seen || '')
   return {
@@ -75,6 +89,7 @@ export function normalizeCoreAgentHealth(agent, snapshotAt) {
     topology,
     snapshot: {
       overall,
+      issues,
       runtime: {
         state: 'online',
         ...(topology?.reader_detail ? { last_error_code: topology.reader_detail } : {}),
@@ -82,7 +97,7 @@ export function normalizeCoreAgentHealth(agent, snapshotAt) {
 		manager: { kind: host?.manager || '', host_mode: host?.host_mode || '', session_scope: host?.session_scope || '' },
 		config: { state: host?.config_state || '', token_configured: host?.token_configured === true,
 			modem_enabled: host?.modem_enabled === true },
-		isolation: { state: isolationState, backend: dataGuards.join(',') || (host?.modem_enabled ? '' : 'not-applicable') },
+		isolation: { state: isolationState, backend: [...new Set(dataGuards)].join(',') },
 		inventory: { modems_total: modems.length, modems_connected: modems.length,
 			pcsc: { discovery: readerCondition, readers } },
 		resources: { storage: host?.storage || { state: 'unknown', error_code: 'host_health_unreported' } },
@@ -109,8 +124,29 @@ export function agentHealthEnumLabel(kind, value, language = 'en') {
       stopped: '已停止', failed: '失败', cleanup_blocked: '正在安全收敛通话',
     },
     storage: { ok: '正常', warning: '空间偏低', critical: '空间严重不足', unknown: '未知' },
-		isolation: { ok: '正常', error: '异常', unsupported: '不可证明' },
+		isolation: { ok: '正常', error: '异常', unsupported: '不可证明', not_applicable: '不适用（无蜂窝模块）' },
 		manager: { scm: 'Windows 服务', systemd: 'systemd 服务', gui: '图形应用', cli: '命令行' },
   }
   return labels[kind]?.[raw] || raw || '—'
+}
+
+export function agentIssueLabel(issue, language = 'en') {
+  const labels = {
+    reader_recovering: ['读卡器监测正在恢复', 'Reader monitoring is recovering'],
+    modem_recovering: ['模块监测正在恢复', 'Modem monitoring is recovering'],
+    reader_identity_unavailable: ['卡片身份暂不可用', 'Card identity unavailable'],
+    modem_degraded: ['模块运行异常', 'Modem degraded'],
+    policy_recovering: ['设备策略尚未生效', 'Device policy is recovering'],
+    isolation_failed: ['蜂窝流量隔离失败', 'Cellular isolation failed'],
+    isolation_unconfirmed: ['蜂窝流量隔离无法确认', 'Cellular isolation unconfirmed'],
+    storage_warning: ['磁盘使用率达到告警阈值（85%）', 'Disk usage reached warning threshold (85%)'],
+    storage_critical: ['磁盘使用率达到严重阈值（95%）', 'Disk usage reached critical threshold (95%)'],
+    storage_unknown: ['磁盘状态未能读取', 'Disk health unavailable'],
+  }
+  const zh = language === 'zh'
+  const message = labels[issue.code]?.[zh ? 0 : 1] || issue.code
+  const action = issue.automatic ? (zh ? '系统正在按退避策略重试' : 'Automatic retry with backoff')
+    : issue.code.startsWith('storage_') ? (zh ? '不会自动删除文件或重启' : 'No automatic file deletion or restart')
+      : (zh ? '需核对具体原因；不会盲目重启' : 'Inspect the cause; no blind restart')
+  return `${message} · ${action}`
 }

@@ -249,6 +249,11 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
       rcs: { actual: 'unsupported' },
     },
     cellular: adapted ? {
+      interface: modem?.network?.interface || '',
+      ip: modem?.network?.address || '',
+      apn: modem?.network?.apn || '',
+      rx_bytes: modem?.network?.counters_available === true ? modem.network.rx_bytes || 0 : null,
+      tx_bytes: modem?.network?.counters_available === true ? modem.network.tx_bytes || 0 : null,
       registration: modem?.network?.registration || '',
       operator: modem?.network?.operator_name || modem?.network?.operator_id || '',
       signal: modem?.network?.signal_percent ?? null,

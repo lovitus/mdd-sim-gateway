@@ -1745,8 +1745,24 @@ func TestTopologyModemFactsAreTypedSortedAndDeepCopied(t *testing.T) {
 		},
 	}
 	copy := NormalizeTopology(topology)
+	copy.Modems[1].Network.Interface = "wwan0"
+	copy.Modems[1].Network.Address = "192.0.2.10"
+	copy.Modems[1].Network.APN = "CTNET"
+	copy.Modems[1].Network.CountersAvailable = true
+	copy.Modems[1].Network.RXBytes = 12
+	copy.Modems[1].Network.TXBytes = 34
 	if err := copy.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	invalid := NormalizeTopology(copy)
+	invalid.Modems[1].Network.Address = "not-an-address"
+	if invalid.Validate() == nil {
+		t.Fatal("invalid connection address accepted")
+	}
+	invalid = NormalizeTopology(copy)
+	invalid.Modems[1].Network.CountersAvailable = false
+	if invalid.Validate() == nil {
+		t.Fatal("unobserved nonzero traffic accepted")
 	}
 	if copy.Modems[0].AttachmentID != "mbn-a" || copy.Modems[1].AttachmentID != "mbn-b" {
 		t.Fatalf("modems not sorted: %+v", copy.Modems)

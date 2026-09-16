@@ -119,15 +119,21 @@ type SIMFact struct {
 }
 
 type NetworkFact struct {
-	Registration  RegistrationState `json:"registration"`
-	OperatorID    string            `json:"operator_id,omitempty"`
-	OperatorName  string            `json:"operator_name,omitempty"`
-	SignalPercent *uint32           `json:"signal_percent,omitempty"`
-	SoftwareRadio RadioState        `json:"software_radio"`
-	HardwareRadio RadioState        `json:"hardware_radio"`
-	Data          DataState         `json:"data"`
-	Profile       string            `json:"profile,omitempty"`
-	Guard         DataGuardFact     `json:"data_guard"`
+	Interface         string            `json:"interface,omitempty"`
+	Address           string            `json:"address,omitempty"`
+	APN               string            `json:"apn,omitempty"`
+	CountersAvailable bool              `json:"counters_available,omitempty"`
+	RXBytes           uint64            `json:"rx_bytes,omitempty"`
+	TXBytes           uint64            `json:"tx_bytes,omitempty"`
+	Registration      RegistrationState `json:"registration"`
+	OperatorID        string            `json:"operator_id,omitempty"`
+	OperatorName      string            `json:"operator_name,omitempty"`
+	SignalPercent     *uint32           `json:"signal_percent,omitempty"`
+	SoftwareRadio     RadioState        `json:"software_radio"`
+	HardwareRadio     RadioState        `json:"hardware_radio"`
+	Data              DataState         `json:"data"`
+	Profile           string            `json:"profile,omitempty"`
+	Guard             DataGuardFact     `json:"data_guard"`
 }
 
 // Fact separates the local attachment ID from the SIM identity. Neither the

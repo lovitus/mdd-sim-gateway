@@ -70,6 +70,7 @@ type modemManager interface {
 }
 
 type dataBearer struct {
+	APN        string
 	ObjectPath dbus.ObjectPath
 	Interface  string
 	Address    string
@@ -374,6 +375,8 @@ func (manager *dbusModemManager) readBearer(ctx context.Context, path dbus.Objec
 
 func parseDataBearer(path dbus.ObjectPath, properties map[string]dbus.Variant) (dataBearer, error) {
 	result := dataBearer{ObjectPath: path, Interface: stringProperty(properties, "Interface")}
+	settings, _ := variantValue[map[string]dbus.Variant](properties, "Properties")
+	result.APN = stringProperty(settings, "apn")
 	connected, _ := variantValue[bool](properties, "Connected")
 	config, _ := variantValue[map[string]dbus.Variant](properties, "Ip4Config")
 	method := uint32Property(config, "method")

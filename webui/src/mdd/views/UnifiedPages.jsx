@@ -12,7 +12,7 @@ import AdvancedDiagnostics from './AdvancedDiagnostics.jsx'
 import { saveReaderIMEI } from '../hardwareAdapter.js'
 import { networkProbeError } from '../networkAdapter.js'
 import { compactReaderName, lineCallReadinessStatus, intentionalLineStop, unavailableCellularLabel, lineFailureReasons } from '../linePresentation.js'
-import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel } from '../agentHealthPresentation.js'
+import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel, agentIssueLabel } from '../agentHealthPresentation.js'
 
 
 const CAP_STATES = ['off', 'starting', 'on', 'stopping', 'degraded', 'error', 'unsupported']
@@ -1114,6 +1114,7 @@ function countryKeywords(code) {
 }
 
 function formatBytes(value) {
+  if (value == null || !Number.isFinite(Number(value))) return '—'
   const n = Number(value || 0)
   if (n < 1024) return `${n} B`
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KiB`
@@ -1606,6 +1607,9 @@ function AgentHostsPanel({ agents, devices = [], loading, now, language, restart
       return <div className="card u-panel" key={agent.id}>
         <div className="u-section-title"><div><h3>{platform} Agent · {agent.display_id}</h3><p>{meta.arch || '—'}{meta.agent_version ? ` · v${meta.agent_version}` : ''}</p></div><Badge state={view.state}>{view.label}</Badge></div>
         <AgentLocationDetails agent={agent} language={language} />
+        {!!snapshot.issues?.length && <ul className="u-agent-issues">{snapshot.issues.map((issue, index) => <li key={`${issue.code}-${index}`}>
+          {agentIssueLabel(issue, language)}{issue.detail && <div style={{overflowWrap:'anywhere'}}>{issue.detail}</div>}
+        </li>)}</ul>}
         <button className="btn btn-ghost" disabled={!!restarting || !agent.capabilities?.includes('agent-process-restart-v1')}
           title={!agent.capabilities?.includes('agent-process-restart-v1') ? (isZh ? '当前 Agent 未提供受控进程重启能力' : 'Managed process restart is unavailable on this Agent') : undefined}
           onClick={() => onRestart(agent)}>{restarting === agent.id ? (isZh ? '正在等待重新接入…' : 'Waiting for reconnection…') : (isZh ? '软重启 Agent' : 'Restart Agent')}</button>
@@ -1619,6 +1623,7 @@ function AgentHostsPanel({ agents, devices = [], loading, now, language, restart
         <div className="u-detail"><span>{isZh ? '当前硬件连接' : 'Current attachments'}</span><b>{isZh ? `${attachments.modems_online ?? inventory.modems_connected ?? 0} 个模块 · ${attachments.readers_online ?? 0} 个读卡器` : `${attachments.modems_online ?? inventory.modems_connected ?? 0} modem(s) · ${attachments.readers_online ?? 0} reader(s)`}</b></div>
         {!!snapshot.isolation?.state && <div className="u-detail"><span>{isZh ? '宿主流量隔离' : 'Host traffic isolation'}</span><b>{agentHealthEnumLabel('isolation', snapshot.isolation.state, language)}{snapshot.isolation.backend ? ` · ${snapshot.isolation.backend}` : ''}</b></div>}
         {!!storage.state && <div className="u-detail"><span>{isZh ? 'Agent 数据磁盘' : 'Agent data storage'}</span><b>{agentHealthEnumLabel('storage', storage.state, language)}{Number.isFinite(storage.used_percent) ? ` · ${storage.used_percent}%` : ''}</b></div>}
+        {Number.isFinite(storage.free_bytes) && storage.state !== 'unknown' && <div className="u-detail"><span>{isZh ? '剩余 / 总容量' : 'Free / total'}</span><b>{formatBytes(storage.free_bytes)} / {formatBytes(storage.total_bytes)}</b></div>}
         {!!runtime.last_error_code && <p className="u-error">{runtime.last_error_code}</p>}
         {!!snapshot.isolation?.reason_code && <p className="u-error">{snapshot.isolation.reason_code}</p>}
       </div>

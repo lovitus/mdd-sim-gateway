@@ -32,6 +32,7 @@ const device = {
     sim: { state: 'ready', iccid: cardID, imsi: '234100000000001', msisdns: ['+441234567890'],
       pin_state: 'not_required', sms_error: 'refresh_failed' },
     network: { registration: 'home', operator_name: 'Example', signal_percent: 77,
+      interface:'wwan0', address:'192.0.2.7', apn:'CTNET', counters_available:true, rx_bytes:0, tx_bytes:123,
       software_radio: 'on', data: 'connected', profile: 'carrier', data_guard: 'protected' },
     policy,
   },
@@ -54,6 +55,13 @@ assert.equal(mapped.instances[0].id, 'line-a')
 assert.equal(mapped.instances[0].status.state, 'OK')
 assert.equal(mapped.devices.length, 1)
 assert.equal(mapped.devices[0].instance_id, 'line-a')
+assert.equal(mapped.devices[0].cellular.ip,'192.0.2.7')
+assert.equal(mapped.devices[0].cellular.interface,'wwan0')
+assert.equal(mapped.devices[0].cellular.apn,'CTNET')
+assert.equal(mapped.devices[0].cellular.rx_bytes,0)
+assert.equal(mapped.devices[0].cellular.tx_bytes,123)
+const unreadTraffic=mapGoSnapshot({devices:[{...device,modem:{...device.modem,network:{data:'disconnected'}}}]})
+assert.equal(unreadTraffic.devices[0].cellular.rx_bytes,null,'no counter evidence must not be displayed as zero')
 assert.equal(mapped.devices[0].imei, '862547055201716')
 assert.equal(mapped.devices[0].imei_masked, '***********1716', 'copied hardware panel requires the legacy masked field')
 assert.equal(mapped.devices[0].vowifi.rekey_minutes, 30, 'final device mapping must preserve rekey facts')

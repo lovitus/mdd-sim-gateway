@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -347,6 +349,12 @@ func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmode
 	fact.Network.Data = agentmodem.DataConnected
 	fact.Network.Profile = claim.profile
 	fact.Network.Guard = agentmodem.DataGuardFact{State: agentmodem.DataGuardProtected}
+	fact.Network.Interface, fact.Network.Address, fact.Network.APN = "", "", ""
+	fact.Network.CountersAvailable, fact.Network.RXBytes, fact.Network.TXBytes = false, 0, 0
+	if !claim.cleanup && claim.bearer.Interface != "" {
+		fact.Network.Interface, fact.Network.Address, fact.Network.APN = claim.bearer.Interface, claim.bearer.Address, claim.bearer.APN
+		fact.Network.RXBytes, fact.Network.TXBytes, fact.Network.CountersAvailable = readInterfaceCounters(prober.sysRoot, claim.bearer.Interface)
+	}
 	if claim.cleanup {
 		fact.Condition = agentmodem.DeviceDegraded
 		fact.Detail = "cellular data cleanup is pending"
@@ -360,3 +368,23 @@ func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmode
 }
 
 var _ agentdata.Backend = (*Prober)(nil)
+
+// Counters are interface totals, not a fabricated per-session traffic measure.
+func readInterfaceCounters(root, name string) (uint64, uint64, bool) {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return 0, 0, false
+	}
+	read := func(field string) (uint64, error) {
+		value, err := os.ReadFile(filepath.Join(root, "class", "net", name, "statistics", field))
+		if err != nil {
+			return 0, err
+		}
+		return strconv.ParseUint(strings.TrimSpace(string(value)), 10, 64)
+	}
+	rx, rxErr := read("rx_bytes")
+	tx, txErr := read("tx_bytes")
+	if rxErr != nil || txErr != nil {
+		return 0, 0, false
+	}
+	return rx, tx, true
+}
