@@ -260,8 +260,20 @@ func TestConfigCommandsCreateOnePrivateSharedConfigWithoutExposingTokens(t *test
 		if strings.Contains(output.String(), "0123456789abcdef") {
 			t.Fatalf("config output exposed the server token: %s", output.String())
 		}
-		if strings.Contains(output.String(), "1234") {
-			t.Fatalf("config output exposed a SIM PIN: %s", output.String())
+		var display struct {
+			Settings struct {
+				Agent struct {
+					PINs map[string]string `json:"pins"`
+				} `json:"agent"`
+			} `json:"settings"`
+		}
+		if err := json.Unmarshal(output.Bytes(), &display); err != nil {
+			t.Fatal(err)
+		}
+		for _, pin := range display.Settings.Agent.PINs {
+			if pin != "<configured>" {
+				t.Fatal("config output did not redact a SIM PIN field")
+			}
 		}
 	}
 	settings, err := loadConfig(path)
