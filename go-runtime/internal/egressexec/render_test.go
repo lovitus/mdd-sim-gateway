@@ -32,12 +32,21 @@ func TestRenderProductionStyleShadowsocksAsLoopbackUDPProxy(t *testing.T) {
 		t.Fatalf("exit=%+v", exit)
 	}
 	var config struct {
+		DNS struct {
+			Servers []struct {
+				Type     string `json:"type"`
+				PreferGo bool   `json:"prefer_go"`
+			} `json:"servers"`
+		} `json:"dns"`
 		Inbounds  []map[string]any `json:"inbounds"`
 		Outbounds []map[string]any `json:"outbounds"`
 		Route     map[string]any   `json:"route"`
 	}
 	if err := json.Unmarshal(rendered.Config, &config); err != nil {
 		t.Fatal(err)
+	}
+	if len(config.DNS.Servers) != 1 || config.DNS.Servers[0].Type != "local" || !config.DNS.Servers[0].PreferGo {
+		t.Fatal("bootstrap DNS must not depend on the default link having resolved DNS servers")
 	}
 	if len(config.Inbounds) != 1 || config.Inbounds[0]["listen"] != "127.0.0.1" ||
 		len(config.Outbounds) != 1 || config.Outbounds[0]["type"] != "shadowsocks" ||

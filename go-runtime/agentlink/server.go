@@ -1263,8 +1263,10 @@ func (server *Server) resolveModemDataTarget(equipmentID, cardID string, exactEq
 			continue
 		}
 		for _, modem := range status.Topology.Modems {
+			persistentDataReady := modem.Policy != nil && modem.Policy.ConnectionActive &&
+				modem.Policy.ConnectionAvailable && modem.Policy.Desired.ConnectionEnabled && modem.Network.Data == "connected"
 			adaptedReady := exactEquipment || modem.Condition == "ready" && modem.SIM.SessionGeneration != "" &&
-				modem.AT.State == "ready"
+				(modem.AT.State == "ready" || persistentDataReady)
 			if (!exactEquipment || modem.EquipmentID == equipmentID) && adaptedReady &&
 				modem.SIM.State == "ready" && modem.SIM.ICCID == cardID && modem.Capabilities.CellularData &&
 				modem.Network.DataGuard == "protected" {

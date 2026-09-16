@@ -164,8 +164,10 @@ func baseConfig(inbounds, outbounds, rules []map[string]any) map[string]any {
 		rules = []map[string]any{}
 	}
 	return map[string]any{
-		"log":      map[string]any{"level": "info"},
-		"dns":      map[string]any{"servers": []map[string]any{{"type": "local", "tag": "dns-bootstrap"}}},
+		"log": map[string]any{"level": "info"},
+		// Use the system resolver configuration, not resolved's default-link
+		// DBus path: the default route may have no DNS while another link does.
+		"dns":      map[string]any{"servers": []map[string]any{{"type": "local", "tag": "dns-bootstrap", "prefer_go": true}}},
 		"inbounds": inbounds, "outbounds": outbounds,
 		"route": map[string]any{"rules": rules, "default_domain_resolver": "dns-bootstrap"},
 	}

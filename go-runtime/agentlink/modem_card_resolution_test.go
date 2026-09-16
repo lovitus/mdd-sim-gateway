@@ -114,6 +114,36 @@ func TestAdaptedModemCapabilitiesRemainIndependent(t *testing.T) {
 	}
 }
 
+func TestPersistentConnectedDataDoesNotRequireExclusiveATOwner(t *testing.T) {
+	server := modemCardTestServer(t)
+	fact := modemCardFact("attachment", "862547055201716", "8985200000000000001", false, false, true)
+	fact.AT = ModemATControlFact{State: "unavailable", Detail: "ModemManager owns the active data bearer"}
+	fact.Network.Data = "connected"
+	fact.Policy = &ModemPolicyFact{ConnectionActive: true, ConnectionAvailable: true, Desired: ModemPolicyDesired{ConnectionEnabled: true}}
+	server.agents["agent"] = modemCardConnection("agent", "process", fact)
+	if _, err := server.ResolveModemDataTargetForCard(fact.SIM.ICCID); err != nil {
+		t.Fatalf("active guarded data route rejected: %v", err)
+	}
+	if _, err := server.ResolveModemTargetForCardAction(fact.SIM.ICCID, ModemCallDial); !errors.Is(err, ErrModemOffline) {
+		t.Fatal("data readiness fabricated voice readiness")
+	}
+	for _, change := range []func(*ModemFact){
+		func(m *ModemFact) { m.Network.DataGuard = "failed" },
+		func(m *ModemFact) { m.Policy.ConnectionActive = false },
+		func(m *ModemFact) { m.Network.Data = "disconnected" },
+		func(m *ModemFact) { m.SIM.SessionGeneration = "" },
+	} {
+		candidate := fact
+		policy := *fact.Policy
+		candidate.Policy = &policy
+		change(&candidate)
+		server.agents["agent"] = modemCardConnection("agent", "process", candidate)
+		if _, err := server.ResolveModemDataTargetForCard(fact.SIM.ICCID); !errors.Is(err, ErrModemOffline) {
+			t.Fatal("unproven data route accepted")
+		}
+	}
+}
+
 func TestSMSRouteRequiresNegotiatedSessionFence(t *testing.T) {
 	server := modemCardTestServer(t)
 	fact := modemCardFact("attachment", "862547055201716", "8985200000000000001", true, true, false)
