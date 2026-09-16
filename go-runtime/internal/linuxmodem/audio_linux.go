@@ -197,16 +197,26 @@ func decodeALSAHardwareID(value string) (card, device int, ok bool) {
 
 func runLinuxAudioHelper(ctx context.Context, helper string, arguments ...string) (audioHelperResult, error) {
 	command := exec.CommandContext(ctx, helper, arguments...)
-	output, err := command.CombinedOutput()
+	// ALSA enumeration may warn about optional PulseAudio plugins on stderr
+	// in a system service. Only stdout is the helper's JSON protocol.
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
 	var result audioHelperResult
 	decodeErr := json.Unmarshal(output, &result)
 	if err != nil || decodeErr != nil || !result.OK || result.Version < minimumAudioHelperVersion || result.Backend != "alsa" {
 		detail := bounded(result.Error, 500)
 		if detail == "" {
-			detail = bounded(string(output), 500)
+			detail = bounded(stderr.String(), 500)
 		}
 		if detail == "" && err != nil {
 			detail = err.Error()
+		}
+		if detail == "" && decodeErr != nil {
+			detail = decodeErr.Error()
+		}
+		if detail == "" {
+			detail = "invalid audio helper result contract"
 		}
 		return audioHelperResult{}, fmt.Errorf("call-audio helper failed: %s", detail)
 	}
