@@ -145,6 +145,7 @@ func (broker *Broker) Revoke(streamID string) {
 	broker.mu.Lock()
 	record := broker.items[strings.TrimSpace(streamID)]
 	delete(broker.items, strings.TrimSpace(streamID))
+	signalReservationLocked(record)
 	broker.mu.Unlock()
 	if record != nil && record.conn != nil {
 		_ = record.conn.Close()
@@ -157,6 +158,7 @@ func (broker *Broker) RevokeSession(sessionID string) {
 	for key, record := range broker.items {
 		if record.SessionID == sessionID {
 			delete(broker.items, key)
+			signalReservationLocked(record)
 			if record.conn != nil {
 				conns = append(conns, record.conn)
 			}
@@ -175,6 +177,7 @@ func (broker *Broker) DisconnectAgent(agentID string) {
 	for streamID, record := range broker.items {
 		if agentID == "" || record.AgentID == agentID {
 			delete(broker.items, streamID)
+			signalReservationLocked(record)
 			if record.conn != nil {
 				conns = append(conns, record.conn)
 			}
@@ -235,7 +238,7 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	broker.mu.Unlock()
 	ack, _ := json.Marshal(map[string]any{"type": "agent.data.ready", "version": 1, "stream_id": streamID})
 	if err := socket.Write(request.Context(), websocket.MessageText, ack); err != nil {
-		broker.Revoke(streamID)
+		broker.remove(streamID, record)
 		return
 	}
 	broker.mu.Lock()
@@ -245,7 +248,7 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		_ = conn.Close()
 		return
 	}
-	close(record.ready)
+	signalReservationLocked(record)
 	broker.mu.Unlock()
 	select {
 	case <-request.Context().Done():
@@ -258,6 +261,7 @@ func (broker *Broker) purgeLocked(now time.Time) {
 	for key, record := range broker.items {
 		if !record.ExpiresAt.After(now) {
 			delete(broker.items, key)
+			signalReservationLocked(record)
 			if record.conn != nil {
 				_ = record.conn.Close()
 			}

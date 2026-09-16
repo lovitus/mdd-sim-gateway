@@ -74,6 +74,18 @@ jobs:
           persist-credentials: false
       - name: Prove each counterexample against pre-fix production code
         run: bash go-runtime/scripts/review-counterexamples.sh "$GITHUB_WORKSPACE/review-baseline"
+      - name: Check out follow-up pre-fix source
+        uses: actions/checkout@v7
+        with:
+          ref: dde262a5c3724323a20c2d5b7d5cf5bb09ddff84
+          path: followup-baseline
+          persist-credentials: false
+      - name: Prove exact follow-up counterexamples
+        run: bash go-runtime/scripts/followup-counterexamples.sh "$GITHUB_WORKSPACE/followup-baseline"
+      - name: Check source formatting and patch whitespace
+        run: |
+          git show --format= --check HEAD
+          test -z "$(gofmt -l go-runtime/internal/agentdata/broker.go go-runtime/internal/agentmedia/broker.go go-runtime/internal/agentdata/reservation_lifetime.go go-runtime/internal/agentmedia/reservation_lifetime.go go-runtime/internal/agentdata/followup_lifetime_test.go go-runtime/internal/agentmedia/followup_lifetime_test.go)"
       - name: Test Core
         run: |
           set -o pipefail
@@ -90,6 +102,10 @@ jobs:
           go -C providers/vowifi-go test -json -race -count=1 -timeout 5m ./... 2>&1 | tee provider-tests.jsonl
           GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go test -json -race -count=1 -timeout 5m ./engine/swu/... ./runtimehost/... 2>&1 | tee upstream-tests.jsonl
           GOWORK=off go -C agent/call-audio-helper test -race -count=1 ./...
+      - name: Repeat capability-lifetime regression interleavings
+        run: |
+          set -o pipefail
+          go -C go-runtime test -json -race -count=20 -timeout 3m -run '^TestFollowup' ./internal/agentdata ./internal/agentmedia 2>&1 | tee capability-stress-tests.jsonl
       - name: Repeat paid-call regression interleavings
         run: |
           set -o pipefail
