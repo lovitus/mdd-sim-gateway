@@ -281,6 +281,10 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 	}
 	runtime := backend.runtime
 	active := backend.activeCall
+	if active != nil && active.phase == "ending" && active.call != nil {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, conflict("operation_in_progress")
+	}
 	if active != nil && active.call == nil {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflictLayer("call_start_in_progress", "call")
@@ -317,9 +321,8 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	if callEnded && backend.activeCall == active {
-		backend.activeCall = nil
-		backend.sequence++
+	if callEnded {
+		backend.finishCallLocked(active)
 	}
 	if err != nil {
 		var released locallyReleasedCloseError
@@ -336,6 +339,11 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 			return result, nil
 		}
 		backend.transitionLocked(vowifiipc.RuntimeFailed, stopFailureCode)
+		if active != nil && !callEnded {
+			if guardContext := backend.restartCallGuardLocked(active, false); guardContext != nil {
+				go backend.guardCall(guardContext, active)
+			}
+		}
 		failure := publicFailure(&StageError{Layer: failureLayer, Code: stopFailureCode, Err: err})
 		if storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure); storeErr != nil {
 			return vowifiipc.OperationResult{}, errors.Join(failure, storeErr)

@@ -66,6 +66,14 @@ jobs:
           go -C go-runtime mod verify
           go -C providers/vowifi-go mod verify
           GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go mod verify
+      - name: Check out pinned pre-fix source for counterexamples
+        uses: actions/checkout@v7
+        with:
+          ref: f8a8c33793c95308e95043a4cb6acd3ebe01eeed
+          path: review-baseline
+          persist-credentials: false
+      - name: Prove each counterexample against pre-fix production code
+        run: bash go-runtime/scripts/review-counterexamples.sh "$GITHUB_WORKSPACE/review-baseline"
       - name: Test Core
         run: |
           set -o pipefail
@@ -82,6 +90,10 @@ jobs:
           go -C providers/vowifi-go test -json -race -count=1 -timeout 5m ./... 2>&1 | tee provider-tests.jsonl
           GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go test -json -race -count=1 -timeout 5m ./engine/swu/... ./runtimehost/... 2>&1 | tee upstream-tests.jsonl
           GOWORK=off go -C agent/call-audio-helper test -race -count=1 ./...
+      - name: Repeat paid-call regression interleavings
+        run: |
+          set -o pipefail
+          go -C providers/vowifi-go test -json -race -count=20 -timeout 3m -run '^TestReview' ./internal/service 2>&1 | tee call-stress-tests.jsonl
       - name: Vet all selected modules
         run: |
           go -C go-runtime vet ./...

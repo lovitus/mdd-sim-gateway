@@ -140,6 +140,7 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		http.Error(response, "media_reservation_mismatch", http.StatusConflict)
 		return
 	}
+	expected := record
 	socket, err := websocket.Accept(response, request, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
@@ -147,8 +148,11 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	socket.SetReadLimit(pcmFrameBytes)
 	peer := &Peer{socket: socket, incoming: make(chan []byte, maximumQueuedFrames), done: make(chan struct{})}
 	broker.mu.Lock()
+	// Preparation expiry must still hold at attachment, not just before the
+	// WebSocket handshake. Attached media retains its explicit call lifetime.
+	broker.purgeLocked(broker.now().UTC())
 	record = broker.reservations[sessionID]
-	if record == nil || record.peer != nil || record.AgentID != agentID || record.ProcessGeneration != generation ||
+	if record != expected || record == nil || record.peer != nil || record.AgentID != agentID || record.ProcessGeneration != generation ||
 		!hashEqual(record.tokenHash, request.Header.Get("X-MDD-Media-Token")) {
 		broker.mu.Unlock()
 		_ = socket.Close(websocket.StatusPolicyViolation, "media reservation changed")
