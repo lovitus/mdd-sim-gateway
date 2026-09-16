@@ -452,14 +452,26 @@ type fakeRuntime struct {
 	responderID     string
 	registers       atomic.Int32
 	registerErr     error
+	registerStarted chan struct{}
+	registerRelease chan struct{}
 }
 
 func (runtime *fakeRuntime) NetworkSelection() (string, string) {
 	return runtime.pdnFamily, runtime.responderID
 }
 
-func (runtime *fakeRuntime) RecoverRegistration(context.Context) error {
+func (runtime *fakeRuntime) RecoverRegistration(ctx context.Context) error {
 	runtime.registers.Add(1)
+	if runtime.registerStarted != nil {
+		runtime.registerStarted <- struct{}{}
+	}
+	if runtime.registerRelease != nil {
+		select {
+		case <-runtime.registerRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return runtime.registerErr
 }
 
@@ -749,6 +761,12 @@ func TestBackendReportsCloseFailureOnlyWhenFailedStartCleanupFails(t *testing.T)
 	var operationErr *vowifiipc.OperationError
 	if !errors.As(err, &operationErr) || operationErr.Layer != "runtime" || operationErr.Code != "close_failed" || runtime.closes.Load() != 1 {
 		t.Fatalf("start err=%#v closes=%d", err, runtime.closes.Load())
+	}
+	if backend.runtime != runtime {
+		t.Fatal("failed startup cleanup lost runtime ownership")
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "replace-owned-runtime"}); operationCode(err) != "runtime_busy" {
+		t.Fatalf("failed startup was overwritten: %v", err)
 	}
 }
 

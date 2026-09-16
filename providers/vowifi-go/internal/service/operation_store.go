@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,12 +20,20 @@ var operationBucket = []byte("operations-v1")
 var messageOutboxBucket = []byte("message-outbox-v1")
 var maintenanceBucket = []byte("maintenance-v1")
 var drainLeaseKey = []byte("apply-drain-lease")
+var paidMessageBucket = []byte("paid-message-operations-v1")
 
 type OperationRecord struct {
 	Kind    string                    `json:"kind"`
 	Done    bool                      `json:"done"`
 	Result  vowifiipc.OperationResult `json:"result"`
 	Failure *vowifiipc.OperationError `json:"failure,omitempty"`
+}
+
+type MessageOperationRecord struct {
+	OperationRecord
+	Scope      string `json:"scope"`
+	Generation string `json:"execution_generation"`
+	Legacy     bool   `json:"legacy_identity_unknown,omitempty"`
 }
 
 type OperationStore interface {
@@ -35,6 +44,9 @@ type OperationStore interface {
 	MaintenanceLease() (string, error)
 	BeginMaintenance(string) error
 	EndMaintenance(string) error
+	LookupMessage(string) (MessageOperationRecord, bool, error)
+	ReserveMessage(string, MessageOperationRecord) error
+	CompleteMessage(string, vowifiipc.OperationResult, *vowifiipc.OperationError) error
 }
 
 type MessageOutbox interface {
@@ -49,10 +61,40 @@ type MemoryOperationStore struct {
 	records    map[string]OperationRecord
 	messages   map[string]providermessages.Event
 	drainLease string
+	paid       map[string]MessageOperationRecord
 }
 
 func NewMemoryOperationStore() *MemoryOperationStore {
-	return &MemoryOperationStore{records: make(map[string]OperationRecord), messages: make(map[string]providermessages.Event)}
+	return &MemoryOperationStore{records: make(map[string]OperationRecord), messages: make(map[string]providermessages.Event), paid: make(map[string]MessageOperationRecord)}
+}
+
+func (store *MemoryOperationStore) LookupMessage(id string) (MessageOperationRecord, bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	record, found := store.paid[id]
+	return record, found, nil
+}
+
+func (store *MemoryOperationStore) ReserveMessage(id string, record MessageOperationRecord) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, found := store.paid[id]; found {
+		return errors.New("message operation already reserved")
+	}
+	store.paid[id] = record
+	return nil
+}
+
+func (store *MemoryOperationStore) CompleteMessage(id string, result vowifiipc.OperationResult, failure *vowifiipc.OperationError) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	record, found := store.paid[id]
+	if !found || record.Done {
+		return errors.New("message operation is not pending")
+	}
+	record.Done, record.Result, record.Failure = true, result, failure
+	store.paid[id] = record
+	return nil
 }
 
 func (store *MemoryOperationStore) Lookup(generation, operationID string) (OperationRecord, bool, error) {
@@ -197,8 +239,38 @@ func OpenBoltOperationStore(path string) (*BoltOperationStore, error) {
 		if _, err := tx.CreateBucketIfNotExists(messageOutboxBucket); err != nil {
 			return err
 		}
-		_, err := tx.CreateBucketIfNotExists(maintenanceBucket)
-		return err
+		if _, err := tx.CreateBucketIfNotExists(maintenanceBucket); err != nil {
+			return err
+		}
+		paid, err := tx.CreateBucketIfNotExists(paidMessageBucket)
+		if err != nil {
+			return err
+		}
+		// Old paid records have no SIM identity. Preserve them as unknown
+		// tombstones rather than treating a process restart as permission to send.
+		return tx.Bucket(operationBucket).ForEach(func(key, value []byte) error {
+			var record OperationRecord
+			if err := json.Unmarshal(value, &record); err != nil {
+				return err
+			}
+			if !strings.HasPrefix(record.Kind, "message_send:") {
+				return nil
+			}
+			generation, id, ok := strings.Cut(string(key), "\x00")
+			if !ok || id == "" {
+				return errors.New("invalid legacy paid operation key")
+			}
+			if paid.Get([]byte(id)) != nil {
+				return nil
+			}
+			payload, err := json.Marshal(MessageOperationRecord{
+				OperationRecord: OperationRecord{Kind: record.Kind}, Generation: generation, Legacy: true,
+			})
+			if err != nil {
+				return err
+			}
+			return paid.Put([]byte(id), payload)
+		})
 	}); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -217,6 +289,57 @@ func OpenBoltOperationStore(path string) (*BoltOperationStore, error) {
 }
 
 func (store *BoltOperationStore) Close() error { return store.db.Close() }
+
+func (store *BoltOperationStore) LookupMessage(id string) (MessageOperationRecord, bool, error) {
+	var record MessageOperationRecord
+	var found bool
+	err := store.db.View(func(tx *bolt.Tx) error {
+		value := tx.Bucket(paidMessageBucket).Get([]byte(id))
+		if value == nil {
+			return nil
+		}
+		found = true
+		return json.Unmarshal(value, &record)
+	})
+	return record, found, err
+}
+
+func (store *BoltOperationStore) ReserveMessage(id string, record MessageOperationRecord) error {
+	return store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(paidMessageBucket)
+		if bucket.Get([]byte(id)) != nil {
+			return errors.New("message operation already reserved")
+		}
+		value, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(id), value)
+	})
+}
+
+func (store *BoltOperationStore) CompleteMessage(id string, result vowifiipc.OperationResult, failure *vowifiipc.OperationError) error {
+	return store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(paidMessageBucket)
+		value := bucket.Get([]byte(id))
+		if value == nil {
+			return errors.New("message operation is not pending")
+		}
+		var record MessageOperationRecord
+		if err := json.Unmarshal(value, &record); err != nil {
+			return err
+		}
+		if record.Done {
+			return errors.New("message operation is not pending")
+		}
+		record.Done, record.Result, record.Failure = true, result, failure
+		payload, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(id), payload)
+	})
+}
 func (store *BoltOperationStore) Lookup(generation, operationID string) (OperationRecord, bool, error) {
 	var record OperationRecord
 	var found bool

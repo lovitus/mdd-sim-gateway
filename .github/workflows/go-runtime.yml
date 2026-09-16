@@ -155,6 +155,8 @@ jobs:
         working-directory: go-runtime
         run: >-
           go test -race
+          ./adminauth
+          ./mediaauth
           ./internal/boltsnapshot
           ./internal/systembackup
           ./internal/systemstatus

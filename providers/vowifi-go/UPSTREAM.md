@@ -55,3 +55,19 @@ algorithms. These are not retransmit or authentication-success counters.
 Failed startup retains an immutable copy in the optional IPC runtime evidence;
 new startup clears it. Core must accept the new fields before this Provider is
 upgraded. Missing evidence from an older Provider remains unknown.
+
+## MDD Operation Ownership
+
+The service wrapper keeps paid SMS receipts in `paid-message-operations-v1`
+inside its existing Bolt database, independently of process-lifecycle records.
+Each operation is bound to the line, Provider, configured SIM and request
+fingerprint; execution generation is retained as metadata. Reopening the store
+must not authorize another send. Pending receipts remain outcome-unknown.
+Legacy SMS records lack a reliable SIM binding, so their operation IDs become
+unknown tombstones; the original records are retained for reconciliation.
+Do not retry them with fresh operation IDs to bypass this protection.
+
+Manual registration owns an in-flight slot until completion. Drain, stop and
+new paid operations cannot race it. Failed cleanup retains the previous runtime
+until local release is confirmed; a later start cannot overwrite that owner.
+These changes are in the MDD service wrapper, not the upstream protocol stack.

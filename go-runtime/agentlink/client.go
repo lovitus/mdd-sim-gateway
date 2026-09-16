@@ -201,7 +201,14 @@ func (client Client) Run(ctx context.Context) (result error) {
 	}()
 	var workers sync.WaitGroup
 	slots := make(chan struct{}, maximumConcurrentRequests)
-	defer workers.Wait()
+	operationParent, cancelOperations := context.WithCancel(ctx)
+	defer func() {
+		cancelOperations()
+		stopReports()
+		socket.CloseNow()
+		// Keep ownership until even non-cancellable native work has returned.
+		workers.Wait()
+	}()
 	for {
 		message, err := readEnvelope(ctx, socket)
 		if err != nil {
@@ -308,7 +315,7 @@ func (client Client) Run(ctx context.Context) (result error) {
 		go func() {
 			defer workers.Done()
 			defer func() { <-slots }()
-			operationContext, cancel := context.WithTimeout(ctx, client.timeoutFor(message))
+			operationContext, cancel := context.WithTimeout(operationParent, client.timeoutFor(message))
 			result := client.execute(operationContext, message)
 			cancel()
 			writes.Lock()

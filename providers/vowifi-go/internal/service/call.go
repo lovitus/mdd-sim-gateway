@@ -86,6 +86,10 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, notReady("apply_drain_active", "maintenance")
 	}
+	if backend.registering {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, conflict("operation_in_progress")
+	}
 	if backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, notReady("runtime_not_running", "runtime")
@@ -237,6 +241,10 @@ func (backend *Backend) AnswerIncomingCall(ctx context.Context, request vowifiip
 	if backend.drainLease != "" || backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, notReady("runtime_not_running", "runtime")
+	}
+	if backend.registering {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, conflict("operation_in_progress")
 	}
 	runtime, ok := backend.runtime.(IncomingVoiceRuntime)
 	if !ok || !backend.runtime.Layers().Voice.Available {

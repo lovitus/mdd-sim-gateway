@@ -59,6 +59,7 @@ type Server struct {
 	tokens               TokenResolver
 	mu                   sync.RWMutex
 	agents               map[string]*serverConnection
+	credentialEpoch      uint64
 	modemAdmission       ModemRouteAdmission
 	events               ModemEventSink
 	nextID               atomic.Uint64
@@ -215,6 +216,10 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		http.Error(response, "invalid_agent", http.StatusBadRequest)
 		return
 	}
+	// Capture before credential lookup; revocation and insertion share mu.
+	server.mu.RLock()
+	credentialEpoch := server.credentialEpoch
+	server.mu.RUnlock()
 	token, err := server.tokens.TokenForAgent(request.Context(), agentID)
 	if err != nil || len(token) < minimumTokenBytes || !bearerMatches(request.Header.Get("Authorization"), token) {
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
@@ -305,9 +310,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	// acquire this lock before it can enqueue/write a request, so hello_ack is
 	// always the first server frame observed by the Agent.
 	connection.mu.Lock()
-	if !server.add(connection) {
+	if !server.add(connection, credentialEpoch) {
 		connection.mu.Unlock()
-		_ = socket.Close(websocket.StatusPolicyViolation, "duplicate Agent")
+		_ = socket.Close(websocket.StatusPolicyViolation, "Agent admission changed")
 		return
 	}
 	defer server.remove(connection)
@@ -355,14 +360,17 @@ func (server *Server) Status(agentID string) (ConnectionStatus, bool) {
 // credential change. An empty Agent ID disconnects every current Agent.
 func (server *Server) DisconnectAgent(agentID string) {
 	agentID = strings.TrimSpace(agentID)
-	server.mu.RLock()
+	server.mu.Lock()
+	// Invalidate pending handshakes as well as already registered sockets.
+	// Unrelated live Agents are not disconnected.
+	server.credentialEpoch++
 	connections := make([]*serverConnection, 0, len(server.agents))
 	for currentID, connection := range server.agents {
 		if agentID == "" || currentID == agentID {
 			connections = append(connections, connection)
 		}
 	}
-	server.mu.RUnlock()
+	server.mu.Unlock()
 	for _, connection := range connections {
 		connection.socket.CloseNow()
 	}
@@ -1568,9 +1576,12 @@ func (server *Server) ResolveCardRoute(cardID string) (CardRouteTarget, error) {
 	return matches[0], nil
 }
 
-func (server *Server) add(connection *serverConnection) bool {
+func (server *Server) add(connection *serverConnection, credentialEpoch uint64) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
+	if credentialEpoch != server.credentialEpoch {
+		return false
+	}
 	if _, exists := server.agents[connection.hello.AgentID]; exists {
 		return false
 	}

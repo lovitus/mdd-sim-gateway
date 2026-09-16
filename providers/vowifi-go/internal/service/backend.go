@@ -63,6 +63,8 @@ type Backend struct {
 	activeCall                     *activeVoiceCall
 	drainLease                     string
 	messageSends                   int
+	registering                    bool
+	messageScope                   string
 }
 
 func NewBackend(lineID, providerID, generation string, factory Factory) (*Backend, error) {
@@ -74,13 +76,20 @@ func NewBackendWithStore(lineID, providerID, generation string, factory Factory,
 }
 
 func NewBackendWithMediaStore(lineID, providerID, generation string, factory Factory, operations OperationStore,
-	media MediaDirectory, callGuardTimeout time.Duration,
+	media MediaDirectory, callGuardTimeout time.Duration, cardID ...string,
 ) (*Backend, error) {
 	if lineID == "" || providerID == "" || generation == "" || factory == nil {
 		return nil, errors.New("invalid VoWiFi service backend configuration")
 	}
 	if operations == nil {
 		return nil, errors.New("VoWiFi service operation store is required")
+	}
+	if len(cardID) > 1 || len(cardID) == 1 && strings.TrimSpace(cardID[0]) == "" {
+		return nil, errors.New("invalid paid message SIM identity")
+	}
+	card := ""
+	if len(cardID) == 1 {
+		card = cardID[0]
 	}
 	drainLease, err := operations.MaintenanceLease()
 	if err != nil {
@@ -106,6 +115,7 @@ func NewBackendWithMediaStore(lineID, providerID, generation string, factory Fac
 		lineID: lineID, providerID: providerID, generation: generation, factory: factory,
 		condition: vowifiipc.RuntimeStopped, sequence: 1, operations: operations,
 		media: media, callGuardTimeout: callGuardTimeout, drainLease: drainLease,
+		messageScope: operationKind("sim", lineID, providerID, card),
 	}, nil
 }
 
@@ -135,7 +145,7 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 		return vowifiipc.OperationResult{}, notReady("apply_drain_active", "maintenance")
 	}
 	if backend.condition == vowifiipc.RuntimeStarting || backend.condition == vowifiipc.RuntimeStopping ||
-		backend.condition == vowifiipc.RuntimeRunning {
+		backend.condition == vowifiipc.RuntimeRunning || backend.runtime != nil {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflict("runtime_busy")
 	}
@@ -157,6 +167,10 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 		failure := publicFailure(err)
 		if runtime != nil {
 			if closeErr := closeBounded(5*time.Second, runtime.Close); closeErr != nil {
+				var released locallyReleasedCloseError
+				if !errors.As(closeErr, &released) || !released.LocalRuntimeReleased() {
+					backend.runtime = runtime
+				}
 				err = errors.Join(err, closeErr)
 				failure = publicFailure(&StageError{Layer: "runtime", Code: "close_failed", Err: err})
 			}
@@ -179,7 +193,7 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 		incoming.SetIncomingCallAvailability(func() bool {
 			backend.mu.Lock()
 			defer backend.mu.Unlock()
-			return backend.runtime == runtime && backend.condition == vowifiipc.RuntimeRunning && backend.activeCall == nil
+			return backend.runtime == runtime && backend.condition == vowifiipc.RuntimeRunning && backend.activeCall == nil && !backend.registering
 		})
 	}
 	backend.runtime = runtime
@@ -189,7 +203,10 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 	}
 	if err := backend.operations.Complete(backend.generation, request.OperationID, result); err != nil {
 		closeErr := closeBounded(5*time.Second, runtime.Close)
-		backend.runtime = nil
+		var released locallyReleasedCloseError
+		if closeErr == nil || errors.As(closeErr, &released) && released.LocalRuntimeReleased() {
+			backend.runtime = nil
+		}
 		backend.transitionLocked(vowifiipc.RuntimeFailed, "operation_store_failed")
 		return vowifiipc.OperationResult{}, errors.Join(err, closeErr)
 	}
@@ -212,6 +229,10 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 	if backend.condition == vowifiipc.RuntimeStarting || backend.condition == vowifiipc.RuntimeStopping {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflict("runtime_busy")
+	}
+	if backend.registering || backend.messageSends != 0 {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, conflict("operation_in_progress")
 	}
 	if request.RequireIdle && backend.drainLease != "" {
 		backend.mu.Unlock()
@@ -348,6 +369,10 @@ func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendM
 		backend.mu.Unlock()
 		return vowifiipc.MessageResult{}, notReady("apply_drain_active", "maintenance")
 	}
+	if backend.registering {
+		backend.mu.Unlock()
+		return vowifiipc.MessageResult{}, conflict("operation_in_progress")
+	}
 	if backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
 		backend.mu.Unlock()
 		return vowifiipc.MessageResult{}, notReady("runtime_not_running", "runtime")
@@ -357,7 +382,9 @@ func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendM
 		backend.mu.Unlock()
 		return vowifiipc.MessageResult{}, notReady("messaging_transport_unavailable", "messaging")
 	}
-	if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
+	if err := backend.operations.ReserveMessage(request.OperationID, MessageOperationRecord{
+		OperationRecord: OperationRecord{Kind: kind}, Scope: backend.messageScope, Generation: backend.generation,
+	}); err != nil {
 		backend.mu.Unlock()
 		return vowifiipc.MessageResult{}, err
 	}
@@ -369,7 +396,7 @@ func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendM
 	backend.messageSends--
 	if sendErr != nil {
 		failure := publicFailure(&StageError{Layer: "messaging", Code: "message_send_failed", Err: sendErr})
-		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
+		storeErr := backend.operations.CompleteMessage(request.OperationID, vowifiipc.OperationResult{}, failure)
 		backend.mu.Unlock()
 		if storeErr != nil {
 			return vowifiipc.MessageResult{}, errors.Join(failure, storeErr)
@@ -383,7 +410,7 @@ func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendM
 		},
 		MessageID: request.MessageID,
 	}
-	storeErr := backend.operations.Complete(backend.generation, request.OperationID, result.OperationResult)
+	storeErr := backend.operations.CompleteMessage(request.OperationID, result.OperationResult, nil)
 	backend.mu.Unlock()
 	if storeErr != nil {
 		// The network side effect has already completed. Returning the storage
@@ -416,7 +443,7 @@ func (backend *Backend) Register(ctx context.Context, request vowifiipc.Register
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, notReady("register_unsupported", "ims")
 	}
-	if backend.activeCall != nil || backend.pendingIncomingCallSnapshotLocked() != nil || backend.messageSends != 0 {
+	if backend.registering || backend.activeCall != nil || backend.pendingIncomingCallSnapshotLocked() != nil || backend.messageSends != 0 {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflict("register_busy")
 	}
@@ -424,9 +451,11 @@ func (backend *Backend) Register(ctx context.Context, request vowifiipc.Register
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, err
 	}
+	backend.registering = true
 	backend.mu.Unlock()
 	err := registration.RecoverRegistration(ctx)
 	backend.mu.Lock()
+	backend.registering = false
 	if err != nil {
 		failure := publicFailure(&StageError{Layer: "ims", Code: "ims_register_failed", Err: err})
 		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
@@ -447,10 +476,27 @@ func (backend *Backend) Register(ctx context.Context, request vowifiipc.Register
 }
 
 func (backend *Backend) replayMessageLocked(operationID, messageID, kind string) (vowifiipc.MessageResult, error, bool) {
-	result, err, found := backend.replayLocked(operationID, kind)
+	prior, found, err := backend.operations.LookupMessage(operationID)
 	if !found || err != nil {
 		return vowifiipc.MessageResult{}, err, found
 	}
+	if prior.Legacy {
+		return vowifiipc.MessageResult{}, conflict("operation_result_unknown"), true
+	}
+	if prior.Scope != backend.messageScope || prior.Kind != kind {
+		return vowifiipc.MessageResult{}, conflict("operation_id_reused"), true
+	}
+	if !prior.Done {
+		return vowifiipc.MessageResult{}, conflict("operation_result_unknown"), true
+	}
+	if prior.Failure != nil {
+		failure := *prior.Failure
+		return vowifiipc.MessageResult{}, &failure, true
+	}
+	result := prior.Result
+	// The receipt is durable; the status is a fresh observation, not a replay
+	// of a previous process's running state or generation.
+	result.Status = backend.snapshotLocked()
 	return vowifiipc.MessageResult{OperationResult: result, MessageID: messageID}, nil, true
 }
 

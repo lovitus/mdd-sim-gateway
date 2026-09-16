@@ -101,6 +101,7 @@ func runWithFactory(settings config, factory service.Factory) error {
 	backend, err := service.NewBackendWithMediaStore(
 		settings.LineID, settings.ProviderID, generation, factory, operations,
 		mediaDirectory{registry: media}, durationMS(settings.IPC.CallGuardTimeoutMS, 10*time.Second),
+		settings.Agent.CardID,
 	)
 	if err != nil {
 		return err

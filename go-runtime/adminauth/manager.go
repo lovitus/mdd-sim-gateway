@@ -31,6 +31,7 @@ const (
 	maxSessions         = 1024
 	maxAuthBytes        = 16 << 10
 	maxAgentCredentials = 64
+	maxLoginDerivations = 2
 )
 
 var (
@@ -74,6 +75,9 @@ type Manager struct {
 	sessions       map[[32]byte]sessionRecord
 	failures       map[string][]time.Time
 	persister      CredentialPersister
+	passwordEpoch  uint64
+	loginInFlight  map[string]bool
+	derivePassword func(password, salt []byte) ([]byte, error)
 }
 
 type CredentialPersister interface {
@@ -166,6 +170,10 @@ func NewManager(path string, secureCookies bool, now func() time.Time, options .
 		agentTokenMode: mode, agentTokens: agentTokens,
 		now: now, sessions: make(map[[32]byte]sessionRecord),
 		failures: make(map[string][]time.Time), persister: &fileCredentialPersister{path: path, uid: -1, gid: -1}}
+	manager.loginInFlight = make(map[string]bool)
+	manager.derivePassword = func(password, salt []byte) ([]byte, error) {
+		return scrypt.Key(password, salt, 1<<15, 8, 1, 32)
+	}
 	for _, option := range options {
 		if option == nil {
 			return nil, errors.New("nil administrator authentication option")
@@ -205,6 +213,7 @@ func (manager *Manager) ChangePassword(current, next string) error {
 	}
 	manager.salt = salt
 	manager.passwordHash = hash
+	manager.passwordEpoch++
 	manager.sessions = make(map[[32]byte]sessionRecord)
 	return nil
 }
@@ -387,24 +396,32 @@ func validAgentID(value string) bool {
 }
 
 func (manager *Manager) Login(username, password, peer string) (LoginResult, error) {
+	if !validPassword(password) || !utf8.ValidString(username) || utf8.RuneCountInString(username) > 64 {
+		return LoginResult{}, ErrInvalidCredentials
+	}
+	peer = strings.TrimSpace(peer)
 	now := manager.now().UTC()
 	manager.mu.Lock()
-	retry := manager.retryAfterLocked(strings.TrimSpace(peer), now)
+	retry := manager.retryAfterLocked(peer, now)
+	if retry > 0 || manager.loginInFlight[peer] || len(manager.loginInFlight) >= maxLoginDerivations {
+		manager.mu.Unlock()
+		return LoginResult{}, &ThrottleError{RetryAfter: max(1, retry)}
+	}
+	manager.loginInFlight[peer] = true
 	salt := append([]byte(nil), manager.salt...)
 	passwordHash := append([]byte(nil), manager.passwordHash...)
+	epoch := manager.passwordEpoch
+	derive := manager.derivePassword
 	manager.mu.Unlock()
-	if retry > 0 {
-		return LoginResult{}, &ThrottleError{RetryAfter: retry}
-	}
-	validPasswordLength := utf8.ValidString(password) && utf8.RuneCountInString(password) <= 256
-	derived, err := scrypt.Key([]byte(password), salt, 1<<15, 8, 1, 32)
+	derived, err := derive([]byte(password), salt)
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	delete(manager.loginInFlight, peer)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	valid := validPasswordLength && secureEqual(username, manager.username) && secureBytes(derived, passwordHash)
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	peer = strings.TrimSpace(peer)
+	now = manager.now().UTC()
+	valid := epoch == manager.passwordEpoch && secureEqual(username, manager.username) && secureBytes(derived, passwordHash)
 	if !valid {
 		manager.failures[peer] = append(manager.failures[peer], now)
 		return LoginResult{}, ErrInvalidCredentials
