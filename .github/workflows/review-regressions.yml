@@ -71,10 +71,12 @@ jobs:
           set -o pipefail
           go -C go-runtime test -json -count=1 -timeout 3m ./... 2>&1 | tee core-tests.jsonl
       - name: Race-test reviewed boundaries
+        if: ${{ !cancelled() }}
         run: |
           set -o pipefail
           go -C go-runtime test -json -race -count=3 -timeout 5m ./adminauth ./agentlink ./mediaauth ./providercontrol ./internal/agentdata ./internal/agentmedia ./internal/agentusbip ./internal/runtimereconcile ./internal/linecatalog 2>&1 | tee boundary-tests.jsonl
       - name: Test Provider and protocol simulators
+        if: ${{ !cancelled() }}
         run: |
           set -o pipefail
           go -C providers/vowifi-go test -json -race -count=1 -timeout 5m ./... 2>&1 | tee provider-tests.jsonl
