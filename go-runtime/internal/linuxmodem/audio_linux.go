@@ -67,15 +67,15 @@ func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaT
 	}
 	uac, err := discoverLinuxUAC(ctx, prober.sysRoot, current.usb.PhysicalID, prober.audioHelper)
 	if err != nil {
-		return nil, err
+		return nil, &agentmodem.MediaStageError{Stage: "pcm_discovery", Err: err}
 	}
 	if err := prober.at.EnableVoicePCMMode(ctx, target.EquipmentID, 2); err != nil {
-		return nil, fmt.Errorf("enable modem UAC voice route: %w", err)
+		return nil, &agentmodem.MediaStageError{Stage: "pcm_route", Err: err}
 	}
 	endpoint, err := uac.Open()
 	if err != nil {
 		_ = prober.at.DisableVoicePCM(ctx, target.EquipmentID)
-		return nil, err
+		return nil, &agentmodem.MediaStageError{Stage: "pcm_open", Err: err}
 	}
 	return &linuxVoiceEndpoint{
 		ReadWriteCloser: endpoint, prober: prober,

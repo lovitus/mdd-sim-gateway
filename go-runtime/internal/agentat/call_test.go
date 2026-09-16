@@ -194,3 +194,28 @@ func TestEnableVoicePCMModeUsesOnlyDocumentedRoutes(t *testing.T) {
 		t.Fatal("undocumented route was accepted")
 	}
 }
+
+func TestEnableVoicePCMRechecksFailedDiscoveryWithoutDialing(t *testing.T) {
+	for _, advertised := range []bool{false, true} {
+		response := "OK\r\n"
+		if advertised {
+			response = "+QPCMV: (0,1),(0-2)\r\nOK\r\n"
+		}
+		port := &fakePort{responses: map[string][]byte{
+			"AT+QPCMV=?": []byte(response), "AT+QPCMV=1,2": []byte("OK\r\n"),
+		}}
+		owner := &Owner{port: port}
+		err := owner.EnableVoicePCMMode(context.Background(), 2)
+		if (err == nil) != advertised {
+			t.Fatalf("advertised=%v: %v", advertised, err)
+		}
+		want := 1
+		if advertised {
+			want = 2
+		}
+		if len(port.commands) != want || port.commands[0] != "AT+QPCMV=?" ||
+			(advertised && port.commands[1] != "AT+QPCMV=1,2") {
+			t.Fatalf("unexpected side effects: %v", port.commands)
+		}
+	}
+}

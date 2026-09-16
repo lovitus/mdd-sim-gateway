@@ -194,11 +194,19 @@ func (owner *Owner) EnableVoicePCM(ctx context.Context) error {
 }
 
 func (owner *Owner) EnableVoicePCMMode(ctx context.Context, mode int) error {
-	if !owner.capabilities.VoicePCM {
-		return errors.New("modem does not advertise voice PCM")
-	}
 	if mode != 0 && mode != 2 {
 		return errors.New("unsupported modem voice PCM mode")
+	}
+	if !owner.capabilities.VoicePCM {
+		// An optional discovery probe can fail while the modem is coming up.
+		// Recheck only on explicit media preparation, never retry a paid dial.
+		response, err := owner.Exchange(ctx, "AT+QPCMV=?", 3*time.Second)
+		if err != nil {
+			return fmt.Errorf("recheck modem voice PCM: %w", err)
+		}
+		if !supportsVoicePCM(response) {
+			return errors.New("modem does not advertise voice PCM")
+		}
 	}
 	_, err := owner.Exchange(ctx, fmt.Sprintf("AT+QPCMV=1,%d", mode), 5*time.Second)
 	return err

@@ -137,12 +137,12 @@ func (manager *Manager) prepare(ctx context.Context, request agentlink.ModemMedi
 	writeBatchBytes, err := pcmWriteBatchBytes(endpoint)
 	if err != nil {
 		_ = endpoint.Close()
-		return err
+		return &agentmodem.MediaStageError{Stage: "pcm_format", Err: err}
 	}
 	socket, err := manager.dial(ctx, request)
 	if err != nil {
 		_ = endpoint.Close()
-		return err
+		return &agentmodem.MediaStageError{Stage: "wss_connect", Err: err}
 	}
 	sessionContext, cancel := context.WithCancel(manager.ctx)
 	current := &session{
@@ -386,6 +386,13 @@ func mediaFailure(err error) *agentlink.RemoteError {
 		strings.Contains(err.Error(), "ownership changed"):
 		return &agentlink.RemoteError{Kind: "conflict", Code: "modem_media_conflict"}
 	default:
+		var stage *agentmodem.MediaStageError
+		if errors.As(err, &stage) {
+			switch stage.Stage {
+			case "pcm_discovery", "pcm_route", "pcm_open", "pcm_format", "wss_connect":
+				return &agentlink.RemoteError{Kind: "failed", Code: "modem_media_" + stage.Stage + "_failed", Retryable: true}
+			}
+		}
 		return &agentlink.RemoteError{Kind: "failed", Code: "modem_media_failed", Retryable: true}
 	}
 }

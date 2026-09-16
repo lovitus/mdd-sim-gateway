@@ -3,6 +3,7 @@ package agentmedia
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +19,25 @@ import (
 )
 
 const mediaTestToken = "0123456789abcdef0123456789abcdef"
+
+func TestMediaFailurePreservesStageButNotPrivateCause(t *testing.T) {
+	for _, stage := range []string{"pcm_discovery", "pcm_route", "pcm_open", "pcm_format", "wss_connect"} {
+		err := &agentmodem.MediaStageError{Stage: stage, Err: errors.New("private credential or path")}
+		failure := mediaFailure(err)
+		if failure.Code != "modem_media_"+stage+"_failed" {
+			t.Fatalf("lost failure stage: %+v", failure)
+		}
+		payload, _ := json.Marshal(failure)
+		if strings.Contains(string(payload), "private") {
+			t.Fatal("private cause leaked")
+		}
+	}
+	for _, cause := range []error{context.Canceled, agentmodem.ErrOperationTargetReplaced} {
+		if mediaFailure(&agentmodem.MediaStageError{Stage: "pcm_route", Err: cause}).Kind == "failed" {
+			t.Fatal("stage hid authoritative cancellation or replacement")
+		}
+	}
+}
 
 type endpointFactory struct {
 	mu              sync.Mutex

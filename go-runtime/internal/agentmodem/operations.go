@@ -114,6 +114,16 @@ type MediaTarget struct {
 	CardID       string
 }
 
+// MediaStageError preserves the local cause without sending device paths or
+// transport credentials across the public error contract.
+type MediaStageError struct {
+	Stage string
+	Err   error
+}
+
+func (err *MediaStageError) Error() string { return err.Stage + ": " + err.Err.Error() }
+func (err *MediaStageError) Unwrap() error { return err.Err }
+
 // MediaWriteBatchSizer lets a PCM endpoint declare its exact write cadence.
 // Endpoints without it retain the Quectel serial PCM packet contract.
 type MediaWriteBatchSizer interface {
