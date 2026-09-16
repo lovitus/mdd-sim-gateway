@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/godbus/dbus/v5"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpolicy"
@@ -22,6 +23,8 @@ import (
 )
 
 type dataClaim struct {
+	commandSnapshot                                           modemSnapshot
+	commandEpoch                                              string
 	target                                                    agentdata.Target
 	profiles                                                  []agentpolicy.ProfileView
 	uid                                                       string
@@ -115,6 +118,16 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 	snapshot, err := prober.awaitDataModem(ctx, claim.uid, target)
 	if err != nil {
 		return rollback(err)
+	}
+	claim.commandSnapshot = snapshot
+	if source, ok := prober.manager.(interface {
+		SIMEpoch(dbus.ObjectPath, dbus.ObjectPath) (string, bool)
+	}); ok {
+		var available bool
+		claim.commandEpoch, available = source.SIMEpoch(snapshot.ObjectPath, snapshot.SIMPath)
+		if !available {
+			return rollback(errors.New("ModemManager data SIM event fence unavailable"))
+		}
 	}
 	claim.bearer, err = prober.manager.Connect(ctx, snapshot.ObjectPath, profile)
 	if err != nil {
@@ -324,6 +337,16 @@ func (prober *Prober) retryDataCleanup() {
 func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmodem.Fact {
 	fact := cloneFact(current.lastFact)
 	continuity, continuityErr := prober.simContinuity(current)
+	if claim.commandEpoch != "" {
+		if source, ok := prober.manager.(interface {
+			SIMEpoch(dbus.ObjectPath, dbus.ObjectPath) (string, bool)
+		}); ok {
+			epoch, available := source.SIMEpoch(claim.commandSnapshot.ObjectPath, claim.commandSnapshot.SIMPath)
+			if !available || epoch != claim.commandEpoch {
+				continuityErr = errors.New("SIM event changed during the active ModemManager bearer")
+			}
+		}
+	}
 	if fact.EquipmentID == "" {
 		fact = agentmodem.Fact{AttachmentID: current.usb.AttachmentID, EquipmentID: current.snapshot.EquipmentID,
 			ContinuityEpoch: continuity,
@@ -346,6 +369,11 @@ func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmode
 	}
 	fact.Capabilities.CellularData = true
 	fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable, Detail: "ModemManager owns the active data bearer"}
+	if !claim.cleanup && claim.commandSnapshot.ObjectPath != "" {
+		if at, ok := prober.atSnapshot[current.usb.AttachmentID]; ok && at.State == "ready" {
+			fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: at.Port, CallSignalling: at.CallSignalling, SMS: at.SMS}
+		}
+	}
 	fact.Network.Data = agentmodem.DataConnected
 	fact.Network.Profile = claim.profile
 	fact.Network.Guard = agentmodem.DataGuardFact{State: agentmodem.DataGuardProtected}

@@ -14,6 +14,31 @@ type transactionPort struct {
 	ctx     context.Context
 }
 
+type textSubmitPort struct {
+	transactionPort
+	submits int
+	failure error
+}
+
+func (p *textSubmitPort) SubmitSMSText(context.Context, string, string) ([]int, error) {
+	p.submits++
+	return []int{42}, p.failure
+}
+
+func TestTransactionalTextSubmissionDoesNotUseSplitPDUWrites(t *testing.T) {
+	port := &textSubmitPort{}
+	owner := &Owner{port: port, equipmentID: "equipment", capabilities: Capabilities{SMS: true}}
+	refs, err := owner.SendSMS(context.Background(), "equipment", "+4412345", "message")
+	if err != nil || len(refs) != 1 || refs[0] != 42 || port.submits != 1 {
+		t.Fatalf("submission %v %v", refs, err)
+	}
+	port.failure = &SMSSubmitError{PossiblySent: true, Err: errors.New("send outcome unknown")}
+	_, err = owner.SendSMS(context.Background(), "equipment", "+4412345", "message")
+	if !SMSPossiblySent(err) || port.submits != 2 {
+		t.Fatal("uncertain submission lost safety state or retried")
+	}
+}
+
 func (*transactionPort) Read([]byte) (int, error) { return 0, io.EOF }
 func (*transactionPort) Write([]byte) (int, error) {
 	return 0, errors.New("split write must not be used")

@@ -29,6 +29,7 @@ import (
 )
 
 type Prober struct {
+	atSnapshot    map[string]agentat.Snapshot
 	serialOnly    bool
 	homePLMN      map[string]homePLMNObservation
 	mu            sync.Mutex
@@ -120,7 +121,21 @@ func newProber(manager modemManager, simAPDU bool, audioHelper, sysRoot string, 
 		localCapture: make(map[string]bool), data: make(map[string]*dataClaim),
 		recovery: make(map[string]rawRecoveryAttempt), sessions: sessions,
 	}
-	at, err := agentat.NewManagerWithSIMAPDU(prober.enumerateAT, opener, simAPDU)
+	at, err := agentat.NewManagerWithSIMAPDU(prober.enumerateAT, func(candidate agentat.Candidate) (agentat.Port, error) {
+		if strings.HasPrefix(candidate.Name, mmCommandPrefix) {
+			commands, ok := manager.(modemCommandRuntime)
+			if !ok {
+				return nil, errors.New("ModemManager command runtime unavailable")
+			}
+			for _, claim := range prober.data {
+				if !claim.cleanup && candidate.Name == mmCommandPrefix+string(claim.commandSnapshot.ObjectPath) {
+					return &modemCommandPort{manager: manager, commands: commands, snapshot: claim.commandSnapshot, epoch: claim.commandEpoch}, nil
+				}
+			}
+			return nil, agentmodem.ErrOperationTargetReplaced
+		}
+		return opener(candidate)
+	}, simAPDU)
 	if err != nil {
 		_ = manager.Close()
 		return nil, err
@@ -231,6 +246,7 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agen
 	}
 
 	snapshots := prober.at.Reconcile(ctx, prober.targetsExcept(nil))
+	prober.atSnapshot = snapshots
 	facts = make([]agentmodem.Fact, 0, len(prober.devices)+len(blocked))
 	for _, current := range prober.devices {
 		if _, exported := prober.raw[current.snapshot.EquipmentID]; exported {
@@ -360,6 +376,10 @@ func (prober *Prober) enumerateAT() ([]agentat.Candidate, error) {
 		// release is confirmed, enumeration must allow that recovery to finish.
 		if claim := prober.data[current.snapshot.EquipmentID]; claim != nil &&
 			!(claim.cleanup && claim.permitClosed && claim.routeCleaned && claim.bearerDisconnected && claim.inhibited) {
+			if _, supported := prober.manager.(modemCommandRuntime); supported && !claim.cleanup && claim.commandSnapshot.ObjectPath != "" {
+				result = append(result, agentat.Candidate{Name: mmCommandPrefix + string(claim.commandSnapshot.ObjectPath),
+					Product: current.snapshot.Model, PhysicalID: current.usb.PhysicalID, USB: true})
+			}
 			continue
 		}
 		result = append(result, linuxATCandidates(current.snapshot, current.usb.PhysicalID)...)
@@ -528,7 +548,7 @@ func (prober *Prober) simContinuity(current *ownedDevice) (string, error) {
 func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	if prober.data[operation.EquipmentID] != nil && operation.Action != agentmodem.OperationCallStatus &&
+	if claim := prober.data[operation.EquipmentID]; claim != nil && claim.cleanup && operation.Action != agentmodem.OperationCallStatus &&
 		operation.Action != agentmodem.OperationCallHangup {
 		return agentmodem.OperationResult{}, fmt.Errorf("%w: protected cellular data owns modem operations", agentmodem.ErrOperationUnavailable)
 	}

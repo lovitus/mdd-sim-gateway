@@ -180,6 +180,14 @@ func (owner *Owner) SendSMS(ctx context.Context, equipmentID, recipient, body st
 	if len(pdus) < 1 || len(pdus) > maximumSMSParts {
 		return nil, fmt.Errorf("SMS requires %d parts; maximum is %d", len(pdus), maximumSMSParts)
 	}
+	owner.mu.Lock()
+	if submitter, ok := owner.port.(interface {
+		SubmitSMSText(context.Context, string, string) ([]int, error)
+	}); ok {
+		defer owner.mu.Unlock()
+		return submitter.SubmitSMSText(ctx, recipient, body)
+	}
+	owner.mu.Unlock()
 	if _, err := owner.Exchange(ctx, "AT+CMGF=0", 3*time.Second); err != nil {
 		return nil, err
 	}
