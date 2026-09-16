@@ -18,6 +18,9 @@ func metadataRecoveryFixture(t *testing.T) (*Manager, *session, *fakeCard) {
 	card := scriptedCard("8944000000000000001", pinAlreadyVerified)
 	original := card.handler
 	card.handler = func(command []byte) ([]byte, error) {
+		if len(command) > 1 && command[0] == 0x80 && command[1] == 0xAA {
+			return []byte{0x6A, 0x82}, nil
+		}
 		if len(command) == 5 && command[1] == 0x70 {
 			if command[2] == 0 {
 				return []byte{1, 0x90, 0}, nil
