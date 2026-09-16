@@ -128,7 +128,7 @@ func newProber(manager modemManager, simAPDU bool, audioHelper, sysRoot string, 
 				return nil, errors.New("ModemManager command runtime unavailable")
 			}
 			for _, claim := range prober.data {
-				if !claim.cleanup && candidate.Name == mmCommandPrefix+string(claim.commandSnapshot.ObjectPath) {
+				if !claim.cleanup && candidate.Name == commandPortName(claim.commandSnapshot.ObjectPath) {
 					return &modemCommandPort{manager: manager, commands: commands, snapshot: claim.commandSnapshot, epoch: claim.commandEpoch}, nil
 				}
 			}
@@ -377,7 +377,7 @@ func (prober *Prober) enumerateAT() ([]agentat.Candidate, error) {
 		if claim := prober.data[current.snapshot.EquipmentID]; claim != nil &&
 			!(claim.cleanup && claim.permitClosed && claim.routeCleaned && claim.bearerDisconnected && claim.inhibited) {
 			if _, supported := prober.manager.(modemCommandRuntime); supported && !claim.cleanup && claim.commandSnapshot.ObjectPath != "" {
-				result = append(result, agentat.Candidate{Name: mmCommandPrefix + string(claim.commandSnapshot.ObjectPath),
+				result = append(result, agentat.Candidate{Name: commandPortName(claim.commandSnapshot.ObjectPath),
 					Product: current.snapshot.Model, PhysicalID: current.usb.PhysicalID, USB: true})
 			}
 			continue

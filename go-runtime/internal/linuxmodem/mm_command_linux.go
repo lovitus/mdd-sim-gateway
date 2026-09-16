@@ -17,6 +17,10 @@ import (
 
 const mmCommandPrefix = "mm-command:"
 
+func commandPortName(path dbus.ObjectPath) string {
+	return mmCommandPrefix + strings.TrimPrefix(string(path), "/org/freedesktop/ModemManager1/Modem/")
+}
+
 type modemCommandRuntime interface {
 	Command(context.Context, dbus.ObjectPath, string, time.Duration) ([]byte, error)
 	SendText(context.Context, dbus.ObjectPath, string, string, func(context.Context) error) ([]int, error)

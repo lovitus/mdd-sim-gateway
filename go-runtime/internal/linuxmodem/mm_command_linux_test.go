@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
@@ -68,8 +69,17 @@ func TestDataOwnerOffersOnlyModemManagerCommandCandidate(t *testing.T) {
 	prober.devices["usb"] = &ownedDevice{snapshot: modemSnapshot{EquipmentID: "equipment", ATPorts: []string{"ttyUSB2"}}, usb: usbGeneration{PhysicalID: "physical", AttachmentID: "attachment"}}
 	prober.data["equipment"] = &dataClaim{commandSnapshot: modemSnapshot{ObjectPath: "/org/freedesktop/ModemManager1/Modem/1"}}
 	candidates, err := prober.enumerateAT()
-	if err != nil || len(candidates) != 1 || candidates[0].Name != mmCommandPrefix+"/org/freedesktop/ModemManager1/Modem/1" {
+	if err != nil || len(candidates) != 1 || candidates[0].Name != "mm-command:1" {
 		t.Fatalf("candidates %v %v", candidates, err)
+	}
+	wire := agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
+		AttachmentID: "attachment", EquipmentID: "862547055201716", Condition: "ready",
+		AT:      agentlink.ModemATControlFact{State: "ready", Port: candidates[0].Name, CallSignalling: true, SMS: true},
+		SIM:     agentlink.ModemSIMFact{State: "ready", ICCID: "8985200000000000001", SessionGeneration: "session"},
+		Network: agentlink.ModemNetworkFact{Registration: "roaming", SoftwareRadio: "on", HardwareRadio: "unknown", Data: "connected", DataGuard: "protected"},
+	}}}
+	if err := wire.Validate(); err != nil {
+		t.Fatalf("coexistence topology cannot be reported: %v", err)
 	}
 	prober.data["equipment"].cleanup = true
 	candidates, err = prober.enumerateAT()
