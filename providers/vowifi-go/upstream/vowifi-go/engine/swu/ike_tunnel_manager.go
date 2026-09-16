@@ -1,6 +1,7 @@
 package swu
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -88,6 +89,8 @@ type IKEPacketTunnelManagerConfig struct {
 	NoAdditionalAddresses    bool
 	Liveness                 IKELivenessConfig
 	ChildSARekey             ChildSARekeyPolicy
+	TransactionalChildRekey  bool
+	ChildSARekeyDHGroup      uint16
 	DisableControlPlaneHooks bool
 }
 
@@ -209,7 +212,7 @@ func (m *IKEPacketTunnelManager) EstablishTunnel(ctx context.Context, cfg Tunnel
 	child := *auth.ChildSA
 	m.updateReauthenticationState(auth, operatorRealm)
 	result := tunnelResultFromIKE(cfg, epdg, init, child, mode)
-	closeHandler, mobikeHandler, rekeyHandler, dpdHandler := m.controlHandlers(transport, init, auth, child, result, transportCfg)
+	closeHandler, mobikeHandler, rekeyHandler, dpdHandler, rekeyCommit := m.controlHandlers(transport, init, auth, child, result, transportCfg)
 	if mode == DataplaneModeKernel {
 		return m.establishKernelSession(ctx, cfg, transportCfg, init, child, result, closeHandler)
 	}
@@ -235,13 +238,14 @@ func (m *IKEPacketTunnelManager) EstablishTunnel(ctx context.Context, cfg Tunnel
 		}
 	}
 	session, err := sessionFactory(PacketSessionConfig{
-		Result:        result,
-		ChildSA:       child,
-		Transport:     espTransport,
-		Random:        random,
-		MOBIKEHandler: mobikeHandler,
-		RekeyHandler:  rekeyHandler,
-		RekeyPolicy:   m.Config.ChildSARekey,
+		Result:         result,
+		ChildSA:        child,
+		Transport:      espTransport,
+		Random:         random,
+		MOBIKEHandler:  mobikeHandler,
+		RekeyHandler:   rekeyHandler,
+		RekeyCommitted: rekeyCommit,
+		RekeyPolicy:    m.Config.ChildSARekey,
 		MOBIKENAT: NewMOBIKENATState(MOBIKENATStateConfig{
 			MOBIKESupported: result.MOBIKESupported,
 			LocalIP:         transportCfg.LocalIP,
@@ -454,9 +458,9 @@ func (m *IKEPacketTunnelManager) childSPI(random io.Reader) ([]byte, error) {
 	return spi, nil
 }
 
-func (m *IKEPacketTunnelManager) controlHandlers(transport ikev2.InitTransport, init ikev2.InitResult, auth ikev2.FullAuthResult, child ikev2.ChildSAResult, result TunnelResult, transportCfg IKETransportConfig) (func(context.Context) error, func(context.Context, MOBIKERequest) (MOBIKEResult, error), ChildSARekeyHandler, func(context.Context) error) {
+func (m *IKEPacketTunnelManager) controlHandlers(transport ikev2.InitTransport, init ikev2.InitResult, auth ikev2.FullAuthResult, child ikev2.ChildSAResult, result TunnelResult, transportCfg IKETransportConfig) (func(context.Context) error, func(context.Context, MOBIKERequest) (MOBIKEResult, error), ChildSARekeyHandler, func(context.Context) error, func(context.Context, ikev2.ChildSAResult) error) {
 	if m.Config.DisableControlPlaneHooks || auth.NextMessageID == 0 || !ikeKeysUsable(init.Keys) {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	control := &ikePacketTunnelControl{
 		transport:             transport,
@@ -472,16 +476,25 @@ func (m *IKEPacketTunnelManager) controlHandlers(transport ikev2.InitTransport, 
 		additionalAddresses:   cloneIPs(m.Config.AdditionalAddresses),
 		noAdditionalAddresses: m.Config.NoAdditionalAddresses,
 		random:                m.Config.Random,
+		transactional:         m.Config.TransactionalChildRekey,
+		pfsGroup:              m.Config.ChildSARekeyDHGroup,
 	}
 	closeHandler := control.close
 	var mobikeHandler func(context.Context, MOBIKERequest) (MOBIKEResult, error)
 	if init.MOBIKESupported {
 		mobikeHandler = control.mobike
 	}
-	return closeHandler, mobikeHandler, control.rekeyChildSA, control.dpd
+	var commit func(context.Context, ikev2.ChildSAResult) error
+	if control.transactional {
+		commit = control.commitChildSA
+	}
+	return closeHandler, mobikeHandler, control.rekeyChildSA, control.dpd, commit
 }
 
 type ikePacketTunnelControl struct {
+	transactional         bool
+	pfsGroup              uint16
+	pendingChild          *ikev2.ChildSAResult
 	mu                    sync.Mutex
 	transport             ikev2.InitTransport
 	init                  ikev2.InitResult
@@ -498,14 +511,24 @@ type ikePacketTunnelControl struct {
 	random                io.Reader
 }
 
+type childRekeyTransport struct {
+	ikev2.InitTransport
+	attempted bool
+}
+
+func (transport *childRekeyTransport) ExchangeIKE(ctx context.Context, request []byte) ([]byte, error) {
+	transport.attempted = true
+	return transport.InitTransport.ExchangeIKE(ctx, request)
+}
+
 func (c *ikePacketTunnelControl) close(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	messageID := c.nextMessageID
 	c.nextMessageID++
-	c.mu.Unlock()
 	payloads, err := ikev2.TeardownDeletePayloads(c.child, true)
 	if err != nil {
 		return err
@@ -527,24 +550,42 @@ func (c *ikePacketTunnelControl) rekeyChildSA(ctx context.Context) (ikev2.ChildS
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.pendingChild != nil {
+		return ikev2.ChildSAResult{}, fmt.Errorf("%w: prior child not committed", ErrInvalidIKEControl)
+	}
 	if c.nextMessageID == 0 {
 		return ikev2.ChildSAResult{}, fmt.Errorf("%w: next message_id is zero", ErrInvalidIKEControl)
 	}
 	messageID := c.nextMessageID
 	c.nextMessageID++
+	transport := c.transport
+	var observed *childRekeyTransport
+	if c.transactional {
+		observed = &childRekeyTransport{InitTransport: ikev2.RetransmitTransport{Transport: c.transport}}
+		transport = observed
+	}
 	res, err := ikev2.RunCREATE_CHILD_SARekey(ctx, ikev2.ChildSARekeyConfig{
-		Transport:  c.transport,
+		Transport:  transport,
 		Init:       c.init,
 		Keys:       c.keys,
 		MessageID:  messageID,
 		OldChildSA: c.child,
 		Random:     c.random,
+		PFSGroup:   c.pfsGroup,
 	})
 	if err != nil {
+		var rejected *ikev2.NotifyError
+		if observed != nil && observed.attempted && !errors.As(err, &rejected) {
+			return ikev2.ChildSAResult{}, errors.Join(ikev2.ErrExchangeUncertain, err)
+		}
 		return ikev2.ChildSAResult{}, err
 	}
 	if res.NextMessageID != 0 {
 		c.nextMessageID = res.NextMessageID
+	}
+	if c.transactional {
+		c.pendingChild = &res.ChildSA
+		return res.ChildSA, nil
 	}
 	c.child = res.ChildSA
 	c.result.ChildSAIdentifier = childSAIdentifier(res.ChildSA)
@@ -555,14 +596,55 @@ func (c *ikePacketTunnelControl) rekeyChildSA(ctx context.Context) (ikev2.ChildS
 	return res.ChildSA, nil
 }
 
+// MDD _install_child_workers -> _start_child_delete -> _accept_child_delete_response.
+// PacketSession calls this only after both new packet SAs have been installed.
+func (c *ikePacketTunnelControl) commitChildSA(ctx context.Context, installed ikev2.ChildSAResult) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pendingChild == nil || !bytes.Equal(c.pendingChild.LocalSPI, installed.LocalSPI) || !bytes.Equal(c.pendingChild.RemoteSPI, installed.RemoteSPI) {
+		return fmt.Errorf("%w: installed child does not match pending exchange", ErrInvalidIKEControl)
+	}
+	old := c.child
+	c.child = *c.pendingChild
+	c.pendingChild = nil
+	if c.nextMessageID == 0 {
+		return fmt.Errorf("%w: exhausted message IDs", ErrInvalidIKEControl)
+	}
+	messageID := c.nextMessageID
+	c.nextMessageID++
+	deletePayload, err := ikev2.ESPDeletePayload(old.LocalSPI)
+	if err != nil {
+		return err
+	}
+	result, err := ikev2.RunInformationalExchange(ctx, ikev2.InformationalConfig{
+		Transport: ikev2.RetransmitTransport{Transport: c.transport}, Init: c.init, Keys: c.keys,
+		MessageID: messageID, Payloads: []ikev2.Payload{deletePayload}, Random: c.random,
+	})
+	if err != nil {
+		return err
+	}
+	if result.Response.NotifyError != nil {
+		return result.Response.NotifyError
+	}
+	for _, deleted := range result.Response.Deletes {
+		if deleted.ProtocolID != ikev2.ProtocolESP || len(deleted.SPIs) != 1 || !bytes.Equal(deleted.SPIs[0], old.RemoteSPI) {
+			return fmt.Errorf("%w: old child DELETE response identity mismatch", ErrInvalidIKEControl)
+		}
+	}
+	c.result.ChildSAIdentifier = childSAIdentifier(c.child)
+	c.result.Ready = true
+	c.result.Reason = "child sa installed and previous child retired"
+	return nil
+}
+
 func (c *ikePacketTunnelControl) dpd(ctx context.Context) error {
 	if c == nil {
 		return ErrInvalidIKEControl
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	messageID := c.nextMessageID
 	c.nextMessageID++
-	c.mu.Unlock()
 	_, err := ikev2.RunLivenessCheck(ctx, ikev2.InformationalConfig{
 		Transport: c.transport,
 		Init:      c.init,
@@ -578,9 +660,9 @@ func (c *ikePacketTunnelControl) mobike(ctx context.Context, req MOBIKERequest) 
 		return MOBIKEResult{}, ErrInvalidIKEControl
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	messageID := c.nextMessageID
 	c.nextMessageID++
-	c.mu.Unlock()
 	payloads, err := mobikeUpdatePayloads(IKEMOBIKEConfig{
 		Init:                  c.init,
 		Result:                c.result,

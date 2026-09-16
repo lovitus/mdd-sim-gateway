@@ -2,6 +2,7 @@ package swu
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,8 @@ var (
 	ErrPacketTunnelClosed        = errors.New("swu packet tunnel closed")
 	ErrUnsupportedInnerPacket    = errors.New("unsupported inner packet")
 	ErrInvalidChildSARekeyPolicy = errors.New("invalid swu child sa rekey policy")
+	ErrChildSARetirement         = errors.New("CHILD-SA installation or retirement is unconfirmed")
+	ErrChildSAOverlap            = errors.New("previous CHILD-SA receive grace is still active")
 )
 
 type ESPPacketTransport interface {
@@ -335,9 +338,15 @@ type PacketSessionConfig struct {
 	CloseHandler  func(context.Context) error
 	// MDD observes only committed SPI identities, never an uninstalled rekey candidate.
 	ChildSAInstalled func(localSPI, remoteSPI []byte)
+	RekeyCommitted   func(context.Context, ikev2.ChildSAResult) error
 }
 
 type PacketSession struct {
+	rekeyMu          sync.Mutex
+	rekeyCommitted   func(context.Context, ikev2.ChildSAResult) error
+	previousInbound  *esp.SA
+	previousUntil    time.Time
+	rekeyFailure     error
 	childSAInstalled func(localSPI, remoteSPI []byte)
 	mu               sync.Mutex
 	result           TunnelResult
@@ -401,6 +410,7 @@ func NewPacketSession(cfg PacketSessionConfig) (*PacketSession, error) {
 		mobikeHandler:    cfg.MOBIKEHandler,
 		rekeyHandler:     cfg.RekeyHandler,
 		childSAInstalled: cfg.ChildSAInstalled,
+		rekeyCommitted:   cfg.RekeyCommitted,
 		rekeyState:       rekeyState,
 		mobikeNAT:        cfg.MOBIKENAT,
 		liveness:         cfg.Liveness,
@@ -443,13 +453,24 @@ func (s *PacketSession) rekeyChildSA(ctx context.Context, rekeyedAt time.Time) (
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	s.rekeyMu.Lock()
+	defer s.rekeyMu.Unlock()
 	if err := contextReady(ctx); err != nil {
 		return TunnelResult{}, err
 	}
 	s.mu.Lock()
 	closed := s.closed
 	handler := s.rekeyHandler
+	commit := s.rekeyCommitted
+	failure := s.rekeyFailure
+	overlap := s.previousInbound != nil && (s.previousUntil.IsZero() || time.Now().Before(s.previousUntil))
 	s.mu.Unlock()
+	if failure != nil {
+		return TunnelResult{}, failure
+	}
+	if overlap {
+		return TunnelResult{}, ErrChildSAOverlap
+	}
 	if closed {
 		return TunnelResult{}, ErrPacketTunnelClosed
 	}
@@ -458,16 +479,30 @@ func (s *PacketSession) rekeyChildSA(ctx context.Context, rekeyedAt time.Time) (
 	}
 	child, err := handler(ctx)
 	if err != nil {
+		if commit != nil && (errors.Is(err, ikev2.ErrExchangeUncertain) || errors.Is(err, context.DeadlineExceeded)) {
+			s.abortRekey(err)
+		}
 		return TunnelResult{}, err
 	}
 	outbound, inbound, err := packetSAs(PacketSessionConfig{ChildSA: child})
 	if err != nil {
+		if commit != nil {
+			s.abortRekey(err)
+		}
 		return TunnelResult{}, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return TunnelResult{}, ErrPacketTunnelClosed
+	}
+	if commit != nil && (inbound.SPI == s.inbound.SPI || outbound.SPI == s.outbound.SPI) {
+		s.mu.Unlock()
+		return TunnelResult{}, s.abortRekey(errors.New("replacement CHILD-SA reuses a live SPI"))
+	}
+	if commit != nil {
+		s.previousInbound = s.inbound
+		s.previousUntil = time.Time{}
 	}
 	s.outbound = outbound
 	s.inbound = inbound
@@ -476,7 +511,7 @@ func (s *PacketSession) rekeyChildSA(ctx context.Context, rekeyedAt time.Time) (
 	s.result.Ready = true
 	s.result.ChildSAIdentifier = childSAIdentifier(child)
 	s.result.Reason = "child sa rekeyed"
-	if s.rekeyState != nil {
+	if s.rekeyState != nil && commit == nil {
 		s.rekeyState.RecordRekey(rekeyedAt)
 	}
 	if local := firstPacketNonEmpty(
@@ -494,7 +529,42 @@ func (s *PacketSession) rekeyChildSA(ctx context.Context, rekeyedAt time.Time) (
 	if s.childSAInstalled != nil {
 		s.childSAInstalled(append([]byte(nil), child.LocalSPI...), append([]byte(nil), child.RemoteSPI...))
 	}
-	return cloneTunnelResult(s.result), nil
+	result := cloneTunnelResult(s.result)
+	s.mu.Unlock()
+	if commit != nil {
+		// Do not hold the packet mutex during the DELETE exchange: both SAs
+		// must keep carrying inbound traffic while its acknowledgement is pending.
+		if err := commit(ctx, child); err != nil {
+			return TunnelResult{}, s.abortRekey(err)
+		}
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return TunnelResult{}, ErrPacketTunnelClosed
+		}
+		s.previousUntil = time.Now().Add(5 * time.Second)
+		if s.rekeyState != nil {
+			s.rekeyState.RecordRekey(rekeyedAt)
+		}
+		s.mu.Unlock()
+	}
+	return result, nil
+}
+
+func (s *PacketSession) abortRekey(cause error) error {
+	failure := errors.Join(ErrChildSARetirement, cause)
+	s.mu.Lock()
+	s.rekeyFailure = failure
+	s.result.Ready = false
+	s.result.Reason = "child sa retirement unconfirmed"
+	transport := s.transport
+	s.mu.Unlock()
+	if closer, ok := transport.(ESPPacketTransportCloser); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = closer.Close(ctx)
+		cancel()
+	}
+	return failure
 }
 
 func (s *PacketSession) AdvanceChildSARekey(ctx context.Context, now time.Time) (ChildSARekeyDecision, error) {
@@ -872,6 +942,11 @@ func (s *PacketSession) SendInnerPacketWithNextHeader(ctx context.Context, nextH
 		s.mu.Unlock()
 		return ErrPacketTunnelClosed
 	}
+	if s.rekeyFailure != nil {
+		err := s.rekeyFailure
+		s.mu.Unlock()
+		return err
+	}
 	if s.outbound == nil || s.transport == nil {
 		s.stats.OutboundErrors++
 		s.mu.Unlock()
@@ -924,11 +999,21 @@ func (s *PacketSession) ReceiveESPPacket(ctx context.Context, packet []byte) (Pa
 	if s.closed {
 		return PacketTunnelPacket{}, ErrPacketTunnelClosed
 	}
+	if s.rekeyFailure != nil {
+		return PacketTunnelPacket{}, s.rekeyFailure
+	}
 	if s.inbound == nil {
 		s.stats.InboundErrors++
 		return PacketTunnelPacket{}, fmt.Errorf("%w: inbound sa is nil", ErrInvalidPacketTunnel)
 	}
-	out, err := s.inbound.Open(packetCopy)
+	if s.previousInbound != nil && !s.previousUntil.IsZero() && !time.Now().Before(s.previousUntil) {
+		s.previousInbound = nil
+	}
+	sa := s.inbound
+	if s.previousInbound != nil && len(packetCopy) >= 4 && binary.BigEndian.Uint32(packetCopy[:4]) == s.previousInbound.SPI {
+		sa = s.previousInbound
+	}
+	out, err := sa.Open(packetCopy)
 	if err != nil {
 		s.recordInboundErrorLocked(err)
 		return PacketTunnelPacket{}, err
@@ -978,6 +1063,9 @@ func (s *PacketSession) ReadInnerPacket(ctx context.Context) (PacketTunnelPacket
 	}
 	packet, err := receiver.ReadESPPacket(ctx)
 	if err != nil {
+		s.mu.Lock()
+		err = errors.Join(s.rekeyFailure, err)
+		s.mu.Unlock()
 		s.recordInboundError(err)
 		return PacketTunnelPacket{}, err
 	}

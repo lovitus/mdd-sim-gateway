@@ -15,18 +15,20 @@ func CreateChildSANotifyActionFromError(err error) (NotifyAction, bool) {
 }
 
 type CreateChildSAConfig struct {
-	Transport InitTransport
-	Init      InitResult
-	Keys      IKEKeys
-	MessageID uint32
-	ChildSA   SecurityAssociation
-	ChildSPI  []byte
-	TSi       TrafficSelectors
-	TSr       TrafficSelectors
-	Nonce     []byte
-	RekeySPI  []byte
-	Random    io.Reader
-	IV        []byte
+	Transport   InitTransport
+	Init        InitResult
+	Keys        IKEKeys
+	MessageID   uint32
+	ChildSA     SecurityAssociation
+	ChildSPI    []byte
+	TSi         TrafficSelectors
+	TSr         TrafficSelectors
+	Nonce       []byte
+	RekeySPI    []byte
+	Random      io.Reader
+	IV          []byte
+	PFSGroup    uint16
+	KeyExchange *KeyExchange
 }
 
 type CreateChildSAResult struct {
@@ -41,6 +43,9 @@ type CreateChildSAResult struct {
 }
 
 func RunCREATE_CHILD_SA(ctx context.Context, cfg CreateChildSAConfig) (CreateChildSAResult, error) {
+	if cfg.KeyExchange != nil {
+		return CreateChildSAResult{}, fmt.Errorf("%w: exchange must own its DH private key", ErrInvalidCreateChild)
+	}
 	if cfg.Transport == nil {
 		return CreateChildSAResult{}, fmt.Errorf("%w: transport is nil", ErrInvalidCreateChild)
 	}
@@ -56,6 +61,26 @@ func RunCREATE_CHILD_SA(ctx context.Context, cfg CreateChildSAConfig) (CreateChi
 	}
 	if cfg.MessageID == 0 {
 		return CreateChildSAResult{}, fmt.Errorf("%w: message_id is zero", ErrInvalidCreateChild)
+	}
+	var dh initDH
+	if cfg.PFSGroup != 0 {
+		sa, spi, err := createChildProposal(cfg, cfg.Random)
+		if err != nil {
+			return CreateChildSAResult{}, err
+		}
+		cfg.ChildSA, cfg.ChildSPI = sa, spi
+		transforms := cfg.ChildSA.Proposals[0].Transforms[:0]
+		for _, transform := range cfg.ChildSA.Proposals[0].Transforms {
+			if transform.Type != TransformDHRGroup {
+				transforms = append(transforms, transform)
+			}
+		}
+		cfg.ChildSA.Proposals[0].Transforms = append(transforms, Transform{Type: TransformDHRGroup, ID: cfg.PFSGroup})
+		dh, err = newInitDH(cfg.PFSGroup, nil, cfg.Random)
+		if err != nil {
+			return CreateChildSAResult{}, err
+		}
+		cfg.KeyExchange = &KeyExchange{DHGroup: cfg.PFSGroup, KeyData: dh.public}
 	}
 	payloads, requestNonce, localSPI, err := BuildCreateChildSAPayloads(cfg)
 	if err != nil {
@@ -91,11 +116,45 @@ func RunCREATE_CHILD_SA(ctx context.Context, cfg CreateChildSAConfig) (CreateChi
 	if err != nil {
 		return CreateChildSAResult{}, err
 	}
+	var sharedSecret []byte
+	if cfg.PFSGroup != 0 {
+		var received *KeyExchange
+		for _, payload := range inner {
+			if payload.Type != PayloadKE {
+				continue
+			}
+			if received != nil {
+				return CreateChildSAResult{}, fmt.Errorf("%w: duplicate KE", ErrInvalidCreateChild)
+			}
+			key, err := ParseKeyExchange(payload.Body)
+			if err != nil || key.DHGroup != cfg.PFSGroup {
+				return CreateChildSAResult{}, fmt.Errorf("%w: wrong KE group", ErrInvalidCreateChild)
+			}
+			received = &key
+		}
+		if received == nil {
+			return CreateChildSAResult{}, fmt.Errorf("%w: missing PFS response KE", ErrInvalidCreateChild)
+		}
+		sharedSecret, err = dh.shared(received.KeyData)
+		if err != nil {
+			return CreateChildSAResult{}, err
+		}
+	} else {
+		for _, payload := range inner {
+			if payload.Type == PayloadKE {
+				return CreateChildSAResult{}, fmt.Errorf("%w: unsolicited KE", ErrInvalidCreateChild)
+			}
+		}
+	}
 	parseInit := cfg.Init
 	parseInit.Keys = keys
-	child, err := parseChildSAResultWithNonces(parseInit, inner, localSPI, requestNonce, responseNonce, &offeredSA, trafficSelectorsOrIPv4Any(cfg.TSi), trafficSelectorsOrIPv4Any(cfg.TSr))
+	child, err := parseChildSAResultWithNonces(parseInit, inner, localSPI, requestNonce, responseNonce, &offeredSA, trafficSelectorsOrIPv4Any(cfg.TSi), trafficSelectorsOrIPv4Any(cfg.TSr), sharedSecret)
 	if err != nil {
 		return CreateChildSAResult{}, err
+	}
+	selectedDH, _ := firstDHGroup(child.SelectedSA)
+	if selectedDH != cfg.PFSGroup {
+		return CreateChildSAResult{}, fmt.Errorf("%w: selected PFS group mismatch", ErrInvalidCreateChild)
 	}
 	child.NextMessageID = cfg.MessageID + 1
 	return CreateChildSAResult{
@@ -111,6 +170,9 @@ func RunCREATE_CHILD_SA(ctx context.Context, cfg CreateChildSAConfig) (CreateChi
 }
 
 func BuildCreateChildSAPayloads(cfg CreateChildSAConfig) ([]Payload, []byte, []byte, error) {
+	if cfg.PFSGroup != 0 && (cfg.KeyExchange == nil || cfg.KeyExchange.DHGroup != cfg.PFSGroup) {
+		return nil, nil, nil, fmt.Errorf("%w: PFS requires a matching KE", ErrInvalidCreateChild)
+	}
 	random := cfg.Random
 	if random == nil {
 		random = rand.Reader
@@ -165,10 +227,16 @@ func BuildCreateChildSAPayloads(cfg CreateChildSAConfig) ([]Payload, []byte, []b
 		payloads = append(payloads, rekey)
 	}
 	payloads = append(payloads, saPayload, NoncePayload(nonce), tsiPayload, tsrPayload)
+	if cfg.KeyExchange != nil {
+		payloads = append(payloads, KeyExchangePayload(cfg.KeyExchange.DHGroup, cfg.KeyExchange.KeyData))
+	}
 	return payloads, nonce, localSPI, nil
 }
 
 func createChildProposal(cfg CreateChildSAConfig, random io.Reader) (SecurityAssociation, []byte, error) {
+	if random == nil {
+		random = rand.Reader
+	}
 	sa := cfg.ChildSA
 	spi := append([]byte(nil), cfg.ChildSPI...)
 	if len(sa.Proposals) == 0 {

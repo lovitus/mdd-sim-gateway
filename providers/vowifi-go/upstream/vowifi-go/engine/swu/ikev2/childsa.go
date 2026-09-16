@@ -99,6 +99,12 @@ func DeriveChildSAKeys(init InitResult, selectedSA SecurityAssociation) (ChildSA
 }
 
 func DeriveChildSAKeysWithNonces(prf crypto.Hash, skD, nonceI, nonceR []byte, selectedSA SecurityAssociation) (ChildSAKeys, error) {
+	return DeriveChildSAKeysWithPFS(prf, skD, nil, nonceI, nonceR, selectedSA)
+}
+
+// RFC 7296 section 2.17 and MDD swu_ike.py: include fresh DH material only
+// for a CREATE_CHILD_SA exchange that actually negotiated PFS.
+func DeriveChildSAKeysWithPFS(prf crypto.Hash, skD, sharedSecret, nonceI, nonceR []byte, selectedSA SecurityAssociation) (ChildSAKeys, error) {
 	if len(skD) == 0 || len(nonceI) == 0 || len(nonceR) == 0 {
 		return ChildSAKeys{}, fmt.Errorf("%w: missing child SA key seed", ErrInvalidChildSA)
 	}
@@ -110,7 +116,8 @@ func DeriveChildSAKeysWithNonces(prf crypto.Hash, skD, nonceI, nonceR []byte, se
 	if dirLen <= 0 {
 		return ChildSAKeys{}, fmt.Errorf("%w: invalid ESP profile", ErrInvalidChildSA)
 	}
-	seed := make([]byte, 0, len(nonceI)+len(nonceR))
+	seed := make([]byte, 0, len(sharedSecret)+len(nonceI)+len(nonceR))
+	seed = append(seed, sharedSecret...)
 	seed = append(seed, nonceI...)
 	seed = append(seed, nonceR...)
 	keymat, err := PRFPlus(prf, skD, seed, dirLen*2)
@@ -134,7 +141,7 @@ func parseChildSAResultWithOfferedSA(init InitResult, inner []Payload, localSPI 
 	return parseChildSAResultWithNonces(init, inner, localSPI, init.NonceI, init.NonceR, &offeredSA, TrafficSelectors{}, TrafficSelectors{})
 }
 
-func parseChildSAResultWithNonces(init InitResult, inner []Payload, localSPI, nonceI, nonceR []byte, offeredSA *SecurityAssociation, offeredTSi, offeredTSr TrafficSelectors) (ChildSAResult, error) {
+func parseChildSAResultWithNonces(init InitResult, inner []Payload, localSPI, nonceI, nonceR []byte, offeredSA *SecurityAssociation, offeredTSi, offeredTSr TrafficSelectors, pfs ...[]byte) (ChildSAResult, error) {
 	var out ChildSAResult
 	for _, p := range inner {
 		switch p.Type {
@@ -197,7 +204,11 @@ func parseChildSAResultWithNonces(init InitResult, inner []Payload, localSPI, no
 			return ChildSAResult{}, fmt.Errorf("%w: TSr narrowing: %w", ErrInvalidChildSA, err)
 		}
 	}
-	keys, err := DeriveChildSAKeysWithNonces(init.Keys.Profile.PRF, init.Keys.SKD, nonceI, nonceR, out.SelectedSA)
+	var sharedSecret []byte
+	if len(pfs) > 0 {
+		sharedSecret = pfs[0]
+	}
+	keys, err := DeriveChildSAKeysWithPFS(init.Keys.Profile.PRF, init.Keys.SKD, sharedSecret, nonceI, nonceR, out.SelectedSA)
 	if err != nil {
 		return ChildSAResult{}, err
 	}

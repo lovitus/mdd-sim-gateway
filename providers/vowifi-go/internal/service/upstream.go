@@ -190,13 +190,15 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 	var peer *peerIKEResponder
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
-		ChildSARekey:          upstreamswu.ChildSARekeyPolicy{Lifetime: time.Duration(config.RekeyMinutes) * time.Minute, Disabled: config.RekeyMinutes == 0},
-		ResponderID:           ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(responderID)},
-		InitialContact:        true,
-		EAPOnlyAuth:           true,
-		ForceUDPEncapsulation: config.ProxyURL != "",
-		SA:                    swuIKEProposalForDH(ikev2.DHGroup2048BitMODP),
-		InitRunner:            runSWUIKEInit,
+		ChildSARekey:            upstreamswu.ChildSARekeyPolicy{Lifetime: time.Duration(config.RekeyMinutes) * time.Minute, Disabled: config.RekeyMinutes == 0},
+		TransactionalChildRekey: true,
+		ChildSARekeyDHGroup:     ikev2.DHGroup2048BitMODP,
+		ResponderID:             ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(responderID)},
+		InitialContact:          true,
+		EAPOnlyAuth:             true,
+		ForceUDPEncapsulation:   config.ProxyURL != "",
+		SA:                      swuIKEProposalForDH(ikev2.DHGroup2048BitMODP),
+		InitRunner:              runSWUIKEInit,
 		AuthRunner: func(ctx context.Context, cfg ikev2.FullAuthConfig) (ikev2.FullAuthResult, error) {
 			result, err := ikev2.RunIKE_AUTH_Full(ctx, cfg)
 			if err == nil {
@@ -927,6 +929,9 @@ func (runtime *upstreamRuntime) Layers() Layers {
 	runtime.faultMu.Unlock()
 	if fault != nil {
 		code := "userspace_stack_failed"
+		if errors.Is(fault, upstreamswu.ErrChildSARetirement) {
+			code = "child_sa_retirement_failed"
+		}
 		var stage *StageError
 		if errors.As(fault, &stage) && stage.Layer == "tunnel" {
 			code = stage.Code

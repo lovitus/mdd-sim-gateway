@@ -40,6 +40,11 @@ MDD keeps this source local because the reviewed upstream API hard-coded
 - a committed CHILD-SA SPI observer on `PacketSession`, so the MDD peer-IKE
 responder matches DELETE against the installed child rather than a candidate or
   a retired child. The observer receives copied SPI identifiers, not key material.
+- opt-in transactional CHILD rekey: PFS through the existing DH implementation,
+  exact-wire bounded retransmission, atomic packet-SA installation, authenticated
+  old-SA DELETE validation, and a five-second old-inbound receive grace. Unset
+  options retain the upstream adapter behavior; MDD does not enable a disabled
+  rekey schedule merely by supplying the transaction hooks.
 
 When these seams are nil, the original host-network and Security-Agree behavior
 is unchanged.
@@ -94,6 +99,16 @@ was experimental and disabled by default; peer IKE in-place acceptance was not
 implemented. Do not describe either as a fully enabled legacy capability.
 Fragmented peer requests and
 network-supplied recovery backoff remain separate compatibility boundaries.
+
+MDD's proactive CHILD transaction adapts `ec620942:engine/swu_ike.py` functions
+`state_ue_rekey_child`, `_install_child_workers`, `_start_child_delete`,
+`_accept_child_delete_response`, and `_child_delete_tick`. It reuses upstream
+DH, PRF+, SA validation and ESP implementations. Explicit refusal keeps the
+existing SA; an unanswered or invalid transaction after submission is not
+reported as healthy. DELETE is sent only after new inbound/outbound SAs are
+installed, and the old inbound replay window is retained through confirmation
+and the five-second grace. The independent proactive IKE-SA replacement timer
+is not implied by this CHILD transaction implementation.
 
 ## MDD Operation Ownership
 

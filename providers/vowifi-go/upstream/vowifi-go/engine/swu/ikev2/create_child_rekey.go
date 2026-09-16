@@ -1,6 +1,7 @@
 package ikev2
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -21,6 +22,7 @@ type ChildSARekeyConfig struct {
 	Nonce      []byte
 	Random     io.Reader
 	IV         []byte
+	PFSGroup   uint16
 }
 
 type ChildSARekeyPlan struct {
@@ -69,6 +71,7 @@ func NewChildSARekeyPlan(cfg ChildSARekeyConfig) (ChildSARekeyPlan, error) {
 			RekeySPI:  rekeySPI,
 			Random:    cfg.Random,
 			IV:        append([]byte(nil), cfg.IV...),
+			PFSGroup:  cfg.PFSGroup,
 		},
 		OldLocalSPI:  oldLocalSPI,
 		OldRemoteSPI: append([]byte(nil), cfg.OldChildSA.RemoteSPI...),
@@ -103,6 +106,9 @@ func childSAForRekey(cfg ChildSARekeyConfig) (SecurityAssociation, []byte, error
 	}
 	if len(childSPI) != 4 {
 		return SecurityAssociation{}, nil, fmt.Errorf("%w: child SPI length %d", ErrInvalidCreateChild, len(childSPI))
+	}
+	if bytes.Equal(childSPI, cfg.OldChildSA.LocalSPI) || bytes.Equal(childSPI, []byte{0, 0, 0, 0}) {
+		return SecurityAssociation{}, nil, fmt.Errorf("%w: replacement SPI is zero or already owned", ErrInvalidCreateChild)
 	}
 	sa := cfg.ChildSA
 	if len(sa.Proposals) == 0 {
