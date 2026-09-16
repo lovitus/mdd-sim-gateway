@@ -99,6 +99,7 @@ func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, exi
 		instance := providerconfig.UnitInstance(line.ID)
 		provider := providerConfigForLine(settings, line, coreAddress, statePath, instance)
 		provider.Network.RekeyMinutes = linecatalog.EffectiveRekeyMinutes(line, snapshot.Defaults)
+		provider.Network.IKERekeyMinutes = linecatalog.EffectiveIKERekeyMinutes(line, snapshot.Defaults)
 		proxyURL, err := exits.ProxyURL(line.Network.EgressCountry)
 		if err != nil {
 			// Only this line's own country exit is unready; excluding just this
@@ -182,6 +183,7 @@ func providerConfigForLine(settings config, line linecatalog.Line, coreAddress, 
 	result.Network.IMSAPN, result.Network.IDRMode, result.Network.PDNFamily =
 		line.Network.IMSAPN, line.Network.IDRMode, line.Network.CPMode
 	result.Network.RekeyMinutes = linecatalog.EffectiveRekeyMinutes(line, linecatalog.ProviderDefaults{})
+	result.Network.IKERekeyMinutes = linecatalog.EffectiveIKERekeyMinutes(line, linecatalog.ProviderDefaults{})
 	result.IMS.IMPI, result.IMS.IMPU, result.IMS.Domain = line.IMS.IMPI, line.IMS.IMPU, line.IMS.Domain
 	result.IMS.UserAgent = line.IMS.UserAgent
 	result.IMS.AccessNetworkInfo = line.IMS.AccessNetworkInfo

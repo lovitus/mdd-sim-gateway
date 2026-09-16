@@ -59,9 +59,6 @@ func RunCREATE_CHILD_SA(ctx context.Context, cfg CreateChildSAConfig) (CreateChi
 	if cfg.Init.InitiatorSPI == 0 || cfg.Init.ResponderSPI == 0 {
 		return CreateChildSAResult{}, fmt.Errorf("%w: missing IKE SPIs", ErrInvalidCreateChild)
 	}
-	if cfg.MessageID == 0 {
-		return CreateChildSAResult{}, fmt.Errorf("%w: message_id is zero", ErrInvalidCreateChild)
-	}
 	var dh initDH
 	if cfg.PFSGroup != 0 {
 		sa, spi, err := createChildProposal(cfg, cfg.Random)
@@ -274,7 +271,7 @@ func unprotectCreateChildResponse(raw []byte, init InitResult, keys IKEKeys, mes
 	}
 	h := msg.Header
 	if h.InitiatorSPI != init.InitiatorSPI || h.ResponderSPI != init.ResponderSPI ||
-		h.ExchangeType != ExchangeCREATE_CHILD_SA || h.MessageID != messageID || h.Flags&FlagResponse == 0 {
+		h.ExchangeType != ExchangeCREATE_CHILD_SA || h.MessageID != messageID || h.Flags&(FlagInitiator|FlagResponse) != FlagResponse {
 		return Message{}, nil, fmt.Errorf("%w: unexpected CREATE_CHILD_SA response header", ErrInvalidCreateChild)
 	}
 	return msg, inner, nil

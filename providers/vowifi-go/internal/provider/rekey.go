@@ -83,16 +83,30 @@ func (session *Session) RunRekeyMaintenance(ctx context.Context) error {
 		return errors.New("rekey maintenance already running")
 	}
 	defer session.rekeyRunning.Store(false)
+	ike, _ := session.base.(upstreamswu.IKESARekeyScheduler)
 	for {
 		due, enabled := scheduler.NextChildSARekeyDue()
-		if !enabled {
-			return nil
-		}
 		session.rekeyMu.Lock()
 		retryAt := session.rekeyRetryAt
+		ikeRetry := session.ikeRekeyRetryAt
 		session.rekeyMu.Unlock()
 		if retryAt.After(due) {
 			due = retryAt
+		}
+		isIKE := false
+		if ike != nil {
+			ikeDue, ikeEnabled := ike.NextIKESARekeyDue()
+			if ikeRetry.After(ikeDue) {
+				ikeDue = ikeRetry
+			}
+			if ikeEnabled && (!enabled || !ikeDue.After(due)) {
+				due = ikeDue
+				enabled = true
+				isIKE = true
+			}
+		}
+		if !enabled {
+			return nil
 		}
 		timer := time.NewTimer(max(time.Duration(0), time.Until(due)))
 		select {
@@ -104,11 +118,38 @@ func (session *Session) RunRekeyMaintenance(ctx context.Context) error {
 		if session.closed.Load() {
 			return ErrProviderSessionClose
 		}
-		operation, cancel := context.WithTimeout(ctx, 30*time.Second)
-		_, err := scheduler.RunChildSARekeyDue(operation, time.Now())
+		// Creation and retirement each retain the legacy three ten-second waits.
+		operation, cancel := context.WithTimeout(ctx, 60*time.Second)
+		var err error
+		if isIKE {
+			err = ike.RunIKESARekeyDue(operation, time.Now())
+		} else {
+			_, err = scheduler.RunChildSARekeyDue(operation, time.Now())
+		}
 		cancel()
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if isIKE {
+			session.rekeyMu.Lock()
+			session.ikeRekeyFailure = err
+			if err != nil {
+				delay := time.Hour
+				if errors.Is(err, upstreamswu.ErrChildSAOverlap) {
+					delay = 5 * time.Second
+				}
+				session.ikeRekeyRetryAt = time.Now().Add(delay)
+			} else {
+				session.ikeRekeyRetryAt = time.Time{}
+			}
+			session.rekeyMu.Unlock()
+			if next, ok := ike.NextIKESARekeyDue(); err == nil && ok && !next.After(time.Now()) {
+				session.rekeyMu.Lock()
+				session.ikeRekeyFailure = errors.New("IKE rekey schedule did not advance")
+				session.ikeRekeyRetryAt = time.Now().Add(time.Hour)
+				session.rekeyMu.Unlock()
+			}
+			continue
 		}
 		session.rekeyMu.Lock()
 		session.rekeyFailure = err

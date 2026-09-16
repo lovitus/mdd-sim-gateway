@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
@@ -26,6 +27,9 @@ type peerIKECache struct {
 }
 
 type peerIKEResponder struct {
+	previous          *peerIKEResponder
+	previousUntil     time.Time
+	retired           bool
 	mu                sync.Mutex
 	init              ikev2.InitResult
 	profile           identity.Profile
@@ -57,8 +61,16 @@ func (peer *peerIKEResponder) setChild(local, remote []byte) {
 // All crypto, payload parsing and recovery classification use the upstream API.
 func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 	peer.mu.Lock()
-	defer peer.mu.Unlock()
 	header, err := ikev2.ParseHeader(raw)
+	if peer.previous != nil && !peer.previousUntil.IsZero() && !time.Now().Before(peer.previousUntil) {
+		peer.previous = nil
+	}
+	if err == nil && peer.previous != nil && header.InitiatorSPI == peer.previous.init.InitiatorSPI && header.ResponderSPI == peer.previous.init.ResponderSPI {
+		previous := peer.previous
+		peer.mu.Unlock()
+		return previous.handle(raw)
+	}
+	defer peer.mu.Unlock()
 	if err != nil || header.Version>>4 != 2 || header.Length != uint32(len(raw)) ||
 		header.InitiatorSPI != peer.init.InitiatorSPI || header.ResponderSPI != peer.init.ResponderSPI ||
 		header.Flags&(ikev2.FlagInitiator|ikev2.FlagResponse) != 0 {
@@ -69,7 +81,21 @@ func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 		if prior.fingerprint != digest {
 			return outerudp.PeerReply{}, errors.New("peer IKE message ID reused")
 		}
-		return clonePeerReply(prior.reply), nil
+		reply := clonePeerReply(prior.reply)
+		if peer.retired {
+			_, inner, err := ikev2.UnprotectMessage(raw, peer.init.Keys, false)
+			if err != nil || header.ExchangeType != ikev2.ExchangeINFORMATIONAL {
+				return outerudp.PeerReply{}, errors.New("retired IKE request is not teardown")
+			}
+			for _, p := range inner {
+				if p.Type != ikev2.PayloadDelete {
+					return outerudp.PeerReply{}, errors.New("retired IKE configuration request")
+				}
+			}
+			reply.AfterSend = nil
+			reply.Abort = nil
+		}
+		return reply, nil
 	}
 	if peer.seen && header.MessageID <= peer.last {
 		return outerudp.PeerReply{}, errors.New("stale peer IKE request")
@@ -81,9 +107,21 @@ func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 	var payloads []ikev2.Payload
 	var abort error
 	var addresses []string
+	if peer.retired {
+		if header.ExchangeType != ikev2.ExchangeINFORMATIONAL {
+			return outerudp.PeerReply{}, errors.New("retired IKE SA only accepts teardown")
+		}
+		for _, payload := range inner {
+			if payload.Type != ikev2.PayloadDelete {
+				return outerudp.PeerReply{}, errors.New("retired IKE SA cannot change current configuration")
+			}
+		}
+	}
 	switch header.ExchangeType {
 	case ikev2.ExchangeINFORMATIONAL:
-		payloads, addresses, abort, err = peer.informational(inner)
+		if !peer.retired {
+			payloads, addresses, abort, err = peer.informational(inner)
+		}
 	case ikev2.ExchangeCREATE_CHILD_SA:
 		payloads = []ikev2.Payload{ikev2.NotifyWithZeroSPI(peer.classifyCreateChild(inner), nil)}
 	default:
@@ -107,13 +145,16 @@ func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 		var once sync.Once
 		reply.AfterSend = func() {
 			once.Do(func() {
+				peer.mu.Lock()
+				defer peer.mu.Unlock()
+				if peer.init.InitiatorSPI != header.InitiatorSPI || peer.init.ResponderSPI != header.ResponderSPI {
+					return
+				}
 				if peer.updatePCSCF != nil {
 					peer.updatePCSCF(append([]string(nil), addresses...))
 				}
 				if rebind {
-					peer.mu.Lock()
 					peer.recoveryPending = true
-					peer.mu.Unlock()
 				}
 			})
 		}
@@ -126,6 +167,34 @@ func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 	}
 	peer.last, peer.seen = header.MessageID, true
 	return clonePeerReply(reply), nil
+}
+
+func (peer *peerIKEResponder) installIKE(previous, next ikev2.InitResult) error {
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	if peer.init.InitiatorSPI != previous.InitiatorSPI || peer.init.ResponderSPI != previous.ResponderSPI ||
+		next.InitiatorSPI == 0 || next.ResponderSPI == 0 || next.InitiatorSPI == previous.InitiatorSPI || next.ResponderSPI == previous.ResponderSPI {
+		return errors.New("IKE cutover identity mismatch")
+	}
+	if peer.previous != nil && (peer.previousUntil.IsZero() || time.Now().Before(peer.previousUntil)) {
+		return errors.New("previous IKE retirement still pending")
+	}
+	peer.previous = &peerIKEResponder{init: peer.init, profile: peer.profile, child: peer.child, cache: peer.cache, order: peer.order, last: peer.last, seen: peer.seen, retired: true}
+	peer.previousUntil = time.Time{}
+	peer.init = next
+	peer.cache = make(map[uint32]peerIKECache)
+	peer.order = nil
+	peer.last = 0
+	peer.seen = false
+	return nil
+}
+
+func (peer *peerIKEResponder) retireIKE(previous ikev2.InitResult) {
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	if peer.previous != nil && peer.previous.init.InitiatorSPI == previous.InitiatorSPI && peer.previous.init.ResponderSPI == previous.ResponderSPI {
+		peer.previousUntil = time.Now().Add(5 * time.Second)
+	}
 }
 
 // Preserve ec620942 state_epdg_create_sa/_handle_epdg_esp_rekey's default

@@ -255,6 +255,53 @@ func TestPeerRestorationCannotRewriteDesiredOrNewerSessionObservation(t *testing
 	}
 }
 
+func TestPeerIKECutoverResetsCountersAndOldDeleteCannotCloseNewSA(t *testing.T) {
+	peer, old := peerFixture(t)
+	oldDPD := peerRequest(t, old, 0)
+	oldReply, err := peer.handle(oldDPD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := old
+	next.InitiatorSPI++
+	next.ResponderSPI++
+	next.Keys, err = ikev2.SplitIKEKeys(old.Keys.Profile, bytes.Repeat([]byte{0x5a}, old.Keys.Profile.RequiredLength()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := append([]byte(nil), peer.child.RemoteSPI...)
+	if err := peer.installIKE(old, next); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := peer.handle(peerRequest(t, next, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodePeerReply(t, next, 0, reply)
+	if bytes.Equal(reply.Packet, oldReply.Packet) || !bytes.Equal(child, peer.child.RemoteSPI) {
+		t.Fatal("old response cache or changed CHILD inherited")
+	}
+	oldDelete := peerRequest(t, old, 1, ikev2.IKEDeletePayload())
+	reply, err = peer.handle(oldDelete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Abort != nil || reply.AfterSend != nil {
+		t.Fatal("old IKE teardown affected new SA")
+	}
+	decodePeerReply(t, old, 1, reply)
+	peer.retireIKE(old)
+	peer.mu.Lock()
+	peer.previousUntil = time.Now().Add(-time.Second)
+	peer.mu.Unlock()
+	if _, err := peer.handle(oldDelete); err == nil {
+		t.Fatal("expired IKE keys remain usable")
+	}
+	if _, err := peer.handle(peerRequest(t, next, 1)); err != nil {
+		t.Fatal("new SA lost after old retirement", err)
+	}
+}
+
 func TestProviderRequiresIdleForPeerIMSRestoration(t *testing.T) {
 	blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: vowifiipc.PeerPCSCFChanged}
 	runtime := &fakeRuntime{layers: &Layers{Tunnel: vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true}, IMS: blocked, Voice: blocked, Messaging: blocked}}

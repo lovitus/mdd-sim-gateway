@@ -50,8 +50,10 @@ export function systemSettingsView(preferences = {}, notifications = {}, status 
     __ring_timeout_supported:Number.isInteger(preferences.preferences?.ring_timeout_seconds),
     retry:preferences.preferences?.retry ? {...preferences.preferences.retry} : undefined,
     __retry_supported:Number.isSafeInteger(preferences.preferences?.retry?.max) && preferences.preferences.retry.max>=1 && Number.isSafeInteger(preferences.preferences?.retry?.interval) && preferences.preferences.retry.interval>=5,
-    rekey:{minutes:catalog.defaults?.rekey_minutes},__catalog_revision:catalog.revision,
+    rekey:{minutes:catalog.defaults?.rekey_minutes,ikeMinutes:catalog.defaults?.ike_rekey_minutes},__catalog_revision:catalog.revision,
     __saved_rekey_minutes:catalog.defaults?.rekey_minutes,
+    __saved_ike_rekey_minutes:catalog.defaults?.ike_rekey_minutes,
+    __ike_rekey_supported:Number.isInteger(catalog.defaults?.ike_rekey_minutes),
     __rekey_supported:Number.isInteger(catalog.defaults?.rekey_minutes),
     bind,http_port:port,tls:{fingerprint:status.public?.tls_fingerprint_sha256 || '',self_signed:status.public?.certificate?.self_signed,
       domain:(status.public?.certificate?.dns_names || []).join(', '),not_after:status.public?.certificate?.not_after,
@@ -113,8 +115,14 @@ export const systemAPI = {
   async saveRekeySettings(draft) {
     const minutes=Number(draft.rekey?.minutes)
     if (!draft.__rekey_supported || !draft.__catalog_revision || !Number.isInteger(minutes) || minutes<0 || minutes>1440) throw new Error('invalid_rekey_default')
-    const result=await go.saveProviderDefaults({rekey_minutes:minutes},draft.__catalog_revision)
-    return {...draft,__catalog_revision:result.revision,rekey:{minutes:result.defaults.rekey_minutes},__saved_rekey_minutes:result.defaults.rekey_minutes}
+    const payload={rekey_minutes:minutes}
+    if(draft.__ike_rekey_supported){
+      const ike=Number(draft.rekey?.ikeMinutes)
+      if(!Number.isInteger(ike)||ike<0||ike>1440)throw new Error('invalid_ike_rekey_default')
+      payload.ike_rekey_minutes=ike
+    }
+    const result=await go.saveProviderDefaults(payload,draft.__catalog_revision)
+    return {...draft,__catalog_revision:result.revision,rekey:{minutes:result.defaults.rekey_minutes,ikeMinutes:result.defaults.ike_rekey_minutes},__saved_rekey_minutes:result.defaults.rekey_minutes,__saved_ike_rekey_minutes:result.defaults.ike_rekey_minutes}
   },
   async saveSettings(draft, domain) {
 	if(domain==='hardware'){

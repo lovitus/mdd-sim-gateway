@@ -339,9 +339,14 @@ type PacketSessionConfig struct {
 	// MDD observes only committed SPI identities, never an uninstalled rekey candidate.
 	ChildSAInstalled func(localSPI, remoteSPI []byte)
 	RekeyCommitted   func(context.Context, ikev2.ChildSAResult) error
+	IKERekeyHandler  func(context.Context) error
+	IKERekeyLifetime time.Duration
 }
 
 type PacketSession struct {
+	ikeRekeyHandler  func(context.Context) error
+	ikeRekeyLifetime time.Duration
+	nextIKERekey     time.Time
 	rekeyMu          sync.Mutex
 	rekeyCommitted   func(context.Context, ikev2.ChildSAResult) error
 	previousInbound  *esp.SA
@@ -375,6 +380,9 @@ var (
 )
 
 func NewPacketSession(cfg PacketSessionConfig) (*PacketSession, error) {
+	if cfg.IKERekeyLifetime < 0 || cfg.IKERekeyLifetime > 24*time.Hour {
+		return nil, ErrInvalidPacketTunnel
+	}
 	if cfg.Transport == nil {
 		return nil, fmt.Errorf("%w: transport is nil", ErrInvalidPacketTunnel)
 	}
@@ -401,7 +409,12 @@ func NewPacketSession(cfg PacketSessionConfig) (*PacketSession, error) {
 	if err != nil {
 		return nil, err
 	}
+	var ikeDue time.Time
+	if cfg.IKERekeyLifetime > 0 && cfg.IKERekeyHandler != nil {
+		ikeDue = result.EstablishedAt.Add(cfg.IKERekeyLifetime)
+	}
 	return &PacketSession{
+		ikeRekeyHandler: cfg.IKERekeyHandler, ikeRekeyLifetime: cfg.IKERekeyLifetime, nextIKERekey: ikeDue,
 		result:           result,
 		outbound:         outbound,
 		inbound:          inbound,
@@ -553,10 +566,14 @@ func (s *PacketSession) rekeyChildSA(ctx context.Context, rekeyedAt time.Time) (
 
 func (s *PacketSession) abortRekey(cause error) error {
 	failure := errors.Join(ErrChildSARetirement, cause)
+	return s.abortSAReplacement(failure, "child sa retirement unconfirmed")
+}
+
+func (s *PacketSession) abortSAReplacement(failure error, reason string) error {
 	s.mu.Lock()
 	s.rekeyFailure = failure
 	s.result.Ready = false
-	s.result.Reason = "child sa retirement unconfirmed"
+	s.result.Reason = reason
 	transport := s.transport
 	s.mu.Unlock()
 	if closer, ok := transport.(ESPPacketTransportCloser); ok {

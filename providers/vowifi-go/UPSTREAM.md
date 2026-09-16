@@ -110,6 +110,18 @@ installed, and the old inbound replay window is retained through confirmation
 and the five-second grace. The independent proactive IKE-SA replacement timer
 is not implied by this CHILD transaction implementation.
 
+Proactive IKE replacement adapts the original `state_ue_create_sa` and
+`generate_new_ike_keying_material` path using upstream DH, PRF and proposal
+validation. The old IKE SA authenticates CREATE_CHILD_SA and its own DELETE;
+new SPIs/keys reset the request counters while existing CHILD SAs are inherited.
+The peer responder keeps an old-key teardown window; an old IKE DELETE must
+not close the new association or replay configuration side effects.
+CHILD and IKE maintenance share one scheduler and serialized control ownership.
+The independent IKE period is durable configuration, exposed alongside CHILD
+in the settings page. Absent/zero remains disabled on upgrade. The retired
+implementation's 600-minute IKE default is an available explicit setting, not
+permission to silently enable a new timer on existing production lines.
+
 ## MDD Operation Ownership
 
 The service wrapper keeps paid SMS receipts in `paid-message-operations-v1`

@@ -13,7 +13,8 @@ import (
 var providerDefaultsKey = []byte("provider-defaults-v1")
 
 type ProviderDefaults struct {
-	RekeyMinutes int `json:"rekey_minutes"`
+	RekeyMinutes    int `json:"rekey_minutes"`
+	IKERekeyMinutes int `json:"ike_rekey_minutes"`
 }
 
 func readProviderDefaults(tx *bolt.Tx) (ProviderDefaults, error) {
@@ -23,14 +24,14 @@ func readProviderDefaults(tx *bolt.Tx) (ProviderDefaults, error) {
 			return defaults, err
 		}
 	}
-	if defaults.RekeyMinutes < 0 || defaults.RekeyMinutes > 1440 {
+	if defaults.RekeyMinutes < 0 || defaults.RekeyMinutes > 1440 || defaults.IKERekeyMinutes < 0 || defaults.IKERekeyMinutes > 1440 {
 		return defaults, errors.New("invalid stored provider defaults")
 	}
 	return defaults, nil
 }
 
 func (store *Store) PutProviderDefaults(value ProviderDefaults, expected uint64) (uint64, error) {
-	if value.RekeyMinutes < 0 || value.RekeyMinutes > 1440 {
+	if value.RekeyMinutes < 0 || value.RekeyMinutes > 1440 || value.IKERekeyMinutes < 0 || value.IKERekeyMinutes > 1440 {
 		return 0, errors.New("invalid provider rekey default")
 	}
 	var revision uint64
@@ -71,15 +72,27 @@ func (handler *DefaultsHandler) ServeHTTP(response http.ResponseWriter, request 
 		return
 	}
 	var input struct {
-		RekeyMinutes *int `json:"rekey_minutes"`
+		RekeyMinutes    *int `json:"rekey_minutes"`
+		IKERekeyMinutes *int `json:"ike_rekey_minutes"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&input) != nil || decoder.Decode(&struct{}{}) != io.EOF || input.RekeyMinutes == nil {
+	if decoder.Decode(&input) != nil || decoder.Decode(&struct{}{}) != io.EOF || (input.RekeyMinutes == nil && input.IKERekeyMinutes == nil) {
 		writeCatalogJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_provider_defaults"})
 		return
 	}
-	value := ProviderDefaults{RekeyMinutes: *input.RekeyMinutes}
+	snapshot, err := handler.store.Snapshot()
+	if err != nil {
+		writeCatalogJSON(response, http.StatusServiceUnavailable, map[string]string{"code": "provider_defaults_unavailable"})
+		return
+	}
+	value := snapshot.Defaults
+	if input.RekeyMinutes != nil {
+		value.RekeyMinutes = *input.RekeyMinutes
+	}
+	if input.IKERekeyMinutes != nil {
+		value.IKERekeyMinutes = *input.IKERekeyMinutes
+	}
 	updated, err := handler.store.PutProviderDefaults(value, revision)
 	if err != nil {
 		status, code := http.StatusBadRequest, "invalid_provider_defaults"
@@ -97,4 +110,11 @@ func EffectiveRekeyMinutes(line Line, defaults ProviderDefaults) int {
 		return *line.Network.RekeyMinutes
 	}
 	return defaults.RekeyMinutes
+}
+
+func EffectiveIKERekeyMinutes(line Line, defaults ProviderDefaults) int {
+	if line.Network.IKERekeyMinutes != nil {
+		return *line.Network.IKERekeyMinutes
+	}
+	return defaults.IKERekeyMinutes
 }

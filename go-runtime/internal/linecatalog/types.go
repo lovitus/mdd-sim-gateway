@@ -23,15 +23,16 @@ type SIMConfig struct {
 }
 
 type NetworkConfig struct {
-	RekeyMinutes  *int         `json:"rekey_minutes,omitempty"`
-	EPDGAddress   string       `json:"epdg_address,omitempty"`
-	PCSCF         []string     `json:"pcscf,omitempty"`
-	EgressCountry string       `json:"egress_country,omitempty"`
-	APNProfiles   []APNProfile `json:"apn_profiles,omitempty"`
-	ActiveAPN     string       `json:"active_apn,omitempty"`
-	IMSAPN        string       `json:"ims_apn,omitempty"`
-	IDRMode       string       `json:"idr_mode,omitempty"`
-	CPMode        string       `json:"cp_mode,omitempty"`
+	RekeyMinutes    *int         `json:"rekey_minutes,omitempty"`
+	IKERekeyMinutes *int         `json:"ike_rekey_minutes,omitempty"`
+	EPDGAddress     string       `json:"epdg_address,omitempty"`
+	PCSCF           []string     `json:"pcscf,omitempty"`
+	EgressCountry   string       `json:"egress_country,omitempty"`
+	APNProfiles     []APNProfile `json:"apn_profiles,omitempty"`
+	ActiveAPN       string       `json:"active_apn,omitempty"`
+	IMSAPN          string       `json:"ims_apn,omitempty"`
+	IDRMode         string       `json:"idr_mode,omitempty"`
+	CPMode          string       `json:"cp_mode,omitempty"`
 }
 
 // APNProfile is MDD-owned desired data. Agent/modem profile observations are
@@ -93,6 +94,9 @@ func (line *Line) normalizeAndValidate() error {
 	}
 	if line.Network.RekeyMinutes != nil && (*line.Network.RekeyMinutes < 0 || *line.Network.RekeyMinutes > 1440) {
 		return errors.New("line rekey period must be 0 or 1..1440 minutes")
+	}
+	if line.Network.IKERekeyMinutes != nil && (*line.Network.IKERekeyMinutes < 0 || *line.Network.IKERekeyMinutes > 1440) {
+		return errors.New("invalid IKE rekey period")
 	}
 	line.ID = strings.TrimSpace(line.ID)
 	line.Name = strings.TrimSpace(line.Name)

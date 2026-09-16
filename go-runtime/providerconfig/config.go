@@ -48,16 +48,17 @@ type Config struct {
 		SMSC   string `json:"smsc"`
 	} `json:"sim"`
 	Network struct {
-		EPDGAddress    string   `json:"epdg_address"`
-		PCSCF          []string `json:"pcscf"`
-		IMSAPN         string   `json:"ims_apn,omitempty"`
-		IDRMode        string   `json:"idr_mode,omitempty"`
-		PDNFamily      string   `json:"pdn_family,omitempty"`
-		RekeyMinutes   int      `json:"rekey_minutes,omitempty"`
-		ProxyURL       string   `json:"proxy_url,omitempty"`
-		IKETimeoutMS   int      `json:"ike_timeout_ms"`
-		CloseTimeoutMS int      `json:"close_timeout_ms"`
-		MTU            int      `json:"mtu"`
+		EPDGAddress     string   `json:"epdg_address"`
+		PCSCF           []string `json:"pcscf"`
+		IMSAPN          string   `json:"ims_apn,omitempty"`
+		IDRMode         string   `json:"idr_mode,omitempty"`
+		PDNFamily       string   `json:"pdn_family,omitempty"`
+		RekeyMinutes    int      `json:"rekey_minutes,omitempty"`
+		IKERekeyMinutes int      `json:"ike_rekey_minutes,omitempty"`
+		ProxyURL        string   `json:"proxy_url,omitempty"`
+		IKETimeoutMS    int      `json:"ike_timeout_ms"`
+		CloseTimeoutMS  int      `json:"close_timeout_ms"`
+		MTU             int      `json:"mtu"`
 	} `json:"network"`
 	IMS struct {
 		IMPI              string `json:"impi"`
@@ -77,8 +78,8 @@ type Config struct {
 }
 
 func (settings Config) Validate() error {
-	if settings.Network.RekeyMinutes < 0 || settings.Network.RekeyMinutes > 1440 {
-		return errors.New("CHILD-SA rekey period must be 0 or 1..1440 minutes")
+	if settings.Network.RekeyMinutes < 0 || settings.Network.RekeyMinutes > 1440 || settings.Network.IKERekeyMinutes < 0 || settings.Network.IKERekeyMinutes > 1440 {
+		return errors.New("SA rekey periods must be 0 or 1..1440 minutes")
 	}
 	if strings.TrimSpace(settings.LineID) == "" || strings.TrimSpace(settings.ProviderID) == "" ||
 		strings.TrimSpace(settings.DeviceID) == "" || len(settings.IPC.Token) < 32 ||

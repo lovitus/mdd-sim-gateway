@@ -17,6 +17,32 @@ type scheduledPacketSession struct {
 	stopAfterAttempt bool
 }
 
+type scheduledIKESession struct {
+	scheduledPacketSession
+	ikeCalls   int
+	ikeFailure error
+}
+
+func (s *scheduledIKESession) NextChildSARekeyDue() (time.Time, bool) { return time.Time{}, false }
+func (s *scheduledIKESession) NextIKESARekeyDue() (time.Time, bool) {
+	return time.Now().Add(-time.Second), s.ikeCalls == 0
+}
+func (s *scheduledIKESession) RunIKESARekeyDue(context.Context, time.Time) error {
+	s.ikeCalls++
+	return s.ikeFailure
+}
+
+func TestIKEOnlyMaintenanceRunsWithoutEnablingChildOrRestartingTunnel(t *testing.T) {
+	base := &scheduledIKESession{ikeFailure: errors.New("peer rejected IKE proposal")}
+	session := &Session{base: base}
+	if err := session.RunRekeyMaintenance(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if base.ikeCalls != 1 || base.calls != 0 || base.closed || time.Until(session.ikeRekeyRetryAt) < 59*time.Minute {
+		t.Fatal("independent IKE retry changed CHILD timer or tunnel")
+	}
+}
+
 func (session *scheduledPacketSession) NextChildSARekeyDue() (time.Time, bool) {
 	if session.stopAfterAttempt && session.calls > 0 {
 		return time.Time{}, false

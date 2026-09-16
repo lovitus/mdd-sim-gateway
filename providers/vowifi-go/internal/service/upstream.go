@@ -43,6 +43,7 @@ type UpstreamConfig struct {
 	IDRMode                   string
 	PDNFamily                 string
 	RekeyMinutes              int
+	IKERekeyMinutes           int
 	ProxyURL                  string
 	IMPI, IMPU, IMSDomain     string
 	UserAgent                 string
@@ -131,6 +132,9 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	if config.RekeyMinutes < 0 || config.RekeyMinutes > 1440 {
 		return nil, errors.New("invalid CHILD-SA rekey period")
 	}
+	if config.IKERekeyMinutes < 0 || config.IKERekeyMinutes > 1440 {
+		return nil, errors.New("invalid IKE-SA rekey period")
+	}
 	if config.SIPNetwork != "udp" && config.SIPNetwork != "tcp" {
 		return nil, errors.New("IMS SIP network must be udp or tcp")
 	}
@@ -192,13 +196,25 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 		SIM: simProvider, Timeout: config.IKETimeout,
 		ChildSARekey:            upstreamswu.ChildSARekeyPolicy{Lifetime: time.Duration(config.RekeyMinutes) * time.Minute, Disabled: config.RekeyMinutes == 0},
 		TransactionalChildRekey: true,
-		ChildSARekeyDHGroup:     ikev2.DHGroup2048BitMODP,
-		ResponderID:             ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(responderID)},
-		InitialContact:          true,
-		EAPOnlyAuth:             true,
-		ForceUDPEncapsulation:   config.ProxyURL != "",
-		SA:                      swuIKEProposalForDH(ikev2.DHGroup2048BitMODP),
-		InitRunner:              runSWUIKEInit,
+		IKERekeyLifetime:        time.Duration(config.IKERekeyMinutes) * time.Minute,
+		IKESAInstalled: func(old, next ikev2.InitResult) error {
+			if peer == nil {
+				return errors.New("peer IKE state unavailable")
+			}
+			return peer.installIKE(old, next)
+		},
+		IKESARetired: func(old ikev2.InitResult) {
+			if peer != nil {
+				peer.retireIKE(old)
+			}
+		},
+		ChildSARekeyDHGroup:   ikev2.DHGroup2048BitMODP,
+		ResponderID:           ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(responderID)},
+		InitialContact:        true,
+		EAPOnlyAuth:           true,
+		ForceUDPEncapsulation: config.ProxyURL != "",
+		SA:                    swuIKEProposalForDH(ikev2.DHGroup2048BitMODP),
+		InitRunner:            runSWUIKEInit,
 		AuthRunner: func(ctx context.Context, cfg ikev2.FullAuthConfig) (ikev2.FullAuthResult, error) {
 			result, err := ikev2.RunIKE_AUTH_Full(ctx, cfg)
 			if err == nil {
@@ -931,6 +947,9 @@ func (runtime *upstreamRuntime) Layers() Layers {
 		code := "userspace_stack_failed"
 		if errors.Is(fault, upstreamswu.ErrChildSARetirement) {
 			code = "child_sa_retirement_failed"
+		}
+		if errors.Is(fault, upstreamswu.ErrIKESAReplacement) {
+			code = "ike_sa_retirement_failed"
 		}
 		var stage *StageError
 		if errors.As(fault, &stage) && stage.Layer == "tunnel" {
