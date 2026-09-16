@@ -37,6 +37,9 @@ MDD keeps this source local because the reviewed upstream API hard-coded
 - RFC 2409 MODP group 2 support used only by MDD's bounded IKE compatibility
   retry after an ePDG rejects the modern group 14 proposal; it is never the
   default and is not selected by MCC/MNC hard-coding.
+- a committed CHILD-SA SPI observer on `PacketSession`, so the MDD peer-IKE
+responder matches DELETE against the installed child rather than a candidate or
+  a retired child. The observer receives copied SPI identifiers, not key material.
 
 When these seams are nil, the original host-network and Security-Agree behavior
 is unchanged.
@@ -66,6 +69,26 @@ upstream cryptographic, Notify, COOKIE or INVALID_KE validation, and it does not
 repeat SIM AKA on another endpoint after selection. Transport evidence counts
 received IKE candidate datagrams, including ignored mismatches, not successful
 authentication. On 2026-09-16, the upstream HEAD was still `1e9c6e6adbfc`.
+
+The authenticated peer-request path reuses upstream IKE protection and
+INFORMATIONAL parsing/planning. It adapts the original MDD `ec620942` functions
+`handle_INFORMATIONAL_request`, `handle_pcscf_restoration`,
+`encode_device_identity_notification_data`, and its 16-response replay cache.
+DPD and COOKIE2 replies share the existing NAT-T socket without blocking an
+outbound transaction. Exact retransmissions receive the same encrypted bytes.
+DELETE acknowledges the paired installed SPI before invalidating the old
+tunnel. Unknown/retired child deletes cannot take down the current child.
+P-CSCF restoration echoes zero-length CFG_REPLY attributes, then applies the
+authenticated addresses as generation-fenced session observations for the next
+idle-only recovery; the live ESP tunnel and active call are not interrupted.
+Core and Provider share the explicit IMS rebind predicate, without attributing
+this event to tunnel or country-exit failure. The restoration
+it does not rewrite desired configuration or use the host network. Configured
+IMEI/IMEISV uses the legacy BCD format; absent IMEISV derives configured SVN 00
+from the configured IMEI, never an invented hardware readback or global identity.
+Peer-initiated CREATE_CHILD_SA is explicitly rejected with NO_ADDITIONAL_SAS;
+this is not full responder-side rekey support. Fragmented peer requests and
+network-supplied recovery backoff remain separate compatibility boundaries.
 
 ## MDD Operation Ownership
 

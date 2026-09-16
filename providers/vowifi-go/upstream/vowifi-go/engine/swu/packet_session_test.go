@@ -14,6 +14,42 @@ import (
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 )
 
+func TestMDDChildSPIObserverRunsOnlyAfterInstalledRekey(t *testing.T) {
+	for _, invalid := range []bool{false, true} {
+		child := packetChildSA(true)
+		child.LocalSPI = []byte{1, 2, 3, 4}
+		child.RemoteSPI = []byte{5, 6, 7, 8}
+		var installed bool
+		session, err := NewPacketSession(PacketSessionConfig{
+			ChildSA: packetChildSA(true), Transport: &captureESPPacketTransport{},
+			RekeyHandler: func(context.Context) (ikev2.ChildSAResult, error) {
+				if invalid {
+					return ikev2.ChildSAResult{}, nil
+				}
+				return child, nil
+			},
+			ChildSAInstalled: func(local, remote []byte) {
+				installed = true
+				if !bytes.Equal(local, child.LocalSPI) || !bytes.Equal(remote, child.RemoteSPI) {
+					t.Error("wrong installed SPI identity")
+				}
+				local[0] = 99
+				remote[0] = 99
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = session.RekeyChildSA(context.Background())
+		if installed == invalid || (err != nil) != invalid {
+			t.Fatalf("invalid=%v installed=%v err=%v", invalid, installed, err)
+		}
+		if child.LocalSPI[0] != 1 || child.RemoteSPI[0] != 5 {
+			t.Fatal("observer mutated the installed identity")
+		}
+	}
+}
+
 func TestPacketSessionSendsAndReceivesIPv4AndIPv6(t *testing.T) {
 	aToB := &captureESPPacketTransport{}
 	a, err := NewPacketSession(PacketSessionConfig{

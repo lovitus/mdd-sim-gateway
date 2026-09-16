@@ -99,7 +99,7 @@ func TestPersistentExchangeIgnoresLateAndUnrelatedIKE(t *testing.T) {
 	if result.err != nil || !bytes.Equal(result.packet, want) {
 		t.Fatalf("wrong reply consumed exchange: %x err=%v", result.packet, result.err)
 	}
-	if stats := transport.IKEStats(); stats.RequestsSent != 3 || stats.ResponseDatagrams != 10 {
+	if stats := transport.IKEStats(); stats.RequestsSent != 3 || stats.ResponseDatagrams != 9 {
 		t.Fatalf("transport evidence=%+v", stats)
 	}
 }

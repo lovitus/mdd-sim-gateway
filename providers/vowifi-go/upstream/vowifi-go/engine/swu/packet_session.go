@@ -333,24 +333,27 @@ type PacketSessionConfig struct {
 	Liveness      *IKELivenessState
 	DPDHandler    func(context.Context) error
 	CloseHandler  func(context.Context) error
+	// MDD observes only committed SPI identities, never an uninstalled rekey candidate.
+	ChildSAInstalled func(localSPI, remoteSPI []byte)
 }
 
 type PacketSession struct {
-	mu            sync.Mutex
-	result        TunnelResult
-	outbound      *esp.SA
-	inbound       *esp.SA
-	transport     ESPPacketTransport
-	random        io.Reader
-	mobikeHandler func(context.Context, MOBIKERequest) (MOBIKEResult, error)
-	rekeyHandler  ChildSARekeyHandler
-	rekeyState    *ChildSARekeyState
-	mobikeNAT     *MOBIKENATState
-	liveness      *IKELivenessState
-	dpdHandler    func(context.Context) error
-	closeHandler  func(context.Context) error
-	stats         PacketTunnelStats
-	closed        bool
+	childSAInstalled func(localSPI, remoteSPI []byte)
+	mu               sync.Mutex
+	result           TunnelResult
+	outbound         *esp.SA
+	inbound          *esp.SA
+	transport        ESPPacketTransport
+	random           io.Reader
+	mobikeHandler    func(context.Context, MOBIKERequest) (MOBIKEResult, error)
+	rekeyHandler     ChildSARekeyHandler
+	rekeyState       *ChildSARekeyState
+	mobikeNAT        *MOBIKENATState
+	liveness         *IKELivenessState
+	dpdHandler       func(context.Context) error
+	closeHandler     func(context.Context) error
+	stats            PacketTunnelStats
+	closed           bool
 }
 
 var (
@@ -390,18 +393,19 @@ func NewPacketSession(cfg PacketSessionConfig) (*PacketSession, error) {
 		return nil, err
 	}
 	return &PacketSession{
-		result:        result,
-		outbound:      outbound,
-		inbound:       inbound,
-		transport:     cfg.Transport,
-		random:        cfg.Random,
-		mobikeHandler: cfg.MOBIKEHandler,
-		rekeyHandler:  cfg.RekeyHandler,
-		rekeyState:    rekeyState,
-		mobikeNAT:     cfg.MOBIKENAT,
-		liveness:      cfg.Liveness,
-		dpdHandler:    cfg.DPDHandler,
-		closeHandler:  cfg.CloseHandler,
+		result:           result,
+		outbound:         outbound,
+		inbound:          inbound,
+		transport:        cfg.Transport,
+		random:           cfg.Random,
+		mobikeHandler:    cfg.MOBIKEHandler,
+		rekeyHandler:     cfg.RekeyHandler,
+		childSAInstalled: cfg.ChildSAInstalled,
+		rekeyState:       rekeyState,
+		mobikeNAT:        cfg.MOBIKENAT,
+		liveness:         cfg.Liveness,
+		dpdHandler:       cfg.DPDHandler,
+		closeHandler:     cfg.CloseHandler,
 	}, nil
 }
 
@@ -486,6 +490,9 @@ func (s *PacketSession) rekeyChildSA(ctx context.Context, rekeyedAt time.Time) (
 	}
 	if pcscf := childConfigurationPCSCF(child); len(pcscf) > 0 {
 		s.result.PCSCFServers = pcscf
+	}
+	if s.childSAInstalled != nil {
+		s.childSAInstalled(append([]byte(nil), child.LocalSPI...), append([]byte(nil), child.RemoteSPI...))
 	}
 	return cloneTunnelResult(s.result), nil
 }

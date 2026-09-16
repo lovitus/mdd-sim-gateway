@@ -1058,6 +1058,44 @@ func TestTerminalTunnelFaultWaitsForActiveCallThenRecovers(t *testing.T) {
 	waitAction(t, runtime.actions, "start")
 }
 
+func TestPeerPCSCFRestorationWaitsForCallThenUsesIdleRecovery(t *testing.T) {
+	reconciler, catalog, runtime, _, _, clock := testReconciler(t, vowifiipc.RuntimeRunning, oneCard())
+	if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.status.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
+	runtime.status.IMS = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: vowifiipc.PeerPCSCFChanged}
+	runtime.status.ActiveCall = &vowifiipc.ActiveCall{CallID: "call-1", Condition: vowifiipc.CallActive}
+	runtime.mu.Unlock()
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case action := <-runtime.actions:
+		t.Fatalf("restoration interrupted call: %s", action)
+	default:
+	}
+	runtime.mu.Lock()
+	runtime.status.ActiveCall = nil
+	runtime.mu.Unlock()
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitAction(t, runtime.actions, "stop")
+	waitIdle(t, reconciler, "line-1")
+	runtime.mu.Lock()
+	if len(runtime.stopRequests) != 1 || !runtime.stopRequests[0].RequireIdle {
+		t.Error("restoration bypassed Provider idle fence")
+	}
+	runtime.mu.Unlock()
+	clock.Advance(5 * time.Second)
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitAction(t, runtime.actions, "start")
+}
+
 func testReconciler(t *testing.T, condition vowifiipc.RuntimeCondition, statuses []agentlink.ConnectionStatus) (
 	*Reconciler, *linecatalog.Store, *fakeRuntime, *fakeAgents, *events.Replay, *fakeClock,
 ) {

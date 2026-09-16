@@ -66,6 +66,8 @@ type UpstreamFactory struct {
 	sink            messageSinkBinding
 	endpointAttempt uint64
 	selectedFamily  string
+	observedPCSCF   []string
+	peerEpoch       uint64
 }
 
 type messageSinkBinding struct {
@@ -151,8 +153,13 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 	if factory == nil {
 		return nil, errors.New("nil upstream VoWiFi factory")
 	}
-	config := factory.config
 	factory.mu.Lock()
+	factory.peerEpoch++
+	peerEpoch := factory.peerEpoch
+	config := factory.config
+	if len(factory.observedPCSCF) > 0 {
+		config.PCSCF = append([]string(nil), factory.observedPCSCF...)
+	}
 	sinkBinding := factory.sink
 	factory.mu.Unlock()
 	effectiveFamily, candidateOffset, pinnedFamily := factory.beginNetworkAttempt()
@@ -180,6 +187,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 	}()
 	configuration, selectors := swuPDNConfiguration(effectiveFamily)
 	responderID := responderIdentity(config.IMSAPN, config.IDRMode, config.Profile.MCC, config.Profile.MNC)
+	var peer *peerIKEResponder
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
 		ChildSARekey:          upstreamswu.ChildSARekeyPolicy{Lifetime: time.Duration(config.RekeyMinutes) * time.Minute, Disabled: config.RekeyMinutes == 0},
@@ -189,7 +197,32 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 		ForceUDPEncapsulation: config.ProxyURL != "",
 		SA:                    swuIKEProposalForDH(ikev2.DHGroup2048BitMODP),
 		InitRunner:            runSWUIKEInit,
-		Configuration:         configuration, TSi: selectors, TSr: selectors,
+		AuthRunner: func(ctx context.Context, cfg ikev2.FullAuthConfig) (ikev2.FullAuthResult, error) {
+			result, err := ikev2.RunIKE_AUTH_Full(ctx, cfg)
+			if err == nil {
+				peer = newPeerIKEResponder(cfg.Init, config.Profile, func(addresses []string) {
+					factory.observePeerPCSCF(peerEpoch, addresses)
+				})
+			}
+			return result, err
+		},
+		PacketSessionFactory: func(cfg upstreamswu.PacketSessionConfig) (upstreamswu.TunnelSession, error) {
+			if peer == nil {
+				return nil, errors.New("authenticated peer IKE state unavailable")
+			}
+			peer.setChild(cfg.ChildSA.LocalSPI, cfg.ChildSA.RemoteSPI)
+			cfg.ChildSAInstalled = peer.setChild
+			session, err := upstreamswu.NewPacketSession(cfg)
+			if err != nil {
+				return nil, err
+			}
+			if err = outer.ServePeerIKE(peer.handle); err != nil {
+				_ = session.Close(context.Background())
+				return nil, err
+			}
+			return session, nil
+		},
+		Configuration: configuration, TSi: selectors, TSr: selectors,
 		IKETransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.IKETransportConfig) (ikev2.InitTransport, error) {
 			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
 				return nil, err
@@ -329,11 +362,20 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 		deviceID: config.DeviceID, imsi: prepared.Profile.IMSI, localIP: localIP.String(),
 		pdnFamily: effectiveFamily, responderID: responderID,
 		messaging: messagingService, tracker: tracker, inbound: inbound,
+		peer: peer,
 	}
 	messagingService.SetSMSTransport(registration.SMSTransport)
 	go runtime.observeStack()
 	established = true
 	return runtime, nil
+}
+
+func (factory *UpstreamFactory) observePeerPCSCF(epoch uint64, addresses []string) {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	if epoch == factory.peerEpoch {
+		factory.observedPCSCF = append([]string(nil), addresses...)
+	}
 }
 
 // swuIKEProposalForDH mirrors the already deployed strongSwan compatibility
@@ -630,6 +672,7 @@ func closeBounded(timeout time.Duration, close func(context.Context) error) erro
 }
 
 type upstreamRuntime struct {
+	peer                 *peerIKEResponder
 	outer                *outerudp.Transport
 	packetSession        *provider.Session
 	stack                *usernet.Stack
@@ -685,6 +728,9 @@ func (runtime *upstreamRuntime) RekeyStatus() *vowifiipc.ChildSARekeyStatus {
 }
 
 func (runtime *upstreamRuntime) RecoverRegistration(ctx context.Context) error {
+	if runtime.IMSRebindPending() {
+		return errors.New("P-CSCF change requires idle runtime recovery")
+	}
 	_, revision := runtime.registrationSnapshot()
 	_, applied, err := runtime.recoverCallRegistration(ctx, revision, 0)
 	if err != nil {
@@ -695,6 +741,8 @@ func (runtime *upstreamRuntime) RecoverRegistration(ctx context.Context) error {
 	}
 	return nil
 }
+
+func (runtime *upstreamRuntime) IMSRebindPending() bool { return runtime.peer.needsRebind() }
 
 func (runtime *upstreamRuntime) SendMessage(ctx context.Context, request vowifiipc.SendMessageRequest) error {
 	registration, _ := runtime.registrationSnapshot()
@@ -878,8 +926,17 @@ func (runtime *upstreamRuntime) Layers() Layers {
 	fault := runtime.fault
 	runtime.faultMu.Unlock()
 	if fault != nil {
-		blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "userspace_stack_failed"}
-		return Layers{Tunnel: vowifiipc.LayerStatus{Condition: vowifiipc.LayerDegraded, Code: "userspace_stack_failed"}, IMS: blocked, Voice: blocked, Messaging: blocked}
+		code := "userspace_stack_failed"
+		var stage *StageError
+		if errors.As(fault, &stage) && stage.Layer == "tunnel" {
+			code = stage.Code
+		}
+		blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: code}
+		return Layers{Tunnel: vowifiipc.LayerStatus{Condition: vowifiipc.LayerDegraded, Code: code}, IMS: blocked, Voice: blocked, Messaging: blocked}
+	}
+	if runtime.peer.needsRebind() {
+		blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: vowifiipc.PeerPCSCFChanged}
+		return Layers{Tunnel: ready, IMS: blocked, Voice: blocked, Messaging: blocked}
 	}
 	registration, _ := runtime.registrationSnapshot()
 	if !registration.Registered {

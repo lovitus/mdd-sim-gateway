@@ -619,7 +619,7 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		observation.status.IMS.Condition == vowifiipc.LayerReady && observation.status.IMS.Available) {
 		reconciler.clearFailureWindow(line.ID)
 	}
-	if observation.status.Runtime.Condition != vowifiipc.RuntimeFailed && observation.status.Tunnel.Condition != vowifiipc.LayerDegraded {
+	if !observation.status.RequiresIdleRecovery() {
 		reconciler.clearFailureWindow(line.ID)
 	}
 	if targetRunning && (observation.status.Maintenance.Draining || reconciler.exitPolicyPaused(line, observation)) {
@@ -627,7 +627,7 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		return
 	}
 	recoveryDue := true
-	if targetRunning && (observation.status.Runtime.Condition == vowifiipc.RuntimeFailed || observation.status.Tunnel.Condition == vowifiipc.LayerDegraded) {
+	if targetRunning && observation.status.RequiresIdleRecovery() {
 		recoveryDue = reconciler.continuousFailureDue(line, observation)
 	}
 	if !targetRunning || observation.status.Runtime.Condition != vowifiipc.RuntimeRunning ||
@@ -655,7 +655,7 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 			reconciler.schedule(reconciler.actionPlan(line, observation, "start", false))
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning &&
-		observation.status.Tunnel.Condition == vowifiipc.LayerDegraded:
+		observation.status.RequiresIdleRecovery():
 		if recoveryDue && observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
 			reconciler.beginRecovery(line, observation)
 		}
@@ -955,10 +955,7 @@ func (reconciler *Reconciler) validatePlan(ctx context.Context, plan actionPlan)
 	if status.ActiveCall != nil || status.PendingIncomingCall != nil {
 		return errActionPlanChanged
 	}
-	failed := status.Runtime.Condition == vowifiipc.RuntimeFailed
-	degraded := status.Runtime.Condition == vowifiipc.RuntimeRunning &&
-		status.Tunnel.Condition == vowifiipc.LayerDegraded
-	if !failed && !degraded {
+	if !status.RequiresIdleRecovery() {
 		return errActionPlanChanged
 	}
 	return nil

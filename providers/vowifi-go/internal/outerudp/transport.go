@@ -63,10 +63,12 @@ type Transport struct {
 	ikeStats IKEExchangeStats
 	done     chan struct{}
 
-	exchange chan struct{}
-	writeMu  sync.Mutex
-	ike      chan []byte
-	esp      chan []byte
+	exchange       chan struct{}
+	writeMu        sync.Mutex
+	ike            chan []byte
+	peerIKE        chan []byte
+	peerHandlerSet bool
+	esp            chan []byte
 }
 
 var (
@@ -102,6 +104,7 @@ func New(config Config) (*Transport, error) {
 	return &Transport{
 		config: config, done: make(chan struct{}), exchange: make(chan struct{}, 1),
 		ike: make(chan []byte, config.QueueCapacity), esp: make(chan []byte, config.QueueCapacity),
+		peerIKE: make(chan []byte, config.QueueCapacity),
 	}, nil
 }
 
@@ -353,12 +356,17 @@ func (transport *Transport) readLoop(conn net.Conn) {
 			// route arbitrary early ESP ciphertext into the IKE parser.
 			target = transport.ike
 		}
+		if target == transport.ike {
+			if header, err := ikev2.ParseHeader(packet); err == nil && header.Flags&ikev2.FlagResponse == 0 {
+				target = transport.peerIKE
+			}
+		}
 		select {
 		case target <- packet:
 		case <-transport.done:
 			return
 		default:
-			if target == transport.esp {
+			if target == transport.esp || target == transport.peerIKE {
 				// ESP is a lossy datagram stream. A transient slow consumer may
 				// drop a packet, but must not tear down an otherwise healthy call.
 				continue

@@ -46,8 +46,13 @@ func TestProviderFailureRequiresCompleteUnansweredBootstrap(t *testing.T) {
 		"SIM failure":                 func(s *vowifiipc.Snapshot) { s.Runtime.Code = "agent_aka_invalid" },
 		"IMS rejection":               func(s *vowifiipc.Snapshot) { s.Runtime.Code = "ims_register_failed" },
 		"cleanup failure":             func(s *vowifiipc.Snapshot) { s.Runtime.Code = "close_failed" },
-		"unknown tunnel":              func(s *vowifiipc.Snapshot) { s.Tunnel.Condition = vowifiipc.LayerUnknown },
-		"failure without identity":    func(s *vowifiipc.Snapshot) { s.Runtime.FailureID = "" },
+		"authenticated peer deletion": func(s *vowifiipc.Snapshot) { s.Runtime.Code = "peer_ike_deleted"; s.Tunnel.Code = "peer_ike_deleted" },
+		"peer P-CSCF restoration": func(s *vowifiipc.Snapshot) {
+			s.Runtime.Code = "peer_pcscf_changed"
+			s.Tunnel.Code = "peer_pcscf_changed"
+		},
+		"unknown tunnel":           func(s *vowifiipc.Snapshot) { s.Tunnel.Condition = vowifiipc.LayerUnknown },
+		"failure without identity": func(s *vowifiipc.Snapshot) { s.Runtime.FailureID = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			current := snapshot

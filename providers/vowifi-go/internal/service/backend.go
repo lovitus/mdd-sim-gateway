@@ -193,6 +193,9 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 		incoming.SetIncomingCallAvailability(func() bool {
 			backend.mu.Lock()
 			defer backend.mu.Unlock()
+			if pending, ok := runtime.(interface{ IMSRebindPending() bool }); ok && pending.IMSRebindPending() {
+				return false
+			}
 			return backend.runtime == runtime && backend.condition == vowifiipc.RuntimeRunning && backend.activeCall == nil && !backend.registering
 		})
 	}
@@ -241,7 +244,8 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 	if request.RequireIdle {
 		recoveryNeeded := backend.condition == vowifiipc.RuntimeFailed
 		if backend.condition == vowifiipc.RuntimeRunning && backend.runtime != nil {
-			recoveryNeeded = backend.runtime.Layers().Tunnel.Condition == vowifiipc.LayerDegraded
+			layers := backend.runtime.Layers()
+			recoveryNeeded = (vowifiipc.Snapshot{Runtime: vowifiipc.RuntimeStatus{Condition: backend.condition}, Tunnel: layers.Tunnel, IMS: layers.IMS}).RequiresIdleRecovery()
 		}
 		if !recoveryNeeded {
 			backend.mu.Unlock()
