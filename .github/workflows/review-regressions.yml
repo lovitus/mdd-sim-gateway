@@ -45,6 +45,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version-file: providers/vowifi-go/go.mod
@@ -84,7 +85,7 @@ jobs:
         run: bash go-runtime/scripts/followup-counterexamples.sh "$GITHUB_WORKSPACE/followup-baseline"
       - name: Check source formatting and patch whitespace
         run: |
-          git show --format= --check HEAD
+          git diff --check f8a8c33793c95308e95043a4cb6acd3ebe01eeed HEAD
           test -z "$(gofmt -l go-runtime/internal/agentdata/broker.go go-runtime/internal/agentmedia/broker.go go-runtime/internal/agentdata/reservation_lifetime.go go-runtime/internal/agentmedia/reservation_lifetime.go go-runtime/internal/agentdata/followup_lifetime_test.go go-runtime/internal/agentmedia/followup_lifetime_test.go)"
       - name: Test Core
         run: |
