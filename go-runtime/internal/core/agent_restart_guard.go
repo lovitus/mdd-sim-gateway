@@ -77,11 +77,14 @@ func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.Conne
 		return nil, err
 	}
 	drain := providerapply.DrainRequest{SchemaVersion: 1, CatalogRevision: catalog.Revision, LeaseID: leaseID, LineIDs: lineIDs}
+	var drainedLineIDs []string
 	releaseProviders := func(releaseContext context.Context) error {
-		if len(lineIDs) == 0 {
+		if len(drainedLineIDs) == 0 {
 			return nil
 		}
-		result, err := maintenance.runtime.Request(releaseContext, drain, false)
+		releaseRequest := drain
+		releaseRequest.LineIDs = drainedLineIDs
+		result, err := maintenance.runtime.Request(releaseContext, releaseRequest, false)
 		if err != nil {
 			return err
 		}
@@ -94,6 +97,11 @@ func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.Conne
 		result, err := maintenance.runtime.Request(ctx, drain, true)
 		if err != nil || !result.Ready {
 			return nil, errors.New("provider maintenance not ready")
+		}
+		for _, line := range result.Lines {
+			if line.Code == "drained" {
+				drainedLineIDs = append(drainedLineIDs, line.LineID)
+			}
 		}
 	}
 	if err := agents.BeginHostMaintenance(status.AgentID, status.ProcessGeneration, leaseID); err != nil {
