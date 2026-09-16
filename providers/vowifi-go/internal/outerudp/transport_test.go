@@ -17,9 +17,51 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 	"github.com/txthinking/socks5"
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+func testIKEHeader(id uint32, response bool) ikev2.Header {
+	h := ikev2.Header{InitiatorSPI: 0x1122334455667788, ResponderSPI: 0x8877665544332211,
+		Version: 0x20, ExchangeType: ikev2.ExchangeIKE_AUTH, Flags: ikev2.FlagInitiator, MessageID: id}
+	if id == 0 {
+		h.ExchangeType = ikev2.ExchangeIKE_SA_INIT
+		if !response {
+			h.ResponderSPI = 0
+		}
+	}
+	if response {
+		h.Flags = ikev2.FlagResponse
+	}
+	return h
+}
+
+func testIKERequest(id uint32) []byte {
+	packet, err := testIKEHeader(id, false).MarshalBinary()
+	if err != nil {
+		panic(err)
+	}
+	return packet
+}
+
+func testIKEResponse(id uint32) []byte {
+	packet, err := testIKEHeader(id, true).MarshalBinary()
+	if err != nil {
+		panic(err)
+	}
+	return packet
+}
+
+func testIKEReject() []byte {
+	packet, err := (ikev2.Message{Header: testIKEHeader(0, true), Payloads: []ikev2.Payload{
+		ikev2.NotifyWithZeroSPI(ikev2.NotifyAuthenticationFailed, nil),
+	}}).MarshalBinary()
+	if err != nil {
+		panic(err)
+	}
+	return packet
+}
 
 func TestDialContextUsesSOCKS5UDPAssociation(t *testing.T) {
 	proxyAddress, observed, tcpClosed, shutdown := startSOCKS5UDPServer(t)
@@ -153,16 +195,16 @@ func TestTransportSharesOneAssociationForIKEAndESP(t *testing.T) {
 	response := make(chan []byte, 1)
 	errResult := make(chan error, 1)
 	go func() {
-		value, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("ike-request"))
+		value, exchangeErr := transport.ExchangeIKE(context.Background(), testIKERequest(0))
 		response <- value
 		errResult <- exchangeErr
 	}()
-	wantIKEWire := append([]byte{0, 0, 0, 0}, []byte("ike-request")...)
+	wantIKEWire := append([]byte{0, 0, 0, 0}, testIKERequest(0)...)
 	if got := receiveDatagram(t, connection.outbound); !bytes.Equal(got, wantIKEWire) {
 		t.Fatalf("IKE wire packet=%x, want %x", got, wantIKEWire)
 	}
-	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("ike-response")...)
-	if got := <-response; !bytes.Equal(got, []byte("ike-response")) {
+	connection.inbound <- append([]byte{0, 0, 0, 0}, testIKEResponse(0)...)
+	if got := <-response; !bytes.Equal(got, testIKEResponse(0)) {
 		t.Fatalf("IKE response=%x", got)
 	}
 	if err := <-errResult; err != nil {
@@ -219,17 +261,17 @@ func TestIKEEvidenceCountsResponseTimeoutButNotDialFailure(t *testing.T) {
 	}
 	completed := make(chan error, 1)
 	go func() {
-		_, err := transport.ExchangeIKE(t.Context(), []byte("initial"))
+		_, err := transport.ExchangeIKE(t.Context(), testIKERequest(0))
 		completed <- err
 	}()
 	receiveDatagram(t, connection.outbound)
-	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("response")...)
+	connection.inbound <- append([]byte{0, 0, 0, 0}, testIKEResponse(0)...)
 	if err := <-completed; err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := transport.ExchangeIKE(ctx, []byte("unanswered")); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := transport.ExchangeIKE(ctx, testIKERequest(1)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout=%v", err)
 	}
 	if got := transport.IKEStats(); got != (IKEExchangeStats{RequestsSent: 2, ResponseDatagrams: 1, ResponseTimeouts: 1}) {
@@ -245,7 +287,7 @@ func TestIKEEvidenceCountsResponseTimeoutButNotDialFailure(t *testing.T) {
 	if err := unreachable.Bind("192.0.2.10:4500", time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unreachable.ExchangeIKE(t.Context(), []byte("not-sent")); err == nil {
+	if _, err := unreachable.ExchangeIKE(t.Context(), testIKERequest(0)); err == nil {
 		t.Fatal("dial unexpectedly succeeded")
 	}
 	if got := unreachable.IKEStats(); got != (IKEExchangeStats{}) {
@@ -267,11 +309,11 @@ func TestTransportQueuesEarlyESPWhileWaitingForMarkedIKE(t *testing.T) {
 
 	firstResult := make(chan error, 1)
 	go func() {
-		_, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("initial"))
+		_, exchangeErr := transport.ExchangeIKE(context.Background(), testIKERequest(0))
 		firstResult <- exchangeErr
 	}()
 	_ = receiveDatagram(t, connection.outbound)
-	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("initial-response")...)
+	connection.inbound <- append([]byte{0, 0, 0, 0}, testIKEResponse(0)...)
 	if err := <-firstResult; err != nil {
 		t.Fatal(err)
 	}
@@ -279,15 +321,15 @@ func TestTransportQueuesEarlyESPWhileWaitingForMarkedIKE(t *testing.T) {
 	response := make(chan []byte, 1)
 	responseErr := make(chan error, 1)
 	go func() {
-		value, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("final-auth"))
+		value, exchangeErr := transport.ExchangeIKE(context.Background(), testIKERequest(1))
 		response <- value
 		responseErr <- exchangeErr
 	}()
 	_ = receiveDatagram(t, connection.outbound)
 	earlyESP := bytes.Repeat([]byte{0x52}, 776)
 	connection.inbound <- earlyESP
-	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("final-response")...)
-	if got := <-response; !bytes.Equal(got, []byte("final-response")) {
+	connection.inbound <- append([]byte{0, 0, 0, 0}, testIKEResponse(1)...)
+	if got := <-response; !bytes.Equal(got, testIKEResponse(1)) {
 		t.Fatalf("IKE response=%x", got)
 	}
 	if err := <-responseErr; err != nil {
@@ -329,15 +371,15 @@ func TestTransportTriesResolvedCandidatesOnlyBeforeFirstIKEResponse(t *testing.T
 	first := make(chan []byte, 1)
 	firstErr := make(chan error, 1)
 	go func() {
-		response, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("first"))
+		response, exchangeErr := transport.ExchangeIKE(context.Background(), testIKERequest(0))
 		first <- response
 		firstErr <- exchangeErr
 	}()
-	if got := receiveDatagram(t, connection.outbound); !bytes.Equal(got, append([]byte{0, 0, 0, 0}, []byte("first")...)) {
+	if got := receiveDatagram(t, connection.outbound); !bytes.Equal(got, append([]byte{0, 0, 0, 0}, testIKERequest(0)...)) {
 		t.Fatalf("first IKE wire packet=%x", got)
 	}
-	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("first-response")...)
-	if got := <-first; !bytes.Equal(got, []byte("first-response")) {
+	connection.inbound <- append([]byte{0, 0, 0, 0}, testIKEResponse(0)...)
+	if got := <-first; !bytes.Equal(got, testIKEResponse(0)) {
 		t.Fatalf("first response=%x", got)
 	}
 	if err := <-firstErr; err != nil {
@@ -347,13 +389,13 @@ func TestTransportTriesResolvedCandidatesOnlyBeforeFirstIKEResponse(t *testing.T
 	second := make(chan []byte, 1)
 	secondErr := make(chan error, 1)
 	go func() {
-		response, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("second"))
+		response, exchangeErr := transport.ExchangeIKE(context.Background(), testIKERequest(1))
 		second <- response
 		secondErr <- exchangeErr
 	}()
 	_ = receiveDatagram(t, connection.outbound)
-	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("second-response")...)
-	if got := <-second; !bytes.Equal(got, []byte("second-response")) {
+	connection.inbound <- append([]byte{0, 0, 0, 0}, testIKEResponse(1)...)
+	if got := <-second; !bytes.Equal(got, testIKEResponse(1)) {
 		t.Fatalf("second response=%x", got)
 	}
 	if err := <-secondErr; err != nil {
@@ -395,14 +437,14 @@ func TestTransportDoesNotTryAnotherCandidateAfterAnyIKEResponse(t *testing.T) {
 	}
 	result := make(chan []byte, 1)
 	go func() {
-		response, _ := transport.ExchangeIKE(context.Background(), []byte("request"))
+		response, _ := transport.ExchangeIKE(context.Background(), testIKERequest(0))
 		result <- response
 	}()
 	_ = receiveDatagram(t, connection.outbound)
 	// The IKE parser may later reject this payload. Transport selection still
 	// pins the responder and must not start another AKA-capable exchange.
-	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("protocol-reject")...)
-	if got := <-result; !bytes.Equal(got, []byte("protocol-reject")) {
+	connection.inbound <- append([]byte{0, 0, 0, 0}, testIKEReject()...)
+	if got := <-result; !bytes.Equal(got, testIKEReject()) {
 		t.Fatalf("response=%x", got)
 	}
 	if dials.Load() != 1 {
@@ -433,11 +475,11 @@ func TestTransportUsesInjectedResolverWithProxy(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("request"))
+		_, exchangeErr := transport.ExchangeIKE(context.Background(), testIKERequest(0))
 		result <- exchangeErr
 	}()
 	_ = receiveDatagram(t, connection.outbound)
-	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("response")...)
+	connection.inbound <- append([]byte{0, 0, 0, 0}, testIKEResponse(0)...)
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +536,7 @@ func TestTransportResolvesEPDGThroughEitherProxyDNSServer(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("request"))
+		_, exchangeErr := transport.ExchangeIKE(context.Background(), testIKERequest(0))
 		result <- exchangeErr
 	}()
 	select {
@@ -504,7 +546,7 @@ func TestTransportResolvesEPDGThroughEitherProxyDNSServer(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for resolved IKE datagram")
 	}
-	ikeConnection.inbound <- append([]byte{0, 0, 0, 0}, []byte("response")...)
+	ikeConnection.inbound <- append([]byte{0, 0, 0, 0}, testIKEResponse(0)...)
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +567,7 @@ func TestTransportReportsLocalResolutionFailureWithoutProxy(t *testing.T) {
 	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
 		t.Fatal(err)
 	}
-	_, err = transport.ExchangeIKE(context.Background(), []byte("request"))
+	_, err = transport.ExchangeIKE(context.Background(), testIKERequest(0))
 	if err == nil || !strings.Contains(err.Error(), "resolve ePDG hostname") {
 		t.Fatalf("exchange error=%v, want local resolution failure", err)
 	}
@@ -556,7 +598,7 @@ func TestTransportReportsAllUnreachableCandidates(t *testing.T) {
 	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
 		t.Fatal(err)
 	}
-	_, err = transport.ExchangeIKE(context.Background(), []byte("request"))
+	_, err = transport.ExchangeIKE(context.Background(), testIKERequest(0))
 	if !errors.Is(err, ErrNoEndpoint) {
 		t.Fatalf("exchange error=%v, want ErrNoEndpoint", err)
 	}
@@ -580,7 +622,7 @@ func TestTransportRotatesCandidatesAcrossSeparateAttempts(t *testing.T) {
 	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = transport.ExchangeIKE(context.Background(), []byte("request"))
+	_, _ = transport.ExchangeIKE(context.Background(), testIKERequest(0))
 	want := []string{"192.0.2.11:4500", "192.0.2.10:4500"}
 	if len(dialed) != len(want) || dialed[0] != want[0] || dialed[1] != want[1] {
 		t.Fatalf("dialed=%v, want rotated order %v", dialed, want)

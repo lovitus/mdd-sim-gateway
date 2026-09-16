@@ -128,11 +128,17 @@ func (transport *Transport) Bind(remote string, timeout time.Duration) error {
 }
 
 func (transport *Transport) ExchangeIKE(ctx context.Context, request []byte) ([]byte, error) {
-	if len(request) == 0 {
-		return nil, errors.New("IKE request is empty")
+	header, err := ikev2.ParseHeader(request)
+	if err != nil || header.Version>>4 != 2 || header.Length != uint32(len(request)) || header.Flags&ikev2.FlagResponse != 0 {
+		return nil, errors.New("invalid IKE request header")
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if deadline := transport.deadline(ctx); !deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
 	select {
 	case transport.exchange <- struct{}{}:
@@ -162,18 +168,39 @@ func (transport *Transport) ExchangeIKE(ctx context.Context, request []byte) ([]
 		return nil, err
 	}
 	transport.recordIKERequest()
-	select {
-	case response := <-transport.ike:
-		transport.recordIKEResult(nil)
-		return response, nil
-	case <-ctx.Done():
-		transport.recordIKEResult(ctx.Err())
-		return nil, ctx.Err()
-	case <-transport.done:
-		err := transport.err()
-		transport.recordIKEResult(err)
-		return nil, err
+	for {
+		select {
+		case response := <-transport.ike:
+			transport.recordIKEResult(nil)
+			if matchesIKEExchange(header, response) {
+				return response, nil
+			}
+		case <-ctx.Done():
+			transport.recordIKEResult(ctx.Err())
+			return nil, ctx.Err()
+		case <-transport.done:
+			err := transport.err()
+			transport.recordIKEResult(err)
+			return nil, err
+		}
 	}
+}
+
+// Reuse upstream auth.go's SPI/type/ID fence at the shared-socket boundary.
+// Like ec620942 swu_ike.py's duplicate-response guard, stale replies must not
+// consume the next exchange. Cryptographic and Notify validation stay upstream.
+func matchesIKEExchange(request ikev2.Header, packet []byte) bool {
+	response, err := ikev2.ParseHeader(packet)
+	if err != nil || response.Version>>4 != 2 || response.Length != uint32(len(packet)) ||
+		response.Flags&ikev2.FlagResponse == 0 || (response.Flags^request.Flags)&ikev2.FlagInitiator == 0 ||
+		response.InitiatorSPI != request.InitiatorSPI || response.ExchangeType != request.ExchangeType ||
+		response.MessageID != request.MessageID {
+		return false
+	}
+	// The responder chooses its SPI during INIT. COOKIE/INVALID_KE error
+	// responses may still use zero; they must reach the existing IKE parser.
+	initial := request.ExchangeType == ikev2.ExchangeIKE_SA_INIT && request.MessageID == 0 && request.ResponderSPI == 0
+	return initial || response.ResponderSPI == request.ResponderSPI
 }
 
 func (transport *Transport) SendESPPacket(ctx context.Context, packet []byte) error {
@@ -406,6 +433,10 @@ func (transport *Transport) exchangeInitial(ctx context.Context, request []byte)
 }
 
 func (transport *Transport) exchangeCandidate(ctx context.Context, remote string, wire []byte, timeout time.Duration) ([]byte, error) {
+	request, err := ikev2.ParseHeader(wire[4:])
+	if err != nil {
+		return nil, err
+	}
 	connection, err := transport.config.DialContext(ctx, transport.config.ProxyURL, remote, timeout)
 	if err != nil {
 		return nil, err
@@ -418,6 +449,8 @@ func (transport *Transport) exchangeCandidate(ctx context.Context, remote string
 	}
 	transport.pending = connection
 	transport.mu.Unlock()
+	stopCancellation := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stopCancellation()
 
 	keep := false
 	defer func() {
@@ -448,10 +481,11 @@ func (transport *Transport) exchangeCandidate(ctx context.Context, remote string
 	for {
 		n, err := connection.Read(buffer)
 		if err != nil {
-			transport.recordIKEResult(err)
 			if ctxErr := ctx.Err(); ctxErr != nil {
+				transport.recordIKEResult(ctxErr)
 				return nil, ctxErr
 			}
+			transport.recordIKEResult(err)
 			return nil, err
 		}
 		if n == 0 || n == 1 && buffer[0] == 0xff {
@@ -460,8 +494,13 @@ func (transport *Transport) exchangeCandidate(ctx context.Context, remote string
 		packet := append([]byte(nil), buffer[:n]...)
 		if hasNonESPMarker(packet) {
 			packet = packet[4:]
+		} else if !isUnmarkedIKE(packet) {
+			continue
 		}
 		transport.recordIKEResult(nil)
+		if !matchesIKEExchange(request, packet) {
+			continue
+		}
 		if err := connection.SetDeadline(time.Time{}); err != nil {
 			return nil, err
 		}

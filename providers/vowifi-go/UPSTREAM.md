@@ -56,6 +56,17 @@ Failed startup retains an immutable copy in the optional IPC runtime evidence;
 new startup clears it. Core must accept the new fields before this Provider is
 upgraded. Missing evidence from an older Provider remains unknown.
 
+The shared outer-UDP adapter matches response SPI, exchange type, Message ID
+and request/response roles before handing a datagram to upstream IKE parsing
+([RFC 7296 sections 2.1-2.2](https://www.rfc-editor.org/rfc/rfc7296.html#section-2.2)).
+It reuses upstream `ikev2.ParseHeader` and the identity checks in `auth.go`,
+and carries forward the duplicate-response guard from the retired MDD
+`ec620942:engine/swu_ike.py:_accept_create_child_response`. This does not replace
+upstream cryptographic, Notify, COOKIE or INVALID_KE validation, and it does not
+repeat SIM AKA on another endpoint after selection. Transport evidence counts
+received IKE candidate datagrams, including ignored mismatches, not successful
+authentication. On 2026-09-16, the upstream HEAD was still `1e9c6e6adbfc`.
+
 ## MDD Operation Ownership
 
 The service wrapper keeps paid SMS receipts in `paid-message-operations-v1`
