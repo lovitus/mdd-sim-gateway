@@ -276,9 +276,9 @@ func TestAgentHostConnectsOutboundWSSWithoutOwningInboundHardwarePort(t *testing
 	for {
 		status, found := server.Status("agent-1")
 		if found && status.ProcessGeneration != "" && !status.LastReport.IsZero() && status.Topology != nil {
-			if len(status.Capabilities) != 2 || !slices.Contains(status.Capabilities, "reader-readback-v1") ||
-				!slices.Contains(status.Capabilities, "sim-pin-v1") {
-				t.Fatalf("PC/SC-only Agent capability=%+v, want reader readback and SIM PIN", status.Capabilities)
+			if len(status.Capabilities) != 3 || !slices.Contains(status.Capabilities, "reader-readback-v1") ||
+				!slices.Contains(status.Capabilities, "sim-pin-v1") || !slices.Contains(status.Capabilities, "reader-metadata-recovery-v1") {
+				t.Fatalf("PC/SC-only Agent capability=%+v, want reader readback, SIM PIN and bounded metadata recovery", status.Capabilities)
 			}
 			break
 		}
