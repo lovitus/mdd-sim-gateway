@@ -251,8 +251,14 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	go func() { linkDone <- worker.runAgentLink(runContext, manager, generation) }()
 
 	localReady := false
+	metadataRecoveryTick := time.NewTicker(30 * time.Second)
+	defer metadataRecoveryTick.Stop()
 	for {
 		select {
+		case now := <-metadataRecoveryTick.C:
+			for _, result := range manager.RepairInvalidMetadata(runContext, now) {
+				log.Printf("mdd-agent: reader metadata recovery attempt=%d code=%s recovered=%t rule=%s", result.Attempt, result.Code, result.Recovered, result.ValidationRule)
+			}
 		case <-readerReady:
 			if !localReady {
 				localReady = true
@@ -509,7 +515,8 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
 			HealthReported:   func() { healthySince.CompareAndSwap(0, time.Now().UnixNano()) }, Health: health,
-			PrepareRestart: prepareRestart,
+			PrepareRestart:         prepareRestart,
+			ReaderMetadataRecovery: true,
 		}).Run(ctx)
 		if rawUSB != nil {
 			_ = rawUSB.Close()

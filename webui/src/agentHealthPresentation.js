@@ -62,7 +62,7 @@ export function normalizeCoreAgentHealth(agent, snapshotAt) {
 	if (readerCondition === 'recovering') addIssue('reader_recovering', topology.reader_detail, true)
 	if (modemCondition === 'recovering') addIssue('modem_recovering', topology.modem_detail, true)
 	for (const reader of readers) {
-		if (reader.card_present && reader.identity_state === 'identity_unavailable') addIssue('reader_identity_unavailable', `${reader.reader_name}: ${reader.identity_detail || ''}`)
+		if (reader.card_present && reader.identity_state === 'identity_unavailable') addIssue('reader_identity_unavailable', `${reader.reader_name}: ${reader.identity_detail || ''}`, agent.capabilities?.includes('reader-metadata-recovery-v1') === true)
 	}
 	for (const modem of modems) {
 		if (modem.condition === 'degraded') addIssue('modem_degraded', modem.detail)
@@ -145,7 +145,9 @@ export function agentIssueLabel(issue, language = 'en') {
   }
   const zh = language === 'zh'
   const message = labels[issue.code]?.[zh ? 0 : 1] || issue.code
-  const action = issue.automatic ? (zh ? '系统正在按退避策略重试' : 'Automatic retry with backoff')
+  const action = issue.automatic && issue.code === 'reader_identity_unavailable'
+    ? (zh ? '只读恢复最多三次，耗尽后需人工处理；不重置卡或输入 PIN' : 'Up to three read-only recovery attempts; no card reset or PIN entry')
+    : issue.automatic ? (zh ? '系统正在按退避策略重试' : 'Automatic retry with backoff')
     : issue.code.startsWith('storage_') ? (zh ? '不会自动删除文件或重启' : 'No automatic file deletion or restart')
       : (zh ? '需核对具体原因；不会盲目重启' : 'Inspect the cause; no blind restart')
   return `${message} · ${action}`

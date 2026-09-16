@@ -22,7 +22,7 @@ func supervisedRestartAvailable(hostMode string) bool {
 		output, err := exec.CommandContext(ctx, "systemctl", "show", "mdd-agent.service", "--property=MainPID", "--value").Output()
 		return err == nil && strings.TrimSpace(string(output)) == strconv.Itoa(os.Getpid())
 	}
-	if runtime.GOOS == "darwin" && hostMode == "gui" {
+	if runtime.GOOS == "darwin" && (hostMode == "gui" || hostMode == "cli") {
 		output, err := exec.CommandContext(ctx, "/bin/launchctl", "print", "gui/"+strconv.Itoa(os.Getuid())+"/com.mdd.agent").Output()
 		if err != nil {
 			return false

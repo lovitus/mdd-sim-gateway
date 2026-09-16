@@ -5,7 +5,11 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 installer="$script_dir/install-macos-agent.sh"
 
 sh -n "$installer"
-grep -Fq 'preflight|install --candidate DIR --config FILE --state DIR; rollback --config FILE --state DIR' "$installer"
+grep -Fq '[--mode gui|cli]' "$installer"
+grep -Fq '<string>$launch_argument</string>' "$installer"
+grep -Fq 'previous_launch_argument' "$installer"
+grep -Fq 'write_launch_plist "$target/mdd-agent"' "$installer"
+grep -Fq 'launch_argument=$previous_argument' "$installer"
 grep -Fq '<key>LimitLoadToSessionType</key>' "$installer"
 grep -Fq '<key>StandardOutPath</key>' "$installer"
 grep -Fq '<key>StandardErrorPath</key>' "$installer"

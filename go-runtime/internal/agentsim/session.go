@@ -105,18 +105,20 @@ type Manager struct {
 }
 
 type session struct {
-	readerName     string
-	generation     string
-	cardID         string
-	simIdentity    *agentlink.ReaderSIMFact
-	secureElements []secureElement
-	atr            []byte
-	card           Card
-	active         atomic.Bool
-	operation      sync.Mutex
-	refresh        chan struct{}
-	refreshOnce    sync.Once
-	ctx            context.Context
+	metadataRecoveryAttempts int
+	metadataRecoveryNext     time.Time
+	readerName               string
+	generation               string
+	cardID                   string
+	simIdentity              *agentlink.ReaderSIMFact
+	secureElements           []secureElement
+	atr                      []byte
+	card                     Card
+	active                   atomic.Bool
+	operation                sync.Mutex
+	refresh                  chan struct{}
+	refreshOnce              sync.Once
+	ctx                      context.Context
 }
 
 var errEUICCProfileChanged = errors.New("eUICC profile changed; reconnecting card session")
@@ -320,6 +322,10 @@ func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, genera
 	}
 	current.operation.Lock()
 	defer current.operation.Unlock()
+	return manager.readCardIdentityLocked(ctx, current, readerName, generation, cardID)
+}
+
+func (manager *Manager) readCardIdentityLocked(ctx context.Context, current *session, readerName, generation, cardID string) (CardReadback, error) {
 	if !current.active.Load() {
 		return CardReadback{}, readbackFailure("reader_readback_identity_stale", errors.New("reader session is no longer active"))
 	}
@@ -349,10 +355,25 @@ func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, genera
 	if secureErr != nil {
 		return CardReadback{}, readbackFailure("reader_readback_secure_element_failed", fmt.Errorf("readback secure elements: %w", secureErr))
 	}
-	manager.mu.Lock()
-	if current.active.Load() {
-		current.simIdentity = simIdentity
+	probe := agentlink.ReaderFact{ReaderName: readerName, CardPresent: true, SessionGeneration: generation, CardID: readID,
+		SIM: simIdentity, IdentityState: agentlink.CardIdentified}
+	if len(secureElements) == 1 && secureElements[0].id == "" {
+		probe.EUICC = cloneEUICCFact(secureElements[0].fact)
+	} else {
+		for _, slot := range secureElements {
+			probe.SecureElements = append(probe.SecureElements, agentlink.EUICCSlotFact{SlotID: slot.id, Label: slot.label, EUICC: *cloneEUICCFact(slot.fact)})
+		}
 	}
+	if err := (agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{probe}}).Validate(); err != nil {
+		return CardReadback{}, readbackFailure("reader_readback_metadata_invalid", err)
+	}
+	manager.mu.Lock()
+	if manager.sessions[generation] != current || !current.active.Load() {
+		manager.mu.Unlock()
+		return CardReadback{}, readbackFailure("reader_readback_identity_stale", errors.New("reader session changed before metadata commit"))
+	}
+	current.simIdentity = simIdentity
+	current.secureElements = cloneSecureElements(secureElements)
 	manager.mu.Unlock()
 	atr := append([]byte(nil), current.atr...)
 	digest := sha256.Sum256(atr)
@@ -360,14 +381,9 @@ func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, genera
 	if len(atr) == 0 {
 		atrHash = ""
 	}
-	slots := make([]agentlink.EUICCSlotFact, len(secureElements))
-	for index, slot := range secureElements {
-		slots[index] = agentlink.EUICCSlotFact{SlotID: slot.id, Label: slot.label,
-			EUICC: *cloneEUICCFact(slot.fact)}
-	}
 	return CardReadback{
 		ReaderName: readerName, SessionGeneration: generation, CardID: readID,
-		SIM: simIdentity, ATR: atr, ATRHash: atrHash, SecureElements: slots,
+		SIM: simIdentity, ATR: atr, ATRHash: atrHash, EUICC: probe.EUICC, SecureElements: probe.SecureElements,
 	}, nil
 }
 
@@ -396,6 +412,7 @@ func (manager *Manager) ReadReader(ctx context.Context, request agentlink.Reader
 		ReaderName: readback.ReaderName, CardPresent: true,
 		SessionGeneration: readback.SessionGeneration, CardID: readback.CardID,
 		SIM: readback.SIM, IdentityState: agentlink.CardIdentified,
+		EUICC:          readback.EUICC,
 		SecureElements: readback.SecureElements,
 	}
 	return response

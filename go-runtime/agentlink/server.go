@@ -270,6 +270,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	if agentHostHealthCapable {
 		features = append(features, agentHostHealthFeature)
 	}
+	if featureEnabled(request.Header.Get(agentCapabilitiesHeader), "reader-metadata-recovery-v1") {
+		features = append(features, "reader-metadata-recovery-v1")
+	}
 	if featureEnabled(request.Header.Get(agentCapabilitiesHeader), AgentRestartFeature) {
 		features = append(features, AgentRestartFeature)
 	}

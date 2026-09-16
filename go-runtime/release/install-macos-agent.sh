@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-	printf '%s\n' "usage: install-macos-agent.sh preflight|install --candidate DIR --config FILE --state DIR; rollback --config FILE --state DIR"
+	printf '%s\n' "usage: install-macos-agent.sh preflight|install --candidate DIR --config FILE --state DIR [--mode gui|cli]; rollback --config FILE --state DIR"
 	exit 2
 }
 
@@ -10,12 +10,14 @@ action=
 candidate=
 config=
 state=
+launch_mode=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	preflight|install|rollback) [ -z "$action" ] || usage; action=$1; shift ;;
 	--candidate) candidate=${2-}; shift 2 ;;
 	--config) config=${2-}; shift 2 ;;
 	--state) state=${2-}; shift 2 ;;
+	--mode) launch_mode=${2-}; case "$launch_mode" in gui|cli) ;; *) usage ;; esac; shift 2 ;;
 	*) usage ;;
 	esac
 done
@@ -47,6 +49,15 @@ launch_plist="$HOME/Library/LaunchAgents/com.mdd.agent.plist"
 current="$state/current"
 record="$state/deployment.json"
 launch_program=
+launch_argument=gui
+
+previous_launch_argument() {
+	if [ -f "$launch_plist" ]; then
+		plist_string "$launch_plist" ProgramArguments.1
+	else
+		case "$previous_program" in */Contents/MacOS/*) printf 'gui\n' ;; *) printf 'run\n' ;; esac
+	fi
+}
 
 replace_link() {
 	mv -fh "$1" "$2"
@@ -66,6 +77,7 @@ validate_candidate() {
 		(cd "$candidate" && shasum -a 256 -c SHA256SUMS >/dev/null)
 	fi
 	codesign --verify --deep --strict "$candidate/MDD Agent.app" >/dev/null
+	codesign --verify --strict "$candidate/mdd-agent" >/dev/null
 	if [ -L "$current" ] && [ -d "$current/MDD Agent.app" ]; then
 		candidate_requirement=$(codesign -d -r- "$candidate/MDD Agent.app" 2>&1 | sed -n '/^designated =>/p')
 		current_requirement=$(codesign -d -r- "$current/MDD Agent.app" 2>&1 | sed -n '/^designated =>/p')
@@ -79,6 +91,7 @@ validate_candidate() {
 write_launch_plist() {
 	program=$1
 	launch_program=$program
+	case "$launch_argument" in gui|run) ;; *) printf '%s\n' 'invalid launch mode' >&2; exit 1 ;; esac
 	temporary="$state/.com.mdd.agent.plist.$$"
 	case "$program$config" in
 		*\&*|*\<*|*\>*) printf '%s\n' 'launchd path contains unsupported XML characters' >&2; exit 1 ;;
@@ -93,7 +106,7 @@ write_launch_plist() {
 	<key>ProgramArguments</key>
 	<array>
 		<string>$program</string>
-		<string>gui</string>
+		<string>$launch_argument</string>
 		<string>-config</string>
 		<string>$config</string>
 	</array>
@@ -123,20 +136,24 @@ stop_launch_agent() {
 	running_pid=$(agent_pids | head -n 1)
 	[ -n "$running_pid" ] || return 0
 	kill -TERM "$running_pid"
-	deadline=$(( $(date +%s) + 45 ))
+	deadline=$(( $(date +%s) + 180 ))
+	delay=30
 	while kill -0 "$running_pid" 2>/dev/null; do
 		[ "$(date +%s)" -lt "$deadline" ] || {
 			printf '%s\n' 'running Agent did not exit before cutover' >&2
 			exit 1
 		}
-		sleep 1
+		sleep "$delay"
+		[ "$delay" -ge 60 ] || delay=$(( delay * 2 ))
 	done
 }
 
 start_launch_agent() {
 	/bin/launchctl bootstrap "$(launch_domain)" "$launch_plist"
-	deadline=$(( $(date +%s) + 45 ))
+	deadline=$(( $(date +%s) + 180 ))
+	delay=30
 	while :; do
+		sleep "$delay"
 		if [ -n "$(agent_pids | head -n 1)" ] &&
 			"$launch_program" status --config "$config" >/dev/null 2>&1; then
 			return 0
@@ -145,7 +162,7 @@ start_launch_agent() {
 			printf '%s\n' 'launchd did not start the MDD Agent' >&2
 			return 1
 		}
-		sleep 1
+		[ "$delay" -ge 60 ] || delay=$(( delay * 2 ))
 	done
 }
 
@@ -170,6 +187,7 @@ if [ "$action" = rollback ]; then
 	[ -f "$record" ] || { printf '%s\n' 'deployment record is missing' >&2; exit 1; }
 	previous=$(plist_string "$record" previous_target)
 	previous_program=$(plist_string "$record" previous_program)
+	launch_argument=$(plist_string "$record" previous_launch_argument 2>/dev/null || printf 'gui')
 	[ -d "$previous" ] || { printf '%s\n' 'rollback release is missing' >&2; exit 1; }
 	[ -x "$previous_program" ] || { printf '%s\n' 'rollback executable is missing' >&2; exit 1; }
 	stop_launch_agent
@@ -186,6 +204,10 @@ target="$state/releases/$(basename "$candidate")"
 [ ! -e "$target" ] || { printf '%s\n' "release already exists: $target" >&2; exit 1; }
 previous_target=$(readlink "$current" 2>/dev/null || true)
 previous_program=$(agent_program 2>/dev/null || true)
+previous_argument=$(previous_launch_argument)
+case "$previous_argument" in gui|run) ;; *) printf '%s\n' 'unknown existing Agent launch mode' >&2; exit 1 ;; esac
+case "$launch_mode" in cli) launch_argument=run ;; gui) launch_argument=gui ;; '') launch_argument=$previous_argument ;; esac
+if [ -z "$previous_program" ] && [ -z "$launch_mode" ]; then launch_argument=gui; fi
 if [ -n "$previous_target" ]; then
 	[ -d "$previous_target" ] || { printf '%s\n' 'current release target is missing' >&2; exit 1; }
 fi
@@ -194,13 +216,18 @@ stop_launch_agent
 next_current="$state/.current.$candidate_hash"
 ln -s "$target" "$next_current"
 replace_link "$next_current" "$current"
-write_launch_plist "$target/MDD Agent.app/Contents/MacOS/mdd-agent"
+if [ "$launch_argument" = run ]; then
+	write_launch_plist "$target/mdd-agent"
+else
+	write_launch_plist "$target/MDD Agent.app/Contents/MacOS/mdd-agent"
+fi
 if ! start_launch_agent; then
 	if [ -n "$previous_target" ] && [ -d "$previous_target" ]; then
 		next_current="$state/.current.rollback.$$"
 		ln -s "$previous_target" "$next_current"
 		replace_link "$next_current" "$current"
 		if [ -n "$previous_program" ] && [ -x "$previous_program" ]; then
+			launch_argument=$previous_argument
 			write_launch_plist "$previous_program"
 		fi
 		start_launch_agent || true
@@ -214,6 +241,7 @@ plist_insert_string "$temporary_record" status installed
 plist_insert_string "$temporary_record" new_target "$target"
 plist_insert_string "$temporary_record" previous_target "$previous_target"
 plist_insert_string "$temporary_record" previous_program "$previous_program"
+plist_insert_string "$temporary_record" previous_launch_argument "$previous_argument"
 plist_insert_string "$temporary_record" current_path "$state/current"
 plist_insert_string "$temporary_record" candidate_sha256 "$candidate_hash"
 plutil -convert json "$temporary_record"

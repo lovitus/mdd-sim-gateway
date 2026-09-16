@@ -15,36 +15,37 @@ import (
 )
 
 type Client struct {
-	URL                 string
-	Token               string
-	Hello               Hello
-	HTTPClient          *http.Client
-	Authenticator       Authenticator
-	Modems              ModemExecutor
-	SMSSessionFencing   bool
-	PIN                 SIMPINExecutor
-	PINConfiguration    bool
-	Recovery            ModemRecoveryExecutor
-	Media               ModemMediaExecutor
-	Data                ModemDataExecutor
-	Policies            ModemPolicyExecutor
-	DeviceDefaults      func(*DeviceDefaults) error
-	DeviceDefaultsReset func()
-	RawUSB              RawUSBExecutor
-	EUICC               EUICCProfileExecutor
-	Downloads           EUICCDownloadExecutor
-	Discovery           EUICCDiscoveryExecutor
-	Notifications       EUICCNotificationExecutor
-	Provision           ProvisionExecutor
-	ReaderReadback      ReaderReadbackExecutor
-	HostHealth          bool
-	Events              ModemEventSource
-	OperationTimeout    time.Duration
-	Connected           func()
-	HealthReported      func()
-	Health              func() TopologySnapshot
-	HealthEvery         time.Duration
-	PrepareRestart      func(context.Context, AgentRestartRequest) (func(context.Context) error, error)
+	URL                    string
+	Token                  string
+	Hello                  Hello
+	HTTPClient             *http.Client
+	Authenticator          Authenticator
+	Modems                 ModemExecutor
+	SMSSessionFencing      bool
+	PIN                    SIMPINExecutor
+	PINConfiguration       bool
+	Recovery               ModemRecoveryExecutor
+	Media                  ModemMediaExecutor
+	Data                   ModemDataExecutor
+	Policies               ModemPolicyExecutor
+	DeviceDefaults         func(*DeviceDefaults) error
+	DeviceDefaultsReset    func()
+	RawUSB                 RawUSBExecutor
+	EUICC                  EUICCProfileExecutor
+	Downloads              EUICCDownloadExecutor
+	Discovery              EUICCDiscoveryExecutor
+	Notifications          EUICCNotificationExecutor
+	Provision              ProvisionExecutor
+	ReaderReadback         ReaderReadbackExecutor
+	HostHealth             bool
+	Events                 ModemEventSource
+	OperationTimeout       time.Duration
+	Connected              func()
+	HealthReported         func()
+	Health                 func() TopologySnapshot
+	HealthEvery            time.Duration
+	ReaderMetadataRecovery bool
+	PrepareRestart         func(context.Context, AgentRestartRequest) (func(context.Context) error, error)
 }
 
 const maximumConcurrentRequests = 16
@@ -106,6 +107,9 @@ func (client Client) Run(ctx context.Context) (result error) {
 	}
 	if client.HostHealth {
 		capabilities = append(capabilities, agentHostHealthFeature)
+	}
+	if client.ReaderMetadataRecovery {
+		capabilities = append(capabilities, "reader-metadata-recovery-v1")
 	}
 	if client.PrepareRestart != nil {
 		capabilities = append(capabilities, AgentRestartFeature)
