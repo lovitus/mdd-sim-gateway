@@ -2,6 +2,17 @@
 
 ## 2026-09-17 分支与工作区处置
 
+- 本批产品修复a10d970已进入main，正式CI35197412063成功。Core/helper/Linux Agent已部署；
+  Provider仍3ff3866，未为标签对齐重启。EC20恢复AT ready、真实MM bearer connected及guard protected。
+  单次精确bearer断线后自动恢复为新的MM对象/承载，Agent及业务PID不变、用户desired不变，
+  宿主主路由表无WWAN路由；不是只看缓存的connected。未发送通话、SMS或测试业务流量。
+  后述forced-close/缓存connected故障已在本批处理，不再当未修条目；最初HUP触发者仍无历史证据。
+- 本地和远端开发分支已收敛为main，无stash；22提交旧incident和遗留未提交文件保留可验证归档。
+  另有5759个被ignore的旧Python环境/字节码、Docker镜像和旧Agent构建产物，约1.32GB，
+  已逐文件哈希核对后移出工作区。当前node_modules、AGENTS与仅本地游标保留，不是待合并代码。
+- 本批尚缺实际浏览器页面验收：浏览器工具因无法验证管理员策略拒绝访问，两次均未获准。
+  未绕过安全检查、未把CI适配器测试或API读回冒充浏览器点击；只读preview已全部关闭。
+
 - 已审查review分支的修复随PR #1进入开发分支；旧forward-runtime分支已被包含。
 - incident/vpcd-multislot-2633d7e的22个旧提交按变更文件和行为核对，处置矩阵见
   webui/src/mdd/UPSTREAM.md。旧Python/VPCD架构不再合并；Android统一协议适配仍按下文未完成项保留。
