@@ -50,6 +50,10 @@ type ConnectionRuntime interface {
 	Persistent(agentdata.Target) bool
 }
 
+type connectionHealthRuntime interface {
+	ConnectionNeedsRecovery(context.Context, Target) (bool, error)
+}
+
 type Config struct {
 	InitialInventoryDefaults bool
 	ProtectedEquipment       func() ([]string, error)
@@ -589,7 +593,8 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 			continue
 		}
 		if err := blockedConnections[fact.EquipmentID]; err != nil {
-			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "cellular_connection_cleanup_failed")
+			// Owner reconciliation already records attempted failures. Advancing
+			// its deadline again on each topology report would starve recovery.
 			continue
 		}
 		if !found {
@@ -684,6 +689,8 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 		return blocked
 	}
 	current := make(map[string]agentdata.Target)
+	dataStates := make(map[string]agentmodem.DataState)
+	atStates := make(map[string]agentmodem.ATControlState)
 	for _, fact := range facts {
 		if fact.EquipmentID == "" || fact.SIM.State != agentmodem.SIMReady || fact.SIM.ICCID == "" ||
 			fact.SIM.SessionGeneration == "" {
@@ -697,10 +704,30 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 			continue
 		}
 		current[fact.EquipmentID] = target
+		dataStates[fact.EquipmentID] = fact.Network.Data
+		atStates[fact.EquipmentID] = fact.AT.State
 	}
 	for _, owned := range connection.OwnedTargets() {
+		health, supportsHealth := manager.config.Runtime.(connectionHealthRuntime)
+		checkControl := false
 		if target, present := current[owned.EquipmentID]; present && target == owned {
-			continue
+			if dataStates[owned.EquipmentID] == agentmodem.DataUnknown {
+				blocked[owned.EquipmentID] = errors.New("cellular bearer state is unknown")
+				manager.mu.Lock()
+				key := pair(owned.EquipmentID, owned.CardID)
+				status := manager.status[key]
+				status.State, status.Code = "recovering", "cellular_bearer_unconfirmed"
+				manager.status[key] = status
+				manager.mu.Unlock()
+				continue
+			}
+			if dataStates[owned.EquipmentID] != agentmodem.DataDisconnected {
+				checkControl = supportsHealth && dataStates[owned.EquipmentID] == agentmodem.DataConnected &&
+					atStates[owned.EquipmentID] == agentmodem.ATControlUnavailable
+				if !checkControl {
+					continue
+				}
+			}
 		}
 		key := pair(owned.EquipmentID, owned.CardID)
 		manager.mu.RLock()
@@ -711,6 +738,13 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 			continue
 		}
 		err := manager.coordinatorNow().DoAuxiliary(ctx, owned.EquipmentID, func(operationContext context.Context) error {
+			if checkControl {
+				recover, err := health.ConnectionNeedsRecovery(operationContext, Target{AttachmentID: owned.AttachmentID,
+					EquipmentID: owned.EquipmentID, CardID: owned.CardID, SIMSessionGeneration: owned.SIMSessionGeneration})
+				if err != nil || !recover {
+					return err
+				}
+			}
 			return connection.ReleaseStale(operationContext, owned)
 		})
 		if err != nil {

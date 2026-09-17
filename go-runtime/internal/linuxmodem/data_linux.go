@@ -32,6 +32,7 @@ type dataClaim struct {
 	route                                                     linuxdataguard.DataRoute
 	dns                                                       []netip.Addr
 	profile                                                   string
+	observedData                                              agentmodem.DataState
 	cleanup                                                   bool
 	failures                                                  uint32
 	retryAt                                                   time.Time
@@ -45,7 +46,12 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 		return "", errors.New("persistent Linux cellular data guard is unavailable")
 	}
 	if current := prober.data[target.EquipmentID]; current != nil {
-		if current.target == target && !current.cleanup {
+		inventory, err := prober.manager.Inventory(ctx)
+		if err != nil {
+			return "", err
+		}
+		prober.observeDataClaims(inventory)
+		if current.target == target && !current.cleanup && current.observedData == agentmodem.DataConnected {
 			return current.profile, nil
 		}
 		return "", errors.New("another cellular data session owns this modem")
@@ -133,6 +139,7 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 	if err != nil {
 		return rollback(err)
 	}
+	claim.observedData = agentmodem.DataConnected
 	address, err := netip.ParsePrefix(claim.bearer.Address + "/" + strconv.FormatUint(uint64(claim.bearer.Prefix), 10))
 	if err != nil || !address.Addr().Is4() {
 		return rollback(errors.New("ModemManager returned an invalid static IPv4 address"))
@@ -196,10 +203,20 @@ func (prober *Prober) awaitDataModem(ctx context.Context, uid string, target age
 
 func (prober *Prober) DialData(ctx context.Context, target agentdata.Target, network, address string) (net.Conn, error) {
 	prober.mu.Lock()
+	inventory, err := prober.manager.Inventory(ctx)
+	if err != nil {
+		prober.mu.Unlock()
+		return nil, err
+	}
+	prober.observeDataClaims(inventory)
 	claim := prober.data[target.EquipmentID]
 	if claim == nil || claim.target != target {
 		prober.mu.Unlock()
 		return nil, agentmodem.ErrOperationTargetReplaced
+	}
+	if claim.cleanup || claim.observedData != agentmodem.DataConnected {
+		prober.mu.Unlock()
+		return nil, agentmodem.ErrOperationUnavailable
 	}
 	copy := *claim
 	copy.dns = append([]netip.Addr(nil), claim.dns...)
@@ -274,6 +291,18 @@ func (prober *Prober) stopDataLocked(target agentdata.Target) error {
 	}
 	if target.AttachmentID != "" && claim.target != target {
 		return agentmodem.ErrOperationTargetReplaced
+	}
+	if !claim.cleanup {
+		if observer, ok := prober.manager.(interface {
+			VoiceIdle(context.Context, dbus.ObjectPath) (bool, error)
+		}); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			idle, err := observer.VoiceIdle(ctx, claim.commandSnapshot.ObjectPath)
+			cancel()
+			if err != nil || !idle {
+				return errors.Join(errors.New("modem call state does not permit data ownership recovery"), err)
+			}
+		}
 	}
 	claim.cleanup = true
 	return prober.cleanupDataClaim(claim)
@@ -368,18 +397,24 @@ func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmode
 		fact.Detail = "SIM insertion changed while protected cellular data was active"
 	}
 	fact.Capabilities.CellularData = true
-	fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable, Detail: "ModemManager owns the active data bearer"}
+	fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable, Detail: "ModemManager command channel has not been confirmed"}
 	if !claim.cleanup && claim.commandSnapshot.ObjectPath != "" {
-		if at, ok := prober.atSnapshot[current.usb.AttachmentID]; ok && at.State == "ready" {
-			fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: at.Port, CallSignalling: at.CallSignalling, SMS: at.SMS}
+		if at, ok := prober.atSnapshot[current.usb.AttachmentID]; ok {
+			fact.AT.Detail = at.Detail
+			if at.State == "ready" {
+				fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: at.Port, CallSignalling: at.CallSignalling, SMS: at.SMS}
+			}
 		}
 	}
-	fact.Network.Data = agentmodem.DataConnected
+	fact.Network.Data = claim.observedData
+	if fact.Network.Data == "" {
+		fact.Network.Data = agentmodem.DataUnknown
+	}
 	fact.Network.Profile = claim.profile
 	fact.Network.Guard = agentmodem.DataGuardFact{State: agentmodem.DataGuardProtected}
 	fact.Network.Interface, fact.Network.Address, fact.Network.APN = "", "", ""
 	fact.Network.CountersAvailable, fact.Network.RXBytes, fact.Network.TXBytes = false, 0, 0
-	if !claim.cleanup && claim.bearer.Interface != "" {
+	if !claim.cleanup && fact.Network.Data == agentmodem.DataConnected && claim.bearer.Interface != "" {
 		fact.Network.Interface, fact.Network.Address, fact.Network.APN = claim.bearer.Interface, claim.bearer.Address, claim.bearer.APN
 		fact.Network.RXBytes, fact.Network.TXBytes, fact.Network.CountersAvailable = readInterfaceCounters(prober.sysRoot, claim.bearer.Interface)
 	}

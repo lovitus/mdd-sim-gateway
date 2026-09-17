@@ -153,6 +153,9 @@ func TestParseManagedObjectsPreservesTypedModemFacts(t *testing.T) {
 		t.Fatalf("facts=%+v", facts)
 	}
 	fact := facts[0]
+	if connected, known := fact.BearerStates[bearerPath]; !known || connected {
+		t.Fatal("explicit disconnected bearer was not preserved")
+	}
 	if fact.UID != "/sys/devices/pci/usb/1-2" || fact.EquipmentID != "862547055201716" ||
 		fact.SIMState != agentmodem.SIMReady || fact.SIMPath != simPath || fact.ICCID != "8985200000000000001" ||
 		fact.IMSI != "454001234567890" || fact.Registration != agentmodem.RegistrationRoaming ||
@@ -256,7 +259,7 @@ func TestActiveLinuxDataFactRetiresOldSIMOnEventEpoch(t *testing.T) {
 	fact := prober.dataFact(current, &dataClaim{target: agentdata.Target{CardID: "8985200000000000001"}, profile: "internet"})
 	if fact.Condition != agentmodem.DeviceDegraded || fact.SIM.State != agentmodem.SIMUnknown || fact.SIM.ICCID != "" ||
 		fact.ContinuityEpoch != "usb-generation:mm-sim-event:0:1" || fact.LastContinuityIssue != "sim_insertion_changed" ||
-		fact.Network.Data != agentmodem.DataConnected || fact.Network.Guard.State != agentmodem.DataGuardProtected {
+		fact.Network.Data != agentmodem.DataUnknown || fact.Network.Guard.State != agentmodem.DataGuardProtected {
 		t.Fatalf("fact=%+v", fact)
 	}
 }

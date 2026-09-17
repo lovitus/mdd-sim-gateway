@@ -128,6 +128,7 @@ function dataState(modem, policy) {
   if (STOPPING_DATA_STATES.has(value)) return 'stopping'
   if (modem?.network?.data_guard === 'failed' || policy?.state === 'failed') return 'error'
   if (policy?.state === 'backoff') return 'degraded'
+  if (!value || value === 'unknown') return 'degraded'
   return 'off'
 }
 
@@ -222,7 +223,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
     condition_code: device?.code || '',
 	capabilities: {
 	  cellular: policyCapability(policy, 'cellular_enabled', borrowActual, policyAvailable),
-	  connection: policyCapability(policy, 'connection_enabled', policy?.connection_active === true ? 'on' : 'off', policyAvailable && policy?.connection_available === true),
+	  connection: policyCapability(policy, 'connection_enabled', dataActual, policyAvailable && policy?.connection_available === true),
       flight: policyCapability(policy, 'flight_mode', flightActual, policyAvailable),
       roaming: policyCapability(policy, 'roaming_enabled', policyAvailable ? (policy?.desired?.roaming_enabled ? 'on' : 'off') : 'unsupported', policyAvailable),
       vowifi: {

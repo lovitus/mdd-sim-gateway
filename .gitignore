@@ -2,6 +2,7 @@
 /data/
 
 # build artifacts
+/go-runtime/mdd-core
 **/__pycache__/
 *.pyc
 node_modules/
@@ -44,3 +45,7 @@ codex-clipboard-*
 screenshot-*
 screenshots/
 debug-artifacts/
+
+# Per-machine recovery cursor and assistant instructions are not product source.
+/TODO_CURRENT_RECOVERY.md
+/Claude.md

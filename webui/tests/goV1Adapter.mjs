@@ -62,6 +62,14 @@ assert.equal(mapped.devices[0].cellular.rx_bytes,0)
 assert.equal(mapped.devices[0].cellular.tx_bytes,123)
 const unreadTraffic=mapGoSnapshot({devices:[{...device,modem:{...device.modem,network:{data:'disconnected'}}}]})
 assert.equal(unreadTraffic.devices[0].cellular.rx_bytes,null,'no counter evidence must not be displayed as zero')
+for (const [data, actual] of [['connected','on'],['disconnected','off'],['unknown','degraded']]) {
+  const changed=structuredClone(device)
+  changed.modem.policy={...policy,connection_available:true,connection_active:true,desired:{...policy.desired,connection_enabled:true}}
+  changed.modem.network.data=data
+  const view=mapGoSnapshot({devices:[changed]}).devices[0].capabilities.connection
+  assert.equal(view.actual,actual,'retained ownership is not live connectivity')
+  assert.equal(view.desired,true,'failed connectivity must not rewrite the saved switch')
+}
 assert.equal(mapped.devices[0].imei, '862547055201716')
 assert.equal(mapped.devices[0].imei_masked, '***********1716', 'copied hardware panel requires the legacy masked field')
 assert.equal(mapped.devices[0].vowifi.rekey_minutes, 30, 'final device mapping must preserve rekey facts')

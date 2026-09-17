@@ -5,17 +5,82 @@ Revision: ec620942e93edbbb567398acda4c0dffe1d8f375
 First Go rewrite: 95c38bbca2ef87559d988e57a38ecc50b02ba685
 
 The customized frontend source files were copied together, retaining the original pages,
-selectors, interactions, styles and translations. This directory is now mounted
-by the working-tree and production entrypoints. Feature parity and acceptance
-remain incomplete; mounted pages alone are not proof of restored behavior.
+selectors, interactions, styles and translations. This directory is mounted
+by the working-tree and production entrypoints. The frontend port/adaptation
+goal is delivered with the acceptance scope below; this is not certification
+of every platform, hardware combination or failure branch.
+
+## Delivery And Acceptance
+
+### Retired Incident Branch
+
+The 22 commits unique to `incident/vpcd-multislot-2633d7e` were checked by
+changed path and behavior before retiring the branch. Its source remains in
+the maintainer's verified private Git bundle; it is not a pending merge of
+the retired Python/Docker transport into the Go runtime.
+
+| Legacy changes | Current disposition |
+| --- | --- |
+| Python VPCD slot allocation, heartbeat, ATR caching, framing and T0/T1 negotiation (`control/app/main.py`, `sim.py`, entrypoint) | Replaced by native Agent PC/SC discovery and identity-scoped reader operations (`internal/pcscmonitor`, `agentreader`, `agentsim`, `agentlink/reader_readback`). Virtual dummy slots and port-number matching must not be reintroduced. |
+| Offline reader/SIM retention and selector names (`SimConfig`, `SimSelector`, `UnifiedPages`) | Mounted `mdd` pages use durable device history and exact line/card association. `goV1Adapter`, `mddLineAdapter` and `mddHardwareAdapter` tests cover offline/stale identity and rejected ambiguous selections. |
+| eSIM cached view, same-name/slot collision and fallback (`Esim`, `lpa.py`) | `mdd/esimAdapter` keys readers by Agent plus reader identity; its tests preserve cached profiles without making cached/offline cards writable or issuing an APDU refresh. No slot-index cache alias is restored. |
+| Android wake lock, reconnect and multi-slot legacy client | Retained as reference only. The retired VPCD-only Android client is not compatible with the current authenticated Agent protocol; Android support remains explicitly unfinished in `postponed-tasks.md`, not silently counted as ported. |
+| Old generated WebUI and Python tests | Superseded by mounted Go adapters, embedded UI generation and current contract tests. No legacy build output or Python runtime is merged. |
+
+Linux connection switches now display fresh bearer observations, not the
+existence of a retained connection owner. Disconnected and unknown states do
+not change the saved user switch. Automatic recovery uses the existing
+serialized policy reconciler and its backoff, preserving call/borrow ownership.
+
+| Scope | Inspected evidence | Boundary |
+| --- | --- | --- |
+| Original page shell and selection | `src/main.jsx` mounts the copied App/CSS; recorded browser traversal covers ten main pages, device tabs and settings/diagnostic/notification tabs, including 390px layouts. | Navigation evidence is separate from the action receipts below. |
+| Calls | The copied dialer uses the single Go coordinator. Existing Chrome evidence includes an answered 37.275-second call, ended history and terminal provider readback. | Do not repeat paid calls. Subjective audio quality is user-manual. |
+| Messages | Original conversations and all-line scope are wired; the original uncertain SMS was reconciled to `cellular_sms_submitted`, HTTP 200, with zero new sends. | Do not resend diagnostic SMS or claim all carriers were exercised. |
+| Devices and SIM configuration | Real Windows automatic claim/readback/provision, exact line identity, disabled data switches, masked IMEI and live rekey display were verified. | CN-SIM VoWiFi is excluded by user decision; non-CN SIMs may still use CN exits. |
+| Recycle bin | Real Chrome archive/restore of the authorized stopped line returned 200 twice; the restored record matched its original, and observed history lists were unchanged. | The chosen line had no call history; populated-history boundaries retain CI evidence. |
+| Network | Existing profile/subscription/explicit-apply adapters, preserved switch semantics and the recorded real direct-entry failover were verified. | Two entries of one upstream are not independent redundancy; metered-data and restoration-delay limitations remain recorded. |
+| Notifications | Credential-preserving configuration/readback and existing delivery receipts were inspected; ed5f702 resolved contradictory capability metadata and disabled-event explanations. | Unsupported original number-change production is not invented; subscriptions are not silently enabled. |
+| System settings | Actual audit, update-network and voice-setting HTTP 200 receipts, re-entry readback, Web original-value save and durable backup downloads exist. | No production port/certificate replacement or destructive whole-state restore was manufactured. |
+| eSIM | Real nickname, download and authorized standard-deletion/retained-notification evidence exists; delete notification was acknowledged and retained. | Acknowledgement is not proof of renewed download entitlement. Do not repeat destructive profile operations. |
+| Diagnostics | Actual page refresh, filtered log download and advanced read-only report export were recorded. | Synthetic and failure fixtures are not presented as production fault injection. |
+| Additional Linux acceptance | Same-host discovery, relayed WSS, disconnect/Agent-stop isolation and the authorized corrected cold boot passed with zero observed WWAN bytes. Temporary samplers were removed. | Relayed WSS is not a second physical Linux host; this does not certify every native voice/data path. |
+
+Exact private receipts and deployment hashes are referenced in the existing
+`TODO_CURRENT_RECOVERY.md`; no secrets or raw evidence are copied here. The
+current frontend goal is distinct from the broader Go/platform project and its
+existing postponed work. Balance/allowance, CN-SIM VoWiFi and automatic audio
+quality testing remain excluded as explicitly requested by the user.
 
 The mounted UI replaces the legacy HTTP/WebSocket adapter with the existing Go
 contracts and adapts the customized PCM call interface to the Go call coordinator.
 Do not restore Python, Docker or a second call owner. Preserve exact line/card
 identity and the user's latest aggregation and data-switch requirements. eSIM
-deletion remains excluded pending the final interactive phase.
+deletion subsequently entered the user-approved interactive phase. The current
+standard deletion and retained-notification behavior is documented below; old
+soft-delete-only notes are not the current product contract.
 
 ## Go Adapter Work
+
+The ed5f702 closing batch aligns notification supported/unsupported metadata and
+shows reasons on unavailable event controls without changing subscriptions.
+Runtime presentation uses fresh failures only, distinguishes expired evidence
+from a current fault, and exposes deduplicated per-layer reasons and original
+codes in the copied device views. Deliberately stopped lines remain stopped,
+not failures. Full CI and production browser/API readback passed; stale-data
+branches are fixture evidence, not an induced production outage. No notifications,
+calls, SIM operations or data-switch changes were used for this acceptance.
+
+The a814850 presentation batch restores the copied hardware panel's
+`imei_masked` contract using `ec620942 control/app/main.py::_masked_identifier`.
+It also preserves rekey facts in the final device mapping instead of overwriting
+them with a second `vowifi` property. SIM, message, call, maintenance and eSIM
+action translations and message-delete accessible names are completed without
+changing requests, confirmations, permissions or device switches. Full CI and
+production browser readback verified the masked modem identity, a live line's
+zero-minute rekey value, SIM action labels and eight real message conversations.
+The candidate SIM form also passed a 390px layout check. No paid, deletion, PIN
+or rekey operation was repeated; prior action evidence remains separate.
 
 User-requested advanced diagnostics now aggregates the existing DiagnosticsV1
 contracts inside the copied Diagnostics page. A manual read-only run checks
@@ -30,6 +95,14 @@ evidence that every device's physical functions were exercised.
 The interface comparison uses static API references in this copied tree against
 the active `../api.js`. A matching name is not assumed to mean matching fields.
 
+The 2026-09-10 mounted-import review followed 43 relative modules from `mdd/App`
+and found no unresolved names among 122 `api` member references. This is only a
+name-level check, not behavioral parity evidence. The copied legacy
+`mdd/callCoordinator.jsx` and `mdd/browserMedia.js` are not mounted; their retired
+API names must not trigger restoration of a second call owner. The disabled old
+eSIM Replay placeholder likewise must not be enabled: current deletion replay
+uses `DeletionNotifications` and its confirmed retained-archive contract.
+
 | Original module | Go adaptation required |
 | --- | --- |
 | App / selectors | Preserve the ten-page shell and stable selection; map Go snapshots and incoming-call events. |
@@ -40,11 +113,19 @@ the active `../api.js`. A matching name is not assumed to mean matching fields.
 | UnifiedPages notifications | Map redacted credential views and explicit secret patches; empty unchanged inputs preserve credentials. Verify real event intake, not merely test delivery. |
 | UnifiedPages system | Map backups, maintenance, scoped Agent credentials and Go update states; never restore shared credentials or container lifecycle. |
 | SimConfig | Map exact reader/card/session, catalog CAS, provision/reprovision and PIN proofs; no index-based card writes. |
-| Esim | Adapt typed EID/profile operations and download receipts. Keep deletion unavailable for the deferred interactive phase. |
+| Esim | Typed EID/profile operations and download receipts are adapted. User-approved standard deletion records card outcome separately from durable notification delivery; the old soft-delete write entry is retired. |
 | Logs / VowifiHistory / AllowancePanel | Use existing Go diagnostic, availability and allowance APIs; preserve missing-data semantics. |
 
 No copied module is counted as restored until it is wired and exercised through
 the corresponding user actions against actual Go responses.
+
+The copied-UI recycle-bin flow subsequently passed real Chrome acceptance with
+the authorized stopped SIM-1111 record: archive confirmation, presence in the
+recycle bin, restore, and the displayed stopped outcome. Both requests returned
+200; independent readback matched the original record and other line settings,
+with unchanged observed call and conversation arrays. No profile or history
+deletion occurred. The selected line had no call history, so populated-history
+preservation is covered by existing code/tests rather than claimed as this HIL.
 
 Provisioning candidates refresh on exact Agent/card-session changes and provide
 an explicit read retry. Unresolved modem operations retain their original request
@@ -59,7 +140,8 @@ adapter maps original thread/message/call/log fields while preserving backend
 identities and typed statuses. Scoped clearing uses a Go transaction over the whole
 selected line rather than only the visible page, and rejects active call records.
 The working-tree and production entrypoints use this App and its stylesheet.
-Remaining contracts and acceptance still block a claim of full restoration.
+The acceptance boundaries above prevent interpreting the frontend delivery as
+universal hardware or failure-path certification.
 
 ## User-defined eSIM soft deletion
 
@@ -218,9 +300,17 @@ choices, and uses the existing Agent policy, draft, preparation, provision and
 Provider apply paths. New automatic Provider apply is restricted to one added
 line and cannot publish unrelated saved changes. MNC length comes from an
 explicit EF_AD read; the original MCC-country JSON is copied unchanged. This
-batch passed complete CI and deployed settings save/readback acceptance. Real
-new-device automatic provisioning remains unverified. Older disabled-defaults
+batch passed complete CI and deployed settings save/readback acceptance. On
+2026-09-10, a real newly attached Windows modem passed automatic claim, EF_AD
+identity preparation, readback and hardware provisioning, with one successful
+provision attempt and browser verification. Automatic Provider/IMS startup did
+not pass: no CN exit is configured, the candidate contains no added Provider,
+and the single-added-line apply gate correctly refuses that plan. Existing
+lines and data switches were preserved. Older disabled-defaults
 descriptions are historical, not outstanding implementation work.
+The user subsequently excluded CN-SIM VoWiFi: that conditional startup test is
+no longer an acceptance blocker. This restriction is about the SIM, not the exit;
+non-CN SIMs may still use a CN exit.
 
 The following are confirmed by comparing `ec620942` with the mounted
 `views/UnifiedPages.jsx` and its Go adapter. This is a correction to the existing
@@ -228,18 +318,39 @@ module matrix, not a claim that all other original actions have passed acceptanc
 
 | Original action | Current boundary | Required closure |
 | --- | --- | --- |
-| New modem 4G/VoWiFi defaults | Deployed in a57bdb0. Original persisted defaults were restored through the production browser; save and re-entry passed, with existing lines and notification configuration unchanged. | Real new-modem automatic provisioning remains unverified. Do not repeat the completed settings-save acceptance. |
-| VoWiFi-only hardware mode | Implementation passed full CI. Linux production binding and actual serial/auto switching passed; original startup policy was restored. | No modem was attached, so this does not prove physical serial-modem discovery. Do not repeat the completed mode-switch cycle. |
+| New modem 4G/VoWiFi defaults | Real Windows first discovery, persisted defaults, automatic claim, identity preparation/readback and hardware provision passed in f7bc552; browser SIM/status/4G/VoWiFi views were checked. All previous line settings and disabled data switches were preserved. | CN-SIM Provider/IMS startup was subsequently excluded by the user. Preserve the original failed restricted-apply receipt; do not retry it or infer VoWiFi readiness. Non-CN SIMs remain eligible to use CN exits. |
+| VoWiFi-only hardware mode | Implementation and serial/auto switching previously passed. The relocated EC20 passed real Linux discovery and original-line association; same-host/relayed WSS and disconnect/Agent-stop isolation were exercised. After fixing the udev PATH defect in 3e0f6df, a separately authorized second reboot passed automatic cold-boot grouping before Agent start, with zero WWAN bytes and preserved settings. | The relay is not a second physical Linux host; paid voice/SMS and enabled cellular-data paths were not exercised. Do not repeat the completed mode-switch or cold-boot tests, or claim Linux has no modem. |
 | Web bind/port/certificate paths | Saved startup settings are editable through the existing helper; the production browser saved/read back unchanged values. | Changed-value persistence/backup has CI coverage; no production port/certificate change was performed. Domain/self-signed fields remain actual certificate information, not an automatic certificate-issuance feature. |
 | Retry count and interval | Original inputs, Go persistence, per-line overrides and continuous-failure window are connected; the production page saved/read back 3/40. | Fault-window behavior is covered by CI, not a manufactured production failure; exit-recovery strike counts remain separate. |
 | Rekey default | Go catalog/provider and original form are already connected. | Retain existing evidence; do not treat this as another missing implementation merely because it appears beside disabled retry fields. |
-| eSIM deletion customization | Intentionally unavailable. | Only after all other original functions, through the user-requested interactive final phase. |
+| eSIM deletion and notification recovery | The user-selected standard deletion path has passed real browser deletion, original-card notification recovery and a single receiver HTTP 204 acknowledgement on the authorized test profile. Original payload/hash and the attempt remain stored. | Network-loss/restart cases have isolated CI evidence, not production fault injection. HTTP acknowledgement is not proof of renewed download entitlement. Do not repeat deletion or notification sending without a new purpose and applicable confirmation. |
 
 Opening all main routes and tabs verifies navigation and rendering only. It does
 not prove saving, actions, persistence, notification delivery, calls, SMS or
 hardware behavior. Keep missing implementation separate from missing acceptance.
 Agent platform delivery (including Android readers and persistent modem capture)
 also cannot be certified by this frontend matrix.
+
+Linux boot-guard execution was subsequently exercised with the real modem.
+The test exposed a systemd ordering wait: the guard runs Before=NetworkManager
+but synchronously queued that daemon's reload. In 6a5c7a4 it calls the existing
+NetworkManager D-Bus configuration reload directly. Full CI and the real oneshot
+service passed, with zero WWAN bytes, no cellular addresses/routes, retained
+drop rules, unchanged catalog and unchanged business-service PIDs. This proves
+the boot service execution path, not a full host reboot.
+
+The subsequent authorized reboot confirmed that the guard finishes before
+NetworkManager, but exposed a separate hotplug-helper failure: udev supplies
+device properties without PATH, so the helper could not locate ip. No WWAN
+bytes, addresses or routes were observed; its missing group was repaired before
+restoring the Linux Agent. Commit 3e0f6df resolves tools from standard directories
+only when PATH is missing and leaves the process environment unchanged. CI,
+the real minimal-environment helper and an exact udev event passed. A subsequent,
+separately authorized second reboot confirmed the automatic group before Agent
+startup, guard completion before NetworkManager, zero WWAN bytes and unchanged
+catalog, notifications and disabled data switches. Both temporary boot observers,
+links and scripts were removed; only private evidence and backups remain. This
+does not certify paid calls or a second physical Linux Agent host.
 
 Source verification for the two remaining General settings controls:
 `ec620942 control/app/device_state.py:23,302` defaults to cellular=false,

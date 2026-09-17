@@ -186,6 +186,7 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agen
 	inventory, inventoryErr := prober.manager.Inventory(ctx)
 	blocked := make([]agentmodem.Fact, 0)
 	if inventoryErr == nil {
+		prober.observeDataClaims(inventory)
 		blocked = prober.acquire(ctx, inventory)
 	} else {
 		return nil, inventoryErr

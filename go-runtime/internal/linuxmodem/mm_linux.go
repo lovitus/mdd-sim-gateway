@@ -49,6 +49,7 @@ type modemSnapshot struct {
 	NetPorts      []string
 	AudioPorts    []string
 	Bearers       []dbus.ObjectPath
+	BearerStates  map[dbus.ObjectPath]bool
 	Connected     bool
 	SIMState      agentmodem.SIMState
 	ICCID         string
@@ -481,6 +482,17 @@ func parseManagedObjects(objects managedObjects) ([]modemSnapshot, error) {
 		sort.Strings(value.NetPorts)
 		sort.Strings(value.AudioPorts)
 		value.Connected = modemConnected(properties, objects)
+		if paths, known := variantValue[[]dbus.ObjectPath](properties, "Bearers"); known {
+			value.BearerStates = make(map[dbus.ObjectPath]bool, len(paths))
+			for _, path := range paths {
+				connected, observed := variantValue[bool](objects[path][mmBearer], "Connected")
+				if !observed {
+					value.BearerStates = nil
+					break
+				}
+				value.BearerStates[path] = connected
+			}
+		}
 		for _, bearerPath := range objectPathSliceProperty(properties, "Bearers") {
 			if interfaces, ok := objects[bearerPath]; ok {
 				if bearer, ok := interfaces[mmBearer]; ok && boolProperty(bearer, "Connected") {
