@@ -140,6 +140,7 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		http.Error(response, "media_reservation_mismatch", http.StatusConflict)
 		return
 	}
+	expected := record
 	socket, err := websocket.Accept(response, request, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
@@ -147,8 +148,11 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	socket.SetReadLimit(pcmFrameBytes)
 	peer := &Peer{socket: socket, incoming: make(chan []byte, maximumQueuedFrames), done: make(chan struct{})}
 	broker.mu.Lock()
+	// Preparation expiry must still hold at attachment, not just before the
+	// WebSocket handshake. Attached media retains its explicit call lifetime.
+	broker.purgeLocked(broker.now().UTC())
 	record = broker.reservations[sessionID]
-	if record == nil || record.peer != nil || record.AgentID != agentID || record.ProcessGeneration != generation ||
+	if record != expected || record == nil || record.peer != nil || record.AgentID != agentID || record.ProcessGeneration != generation ||
 		!hashEqual(record.tokenHash, request.Header.Get("X-MDD-Media-Token")) {
 		broker.mu.Unlock()
 		_ = socket.Close(websocket.StatusPolicyViolation, "media reservation changed")
@@ -168,7 +172,7 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		peer.close()
 		return
 	}
-	close(record.ready)
+	signalReservationLocked(record)
 	broker.mu.Unlock()
 	defer broker.remove(sessionID, record)
 	defer peer.close()
@@ -200,6 +204,7 @@ func (broker *Broker) Acquire(ctx context.Context, sessionID string) (*Peer, err
 		broker.mu.Unlock()
 		return nil, ErrReservationNotFound
 	}
+	expected := record
 	ready := record.ready
 	broker.mu.Unlock()
 	select {
@@ -210,7 +215,7 @@ func (broker *Broker) Acquire(ctx context.Context, sessionID string) (*Peer, err
 	broker.mu.Lock()
 	defer broker.mu.Unlock()
 	record = broker.reservations[strings.TrimSpace(sessionID)]
-	if record == nil || record.peer == nil {
+	if record != expected || record == nil || record.peer == nil {
 		return nil, ErrMediaNotReady
 	}
 	if record.claimed {
@@ -224,6 +229,7 @@ func (broker *Broker) Revoke(sessionID string) {
 	broker.mu.Lock()
 	record := broker.reservations[strings.TrimSpace(sessionID)]
 	delete(broker.reservations, strings.TrimSpace(sessionID))
+	signalReservationLocked(record)
 	broker.mu.Unlock()
 	if record != nil && record.peer != nil {
 		record.peer.close()
@@ -237,6 +243,7 @@ func (broker *Broker) DisconnectAgent(agentID string) {
 	for sessionID, record := range broker.reservations {
 		if agentID == "" || record.AgentID == agentID {
 			delete(broker.reservations, sessionID)
+			signalReservationLocked(record)
 			records = append(records, record)
 		}
 	}
@@ -301,6 +308,7 @@ func (broker *Broker) remove(sessionID string, expected *reservation) {
 	if broker.reservations[sessionID] == expected {
 		delete(broker.reservations, sessionID)
 	}
+	signalReservationLocked(expected)
 	broker.mu.Unlock()
 }
 
@@ -310,6 +318,7 @@ func (broker *Broker) purgeLocked(now time.Time) {
 		// exact Agent has attached, call/session ownership ends it explicitly.
 		if record.peer == nil && !record.ExpiresAt.After(now) {
 			delete(broker.reservations, sessionID)
+			signalReservationLocked(record)
 		}
 	}
 }

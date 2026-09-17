@@ -69,6 +69,8 @@ type activeVoiceCall struct {
 	guardCancel          context.CancelFunc
 	guardAttempt         uint64
 	guardRetryAt         time.Time
+	cleanupPending       bool
+	done                 chan struct{}
 }
 
 func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCallRequest) (vowifiipc.CallResult, error) {
@@ -119,7 +121,7 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 	startContext, startCancel := context.WithCancel(ctx)
 	active := &activeVoiceCall{
 		request: request, session: session, phase: callsafety.PhaseDialing,
-		startCancel: startCancel, startDone: make(chan struct{}),
+		startCancel: startCancel, startDone: make(chan struct{}), done: make(chan struct{}),
 	}
 	backend.activeCall = active
 	backend.sequence++
@@ -176,6 +178,9 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 			_, cleanupErr := call.End(cleanupContext)
 			cancel()
 			backend.recordCallTermination(active, cleanupErr == nil, cleanupErr)
+			if cleanupErr != nil {
+				backend.retainCallCleanup(active, call)
+			}
 			startErr = errors.Join(startErr, cleanupErr)
 		}
 		return backend.failCallStart(active, operationID, startErr)
@@ -189,6 +194,9 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 		_, cleanupErr := call.End(cleanupContext)
 		cancel()
 		backend.recordCallTermination(active, cleanupErr == nil, cleanupErr)
+		if cleanupErr != nil {
+			backend.retainCallCleanup(active, call)
+		}
 		active.session.EndStream("call start invalidated")
 		return backend.failCallStart(active, operationID,
 			errors.Join(errors.New("runtime changed while starting call"), cleanupErr))
@@ -210,13 +218,15 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, cleanupErr := call.End(cleanupContext)
 		cancel()
+		backend.recordCallTermination(active, cleanupErr == nil, cleanupErr)
 		active.session.EndStream("call state could not be persisted")
-		backend.mu.Lock()
-		if backend.activeCall == active {
-			backend.activeCall = nil
-			backend.sequence++
+		if cleanupErr != nil {
+			backend.retainCallCleanup(active, call)
+		} else {
+			backend.mu.Lock()
+			backend.finishCallLocked(active)
+			backend.mu.Unlock()
 		}
-		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, errors.Join(err, cleanupErr)
 	}
 	backend.mu.Unlock()
@@ -277,7 +287,7 @@ func (backend *Backend) AnswerIncomingCall(ctx context.Context, request vowifiip
 	active := &activeVoiceCall{request: vowifiipc.StartCallRequest{
 		OperationID: request.OperationID, CallID: request.CallID, MediaSessionID: mediaSessionID,
 		Callee: pending.Caller, MediaBufferMS: request.MediaBufferMS,
-	}, session: session, phase: callsafety.PhaseDialing, startCancel: startCancel, startDone: make(chan struct{})}
+	}, session: session, phase: callsafety.PhaseDialing, startCancel: startCancel, startDone: make(chan struct{}), done: make(chan struct{})}
 	backend.activeCall = active
 	backend.sequence++
 	backend.mu.Unlock()
@@ -348,19 +358,17 @@ func (backend *Backend) observeRemoteEnd(active *activeVoiceCall, ended <-chan s
 	if ended == nil {
 		return
 	}
-	<-ended
+	select {
+	case <-ended:
+	case <-active.done:
+		return
+	}
 	backend.mu.Lock()
 	if backend.activeCall != active {
 		backend.mu.Unlock()
 		return
 	}
-	if active.guardCancel != nil {
-		active.guardCancel()
-		active.guardCancel = nil
-	}
-	active.phase = callsafety.PhaseEnded
-	backend.activeCall = nil
-	backend.sequence++
+	backend.finishCallLocked(active)
 	backend.mu.Unlock()
 	active.session.EndStream("remote ended")
 }
@@ -368,9 +376,8 @@ func (backend *Backend) observeRemoteEnd(active *activeVoiceCall, ended <-chan s
 func (backend *Backend) failCallStart(active *activeVoiceCall, operationID string, cause error) (vowifiipc.CallResult, error) {
 	failure := publicFailure(&StageError{Layer: "call", Code: "call_start_failed", Err: cause})
 	backend.mu.Lock()
-	if backend.activeCall == active {
-		backend.activeCall = nil
-		backend.sequence++
+	if !active.cleanupPending {
+		backend.finishCallLocked(active)
 	}
 	storeErr := backend.operations.CompleteFailure(backend.generation, operationID, failure)
 	backend.mu.Unlock()
@@ -396,6 +403,10 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 		return vowifiipc.CallResult{}, &vowifiipc.OperationError{
 			Kind: vowifiipc.ErrorNotFound, Code: "call_not_found", Layer: "call",
 		}
+	}
+	if active.call != nil && active.phase == callsafety.PhaseEnding {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, conflict("operation_in_progress")
 	}
 	if active.call == nil {
 		if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
@@ -445,13 +456,7 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 	if endErr != nil {
 		failure := publicFailure(&StageError{Layer: "call", Code: "call_end_failed", Err: endErr})
 		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
-		var guardContext context.Context
-		if backend.activeCall == active {
-			active.phase = callsafety.PhaseActive
-			active.guardRetryAt = time.Now().Add(guardRetryDelay(active.guardAttempt, backend.callGuardTimeout))
-			guardContext, active.guardCancel = context.WithCancel(context.Background())
-			backend.sequence++
-		}
+		guardContext := backend.restartCallGuardLocked(active, false)
 		backend.mu.Unlock()
 		if guardContext != nil {
 			go backend.guardCall(guardContext, active)
@@ -461,9 +466,7 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 		}
 		return vowifiipc.CallResult{}, failure
 	}
-	active.phase = callsafety.PhaseEnded
-	backend.activeCall = nil
-	backend.sequence++
+	backend.finishCallLocked(active)
 	result := vowifiipc.CallResult{
 		OperationResult: vowifiipc.OperationResult{
 			OperationID: request.OperationID, Accepted: true, Code: "ended", Status: backend.snapshotLocked(),
@@ -546,10 +549,7 @@ func (backend *Backend) failPendingCallEnd(request vowifiipc.EndCallRequest, act
 
 func (backend *Backend) completePendingCallEnd(request vowifiipc.EndCallRequest, active *activeVoiceCall) (vowifiipc.CallResult, error) {
 	backend.mu.Lock()
-	if backend.activeCall == active {
-		backend.activeCall = nil
-		backend.sequence++
-	}
+	backend.finishCallLocked(active)
 	result := vowifiipc.CallResult{OperationResult: vowifiipc.OperationResult{
 		OperationID: request.OperationID, Accepted: true, Code: "ended", Status: backend.snapshotLocked(),
 	}, CallID: request.CallID}
@@ -566,11 +566,12 @@ func (backend *Backend) guardCall(ctx context.Context, active *activeVoiceCall) 
 	guard := callsafety.Guard{HeartbeatTimeout: backend.callGuardTimeout}
 	for {
 		backend.mu.Lock()
-		if backend.activeCall != active {
+		if backend.activeCall != active || ctx.Err() != nil {
 			backend.mu.Unlock()
 			return
 		}
 		phase := active.phase
+		cleanup := active.cleanupPending
 		retryAt := active.guardRetryAt
 		backend.mu.Unlock()
 		if wait := time.Until(retryAt); !retryAt.IsZero() && wait > 0 {
@@ -590,9 +591,9 @@ func (backend *Backend) guardCall(ctx context.Context, active *activeVoiceCall) 
 			ID: active.request.CallID, Phase: phase,
 			BrowserLastSeen: lastSeen, BrowserConnected: connected,
 		}, time.Now())
-		if decision.Action == callsafety.ActionHangupExact {
+		if decision.Action == callsafety.ActionHangupExact || cleanup && phase == callsafety.PhaseActive {
 			backend.mu.Lock()
-			if backend.activeCall != active {
+			if backend.activeCall != active || ctx.Err() != nil {
 				backend.mu.Unlock()
 				return
 			}
@@ -603,10 +604,24 @@ func (backend *Backend) guardCall(ctx context.Context, active *activeVoiceCall) 
 			operationID := "guard-end-" + callDigest(fmt.Sprintf("%s\x00%s\x00%d",
 				active.request.CallID, active.request.OperationID, attempt))
 			endContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			reason := "browser_timeout"
+			if cleanup {
+				reason = "call_cleanup_retry"
+			}
 			_, _ = backend.EndCall(endContext, vowifiipc.EndCallRequest{
-				OperationID: operationID, CallID: active.request.CallID, ReasonCode: "browser_timeout",
+				OperationID: operationID, CallID: active.request.CallID, ReasonCode: reason,
 			})
 			cancel()
+			backend.mu.Lock()
+			// EndCall normally retires or replaces this guard. A storage or
+			// admission failure before dispatch does neither: retain bounded
+			// retry ownership instead of silently abandoning the paid call.
+			if backend.activeCall == active && ctx.Err() == nil {
+				active.guardRetryAt = time.Now().Add(guardRetryDelay(active.guardAttempt, backend.callGuardTimeout))
+				backend.mu.Unlock()
+				continue
+			}
+			backend.mu.Unlock()
 			return
 		}
 		deadline := lastSeen.Add(backend.callGuardTimeout)

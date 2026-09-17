@@ -62,22 +62,23 @@ type credentialFile struct {
 }
 
 type Manager struct {
-	mu             sync.Mutex
-	credentialPath string
-	username       string
-	salt           []byte
-	passwordHash   []byte
-	agentToken     string
-	agentTokenMode string
-	agentTokens    map[string]string
-	secureCookies  bool
-	now            func() time.Time
-	sessions       map[[32]byte]sessionRecord
-	failures       map[string][]time.Time
-	persister      CredentialPersister
-	passwordEpoch  uint64
-	loginInFlight  map[string]bool
-	derivePassword func(password, salt []byte) ([]byte, error)
+	mu               sync.Mutex
+	credentialPath   string
+	username         string
+	salt             []byte
+	passwordHash     []byte
+	agentToken       string
+	agentTokenMode   string
+	agentTokens      map[string]string
+	secureCookies    bool
+	now              func() time.Time
+	sessions         map[[32]byte]sessionRecord
+	failures         map[string][]time.Time
+	persister        CredentialPersister
+	passwordEpoch    uint64
+	loginInFlight    map[string]bool
+	derivePassword   func(password, salt []byte) ([]byte, error)
+	lastFailureSweep time.Time
 }
 
 type CredentialPersister interface {
@@ -402,8 +403,14 @@ func (manager *Manager) Login(username, password, peer string) (LoginResult, err
 	peer = strings.TrimSpace(peer)
 	now := manager.now().UTC()
 	manager.mu.Lock()
+	// Reject overload before allocating or sweeping per-peer history.
+	if manager.loginInFlight[peer] || len(manager.loginInFlight) >= maxLoginDerivations {
+		manager.mu.Unlock()
+		return LoginResult{}, &ThrottleError{RetryAfter: 1}
+	}
+	manager.sweepLoginFailuresLocked(now)
 	retry := manager.retryAfterLocked(peer, now)
-	if retry > 0 || manager.loginInFlight[peer] || len(manager.loginInFlight) >= maxLoginDerivations {
+	if retry > 0 || !manager.canTrackLoginPeerLocked(peer) {
 		manager.mu.Unlock()
 		return LoginResult{}, &ThrottleError{RetryAfter: max(1, retry)}
 	}
@@ -557,7 +564,11 @@ func (manager *Manager) retryAfterLocked(peer string, now time.Time) int {
 			attempts = append(attempts, attempt)
 		}
 	}
-	manager.failures[peer] = attempts
+	if len(attempts) == 0 {
+		delete(manager.failures, peer)
+	} else {
+		manager.failures[peer] = attempts
+	}
 	if len(attempts) < 5 {
 		return 0
 	}

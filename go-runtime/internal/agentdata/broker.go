@@ -122,6 +122,7 @@ func (broker *Broker) Acquire(ctx context.Context, streamID string) (net.Conn, e
 		broker.mu.Unlock()
 		return nil, ErrReservationNotFound
 	}
+	expected := record
 	ready := record.ready
 	broker.mu.Unlock()
 	select {
@@ -131,8 +132,9 @@ func (broker *Broker) Acquire(ctx context.Context, streamID string) (net.Conn, e
 	}
 	broker.mu.Lock()
 	defer broker.mu.Unlock()
+	broker.purgeLocked(broker.now().UTC())
 	record = broker.items[strings.TrimSpace(streamID)]
-	if record == nil || record.conn == nil || record.claimed {
+	if record != expected || record == nil || record.conn == nil || record.claimed {
 		return nil, ErrDataNotReady
 	}
 	record.claimed = true
@@ -143,6 +145,7 @@ func (broker *Broker) Revoke(streamID string) {
 	broker.mu.Lock()
 	record := broker.items[strings.TrimSpace(streamID)]
 	delete(broker.items, strings.TrimSpace(streamID))
+	signalReservationLocked(record)
 	broker.mu.Unlock()
 	if record != nil && record.conn != nil {
 		_ = record.conn.Close()
@@ -155,6 +158,7 @@ func (broker *Broker) RevokeSession(sessionID string) {
 	for key, record := range broker.items {
 		if record.SessionID == sessionID {
 			delete(broker.items, key)
+			signalReservationLocked(record)
 			if record.conn != nil {
 				conns = append(conns, record.conn)
 			}
@@ -173,6 +177,7 @@ func (broker *Broker) DisconnectAgent(agentID string) {
 	for streamID, record := range broker.items {
 		if agentID == "" || record.AgentID == agentID {
 			delete(broker.items, streamID)
+			signalReservationLocked(record)
 			if record.conn != nil {
 				conns = append(conns, record.conn)
 			}
@@ -207,6 +212,7 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		http.Error(response, "data_reservation_mismatch", http.StatusConflict)
 		return
 	}
+	expected := record
 	socket, err := websocket.Accept(response, request, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
@@ -220,8 +226,9 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	conn := newTrackedConn(raw)
 	broker.mu.Lock()
+	broker.purgeLocked(broker.now().UTC())
 	record = broker.items[streamID]
-	if record == nil || record.conn != nil || record.AgentID != agentID || record.ProcessGeneration != generation ||
+	if record != expected || record == nil || record.conn != nil || record.AgentID != agentID || record.ProcessGeneration != generation ||
 		!hashEqual(record.tokenHash, request.Header.Get("X-MDD-Data-Token")) {
 		broker.mu.Unlock()
 		_ = conn.Close()
@@ -231,16 +238,17 @@ func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	broker.mu.Unlock()
 	ack, _ := json.Marshal(map[string]any{"type": "agent.data.ready", "version": 1, "stream_id": streamID})
 	if err := socket.Write(request.Context(), websocket.MessageText, ack); err != nil {
-		broker.Revoke(streamID)
+		broker.remove(streamID, record)
 		return
 	}
 	broker.mu.Lock()
+	broker.purgeLocked(broker.now().UTC())
 	if broker.items[streamID] != record || record.conn != conn {
 		broker.mu.Unlock()
 		_ = conn.Close()
 		return
 	}
-	close(record.ready)
+	signalReservationLocked(record)
 	broker.mu.Unlock()
 	select {
 	case <-request.Context().Done():
@@ -253,6 +261,7 @@ func (broker *Broker) purgeLocked(now time.Time) {
 	for key, record := range broker.items {
 		if !record.ExpiresAt.After(now) {
 			delete(broker.items, key)
+			signalReservationLocked(record)
 			if record.conn != nil {
 				_ = record.conn.Close()
 			}
