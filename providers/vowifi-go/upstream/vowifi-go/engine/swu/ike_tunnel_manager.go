@@ -19,6 +19,8 @@ import (
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 )
 
+var ErrIKEControlBusy = errors.New("IKE control exchange already in progress")
+
 var ErrInvalidIKETunnelManager = errors.New("invalid swu ike tunnel manager")
 
 const failedAuthenticatedIKECleanupTimeout = 2 * time.Second
@@ -655,7 +657,12 @@ func (c *ikePacketTunnelControl) dpd(ctx context.Context) error {
 	if c == nil {
 		return ErrInvalidIKEControl
 	}
-	c.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !c.mu.TryLock() {
+		return ErrIKEControlBusy
+	}
 	defer c.mu.Unlock()
 	messageID, err := c.reserveMessageID()
 	if err != nil {

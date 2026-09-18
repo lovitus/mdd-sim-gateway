@@ -375,11 +375,16 @@ jobs:
         working-directory: providers/vowifi-go
         run: go vet ./...
 
+  validate-liveness:
+    name: Validate full VoWiFi recovery chains
+    uses: ./.github/workflows/review-liveness.yml
+
   release-linux-amd64:
     name: Build verified Linux amd64 release
     needs:
       - validate-core
       - validate-provider
+      - validate-liveness
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

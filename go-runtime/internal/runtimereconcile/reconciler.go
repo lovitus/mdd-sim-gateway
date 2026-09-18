@@ -647,7 +647,7 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		reconciler.clearRecovery(line.ID)
 		reconciler.reset(line.ID)
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeFailed:
-		if recoveryDue && observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
+		if recoveryDue && !observation.status.IdleRecoveryBlockedAt(reconciler.now()) && observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
 			reconciler.beginRecovery(line, observation)
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
@@ -656,7 +656,7 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning &&
 		observation.status.RequiresIdleRecovery():
-		if recoveryDue && observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
+		if recoveryDue && !observation.status.IdleRecoveryBlockedAt(reconciler.now()) && observation.status.ActiveCall == nil && observation.status.PendingIncomingCall == nil {
 			reconciler.beginRecovery(line, observation)
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning:
@@ -955,7 +955,7 @@ func (reconciler *Reconciler) validatePlan(ctx context.Context, plan actionPlan)
 	if status.ActiveCall != nil || status.PendingIncomingCall != nil {
 		return errActionPlanChanged
 	}
-	if !status.RequiresIdleRecovery() {
+	if !status.RequiresIdleRecovery() || status.IdleRecoveryBlockedAt(reconciler.now()) {
 		return errActionPlanChanged
 	}
 	return nil
@@ -999,17 +999,21 @@ func (reconciler *Reconciler) publish(line linecatalog.Line, observation lineObs
 	current := currentFacts(reconciler.replay.Projections(now), line.ID)
 	changed := make([]events.Event, 0, len(facts))
 	for _, fact := range facts {
+		detail := ""
+		if fact.layer == state.LayerAdmission {
+			detail = reconciler.recoveryScheduleDetail(line, observation)
+		}
 		prior, found := current[fact.layer]
 		if !first && found && prior.Source == string(events.RoleCore) && prior.ProducerID == coreProducerID &&
 			prior.Generation == reconciler.generation && prior.Condition == fact.condition &&
-			prior.Available == fact.available && prior.Code == fact.code {
+			prior.Available == fact.available && prior.Code == fact.code && prior.Detail == detail {
 			continue
 		}
 		changed = append(changed, events.Event{
 			SchemaVersion: events.SchemaVersion,
 			EventID:       fmt.Sprintf("core-reconcile:%s:%s:%d:%s", reconciler.generation, line.ID, sequence, fact.layer),
 			LineID:        line.ID, ProducerRole: events.RoleCore, ProducerID: coreProducerID,
-			Layer: fact.layer, Condition: fact.condition, Available: fact.available, Code: fact.code,
+			Layer: fact.layer, Condition: fact.condition, Available: fact.available, Code: fact.code, Detail: detail,
 			Generation: reconciler.generation, Sequence: sequence, ObservedAt: now,
 		})
 	}

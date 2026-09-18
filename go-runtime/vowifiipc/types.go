@@ -43,6 +43,7 @@ const (
 )
 
 type RuntimeStatus struct {
+	Health            *RuntimeHealth       `json:"health,omitempty"`
 	IKE               *IKEExchangeEvidence `json:"ike,omitempty"`
 	FailureID         string               `json:"failure_id,omitempty"`
 	Rekey             *ChildSARekeyStatus  `json:"rekey,omitempty"`
@@ -322,6 +323,9 @@ func (snapshot Snapshot) Validate() error {
 			ike.ResponseDatagrams > ike.RequestsSent || ike.ResponseTimeouts > ike.RequestsSent-ike.ResponseDatagrams {
 			return errors.New("snapshot IKE exchange evidence is invalid")
 		}
+	}
+	if err := snapshot.Runtime.Health.Validate(); err != nil {
+		return err
 	}
 	if rekey := snapshot.Runtime.Rekey; rekey != nil {
 		if snapshot.Runtime.Condition != RuntimeRunning || rekey.PeriodMinutes < 0 || rekey.PeriodMinutes > 1440 || rekey.Enabled != (rekey.PeriodMinutes > 0) ||

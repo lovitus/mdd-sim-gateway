@@ -1,3 +1,4 @@
+import { runtimeHealthView } from './runtimeHealth.js'
 const ACTIVE_DATA_STATES = new Set(['active', 'connected', 'ready', 'up'])
 const STARTING_DATA_STATES = new Set(['starting', 'connecting', 'preparing'])
 const STOPPING_DATA_STATES = new Set(['stopping', 'disconnecting', 'cleanup'])
@@ -105,6 +106,7 @@ export function mapCatalogLine(line, projection) {
     operations: projection?.operations || {},
     facts: { facts, summary, raw: projection || null },
     status: lineStatus(projection),
+    runtime_health: runtimeHealthView(projection),
     go_line: line,
     go_projection: projection || null,
   }
@@ -264,7 +266,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
       data_guard_detail: modem?.network?.data_guard_detail || '',
       data_lease: policy?.data_lease || null,
     } : null,
-    vowifi: lineID ? { ...runtimeRekeyView(projection), ims: factsByLayer(projection).ims?.code || '', epdg: factsByLayer(projection).tunnel?.code || '' } : null,
+    vowifi: lineID ? { ...runtimeRekeyView(projection), health: runtimeHealthView(projection), ims: factsByLayer(projection).ims?.code || '', epdg: factsByLayer(projection).tunnel?.code || '' } : null,
     facts: projection ? { facts: factsByLayer(projection), summary: factSummary(projection), raw: projection } : null,
     status: projection ? lineStatus(projection) : null,
     egress: line ? {

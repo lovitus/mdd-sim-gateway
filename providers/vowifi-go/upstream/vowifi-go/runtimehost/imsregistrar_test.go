@@ -1297,8 +1297,8 @@ func TestWireIMSRegistrarRecoveryBackoffDelaysRepeatedRecover(t *testing.T) {
 	}
 	retryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	if _, err := res.Recover(retryCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("second Recover() err=%v, want context deadline from backoff wait", err)
+	if progress, err := res.Recover(retryCtx); !errors.Is(err, ErrIMSRegistrationRetryPending) || progress.RecoveryState.NextAttemptAt.IsZero() {
+		t.Fatalf("second Recover() progress=%+v err=%v, want pending retry without blocking", progress.RecoveryState, err)
 	}
 	select {
 	case ok := <-noImmediateRetry:

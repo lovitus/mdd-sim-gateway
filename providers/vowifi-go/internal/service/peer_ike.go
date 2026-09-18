@@ -27,6 +27,7 @@ type peerIKECache struct {
 }
 
 type peerIKEResponder struct {
+	onAuthenticated   func(time.Time)
 	previous          *peerIKEResponder
 	previousUntil     time.Time
 	retired           bool
@@ -70,7 +71,14 @@ func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 		peer.mu.Unlock()
 		return previous.handle(raw)
 	}
-	defer peer.mu.Unlock()
+	fresh := false
+	defer func() {
+		recorder, retired := peer.onAuthenticated, peer.retired
+		peer.mu.Unlock()
+		if fresh && !retired && recorder != nil {
+			recorder(time.Now())
+		}
+	}()
 	if err != nil || header.Version>>4 != 2 || header.Length != uint32(len(raw)) ||
 		header.InitiatorSPI != peer.init.InitiatorSPI || header.ResponderSPI != peer.init.ResponderSPI ||
 		header.Flags&(ikev2.FlagInitiator|ikev2.FlagResponse) != 0 {
@@ -166,6 +174,7 @@ func (peer *peerIKEResponder) handle(raw []byte) (outerudp.PeerReply, error) {
 		peer.order = peer.order[1:]
 	}
 	peer.last, peer.seen = header.MessageID, true
+	fresh = true
 	return clonePeerReply(reply), nil
 }
 

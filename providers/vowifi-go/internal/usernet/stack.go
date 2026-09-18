@@ -129,6 +129,20 @@ func Open(ctx context.Context, packets PacketSession, config Config) (*Stack, er
 			}
 		}()
 	}
+	if maintenance, ok := packets.(interface{ RunLivenessMaintenance(context.Context) error }); ok {
+		stack.wait.Add(1)
+		go func() {
+			defer stack.wait.Done()
+			if err := maintenance.RunLivenessMaintenance(stack.ctx); err != nil && stack.ctx.Err() == nil {
+				// Report, do not close: Core/Provider still own idle-only recovery
+				// and active paid-call cleanup. This worker has no restart authority.
+				select {
+				case stack.errors <- &PumpError{Direction: PumpFromSWu, Err: err}:
+				default:
+				}
+			}
+		}()
+	}
 	go func() {
 		stack.wait.Wait()
 		close(stack.done)

@@ -178,8 +178,8 @@ func TestRegistrationOwnsAdmissionUntilCompletion(t *testing.T) {
 				t.Errorf("concurrent operation err=%v", err)
 			}
 		}
-		if _, err := backend.Register(t.Context(), vowifiipc.RegisterRequest{OperationID: "second-register"}); operationCode(err) != "register_busy" {
-			t.Errorf("second registration err=%v", err)
+		if progress, err := backend.Register(t.Context(), vowifiipc.RegisterRequest{OperationID: "second-register"}); err != nil || progress.Code != "ims_recovering" {
+			t.Errorf("second registration progress=%+v err=%v", progress, err)
 		}
 		close(runtime.registerRelease)
 		if err := <-done; (err != nil) != fail {

@@ -532,6 +532,8 @@ type IMSRegistrationResult struct {
 }
 
 type IMSRegistrationRecoveryState struct {
+	InProgress          bool
+	RetryAfterUntil     time.Time
 	Attempts            int
 	ConsecutiveFailures int
 	LastReason          string

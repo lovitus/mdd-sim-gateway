@@ -63,6 +63,7 @@ type IKELivenessSnapshot struct {
 	LastInbound      time.Time
 	LastOutbound     time.Time
 	LastDPDProbe     time.Time
+	LastDPDSuccess   time.Time
 	OutstandingDPD   bool
 	ProbeID          uint32
 	MissedDPDProbes  int
@@ -76,6 +77,9 @@ type IKELivenessState struct {
 	lastInbound      time.Time
 	lastOutbound     time.Time
 	lastDPDProbe     time.Time
+	lastDPDSuccess   time.Time
+	dpdAccounted     bool
+	dpdDeferred      bool
 	outstandingDPD   bool
 	probeID          uint32
 	missedDPDProbes  int
@@ -116,6 +120,8 @@ func (s *IKELivenessState) RecordInbound(at time.Time) {
 		s.lastInbound = at
 	}
 	s.outstandingDPD = false
+	s.dpdAccounted = false
+	s.dpdDeferred = false
 	s.missedDPDProbes = 0
 	s.dead = false
 }
@@ -137,15 +143,20 @@ func (s *IKELivenessState) RecordLivenessResult(at time.Time, ok bool) {
 		return
 	}
 	if ok {
+		if at.IsZero() {
+			at = time.Now()
+		}
+		s.lastDPDSuccess = at
 		s.RecordInbound(at)
 		return
 	}
 	if at.IsZero() {
 		at = time.Now()
 	}
-	if !s.outstandingDPD || s.dead {
+	if !s.outstandingDPD || s.dead || s.dpdAccounted {
 		return
 	}
+	s.dpdAccounted = true
 	s.missedDPDProbes++
 	if s.missedDPDProbes >= s.cfg.MaxMissedDPDProbes {
 		s.dead = true
@@ -183,7 +194,8 @@ func (s *IKELivenessState) Snapshot() IKELivenessSnapshot {
 		LastInbound:      s.lastInbound,
 		LastOutbound:     s.lastOutbound,
 		LastDPDProbe:     s.lastDPDProbe,
-		OutstandingDPD:   s.outstandingDPD,
+		LastDPDSuccess:   s.lastDPDSuccess,
+		OutstandingDPD:   s.outstandingDPD && !s.dpdDeferred,
 		ProbeID:          s.probeID,
 		MissedDPDProbes:  s.missedDPDProbes,
 		Dead:             s.dead,
@@ -201,7 +213,11 @@ func (s *IKELivenessState) advanceDPD(now time.Time) IKELivenessDecision {
 		if now.Before(deadline) {
 			return s.decision(now, IKELivenessNoAction, "waiting for dpd response")
 		}
-		s.missedDPDProbes++
+		// A synchronous probe error already consumed this attempt. Do not
+		// charge the same probe again when its scheduled deadline is reached.
+		if !s.dpdAccounted {
+			s.missedDPDProbes++
+		}
 		if s.missedDPDProbes >= s.cfg.MaxMissedDPDProbes {
 			s.dead = true
 			return s.decision(now, IKELivenessDeclareDead, "dpd retry budget exhausted")
@@ -216,6 +232,8 @@ func (s *IKELivenessState) advanceDPD(now time.Time) IKELivenessDecision {
 
 func (s *IKELivenessState) sendDPD(now time.Time, reason string) IKELivenessDecision {
 	s.probeID++
+	s.dpdAccounted = false
+	s.dpdDeferred = false
 	s.outstandingDPD = true
 	s.lastDPDProbe = now
 	s.lastOutbound = now

@@ -1,0 +1,91 @@
+name: VoWiFi liveness and recovery
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'go-runtime/**'
+      - 'providers/vowifi-go/**'
+      - 'webui/**'
+      - '.github/workflows/review-liveness.yml'
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: liveness-review-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            agent/call-audio-helper/go.sum
+            providers/vowifi-go/go.sum
+            providers/vowifi-go/upstream/vowifi-go/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install native test dependencies
+        run: |
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pkg-config xorg-dev
+      - uses: actions/checkout@v7
+        with:
+          ref: 0c3a64ca6fa7292b4f3c0fedef9fc2b4b993590c
+          path: review-liveness-baseline
+          persist-credentials: false
+      - name: Prove pre-fix counterexamples
+        run: bash go-runtime/scripts/test-liveness-negative.sh "$GITHUB_WORKSPACE/review-liveness-baseline"
+      - name: Core, Provider and upstream regression suites
+        run: |
+          set -o pipefail
+          go -C go-runtime test -json -count=1 -timeout 3m ./... | tee liveness-core.jsonl
+          go -C providers/vowifi-go test -json -race -count=1 -timeout 3m ./... | tee liveness-provider.jsonl
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go test -json -race -count=1 -timeout 3m ./engine/swu/... ./runtimehost/... | tee liveness-upstream.jsonl
+      - name: Core boundary and audio-helper race tests
+        run: |
+          set -o pipefail
+          go -C go-runtime test -json -race -count=1 -timeout 3m ./adminauth ./agentlink ./mediaauth ./providercontrol ./internal/agentdata ./internal/agentmedia ./internal/runtimereconcile ./vowifiipc ./providerfacts | tee liveness-boundaries.jsonl
+          GOWORK=off go -C agent/call-audio-helper test -json -race -count=1 -timeout 3m ./... | tee liveness-audio.jsonl
+      - name: Repeat recovery and cancellation interleavings
+        run: |
+          set -o pipefail
+          go -C go-runtime test -json -race -count=20 -run TestLivenessReview ./vowifiipc ./internal/runtimereconcile | tee liveness-core-stress.jsonl
+          go -C providers/vowifi-go test -json -race -count=20 -run TestLivenessReview ./internal/service ./internal/usernet | tee liveness-provider-stress.jsonl
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go test -json -race -count=20 -run TestLivenessReview ./engine/swu ./runtimehost | tee liveness-upstream-stress.jsonl
+      - name: Full loopback fault-to-recovery chain
+        run: |
+          set -o pipefail
+          bash go-runtime/scripts/test-liveness-chain.sh | tee liveness-chain.log
+      - name: Vet changed ownership boundaries
+        run: |
+          go -C go-runtime vet ./vowifiipc ./providerfacts ./internal/runtimereconcile
+          go -C providers/vowifi-go vet ./internal/service ./internal/provider ./internal/usernet
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go vet ./engine/swu/... ./runtimehost/...
+      - name: WebUI tests and deterministic embedded build
+        working-directory: webui
+        run: |
+          npm ci
+          npm run test:all
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+          git diff --exit-code -- ../go-runtime/internal/webui/assets
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: liveness-evidence-${{ github.sha }}
+          path: |
+            liveness-*.jsonl
+            liveness-chain.log
+          retention-days: 7

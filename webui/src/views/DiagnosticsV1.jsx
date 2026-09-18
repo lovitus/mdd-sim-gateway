@@ -1,10 +1,11 @@
+import { registrationOutcomeMessage } from '../runtimeHealth.js'
 import { dialogs } from '../dialogs.js'
 import React, { useCallback, useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
 
 export default function DiagnosticsV1({ instances, devices, callCoordinator, showToast }) {
-  const { t } = useI18n()
+  const { t, language } = useI18n()
   const [snapshot, setSnapshot] = useState(null)
   const [lineID, setLineID] = useState('')
   const [media, setMedia] = useState('')
@@ -43,8 +44,8 @@ export default function DiagnosticsV1({ instances, devices, callCoordinator, sho
 			!(await dialogs.confirm(t('Send one IMS REGISTER on the selected line? This does not place a call or send SMS.')))) return
 		setRegistering(true)
 		try {
-			await api.registerV1(lineID, selectedLine.iccid || selectedLine.card_id)
-			await load(); showToast(t('IMS registration refreshed'))
+			const result = await api.registerV1(lineID, selectedLine.iccid || selectedLine.card_id)
+			await load(); showToast(registrationOutcomeMessage(result, language))
 		} catch (error) { showToast(error.message) } finally { setRegistering(false) }
 	}
   if (!snapshot) return <p>{t('Loading…')}</p>

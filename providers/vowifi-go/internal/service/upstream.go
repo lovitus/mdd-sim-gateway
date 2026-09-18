@@ -236,6 +236,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 			if err != nil {
 				return nil, err
 			}
+			peer.onAuthenticated = session.RecordIKELivenessInbound
 			if err = outer.ServePeerIKE(peer.handle); err != nil {
 				_ = session.Close(context.Background())
 				return nil, err
@@ -347,7 +348,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (startedRuntime Runti
 			err = fmt.Errorf("IMS registration rejected: %d %s", registration.StatusCode, strings.TrimSpace(registration.Reason))
 		}
 		err = imsRegisterDiagnostic(err, info.PCSCFServers, stats)
-		return nil, &StageError{Layer: "ims", Code: "ims_register_failed", Err: errors.Join(err, closeErr)}
+		return nil, &StageError{Layer: "ims", Code: "ims_register_failed", Err: errors.Join(err, closeErr), RetryAfter: max(time.Duration(0), time.Until(registration.RecoveryState.RetryAfterUntil))}
 	}
 	if inbound != nil {
 		localTag := contactUser(config.LineID, config.DeviceID, config.TraceID) + "-inbound"
@@ -850,7 +851,12 @@ func (runtime *upstreamRuntime) recoverCallRegistration(ctx context.Context, fai
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	runtime.recoveryMu.Lock()
+	if err := ctx.Err(); err != nil {
+		return runtimehost.IMSRegistrationResult{}, false, err
+	}
+	if !runtime.recoveryMu.TryLock() {
+		return runtimehost.IMSRegistrationResult{}, false, runtimehost.ErrIMSRegistrationInProgress
+	}
 	defer runtime.recoveryMu.Unlock()
 
 	registration, revision := runtime.registrationSnapshot()
@@ -941,12 +947,20 @@ func (runtime *upstreamRuntime) observeStack() {
 }
 
 func (runtime *upstreamRuntime) Layers() Layers {
+	registration, _ := runtime.registrationSnapshot()
+	return runtime.registrationLayers(registration)
+}
+
+func (runtime *upstreamRuntime) registrationLayers(registration runtimehost.IMSRegistrationResult) Layers {
 	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
 	runtime.faultMu.Lock()
 	fault := runtime.fault
 	runtime.faultMu.Unlock()
 	if fault != nil {
 		code := "userspace_stack_failed"
+		if errors.Is(fault, provider.ErrIKELivenessDead) {
+			code = "tunnel_liveness_failed"
+		}
 		if errors.Is(fault, upstreamswu.ErrChildSARetirement) {
 			code = "child_sa_retirement_failed"
 		}
@@ -964,9 +978,17 @@ func (runtime *upstreamRuntime) Layers() Layers {
 		blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: vowifiipc.PeerPCSCFChanged}
 		return Layers{Tunnel: ready, IMS: blocked, Voice: blocked, Messaging: blocked}
 	}
-	registration, _ := runtime.registrationSnapshot()
 	if !registration.Registered {
-		blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "ims_not_registered"}
+		code := "ims_not_registered"
+		switch {
+		case registration.RecoveryState.ConsecutiveFailures > 0:
+			code = "ims_recovery_failed"
+		case !registration.ExpiresAt.IsZero() && !time.Now().Before(registration.ExpiresAt):
+			code = "ims_expired"
+		case registration.RecoveryState.InProgress:
+			code = "ims_recovering"
+		}
+		blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: code}
 		return Layers{Tunnel: ready, IMS: blocked, Voice: blocked, Messaging: blocked}
 	}
 	voice := ready

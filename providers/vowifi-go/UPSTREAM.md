@@ -1,5 +1,11 @@
 # Upstream source and MDD patch
 
+The September 18 liveness integration also reports an ordinary in-flight
+REGISTER refresh as owned maintenance, including when its prior lease expires.
+This does not invalidate a still-valid registration merely because a refresh
+is running. Success and cancellation release that observation; local retry
+backoff is not reported as an active network transaction.
+
 `upstream/vowifi-go` is a complete tracked-source snapshot of
 `github.com/boa-z/vowifi-go` at commit
 `1e9c6e6adbfcd9667695149d5ecb0f71cd062f07` (pseudo-version
@@ -149,3 +155,42 @@ Manual registration owns an in-flight slot until completion. Drain, stop and
 new paid operations cannot race it. Failed cleanup retains the previous runtime
 until local release is confirmed; a later start cannot overwrite that owner.
 These changes are in the MDD service wrapper, not the upstream protocol stack.
+
+## Liveness and registration recovery integration (review of 0c3a64ca)
+
+The Provider's existing usernet session now drives the upstream
+`AdvanceIKELiveness` scheduler independently of CHILD/IKE rekey maintenance.
+Zero rekey periods remain disabled. Silence schedules a bounded authenticated
+DPD exchange; it does not by itself establish peer death. A failed synchronous
+probe consumes its failure budget once. Contention with another IKE control
+exchange defers an unsent probe without consuming a message ID or failure.
+Fresh authenticated peer requests also update the inbound observation; cached,
+retired-SA and unauthenticated requests do not.
+
+Liveness failure is reported through the existing Provider health path. It does
+not close the stack from the maintenance worker. The existing Core reconciler
+owns budgeted, identity-fenced, idle-only line-session cleanup and rebuilding;
+no Agent/Core/Provider process restart policy is introduced. Existing intent,
+maintenance, active-call, pending-incoming-call and release-confirmation guards
+remain authoritative.
+
+Registration status expires at the negotiated lease deadline. Recovery and
+close use a context-aware operation gate. Concurrent manual recovery reports
+current progress or a pending retry rather than queueing behind maintenance or
+claiming registration succeeded. A carrier Retry-After deadline is separate
+from ordinary local backoff and survives initial failure and session stop/start
+within the same Provider process. It is not a new durable cross-process store.
+Core cannot use its outer retry budget to bypass that deadline.
+
+Optional typed health observations expose authenticated inbound/DPD evidence,
+registration expiry, safe failure categories and the existing retry schedule.
+The device list and line detail share one projection; hardware online is not
+VoWiFi readiness. This is observability, not a second watchdog.
+
+The regression script `go-runtime/scripts/test-liveness-negative.sh` checks
+seven exact pre-fix failures. `go-runtime/scripts/test-liveness-chain.sh` runs
+real Core reconciliation against a separate Provider fixture over loopback IPC,
+with an authenticated IKE peer and a synthetic SIP registrar. It covers both
+packet loss and IMS lease expiry with healthy DPD, without real SIM operations
+or paid traffic. These simulations do not identify the external cause of the
+original packet interruption or replace real-carrier acceptance testing.

@@ -1,3 +1,5 @@
+import RuntimeHealth from '../../components/RuntimeHealth.jsx'
+import { registrationOutcomeMessage } from '../../runtimeHealth.js'
 import { dialogs } from '../../dialogs.js'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
@@ -145,9 +147,9 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     if (!(await dialogs.confirm(text))) return
     setError(''); setRunning('register')
     try {
-      await api.register(selectedId)
+      const result = await api.register(selectedId)
       await loadFacts(true)
-      showToast(language === 'zh' ? '已提交一次人工 IMS REGISTER。' : 'One manual IMS REGISTER was submitted.')
+      showToast(registrationOutcomeMessage(result, language))
     } catch (e) { setError(e.message) } finally { setRunning('') }
   }
   const testStability = async () => {
@@ -324,6 +326,7 @@ function LineActivity({ device, compact = false }) {
     {!compact && factSummary && <p className="u-line-reason" style={expectedStop?{color:'var(--text-mute)'}:undefined}><b>{t('Reason')}:</b> {t(factCode)}</p>}
     {!compact && reasons.length>0 && <details style={{overflowWrap:'anywhere'}}><summary>{t('Failure details')}</summary><ul>{reasons.map(reason=><li key={reason.code}>{t(reason.code)} <code>{reason.code}</code>{reason.layers.length>0 && <small> ({reason.layers.map(layer=>t(`layer.${layer}`)).join(', ')})</small>}</li>)}</ul></details>}
     {!compact && !factSummary && status.reason && status.state !== 'OK' && <p className="u-line-reason"><b>{t('Reason')}:</b> {t(status.reason)}</p>}
+    <RuntimeHealth health={device?.vowifi?.health} compact={compact} />
     <div className="u-line-step"><span>{t('Now')}</span><b>{t(current)}</b></div>
     {next && <div className="u-line-step"><span>{t('Next')}</span><b>{t(next, { seconds: activity.seconds || status.automatic_retry_in || 0 })}</b></div>}
     {!factSummary && retryMax > 0 && status.state !== 'OK' && <div className="u-line-retry">
@@ -981,7 +984,7 @@ export function DevicesPage({
   if (!d) return discovering ? <Discovering t={t} /> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} />
   const isZh = language === 'zh'
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network / APN')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['imeis', isZh ? 'IMEI 池' : 'IMEI Pool'],['trash', isZh ? '回收站' : 'Recycle Bin']]
-  return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.stale ? 'degraded' : x.present === false ? 'error' : 'on'}>{x.stale ? t('Snapshot unavailable') : x.present === false ? t('Offline') : t('Online')}</Badge></span></button>)}</aside>
+  return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.stale ? 'degraded' : x.present === false ? 'error' : 'on'}>{x.stale ? t('Snapshot unavailable') : x.present === false ? t('Offline') : t('Device online')}</Badge><RuntimeHealth health={x.vowifi?.health} compact /></span></button>)}</aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
       {d.stale && <p role="status" className="u-note">{t('Showing the last device snapshot; hardware actions are unavailable.')}<button className="btn btn-ghost" onClick={refreshDevices}>{t('Refresh')}</button></p>}
       <fieldset disabled={d.stale && !['imeis','trash'].includes(tab)} style={{border:0,padding:0,minWidth:0}}>

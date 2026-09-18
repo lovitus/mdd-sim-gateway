@@ -757,6 +757,7 @@ func (s *PacketSession) AdvanceIKELiveness(ctx context.Context, now time.Time) (
 	decision := s.liveness.Advance(now)
 	transport := s.transport
 	dpdHandler := s.dpdHandler
+	dpdTimeout := s.liveness.cfg.DPDTimeout
 	s.mu.Unlock()
 	switch decision.Action {
 	case IKELivenessSendKeepalive:
@@ -771,8 +772,22 @@ func (s *PacketSession) AdvanceIKELiveness(ctx context.Context, now time.Time) (
 		if dpdHandler == nil {
 			return decision, fmt.Errorf("%w: DPD handler is nil", ErrInvalidPacketTunnel)
 		}
-		err := dpdHandler(ctx)
-		s.RecordIKELivenessResult(now, err == nil)
+		probeContext, cancel := context.WithTimeout(ctx, dpdTimeout)
+		err := dpdHandler(probeContext)
+		cancel()
+		if ctx.Err() != nil {
+			return decision, ctx.Err()
+		}
+		if errors.Is(err, ErrIKEControlBusy) {
+			s.mu.Lock()
+			if s.liveness.outstandingDPD && s.liveness.probeID == decision.ProbeID {
+				s.liveness.dpdAccounted, s.liveness.dpdDeferred = true, true
+			}
+			s.mu.Unlock()
+			decision.Action, decision.Reason = IKELivenessNoAction, "IKE control exchange in progress"
+			return decision, nil
+		}
+		s.RecordIKELivenessResult(time.Now(), err == nil)
 		if err != nil {
 			if snapshot := s.IKELivenessSnapshot(); snapshot.Dead {
 				decision.Dead = true

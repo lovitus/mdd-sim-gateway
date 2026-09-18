@@ -3,6 +3,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'Device online': '设备在线',
   'Failure details': '查看各层原因',
   'Blocked': '被阻断',
   'vowifi_disabled': 'VoWiFi 已关闭',

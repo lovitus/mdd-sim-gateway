@@ -194,7 +194,7 @@ func snapshotFacts(snapshot vowifiipc.Snapshot) []desiredFact {
 }
 
 func runtimeNetworkDetail(status vowifiipc.RuntimeStatus) string {
-	parts := []string{}
+	parts := status.Health.DetailFields()
 	if status.Rekey != nil {
 		parts = append(parts, fmt.Sprintf("rekey_minutes=%d", status.Rekey.PeriodMinutes), "rekey_state="+status.Rekey.Code)
 		if status.Rekey.RetryAt != nil {

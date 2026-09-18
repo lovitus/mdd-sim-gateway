@@ -65,6 +65,7 @@ type Backend struct {
 	messageSends                   int
 	registering                    bool
 	messageScope                   string
+	registrationRetryAfterUntil    time.Time
 }
 
 func NewBackend(lineID, providerID, generation string, factory Factory) (*Backend, error) {
@@ -149,6 +150,10 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflict("runtime_busy")
 	}
+	if delay := time.Until(backend.registrationRetryAfterUntil); delay > 0 {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "ims_retry_wait", Layer: "ims", RetryAfter: delay, RetryAfterMS: delay.Milliseconds()}
+	}
 	if err := backend.operations.Reserve(backend.generation, request.OperationID, "start"); err != nil {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, err
@@ -165,6 +170,9 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 			err = &StageError{Layer: "runtime", Code: "runtime_missing", Err: errors.New("factory returned nil runtime")}
 		}
 		failure := publicFailure(err)
+		if failure.RetryAfter > 0 {
+			backend.registrationRetryAfterUntil = time.Now().Add(failure.RetryAfter)
+		}
 		if runtime != nil {
 			if closeErr := closeBounded(5*time.Second, runtime.Close); closeErr != nil {
 				var released locallyReleasedCloseError
@@ -242,6 +250,10 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		return vowifiipc.OperationResult{}, notReady("apply_drain_active", "maintenance")
 	}
 	if request.RequireIdle {
+		if err := backend.idleRegistrationBarrierLocked(ctx); err != nil {
+			backend.mu.Unlock()
+			return vowifiipc.OperationResult{}, err
+		}
 		recoveryNeeded := backend.condition == vowifiipc.RuntimeFailed
 		if backend.condition == vowifiipc.RuntimeRunning && backend.runtime != nil {
 			layers := backend.runtime.Layers()
@@ -280,6 +292,14 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		return result, nil
 	}
 	runtime := backend.runtime
+	if source, ok := runtime.(interface {
+		StatusWithHealth() (Layers, *vowifiipc.RuntimeHealth)
+	}); ok {
+		_, health := source.StatusWithHealth()
+		if health != nil && health.IMSRetryAfterUntil != nil && health.IMSRetryAfterUntil.After(backend.registrationRetryAfterUntil) {
+			backend.registrationRetryAfterUntil = *health.IMSRetryAfterUntil
+		}
+	}
 	active := backend.activeCall
 	if active != nil && active.phase == "ending" && active.call != nil {
 		backend.mu.Unlock()
@@ -455,7 +475,12 @@ func (backend *Backend) Register(ctx context.Context, request vowifiipc.Register
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, notReady("register_unsupported", "ims")
 	}
-	if backend.registering || backend.activeCall != nil || backend.pendingIncomingCallSnapshotLocked() != nil || backend.messageSends != 0 {
+	if backend.registering {
+		result := backend.registrationProgressLocked(request.OperationID, "ims_recovering")
+		backend.mu.Unlock()
+		return result, nil
+	}
+	if backend.activeCall != nil || backend.pendingIncomingCallSnapshotLocked() != nil || backend.messageSends != 0 {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflict("register_busy")
 	}
@@ -468,6 +493,12 @@ func (backend *Backend) Register(ctx context.Context, request vowifiipc.Register
 	err := registration.RecoverRegistration(ctx)
 	backend.mu.Lock()
 	backend.registering = false
+	if code := registrationProgressCode(err); code != "" {
+		result := backend.registrationProgressLocked(request.OperationID, code)
+		storeErr := backend.operations.Complete(backend.generation, request.OperationID, result)
+		backend.mu.Unlock()
+		return result, storeErr
+	}
 	if err != nil {
 		failure := publicFailure(&StageError{Layer: "ims", Code: "ims_register_failed", Err: err})
 		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
@@ -547,8 +578,15 @@ func (backend *Backend) transitionLocked(condition vowifiipc.RuntimeCondition, c
 func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 	backend.sequence++
 	layers := stoppedLayers()
+	var health *vowifiipc.RuntimeHealth
 	if backend.runtime != nil && backend.condition == vowifiipc.RuntimeRunning {
-		layers = backend.runtime.Layers()
+		if source, ok := backend.runtime.(interface {
+			StatusWithHealth() (Layers, *vowifiipc.RuntimeHealth)
+		}); ok {
+			layers, health = source.StatusWithHealth()
+		} else {
+			layers = backend.runtime.Layers()
+		}
 	} else if backend.condition == vowifiipc.RuntimeStarting {
 		layers.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerConnecting, Code: "opening_swu"}
 	} else if backend.condition == vowifiipc.RuntimeFailed {
@@ -559,7 +597,10 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 			layers.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: backend.code}
 		}
 	}
-	runtimeStatus := vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code, FailureID: backend.failureID}
+	if health == nil && time.Now().Before(backend.registrationRetryAfterUntil) {
+		health = &vowifiipc.RuntimeHealth{IMSRetryAfterUntil: observedTime(backend.registrationRetryAfterUntil), IMSNextAttemptAt: observedTime(backend.registrationRetryAfterUntil)}
+	}
+	runtimeStatus := vowifiipc.RuntimeStatus{Health: health, Condition: backend.condition, Code: backend.code, FailureID: backend.failureID}
 	if backend.failedIKE != nil {
 		value := *backend.failedIKE
 		runtimeStatus.IKE = &value
@@ -640,10 +681,11 @@ func stoppedLayers() Layers {
 }
 
 type StageError struct {
-	Layer string
-	Code  string
-	Err   error
-	IKE   *vowifiipc.IKEExchangeEvidence
+	RetryAfter time.Duration
+	Layer      string
+	Code       string
+	Err        error
+	IKE        *vowifiipc.IKEExchangeEvidence
 }
 
 func (failure *StageError) Error() string { return failure.Layer + ": " + failure.Err.Error() }
@@ -679,6 +721,7 @@ func publicFailure(err error) *vowifiipc.OperationError {
 	if errors.As(err, &stage) {
 		return &vowifiipc.OperationError{
 			Kind: vowifiipc.ErrorFailed, Code: stage.Code, Layer: stage.Layer, Detail: diagnosticDetail(stage.Err),
+			RetryAfter: stage.RetryAfter, RetryAfterMS: stage.RetryAfter.Milliseconds(),
 		}
 	}
 	return &vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "operation_failed"}

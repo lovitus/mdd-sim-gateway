@@ -130,6 +130,7 @@ type Session struct {
 	rekeyFailure    error
 	rekeyRetryAt    time.Time
 	rekeyRunning    atomic.Bool
+	livenessRunning atomic.Bool
 	ikeRekeyRetryAt time.Time
 	ikeRekeyFailure error
 }
