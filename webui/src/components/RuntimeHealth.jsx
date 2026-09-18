@@ -5,11 +5,12 @@ import { useI18n } from '../mdd/i18n.jsx'
 export default function RuntimeHealth({ health, compact = false }) {
   const { language } = useI18n()
   const zh = language === 'zh'
-  if (!health) return <span className="u-muted">{zh ? 'VoWiFi 状态未确认' : 'VoWiFi state unconfirmed'}</span>
+  const unknown = zh ? 'VoWiFi 状态未确认' : 'VoWiFi state unconfirmed'
+  if (!health) return <span className="u-muted" title={unknown}>{unknown}</span>
   const names = zh ? { off:'VoWiFi 已关闭', ready:'VoWiFi 就绪', recovering:'VoWiFi 恢复中', failed:'VoWiFi 故障', not_ready:'VoWiFi 未就绪' }
     : { off:'VoWiFi off', ready:'VoWiFi ready', recovering:'VoWiFi recovering', failed:'VoWiFi failed', not_ready:'VoWiFi not ready' }
   const time = value => value ? new Date(value).toLocaleString() : '—'
-  const label = <span role="status">{names[health.state] || names.not_ready}</span>
+  const label = <span role="status" title={names[health.state] || names.not_ready}>{names[health.state] || names.not_ready}</span>
   if (compact || health.telemetry_available === false) return label
   const rows = [
     [zh?'最近认证入站':'Last authenticated inbound', time(health.last_inbound_at)],
