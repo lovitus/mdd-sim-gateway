@@ -1,5 +1,12 @@
 # Upstream source and MDD patch
 
+IKE diagnostic datagrams include late, duplicate and rejected candidates.
+They are not mutually exclusive successful outcomes of the sent requests.
+The IPC contract preserves them unchanged and only bounds timed-out exchanges
+by requests sent; duplicate traffic must not disable status reporting or Core
+recovery. Regression cases retain the real September 20 counters (10/5/6 and
+9/5/5), plus the existing wire test's three requests and nine datagrams.
+
 The September 18 liveness integration also reports an ordinary in-flight
 REGISTER refresh as owned maintenance, including when its prior lease expires.
 This does not invalidate a still-valid registration merely because a refresh

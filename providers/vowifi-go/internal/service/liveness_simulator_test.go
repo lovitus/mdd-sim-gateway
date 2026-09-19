@@ -30,6 +30,13 @@ import (
 
 const livenessSimulatorToken = "liveness-simulator-loopback-token-32"
 
+type incidentCounterRuntime struct{ *upstreamRuntime }
+
+func (*incidentCounterRuntime) IKEEvidence() *vowifiipc.IKEExchangeEvidence {
+	// Exact production counterexample, not a claimed authenticated response count.
+	return &vowifiipc.IKEExchangeEvidence{RequestsSent: 10, ResponseDatagrams: 5, ResponseTimeouts: 6}
+}
+
 type livenessSimulatorFactory struct {
 	t         *testing.T
 	starts    atomic.Int32
@@ -129,6 +136,9 @@ func (f *livenessSimulatorFactory) Start(ctx context.Context) (Runtime, error) {
 	}
 	run := &upstreamRuntime{packetSession: session, stack: stack, registration: registration, closeTimeout: time.Second}
 	go run.observeStack()
+	if os.Getenv("MDD_LIVENESS_INCIDENT_COUNTERS") == "1" {
+		return &incidentCounterRuntime{run}, nil
+	}
 	return run, nil
 }
 

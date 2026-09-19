@@ -60,9 +60,9 @@ func TestSnapshotIKEEvidencePreservesUnknownAndRejectsImpossibleCounters(t *test
 	if copy.Runtime.IKE == nil || *copy.Runtime.IKE != *snapshot.Runtime.IKE {
 		t.Fatal("wire roundtrip lost IKE counters")
 	}
-	snapshot.Runtime.IKE.ResponseTimeouts = 2
+	snapshot.Runtime.IKE.ResponseTimeouts = 4
 	if snapshot.Validate() == nil {
-		t.Fatal("more outcomes than sent requests were accepted")
+		t.Fatal("more timed-out exchanges than sent requests were accepted")
 	}
 	snapshot.Runtime.IKE = &IKEExchangeEvidence{ResponseDatagrams: 1}
 	if snapshot.Validate() == nil {
@@ -443,8 +443,41 @@ func TestClientRejectsProviderSnapshotThatCannotBeAuthoritative(t *testing.T) {
 	_, err = client.Status(context.Background())
 	var responseError *ResponseError
 	if !errors.As(err, &responseError) || responseError.Status != http.StatusInternalServerError ||
-		responseError.Failure.Code != "operation_failed" {
+		responseError.Failure.Code != "invalid_provider_snapshot" || responseError.Failure.Detail == "" {
 		t.Fatalf("invalid snapshot error = %v", err)
+	}
+}
+
+func TestIKECandidateDatagramsCannotDisableStatusOrRecovery(t *testing.T) {
+	for _, counters := range []IKEExchangeEvidence{
+		{RequestsSent: 10, ResponseDatagrams: 5, ResponseTimeouts: 6},
+		{RequestsSent: 9, ResponseDatagrams: 5, ResponseTimeouts: 5},
+		{RequestsSent: 3, ResponseDatagrams: 9},
+	} {
+		backend := newFakeBackend()
+		backend.snapshot.Runtime = RuntimeStatus{Condition: RuntimeRunning, IKE: &counters}
+		backend.snapshot.Tunnel = LayerStatus{Condition: LayerDegraded, Code: "tunnel_liveness_failed"}
+		api, err := NewAPI(backend, testToken, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(api)
+		client, err := NewClient(server.URL, testToken, nil)
+		if err != nil {
+			server.Close()
+			t.Fatal(err)
+		}
+		snapshot, err := client.Status(t.Context())
+		server.Close()
+		if err != nil {
+			t.Fatalf("real counterexample made status unavailable: %+v: %v", counters, err)
+		}
+		if snapshot.Runtime.IKE == nil || *snapshot.Runtime.IKE != counters {
+			t.Fatal("diagnostic counters were changed or removed")
+		}
+		if !snapshot.RequiresIdleRecovery() {
+			t.Fatal("valid diagnostics suppressed recovery")
+		}
 	}
 }
 

@@ -56,6 +56,8 @@ type RuntimeStatus struct {
 
 // IKEExchangeEvidence describes one runtime's outer transport counters.
 // A received datagram is not proof of authentication or a working tunnel.
+// ResponseDatagrams includes late, duplicate and unrelated candidates, not
+// successful exchanges. It is independent of the request/timeout budget.
 type IKEExchangeEvidence struct {
 	RequestsSent      uint64 `json:"requests_sent"`
 	ResponseDatagrams uint64 `json:"response_datagrams"`
@@ -320,7 +322,7 @@ func (snapshot Snapshot) Validate() error {
 	}
 	if ike := snapshot.Runtime.IKE; ike != nil {
 		if (snapshot.Runtime.Condition != RuntimeFailed && snapshot.Runtime.Condition != RuntimeRunning) ||
-			ike.ResponseDatagrams > ike.RequestsSent || ike.ResponseTimeouts > ike.RequestsSent-ike.ResponseDatagrams {
+			ike.ResponseTimeouts > ike.RequestsSent || ike.RequestsSent == 0 && ike.ResponseDatagrams != 0 {
 			return errors.New("snapshot IKE exchange evidence is invalid")
 		}
 	}

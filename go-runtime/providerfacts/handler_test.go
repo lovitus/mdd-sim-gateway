@@ -57,6 +57,8 @@ func TestSnapshotFactsAreDurableAndAppendOnlyOnChange(t *testing.T) {
 	client := Client{URL: server.URL + "/v1/provider/facts", Token: testToken}
 
 	first := readySnapshot("generation-1", 1, now.Add(-time.Second))
+	// Real post-DPD incident: datagrams and timed-out exchanges overlap.
+	first.Runtime.IKE = &vowifiipc.IKEExchangeEvidence{RequestsSent: 10, ResponseDatagrams: 5, ResponseTimeouts: 6}
 	if err := client.Report(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}

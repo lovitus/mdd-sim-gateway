@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
 type exchangeResult struct {
@@ -101,6 +102,17 @@ func TestPersistentExchangeIgnoresLateAndUnrelatedIKE(t *testing.T) {
 	}
 	if stats := transport.IKEStats(); stats.RequestsSent != 3 || stats.ResponseDatagrams != 9 {
 		t.Fatalf("transport evidence=%+v", stats)
+	}
+	stats := transport.IKEStats()
+	snapshot := vowifiipc.Snapshot{
+		SchemaVersion: vowifiipc.SchemaVersion, LineID: "line-1", ProviderID: "provider-1", ProcessGeneration: "generation-1", Sequence: 1, ObservedAt: time.Now(),
+		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeFailed, IKE: &vowifiipc.IKEExchangeEvidence{
+			RequestsSent: stats.RequestsSent, ResponseDatagrams: stats.ResponseDatagrams, ResponseTimeouts: stats.ResponseTimeouts}},
+		Tunnel: vowifiipc.LayerStatus{Condition: vowifiipc.LayerUnknown}, IMS: vowifiipc.LayerStatus{Condition: vowifiipc.LayerUnknown},
+		Voice: vowifiipc.LayerStatus{Condition: vowifiipc.LayerUnknown}, Messaging: vowifiipc.LayerStatus{Condition: vowifiipc.LayerUnknown},
+	}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatalf("real wire counters violate the public contract: %v", err)
 	}
 }
 

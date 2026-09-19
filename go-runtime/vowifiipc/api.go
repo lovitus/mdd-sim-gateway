@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net"
@@ -106,7 +105,7 @@ func (api *API) status(response http.ResponseWriter, request *http.Request) {
 	if err == nil {
 		err = snapshot.Validate()
 		if err != nil {
-			err = fmt.Errorf("invalid provider snapshot: %w", err)
+			err = &OperationError{Kind: ErrorFailed, Code: "invalid_provider_snapshot", Layer: "runtime", Detail: err.Error()}
 		}
 	}
 	writeResult(response, snapshot, err)

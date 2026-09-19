@@ -47,12 +47,15 @@ func TestLivenessRecoveryChainWithRealProviderProcess(t *testing.T) {
 	if binary == "" {
 		t.Skip("set MDD_LIVENESS_SIMULATOR to the Provider service test binary; scripts/test-liveness-chain.sh runs both modules")
 	}
-	for _, fault := range []string{"drop", "ims"} {
+	for _, fault := range []string{"drop", "ims", "counter_drop"} {
 		t.Run(fault, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
 			command := exec.CommandContext(ctx, binary, "-test.run=^TestLivenessSimulatorProcess$", "-test.timeout=25s")
 			command.Env = append(os.Environ(), "MDD_LIVENESS_SIMULATOR_CHILD=1")
+			if fault == "counter_drop" {
+				command.Env = append(command.Env, "MDD_LIVENESS_INCIDENT_COUNTERS=1")
+			}
 			command.Stderr = os.Stderr
 			output, err := command.StdoutPipe()
 			if err != nil {
@@ -115,7 +118,11 @@ func TestLivenessRecoveryChainWithRealProviderProcess(t *testing.T) {
 			if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {
 				t.Fatal(err)
 			}
-			send(fault)
+			injectedFault := fault
+			if fault == "counter_drop" {
+				injectedFault = "drop"
+			}
+			send(injectedFault)
 			deadline := time.Now().Add(3 * time.Second)
 			var degraded vowifiipc.Snapshot
 			for time.Now().Before(deadline) {
@@ -135,7 +142,7 @@ func TestLivenessRecoveryChainWithRealProviderProcess(t *testing.T) {
 			if health == nil {
 				t.Fatal("health observation missing")
 			}
-			if fault == "drop" && (!health.DPDDead || health.MissedDPDProbes != 3) {
+			if injectedFault == "drop" && (!health.DPDDead || health.MissedDPDProbes != 3) {
 				t.Fatalf("failure budget not exact: %+v", health)
 			}
 			if fault == "ims" && (health.DPDDead || health.IMSRegistered || health.IMSFailures == 0) {
