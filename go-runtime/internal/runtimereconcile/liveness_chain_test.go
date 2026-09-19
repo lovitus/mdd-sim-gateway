@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -18,9 +19,10 @@ import (
 const livenessTestToken = "liveness-simulator-loopback-token-32"
 
 type livenessHTTPRuntime struct {
-	client  *vowifiipc.Client
-	fence   mediaauth.ProviderFence
-	actions chan string
+	client     *vowifiipc.Client
+	fence      mediaauth.ProviderFence
+	actions    chan string
+	rejectStop atomic.Bool
 }
 
 func (r *livenessHTTPRuntime) Observe(ctx context.Context, _ string) (vowifiipc.Snapshot, mediaauth.ProviderFence, error) {
@@ -35,6 +37,10 @@ func (r *livenessHTTPRuntime) Start(ctx context.Context, _ string, _ mediaauth.P
 	return s, e
 }
 func (r *livenessHTTPRuntime) Stop(ctx context.Context, _ string, _ mediaauth.ProviderFence, q vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	if r.rejectStop.CompareAndSwap(true, false) {
+		return vowifiipc.OperationResult{}, &vowifiipc.ResponseError{Status: http.StatusConflict,
+			Failure: vowifiipc.OperationError{Kind: vowifiipc.ErrorConflict, Code: "operation_in_progress", Layer: "runtime"}}
+	}
 	s, e := r.client.Stop(ctx, q)
 	if e == nil {
 		r.actions <- "stop"
@@ -47,13 +53,13 @@ func TestLivenessRecoveryChainWithRealProviderProcess(t *testing.T) {
 	if binary == "" {
 		t.Skip("set MDD_LIVENESS_SIMULATOR to the Provider service test binary; scripts/test-liveness-chain.sh runs both modules")
 	}
-	for _, fault := range []string{"drop", "ims", "counter_drop"} {
+	for _, fault := range []string{"drop", "ims", "counter_drop", "counter_drop_busy"} {
 		t.Run(fault, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
 			command := exec.CommandContext(ctx, binary, "-test.run=^TestLivenessSimulatorProcess$", "-test.timeout=25s")
 			command.Env = append(os.Environ(), "MDD_LIVENESS_SIMULATOR_CHILD=1")
-			if fault == "counter_drop" {
+			if strings.HasPrefix(fault, "counter_drop") {
 				command.Env = append(command.Env, "MDD_LIVENESS_INCIDENT_COUNTERS=1")
 			}
 			command.Stderr = os.Stderr
@@ -110,6 +116,10 @@ func TestLivenessRecoveryChainWithRealProviderProcess(t *testing.T) {
 			}
 			real := &livenessHTTPRuntime{client: client, fence: fake.fence, actions: make(chan string, 8)}
 			reconciler.runtime = real
+			// Force a legitimate transient conflict to cover the same backoff that
+			// can occur when a normal REGISTER refresh wins admission to Stop.
+			real.rejectStop.Store(fault == "counter_drop_busy")
+			reconciler.logf = t.Logf
 			// Use the existing continuous-failure budget, but advance its injected clock.
 			reconciler.continuousRetry = func() (recovery.ContinuousRetry, error) { return recovery.ContinuousRetry{Max: 3, Interval: 5}, nil }
 			if _, err := client.Start(ctx, vowifiipc.LifecycleRequest{OperationID: "initial"}); err != nil {
@@ -119,7 +129,7 @@ func TestLivenessRecoveryChainWithRealProviderProcess(t *testing.T) {
 				t.Fatal(err)
 			}
 			injectedFault := fault
-			if fault == "counter_drop" {
+			if strings.HasPrefix(fault, "counter_drop") {
 				injectedFault = "drop"
 			}
 			send(injectedFault)
@@ -174,24 +184,49 @@ func TestLivenessRecoveryChainWithRealProviderProcess(t *testing.T) {
 			default:
 			}
 			clock.Advance(16 * time.Second)
-			agents.set(oneCard())
-			for tries := 0; tries < 30; tries++ {
-				if err = reconciler.reconcile(ctx); err != nil {
-					t.Fatal(err)
+			// The owner uses an injected clock, not time.Now. Real sleeping must
+			// not freeze a legitimate retry deadline after a transient busy response.
+			// Advance only to the owner's scheduled deadline; never remove its guards.
+			awaitAction := func(expected string) {
+				t.Helper()
+				deadline := time.Now().Add(3 * time.Second)
+				for time.Now().Before(deadline) {
+					select {
+					case action := <-real.actions:
+						if action != expected {
+							t.Fatalf("action=%s want=%s", action, expected)
+						}
+						return
+					default:
+					}
+					reconciler.mu.Lock()
+					line := reconciler.lines["line-1"]
+					next, inFlight := time.Time{}, false
+					if line != nil {
+						next, inFlight = line.next, line.inFlight
+						if expected == "start" && line.recoveryNext.After(next) {
+							next = line.recoveryNext
+						}
+					}
+					reconciler.mu.Unlock()
+					if !inFlight && next.After(clock.Now()) {
+						clock.Advance(next.Sub(clock.Now()))
+					}
+					// Keep Agent observations in the same injected time domain.
+					observations := oneCard()
+					observations[0].LastReport = clock.Now()
+					agents.set(observations)
+					if err := reconciler.reconcile(ctx); err != nil {
+						t.Fatal(err)
+					}
+					time.Sleep(5 * time.Millisecond)
 				}
-				if len(real.actions) > 0 {
-					break
-				}
-				time.Sleep(5 * time.Millisecond)
+				status, statusErr := client.Status(ctx)
+				t.Fatalf("recovery did not produce %s: status=%+v err=%v", expected, status, statusErr)
 			}
-			waitAction(t, real.actions, "stop")
+			awaitAction("stop")
 			waitIdle(t, reconciler, "line-1")
-			clock.Advance(10 * time.Second)
-			agents.set(oneCard())
-			if err = reconciler.reconcile(ctx); err != nil {
-				t.Fatal(err)
-			}
-			waitAction(t, real.actions, "start")
+			awaitAction("start")
 			waitIdle(t, reconciler, "line-1")
 			current, err := client.Status(ctx)
 			if err != nil {
