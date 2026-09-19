@@ -12,7 +12,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: liveness-review-${{ github.ref }}
+  # A reusable invocation inherits its caller's workflow name. Keep it
+  # separate from the standalone PR run and from the caller's own group.
+  group: liveness-review-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   recovery:

@@ -602,6 +602,10 @@ func (s *IMSInboundWireServer) handleInvite(ctx context.Context, req voiceclient
 	provisionals := []IMSInboundWireResponse{}
 	final, err := s.handleInviteFinal(ctx, req, func(result InboundCallResult) error {
 		provisional := s.inviteResultResponse(result, 180, "Ringing")
+		// Publish PRACK admission before making the provisional externally
+		// observable, including through the cached INVITE response. A fast
+		// peer may acknowledge it before the emitter has returned.
+		s.trackReliableProvisional(req, provisional)
 		if key != "" {
 			pendingResponses = append(pendingResponses, provisional)
 			s.storeTransactionForRequest(req, key, pendingResponses)
@@ -610,11 +614,9 @@ func (s *IMSInboundWireServer) handleInvite(ctx context.Context, req voiceclient
 			if err := emit(provisional); err != nil {
 				return err
 			}
-			s.trackReliableProvisional(req, provisional)
 			return nil
 		}
 		provisionals = append(provisionals, provisional)
-		s.trackReliableProvisional(req, provisional)
 		return nil
 	})
 	responses = append(responses, provisionals...)
