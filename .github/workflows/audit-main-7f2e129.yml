@@ -1,0 +1,92 @@
+name: Audit main status and recovery
+on:
+  push:
+    branches: ['codex/review-main-7f2e129']
+    paths: ['.github/workflows/audit-main-7f2e129.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 7f2e129a773fd1c43ea4d70d38e19d0a39ba4efa
+          path: verified
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 1aed2bbe55ecf36e10f7a1c8f10bb039ba6a4b12
+          path: before-counter-fix
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: verified/providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            verified/go-runtime/go.sum
+            verified/providers/vowifi-go/go.sum
+            verified/providers/vowifi-go/upstream/vowifi-go/go.sum
+      - name: Native dependencies
+        run: |
+          set -euo pipefail
+          source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$source"; then
+            sudo mv "$source" "$source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libopencore-amrnb-dev libpcsclite-dev pkg-config
+      - name: Record exact source identity
+        run: |
+          mkdir -p evidence
+          git -C verified rev-parse HEAD HEAD^{tree} > evidence/tested-source.txt
+          git -C before-counter-fix rev-parse HEAD > evidence/pre-fix-source.txt
+          go version > evidence/go-version.txt
+      - name: Prove the status failure on pre-fix source
+        run: |
+          set -euo pipefail
+          cp verified/go-runtime/vowifiipc/api_test.go before-counter-fix/go-runtime/vowifiipc/api_test.go
+          set +e
+          go -C before-counter-fix/go-runtime test -json -count=1 -run '^TestIKECandidateDatagramsCannotDisableStatusOrRecovery$' ./vowifiipc > evidence/counter-negative.jsonl 2>&1
+          status=$?
+          set -e
+          test "$status" -eq 1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          events=[]
+          for line in Path('evidence/counter-negative.jsonl').read_text().splitlines():
+              if line.startswith('go: downloading '): continue
+              events.append(json.loads(line))
+          output=''.join(e.get('Output','') for e in events)
+          name='TestIKECandidateDatagramsCannotDisableStatusOrRecovery'
+          assert any(e.get('Test')==name and e.get('Action')=='fail' for e in events)
+          assert 'real counterexample made status unavailable' in output, output
+          assert '500' in output, output
+          assert not any(x in output for x in ['build failed','panic:','DATA RACE']), output
+          assert all(e.get('Test')==name for e in events if e.get('Action')=='fail' and e.get('Test'))
+          print('CONFIRMED: intended HTTP 500 on the exact pre-fix source')
+          PY
+      - name: Repeat status and wire-counter regression tests
+        run: |
+          set -euo pipefail
+          go -C verified/go-runtime test -json -race -count=50 -timeout 3m -run '^Test(IKECandidateDatagramsCannotDisableStatusOrRecovery|ClientRejectsProviderSnapshotThatCannotBeAuthoritative|SnapshotFactsAreDurableAndAppendOnlyOnChange)$' ./vowifiipc ./providerfacts | tee evidence/status-positive.jsonl
+          go -C verified/providers/vowifi-go test -json -race -count=50 -timeout 3m -run '^TestPersistentExchangeIgnoresLateAndUnrelatedIKE$' ./internal/outerudp | tee evidence/wire-positive.jsonl
+      - name: Repeat complete recovery chain ten times
+        run: |
+          set -euo pipefail
+          go -C verified/providers/vowifi-go test -c -race -o "$RUNNER_TEMP/provider-audit.test" ./internal/service
+          MDD_LIVENESS_SIMULATOR="$RUNNER_TEMP/provider-audit.test" go -C verified/go-runtime test -json -race -count=10 -timeout 3m -run '^TestLivenessRecoveryChainWithRealProviderProcess$' ./internal/runtimereconcile | tee evidence/chain-stress.jsonl
+      - name: Recheck previously intermittent PRACK test
+        run: |
+          set -euo pipefail
+          GOWORK=off go -C verified/providers/vowifi-go/upstream/vowifi-go test -json -race -count=50 -timeout 3m -run '^TestIMSInboundWireServerRoutesPrackAfterReliableProvisional$' ./runtimehost/voicehost | tee evidence/prack-stress.jsonl
+      - name: Confirm audited source was not modified
+        run: git -C verified diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: audit-main-7f2e129-evidence
+          path: evidence/
+          retention-days: 7
