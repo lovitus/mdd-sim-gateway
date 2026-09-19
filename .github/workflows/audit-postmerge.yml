@@ -1,0 +1,110 @@
+name: Prove post-merge findings and test fixes
+on:
+  push:
+    branches: ['codex/review-postmerge-7f2e129']
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 7f2e129a773fd1c43ea4d70d38e19d0a39ba4efa
+          path: baseline
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: baseline/providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            baseline/go-runtime/go.sum
+            baseline/providers/vowifi-go/go.sum
+            baseline/providers/vowifi-go/upstream/vowifi-go/go.sum
+      - name: Native test dependencies
+        run: |
+          source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$source"; then sudo mv "$source" "$source.disabled"; fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pkg-config xorg-dev
+      - name: Prepare tests without fixes
+        run: |
+          mkdir -p evidence
+          git -C baseline rev-parse HEAD HEAD^{tree} > evidence/baseline-source.txt
+          git -C baseline apply "$GITHUB_WORKSPACE/harness/audit/probes.patch"
+          cp -a baseline candidate
+          go -C baseline/providers/vowifi-go test -c -race -o "$RUNNER_TEMP/provider-audit.test" ./internal/service
+      - name: Prove exact counterexamples
+        run: |
+          set +e
+          GOWORK=off go -C baseline/providers/vowifi-go/upstream/vowifi-go test -json -race -count=1 -timeout 1m -run '^TestPRACKAdmissionBeforeProvisionalEmissionReturns$' ./runtimehost/voicehost > evidence/prack-negative.jsonl 2>&1
+          prack_status=$?
+          MDD_LIVENESS_SIMULATOR="$RUNNER_TEMP/provider-audit.test" go -C baseline/go-runtime test -json -race -count=1 -timeout 1m -run '^TestLivenessRecoveryChainWithRealProviderProcess$/^counter_drop_busy$' ./internal/runtimereconcile > evidence/clock-negative.jsonl 2>&1
+          clock_status=$?
+          set -e
+          test "$prack_status" -eq 1 && test "$clock_status" -eq 1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path,name,diagnostics in [
+            ('prack-negative.jsonl','TestPRACKAdmissionBeforeProvisionalEmissionReturns',['PRACK raced provisional publication','StatusCode:481']),
+            ('clock-negative.jsonl','TestLivenessRecoveryChainWithRealProviderProcess/counter_drop_busy',['timed out waiting for stop','HTTP 409'])]:
+            events=[]
+            for line in Path('evidence',path).read_text().splitlines():
+              if line.startswith('go: downloading '): continue
+              events.append(json.loads(line))
+            output=''.join(e.get('Output','') for e in events)
+            assert any(e.get('Test')==name and e.get('Action')=='fail' for e in events),output
+            assert all(d in output for d in diagnostics),output
+            assert not any(d in output for d in ['DATA RACE','panic:','build failed']),output
+            print('CONFIRMED',name)
+          PY
+      - name: Apply small fixes and check formatting
+        run: |
+          git -C candidate apply "$GITHUB_WORKSPACE/harness/audit/fixes.patch"
+          git -C candidate diff --check
+          test -z "$(gofmt -l candidate/go-runtime/internal/runtimereconcile/liveness_chain_test.go candidate/providers/vowifi-go/upstream/vowifi-go/runtimehost/voicehost/ims_inbound_wire.go candidate/providers/vowifi-go/upstream/vowifi-go/runtimehost/voicehost/prack_admission_test.go)"
+      - name: Repeat PRACK interleavings and historical flaky test
+        run: |
+          set -o pipefail
+          GOWORK=off go -C candidate/providers/vowifi-go/upstream/vowifi-go test -json -race -count=100 -timeout 3m -run '^Test(PRACKAdmissionBeforeProvisionalEmissionReturns|IMSInboundWireServerRoutesPrackAfterReliableProvisional)$' ./runtimehost/voicehost | tee evidence/prack-positive.jsonl
+      - name: Repeat all four full recovery chains
+        run: |
+          set -o pipefail
+          MDD_LIVENESS_SIMULATOR="$RUNNER_TEMP/provider-audit.test" go -C candidate/go-runtime test -json -race -count=20 -timeout 5m -run '^TestLivenessRecoveryChainWithRealProviderProcess$' ./internal/runtimereconcile | tee evidence/chains-positive.jsonl
+      - name: Full suites and ownership boundary tests
+        run: |
+          set -o pipefail
+          go -C candidate/go-runtime test -json -count=1 -timeout 3m ./... | tee evidence/core-positive.jsonl
+          go -C candidate/go-runtime test -json -race -count=1 -timeout 3m ./internal/runtimereconcile ./vowifiipc ./providerfacts | tee evidence/boundaries-positive.jsonl
+          go -C candidate/providers/vowifi-go test -json -race -count=1 -timeout 3m ./... | tee evidence/provider-positive.jsonl
+          GOWORK=off go -C candidate/providers/vowifi-go/upstream/vowifi-go test -json -race -count=1 -timeout 3m ./engine/swu/... ./runtimehost/... | tee evidence/upstream-positive.jsonl
+          go -C candidate/go-runtime vet ./internal/runtimereconcile ./vowifiipc ./providerfacts
+          GOWORK=off go -C candidate/providers/vowifi-go/upstream/vowifi-go vet ./engine/swu/... ./runtimehost/...
+      - name: Publish only the tested three-file fix branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C candidate add go-runtime/internal/runtimereconcile/liveness_chain_test.go providers/vowifi-go/upstream/vowifi-go/runtimehost/voicehost/ims_inbound_wire.go providers/vowifi-go/upstream/vowifi-go/runtimehost/voicehost/prack_admission_test.go
+          test "$(git -C candidate diff --cached --name-only | wc -l)" -eq 3
+          git -C candidate diff --cached --check
+          git -C candidate diff --cached > evidence/tested-fix.patch
+          git -C candidate commit -m 'fix: publish reliable provisional ownership before PRACK can arrive' -m 'Add deterministic pre-emission PRACK coverage. Advance the recovery simulator clock to owner retry deadlines, and cover one transient stop conflict without weakening production backoff or call guards.'
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/candidate-source.txt
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-prack-fix-7f2e129
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: postmerge-proof-and-fix-evidence
+          path: evidence/
+          retention-days: 7

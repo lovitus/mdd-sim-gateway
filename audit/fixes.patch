@@ -1,0 +1,96 @@
+diff --git a/go-runtime/internal/runtimereconcile/liveness_chain_test.go b/go-runtime/internal/runtimereconcile/liveness_chain_test.go
+index cb16845..843ed3c 100644
+--- a/go-runtime/internal/runtimereconcile/liveness_chain_test.go
++++ b/go-runtime/internal/runtimereconcile/liveness_chain_test.go
+@@ -184,24 +184,49 @@ func TestLivenessRecoveryChainWithRealProviderProcess(t *testing.T) {
+ 			default:
+ 			}
+ 			clock.Advance(16 * time.Second)
+-			agents.set(oneCard())
+-			for tries := 0; tries < 30; tries++ {
+-				if err = reconciler.reconcile(ctx); err != nil {
+-					t.Fatal(err)
+-				}
+-				if len(real.actions) > 0 {
+-					break
++			// The owner uses an injected clock, not time.Now. Real sleeping must
++			// not freeze a legitimate retry deadline after a transient busy response.
++			// Advance only to the owner's scheduled deadline; never remove its guards.
++			awaitAction := func(expected string) {
++				t.Helper()
++				deadline := time.Now().Add(3 * time.Second)
++				for time.Now().Before(deadline) {
++					select {
++					case action := <-real.actions:
++						if action != expected {
++							t.Fatalf("action=%s want=%s", action, expected)
++						}
++						return
++					default:
++					}
++					reconciler.mu.Lock()
++					line := reconciler.lines["line-1"]
++					next, inFlight := time.Time{}, false
++					if line != nil {
++						next, inFlight = line.next, line.inFlight
++						if expected == "start" && line.recoveryNext.After(next) {
++							next = line.recoveryNext
++						}
++					}
++					reconciler.mu.Unlock()
++					if !inFlight && next.After(clock.Now()) {
++						clock.Advance(next.Sub(clock.Now()))
++					}
++					// Keep Agent observations in the same injected time domain.
++					observations := oneCard()
++					observations[0].LastReport = clock.Now()
++					agents.set(observations)
++					if err := reconciler.reconcile(ctx); err != nil {
++						t.Fatal(err)
++					}
++					time.Sleep(5 * time.Millisecond)
+ 				}
+-				time.Sleep(5 * time.Millisecond)
++				status, statusErr := client.Status(ctx)
++				t.Fatalf("recovery did not produce %s: status=%+v err=%v", expected, status, statusErr)
+ 			}
+-			waitAction(t, real.actions, "stop")
++			awaitAction("stop")
+ 			waitIdle(t, reconciler, "line-1")
+-			clock.Advance(10 * time.Second)
+-			agents.set(oneCard())
+-			if err = reconciler.reconcile(ctx); err != nil {
+-				t.Fatal(err)
+-			}
+-			waitAction(t, real.actions, "start")
++			awaitAction("start")
+ 			waitIdle(t, reconciler, "line-1")
+ 			current, err := client.Status(ctx)
+ 			if err != nil {
+diff --git a/providers/vowifi-go/upstream/vowifi-go/runtimehost/voicehost/ims_inbound_wire.go b/providers/vowifi-go/upstream/vowifi-go/runtimehost/voicehost/ims_inbound_wire.go
+index a66bdb1..e7a7c1e 100644
+--- a/providers/vowifi-go/upstream/vowifi-go/runtimehost/voicehost/ims_inbound_wire.go
++++ b/providers/vowifi-go/upstream/vowifi-go/runtimehost/voicehost/ims_inbound_wire.go
+@@ -602,6 +602,10 @@ func (s *IMSInboundWireServer) handleInvite(ctx context.Context, req voiceclient
+ 	provisionals := []IMSInboundWireResponse{}
+ 	final, err := s.handleInviteFinal(ctx, req, func(result InboundCallResult) error {
+ 		provisional := s.inviteResultResponse(result, 180, "Ringing")
++		// Publish PRACK admission before making the provisional externally
++		// observable, including through the cached INVITE response. A fast
++		// peer may acknowledge it before the emitter has returned.
++		s.trackReliableProvisional(req, provisional)
+ 		if key != "" {
+ 			pendingResponses = append(pendingResponses, provisional)
+ 			s.storeTransactionForRequest(req, key, pendingResponses)
+@@ -610,11 +614,9 @@ func (s *IMSInboundWireServer) handleInvite(ctx context.Context, req voiceclient
+ 			if err := emit(provisional); err != nil {
+ 				return err
+ 			}
+-			s.trackReliableProvisional(req, provisional)
+ 			return nil
+ 		}
+ 		provisionals = append(provisionals, provisional)
+-		s.trackReliableProvisional(req, provisional)
+ 		return nil
+ 	})
+ 	responses = append(responses, provisionals...)
