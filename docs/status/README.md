@@ -41,19 +41,19 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ### Implementation
 
-- implemented: 31
+- implemented: 32
 - needs_verification: 7
-- partial: 14
+- partial: 13
 - policy: 5
 - superseded: 6
 
 ### Acceptance / evidence
 
 - covered_by_tests: 18
-- evidence_review_pending: 18
+- evidence_review_pending: 19
 - not_applicable: 11
 - pending_hardware: 13
-- pending_product: 3
+- pending_product: 2
 
 ## Current open work
 
@@ -783,11 +783,11 @@ Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-ru
 
 ### M51
 
-**Implementation: partial; acceptance/evidence: pending_product.**
+**Implementation: implemented; acceptance/evidence: evidence_review_pending.**
 
 Preserved original ([TODO.md:322](../../docs/archive/2026-09-20/TODO.md#L322)): 有音频能力的 Modem 完成浏览器双向语音、静音和录音验证：呼出双向语音已通过，来电、       静音和录音仍待人工验收。
 
-Previously reported outgoing audio is retained. Recording is genuinely unimplemented; actual incoming audio and mute are scoped evidence gaps. A mixed criterion must not erase its already reported subcases. Browser-local opt-in recording is now implemented; no new call, mute, or recording hardware acceptance is claimed.
+Browser voice, local mute and opt-in recording code paths are implemented. Preserve previously reported outgoing audio; reconcile that evidence and qualify only the uncovered incoming audio, mute and recording subcases. This code change claims no new hardware acceptance.
 
 Existing reports: [H-CALL-PARTIAL](#h-call-partial).
 
