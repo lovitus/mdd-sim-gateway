@@ -129,5 +129,5 @@ Agent 离线或 generation 变化时，Core 保持 unknown/blocked，不回退�
 - Android：当前没有受支持客户端。未来实现必须使用统一 Agent 高层协议和每设备凭据，不能恢复旧 VPCD
   raw APDU 或共享 token 设计。
 
-真实平台、设备、SIM、运营商和功能验收以 `TODO_CURRENT_RECOVERY.md` 顶部唯一游标为准；历史文档、旧
-artifact、capability 字符串和进程存在均不能扩大支持声明。
+实现与真实平台／设备／运营商验收分别记录在 [版本化台账](../docs/status/README.md)。历史私有报告、旧
+artifact、capability 字符串和进程存在均不能扩大支持声明；无可审计证据时保留待验收。

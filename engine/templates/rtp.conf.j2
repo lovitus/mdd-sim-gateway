@@ -1,9 +1,0 @@
-[general]
-rtpstart={{ rtp_start }}
-rtpend={{ rtp_end }}
-{% if webrtc_enable %}
-; WebRTC needs ICE (an RTP-level feature — lives here, not in pjsip.conf).  The Engine advertises
-; its exact container address here; Control's authenticated SIP/WSS bridge rewrites only the
-; host candidate in each browser session to that session's confirmed host ingress route.
-icesupport=yes
-{% endif %}

@@ -18,6 +18,12 @@ on:
       - 'README.md'
       - 'DEPLOYMENT.md'
       - 'GO_REWRITE.md'
+      - 'DEVELOPMENT.md'
+      - 'AGENTS.md'
+      - 'TODO*.md'
+      - 'postponed-tasks.md'
+      - 'docs/**'
+      - 'tools/**'
       - 'LICENSE'
       - 'NOTICE'
       - 'THIRD_PARTY_LICENSES.md'
@@ -37,6 +43,12 @@ on:
       - 'README.md'
       - 'DEPLOYMENT.md'
       - 'GO_REWRITE.md'
+      - 'DEVELOPMENT.md'
+      - 'AGENTS.md'
+      - 'TODO*.md'
+      - 'postponed-tasks.md'
+      - 'docs/**'
+      - 'tools/**'
       - 'LICENSE'
       - 'NOTICE'
       - 'THIRD_PARTY_LICENSES.md'
@@ -109,12 +121,27 @@ jobs:
           cache-dependency-path: webui/package-lock.json
           package-manager-cache: false
 
+      - name: Verify versioned acceptance and repository contracts
+        run: |
+          node tools/repository-check.mjs
+          node tools/repository-check.test.mjs
+
       - name: Rebuild and verify embedded React WebUI
         working-directory: webui
         run: |
           npm ci
           npm run test:all
           MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+
+      - name: Check out exact third-party review baseline
+        uses: actions/checkout@v7
+        with:
+          ref: 3e6d5db7657e468eedc0c31316bb97c04b2b599b
+          path: review-hygiene-baseline
+          persist-credentials: false
+
+      - name: Prove orphan graph and language-context counterexample
+        run: node tools/verify-thirdparty-baseline.mjs "$GITHUB_WORKSPACE/review-hygiene-baseline"
 
       - name: Retain deterministic WebUI build for provenance
         if: always()
@@ -147,6 +174,10 @@ jobs:
       - name: Test Core runtime
         working-directory: go-runtime
         run: go test -timeout 2m ./...
+
+      - name: Race-test entire Linux Core module
+        working-directory: go-runtime
+        run: go test -race -count=1 -timeout 5m ./...
 
       - name: Test exact-modem audio helper
         run: GOWORK=off go -C agent/call-audio-helper test -race ./...

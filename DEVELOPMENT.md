@@ -1,45 +1,95 @@
-# 开发、构建与部署规范
+# Development and reproducible validation
 
-本文件约束本项目的本地调试、发布制品和远端部署。目标是让“源码、镜像、运行实例、验证证据”
-可以相互核对，并避免把一次性文件或私人数据污染到项目中。
+Current product scope and acceptance are versioned in [docs/status/README.md](docs/status/README.md).
+Local notes, a green build, historical screenshots and a running PID are not production acceptance.
+The supported build/install surfaces are Go binaries plus the embedded React UI and manifest-listed native helpers.
+Docker, Python Control, VPCD and Asterisk are retired; they are not local development prerequisites.
 
-## 临时文件与证据
+## Toolchain and native dependencies
 
-- 截图、抓包、浏览器导出、诊断日志、测试数据库和一次性脚本不得写入项目目录。
-- macOS 上的本地临时根必须位于外置盘，例如
-  `/Volumes/micron512g/tmp-project/codex-audit-tmp/<task>`；长任务同时设置任务独立的 `TMPDIR`
-  和 `GOTMPDIR`。禁止用系统 `/tmp` 或 `/var/folders/.../T` 承载大型构建或审计。
-- 可再生的依赖与编译缓存不得放入任务目录。本机通过 `MDD_SHARED_CACHE_ROOT`
-  指定外置盘上的稳定共享缓存根；Go 使用其下的 `go-build` 和 `go-mod`，pip、
-  npm 与 Gradle 使用各自的共享子目录。未设置该变量时，使用包管理器原生的
-  用户级共享缓存，不回退到 `<task>/go-cache` 之类的一次性缓存。
-- 项目只保留产品资产，例如 `agent/assets/mdd-agent.png`。临时证据不得因为“已被 gitignore”而留在
-  工作区；任务结束时按自己的清单回收，不能清理宽泛目录或他人文件。
-- 凭据只允许保存在受权限保护的产品配置、环境变量或当前会话；不得写入源码、命令示例、测试
-  fixture、构建日志或发布包。
+Read the exact Go language/toolchain requirements from `providers/vowifi-go/go.mod`, `go-runtime/go.mod`
+and each nested module. Current CI uses Go 1.26.x and Node 24. Run `npm ci`, not an unconstrained dependency upgrade.
 
-## 依赖与构建
+For Debian/Ubuntu development of the full Core/Agent GUI, audio helper and VoWiFi Provider:
 
-- 已有受信任 Release 二进制或镜像时优先直接下载、校验并使用，禁止为了调试重复进行复杂本地编译。
-- 必须从源码构建时，先记录不可使用现成制品的原因，并使用独立构建根；不得污染系统级语言缓存。
-- 不把一次手工调试命令当作实现。可复用的自检、修复和迁移必须进入对应模块，并有有界重试、
-  明确失败状态和回归测试。
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libpcsclite-dev libasound2-dev \
+  libgl1-mesa-dev xorg-dev libopencore-amrnb-dev
+pkg-config --exists libpcsclite alsa opencore-amrnb
+```
 
-## 镜像一致性与迁移
+`opencore-amrnb` is a cgo link dependency of the Provider media packages, not merely an optional test.
+PC/SC and ALSA belong to the native Agent/audio boundary; a source build needs their development headers,
+while a customer should use the reviewed release's declared runtime requirements instead.
+A missing pkg-config library is an environment/build failure, not a passing or skipped Provider suite.
 
-- Control 部署后必须核对容器内关键文件 SHA-256 与当前 checkout；WebUI 同时核对构建产物。
-- Engine 镜像必须带 `io.mdd-sim-gateway.base-fp` 和 `io.mdd-sim-gateway.runtime-fp`。两者与当前
-  checkout 完全一致时才允许复用；任一变化都从正式 Dockerfile 构建新镜像。禁止以 overlay、
-  容器 commit 或复制文件进容器的方式制作生产镜像，旧镜像只按不可变 digest 保留用于回滚。
-- Git commit 时间不能证明镜像是否包含某个补丁；必须检查镜像内源码/文件哈希、镜像 label 和运行
-  容器实际 image ID。
-- 部署顺序采用兼容的滚动升级：先升级支持新协议的服务端，再升级 Agent，最后观测至少两个服务端
-  WebSocket keepalive 周期。任何 `delayed/offline` 抖动都不能作为通过。
+On macOS, install Xcode Command Line Tools and, for local Provider media tests, the explicit Homebrew dependencies:
 
-## 验证和交付
+```bash
+brew install pkg-config opencore-amr
+export PKG_CONFIG_PATH="$(brew --prefix opencore-amr)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+pkg-config --exists opencore-amrnb
+```
 
-- 修改前先写明不变量和失败边界；付费通话、网络隔离、卡片写操作必须经过独立安全评审。
-- 最小门禁包括相关单元测试、全量测试、前端专项测试与 production build、`git diff --check`，并按风险
-  补实机状态转换。短信和通话等收费操作只有用户明确授权时才能做，次数有界并立即清理。
-- 交付说明必须区分“代码测试通过”“已部署”“实机数据面通过”和“仍待人工授权/运营商验证”，不能
-  用页面状态代替端到端证据。
+PC/SC/CoreAudio use the platform frameworks. Do not install Linux ALSA packages on macOS or infer that
+successful Darwin builds qualify experimental Modem functionality. The cellular companion's libusb/lwIP
+versions and hashes are pinned in [agent/cellular-io/THIRD_PARTY.md](agent/cellular-io/THIRD_PARTY.md).
+Windows build/install/driver and signing details are exercised in `.github/workflows/go-runtime.yml`;
+a Linux race run cannot replace those Windows-native tests.
+
+## Isolated test commands
+
+From a clean checkout with the above toolchain:
+
+```bash
+node tools/repository-check.mjs
+node tools/repository-check.test.mjs
+(cd webui && npm ci && npm run test:all && MDD_KEEP_EMBED_SOURCE=1 npm run build:go)
+git diff --exit-code -- go-runtime/internal/webui/assets
+go -C go-runtime test -count=1 -timeout 5m ./...
+go -C go-runtime test -race -count=1 -timeout 5m ./...
+go -C go-runtime vet ./...
+go -C providers/vowifi-go test -race -count=1 -timeout 5m ./...
+go -C providers/vowifi-go vet ./...
+GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go test -race -count=1 -timeout 5m ./engine/swu/... ./runtimehost/...
+GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go vet ./engine/swu/... ./runtimehost/...
+GOWORK=off go -C agent/call-audio-helper test -race -count=1 ./...
+bash go-runtime/scripts/test-liveness-chain.sh
+git diff --check
+```
+
+Go's parent-module `./...` does not select the separately rooted upstream module's own tests; test it explicitly.
+The liveness script uses a separate Provider fixture and loopback-only peers; it does not contact a carrier.
+Tests requiring actual systemd, pinned Xray or real devices are opt-in. Record their skip reasons separately;
+release installation and Xray CI jobs can provide independent acceptance, but a module skip is not a pass.
+Do not run paid SMS/calls, eSIM mutations or disruptive hardware tests without specific authorization.
+
+`npm run test:source-graph` parses the production import graph and rejects orphaned runtime modules and
+contract tests importing them. Literal worklet/dynamic imports are included; unsupported dynamic loaders fail closed.
+`test:shared-i18n` renders the actual mounted React language context used by global call controls.
+Use `node tools/repository-check.mjs --write` to regenerate TODO summaries after editing the acceptance ledger;
+CI checks the generated files, original-criterion preservation and evidence-path integrity.
+
+## Source, artifact and running-instance identity
+
+Prefer verified immutable releases when a source rebuild is unnecessary. For a rebuild, record the reviewed commit,
+source tree, toolchain, commands, test evidence and artifact SHA-256. Release manifests and exact Provider source/license
+archives remain mandatory. Do not create a production artifact by copying edited files into a running installation.
+Verify the installed receipt, release manifest and executable revision on the actual host; commit time and process-active
+status alone do not prove which version is running. `install`, `start` and explicit `restart` remain distinct operations.
+
+For coordinated rollout, preserve protocol compatibility, exact Agent credentials/pins, desired line intent and ownership.
+After an authorized rollout, observe actual control and runtime facts; do not equate a configuration write or HTTP success
+with working audio/data or confirmed carrier termination.
+
+## Temporary evidence and safety
+
+Keep captures, screenshots, private receipts, credentials and test databases outside the checkout. On machines configured
+with an external-volume task root, respect that choice and set task-local TMPDIR/GOTMPDIR there; use stable shared caches
+through MDD_SHARED_CACHE_ROOT or package-manager defaults, not an unbounded new cache per task. Remove only files listed
+in the task's own inventory. Never clean broad directories, unknown sockets or other agents' processes by name.
+
+Public evidence must be redacted and bounded. Credentials belong in owner-only product configuration or stdin, never source,
+argv examples, logs or bundles. Separate the claims: source verified, automated tests passed, artifact built, installed on a
+named authorized host, and real data-plane acceptance. New evidence updates the tracked ledger, not a hidden progress file.

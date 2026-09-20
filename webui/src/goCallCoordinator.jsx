@@ -3,7 +3,7 @@ import { api } from './api.js'
 import { getCallAudioBufferMS } from './browserPreferences.js'
 import { CallMedia, normalizeDialTarget } from './goCallMedia.js'
 import { operationID } from './goV1Adapter.js'
-import { useI18n } from './i18n.jsx'
+import { useI18n } from './mdd/i18n.jsx'
 import { runCallStabilityTest } from './mdd/callStability.js'
 
 function observeTestCall(call,type,cause='') {

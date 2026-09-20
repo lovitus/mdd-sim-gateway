@@ -46,8 +46,9 @@ serialized policy reconciler and its backoff, preserving call/borrow ownership.
 | Diagnostics | Actual page refresh, filtered log download and advanced read-only report export were recorded. | Synthetic and failure fixtures are not presented as production fault injection. |
 | Additional Linux acceptance | Same-host discovery, relayed WSS, disconnect/Agent-stop isolation and the authorized corrected cold boot passed with zero observed WWAN bytes. Temporary samplers were removed. | Relayed WSS is not a second physical Linux host; this does not certify every native voice/data path. |
 
-Exact private receipts and deployment hashes are referenced in the existing
-`TODO_CURRENT_RECOVERY.md`; no secrets or raw evidence are copied here. The
+The table above preserves historical maintainer-reported evidence, not a fresh independent field acceptance.
+Current scope and missing public evidence are tracked in [the acceptance ledger](../../../docs/status/README.md);
+no secrets or raw receipts are copied into source. The
 current frontend goal is distinct from the broader Go/platform project and its
 existing postponed work. Balance/allowance, CN-SIM VoWiFi and automatic audio
 quality testing remain excluded as explicitly requested by the user.
@@ -97,9 +98,9 @@ the active `../api.js`. A matching name is not assumed to mean matching fields.
 
 The 2026-09-10 mounted-import review followed 43 relative modules from `mdd/App`
 and found no unresolved names among 122 `api` member references. This is only a
-name-level check, not behavioral parity evidence. The copied legacy
-`mdd/callCoordinator.jsx` and `mdd/browserMedia.js` are not mounted; their retired
-API names must not trigger restoration of a second call owner. The disabled old
+name-level check, not behavioral parity evidence. The duplicate unmounted call/media owners and legacy V1 shell were removed in the September 20 review.
+`src/api.js` remains live through the Go adapter. The AST import graph now enforces production reachability;
+restoring a second owner or testing a retired runtime module is not an accepted migration strategy. The disabled old
 eSIM Replay placeholder likewise must not be enabled: current deletion replay
 uses `DeletionNotifications` and its confirmed retained-archive contract.
 

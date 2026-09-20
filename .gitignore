@@ -46,6 +46,6 @@ screenshot-*
 screenshots/
 debug-artifacts/
 
-# Per-machine recovery cursor and assistant instructions are not product source.
+# Private machine-local notes are excluded; authoritative acceptance is docs/status/acceptance.json.
 /TODO_CURRENT_RECOVERY.md
 /Claude.md
