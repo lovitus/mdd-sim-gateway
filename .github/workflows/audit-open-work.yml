@@ -1,0 +1,96 @@
+name: Validate remaining-work implementation before publication
+on:
+  push:
+    branches: ['codex/audit-open-work-08de1fb']
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 08de1fb3e1d157f7f82ee5568bd98f5e57735f30
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: candidate/providers/vowifi-go/go.mod
+          cache-dependency-path: candidate/go-runtime/go.sum
+      - name: Apply exact reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/baseline.txt
+          cat harness/audit/open-work/part-*.b64 | base64 -d | xz -d > "$RUNNER_TEMP/open-work.patch"
+          echo "f699557ba3f6273e0a4840072c26717833ccc26a56b2280c383ef5a126d37bfa  $RUNNER_TEMP/open-work.patch" | sha256sum --check
+          git -C candidate apply --check "$RUNNER_TEMP/open-work.patch"
+          git -C candidate apply "$RUNNER_TEMP/open-work.patch"
+          mapfile -t files < harness/audit/open-work/files.txt
+          git -C candidate add -- "${files[@]}"
+          test "$(git -C candidate write-tree)" = 1a15cce7d3a0119098671675dc026e2a1178011d
+          git -C candidate diff --cached --check
+      - name: Repository, recording and actual installer function contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node candidate/tools/repository-check.mjs | tee evidence/ledger.log
+          node candidate/tools/repository-check.test.mjs | tee evidence/ledger-tests.log
+          node candidate/tools/installer-waits.test.mjs | tee evidence/installer-tests.log
+          node candidate/webui/tests/callRecording.mjs | tee evidence/recording-unit.log
+          bash -n candidate/go-runtime/release/install-macos-agent.sh
+      - name: Build and test mounted WebUI
+        working-directory: candidate/webui
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run test:all | tee ../../evidence/webui-tests.log
+          npm run test:recording-browser | tee ../../evidence/recording-browser.log
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go | tee ../../evidence/webui-build.log
+      - name: Test typed topology diagnostics under race detector
+        shell: bash
+        run: |
+          set -euo pipefail
+          go -C candidate/go-runtime test -json -race -count=1 -timeout 3m ./agentlink ./internal/agentcontrol | tee evidence/topology-race.jsonl
+          go -C candidate/go-runtime vet ./agentlink ./internal/agentcontrol
+      - name: Publish only validated source and rebuilt embedded assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Store the reviewed normal-workflow blob; the authorized connector
+          # attaches it separately, without a workflow write through this token.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" -f encoding=utf-8 -F content=@candidate/.github/workflows/go-runtime.yml --jq .sha > evidence/workflow-blob.txt
+          git -C candidate reset -- .github/workflows/go-runtime.yml
+          git -C candidate add -A -- go-runtime/internal/webui/assets
+          git -C candidate diff --cached --name-only > evidence/published-files.txt
+          git -C candidate diff --cached --check
+          git -C candidate diff --cached --binary > evidence/tested-source.patch
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C candidate commit -m 'feat: add consented local call recording and exact installer ownership' -m 'Use the mounted audio owner, bounded memory, explicit save and disconnect cleanup. Wait for exact service/LaunchAgent ownership and protect rollback. Add value-free topology field diagnostics; retain deferred product scope and historical evidence.'
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/source.txt
+          git -C candidate ls-files -s > evidence/source-manifest.txt
+          git -C candidate archive --format=tar.gz HEAD > evidence/source.tar.gz
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-open-work
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: open-work-implementation-proof
+          path: evidence/
+          retention-days: 7
