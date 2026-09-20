@@ -26,7 +26,7 @@ function fixture(options = {}) {
     Recorder: Encoder, now: () => clock, onChange: x => changes.push(x),
     setTimer: (fn, delay) => { const key = ++id; timers.set(key, { fn, delay }); return key },
     clearTimer: key => timers.delete(key), ...options })
-  return { owned, mic, remote, context, graph, edges, disconnected, timers, changes,
+  return { owned, mic, remote, context, graph, edges, disconnected, timers, changes, Recorder: Encoder,
     recorder: () => recorder, tick(ms) { clock += ms }, stops: () => trackStops,
     fire(delay) { const [key, timer] = [...timers].find(([, t]) => t.delay === delay); timers.delete(key); timer.fn() } }
 }
@@ -122,6 +122,24 @@ const broken = fixture(); broken.owned.start(true); broken.recorder().onerror()
 assert.equal(broken.owned.state, 'failed'); assert.equal(broken.timers.size, 0)
 const empty = fixture(); empty.owned.start(true); empty.recorder().ended()
 assert.equal(empty.owned.reason, 'empty_recording')
+// Browser suspension can race recording admission. Failure must not retain
+// an idle recorder that blocks a later explicit retry on the same call.
+{
+  const f = fixture(), saved = globalThis.MediaRecorder
+  globalThis.MediaRecorder = f.Recorder
+  const callMedia = new CallMedia(500)
+  Object.assign(callMedia, { context: f.context, source: f.mic, node: f.remote, phase: 'active', started: true })
+  try {
+    f.context.state = 'suspended'
+    assert.throws(() => callMedia.startRecording({ consent: true }), /unavailable/)
+    assert.equal(callMedia.recording.state, 'failed', 'failed recording admission must allow explicit retry')
+    assert.equal(f.graph.length, 0)
+    f.context.state = 'running'
+    const retry = callMedia.startRecording({ consent: true })
+    assert.equal(retry.state, 'recording')
+    retry.discard()
+  } finally { callMedia.recording?.discard(); globalThis.MediaRecorder = saved }
+}
 // CallMedia owns recorder lifecycle, but recording teardown never submits calls.
 const media = new CallMedia(500); const stops = []
 media.recording = { stop: reason => stops.push(reason), setMuted: value => stops.push(value) }

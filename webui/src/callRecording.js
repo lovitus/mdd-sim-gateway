@@ -37,8 +37,10 @@ export class LocalCallRecording {
   start(consent) {
     if (consent !== true) throw new Error('Explicit recording consent is required')
     if (this.state !== 'idle') throw new Error('This recording has already been used')
-    if (!recordingSupported(this.Recorder) || this.context?.state !== 'running' || !this.microphone || !this.playback)
+    if (!recordingSupported(this.Recorder) || this.context?.state !== 'running' || !this.microphone || !this.playback) {
+      this.fail('start_failed') // A later explicit retry must not inherit an idle owner.
       throw new Error('Local recording is unavailable')
+    }
     try {
       // Record two channels, not two competing call owners. Mute removes the
       // local microphone from the recording too. Never monitor it in speakers.

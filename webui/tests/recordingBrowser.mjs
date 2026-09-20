@@ -43,9 +43,11 @@ window.runRecordingTest = async () => {
     }
     const limited=make({maxMS:150});limited.start(true);await done(limited);check(limited.reason==='time_limit','automatic time limit');limited.discard();
     const media=new CallMedia(500);Object.assign(media,{context,source:microphone,node:playback,phase:'active',started:true});
+    await context.suspend();let unavailable=false;try{media.startRecording({consent:true})}catch{unavailable=true};
+    check(unavailable&&media.recording?.state==='failed','suspended recording must release admission');await context.resume();
     const ended=media.startRecording({consent:true});recordings.push(ended);await delay(300);media.close();await done(ended);
     check(ended.reason==='call_ended','media close must finalize recording');check(ended.bytes>0,'missing final encoded data');
-    return {passed:true,tests:output,callCloseFinalized:true,timeLimit:true,consent:true};
+    return {passed:true,tests:output,callCloseFinalized:true,timeLimit:true,consent:true,retryAfterSuspension:true};
   } finally {for(const r of recordings)r.discard();try{microphone.stop();playback.stop()}catch{};if(context.state!=='closed')await context.close()}
 };
 </script>`
