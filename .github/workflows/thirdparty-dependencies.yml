@@ -1,0 +1,65 @@
+name: Verify browser tooling security updates
+on:
+  push:
+    branches: ['audit/thirdparty-review-3e6d5db']
+    paths: ['.github/workflows/thirdparty-dependencies.yml']
+permissions:
+  contents: read
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: be713bc533102935f994e1e6f0dc6bb93063fcff
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Update only the affected compatible transitive dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dependency-evidence"
+          cp webui/package-lock.json "$RUNNER_TEMP/dependency-evidence/package-lock-before.json"
+          npm --prefix webui update browserslist baseline-browser-mapping --package-lock-only --ignore-scripts
+          git diff --exit-code -- webui/package.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const before=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+'/dependency-evidence/package-lock-before.json'));
+          const after=JSON.parse(fs.readFileSync('webui/package-lock.json'));
+          const names=new Set([...Object.keys(before.packages),...Object.keys(after.packages)]);
+          const changes=[...names].filter(name=>JSON.stringify(before.packages[name])!==JSON.stringify(after.packages[name]));
+          const allowed=new Set(['browserslist','baseline-browser-mapping','caniuse-lite','node-releases','electron-to-chromium','update-browserslist-db'].map(n=>'node_modules/'+n));
+          assert(changes.length && changes.every(name=>allowed.has(name)), JSON.stringify(changes));
+          fs.writeFileSync(process.env.RUNNER_TEMP+'/dependency-evidence/dependency-changes.json',JSON.stringify(changes.map(name=>({name,before:before.packages[name]?.version,after:after.packages[name]?.version})),null,2));
+          JS
+          npm --prefix webui ci
+          npm --prefix webui audit --json > "$RUNNER_TEMP/dependency-evidence/npm-audit-after.json"
+          npm --prefix webui run test:all 2>&1 | tee "$RUNNER_TEMP/dependency-evidence/webui-tests.log"
+          MDD_KEEP_EMBED_SOURCE=1 npm --prefix webui run build:go 2>&1 | tee "$RUNNER_TEMP/dependency-evidence/embedded-build.log"
+          node tools/repository-check.mjs
+          node tools/repository-check.test.mjs
+      - name: Publish reviewed dependency changes without touching main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add webui/package-lock.json go-runtime/internal/webui/assets
+          git diff --cached --check
+          git diff --cached --binary > "$RUNNER_TEMP/dependency-evidence/dependency-fix.patch"
+          git commit -m 'build: update vulnerable browser targeting dependencies within compatible ranges'
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/dependency-evidence/published-source.txt"
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-thirdparty-cleanup
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: thirdparty-browser-tooling-evidence
+          path: ${{ runner.temp }}/dependency-evidence/
+          retention-days: 7
