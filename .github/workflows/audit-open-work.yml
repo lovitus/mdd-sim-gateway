@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  ledger:
+  retry:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -17,42 +17,49 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
-          ref: a8c2a9d73f102e72daafcc99ec224186f5205a6d
+          ref: ba8befe649684f95661459fa8889933de9a4bf73
           path: candidate
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Reconcile mixed voice criterion without claiming hardware acceptance
+      - name: Apply and test explicit recording retry after browser suspension
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          git -C candidate apply "$GITHUB_WORKSPACE/harness/audit/open-work/ledger-fix.patch"
-          node candidate/tools/repository-check.mjs --write | tee evidence/ledger.log
+          git -C candidate apply "$GITHUB_WORKSPACE/harness/audit/open-work/retry-fix.patch"
+          git -C candidate add webui/src/callRecording.js webui/tests/callRecording.mjs webui/tests/recordingBrowser.mjs
+          test "$(git -C candidate write-tree)" = 9858facd098c045adb592c926f8e6603eb17e5b4
+          node candidate/tools/repository-check.mjs | tee evidence/ledger.log
           node candidate/tools/repository-check.test.mjs | tee evidence/ledger-tests.log
-          node candidate/webui/tests/callRecording.mjs | tee evidence/recording-tests.log
-          git -C candidate add TODO.md docs/status/README.md docs/status/acceptance.json
-          git -C candidate diff --cached --check
-          test "$(git -C candidate diff --cached --name-only | wc -l)" -eq 3
-          test "$(git -C candidate write-tree)" = cd578c541e837830918cfa04b1450b7f7f53192d
-          git -C candidate diff --cached > evidence/tested-ledger.patch
-      - name: Publish tested ledger-only successor
+          cd candidate/webui
+          npm ci
+          npm run test:all | tee ../../evidence/webui.log
+          for repeat in 1 2 3; do npm run test:recording-browser 2>&1 | tee "../../evidence/browser-$repeat.log"; done
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go | tee ../../evidence/build.log
+      - name: Publish only tested recorder fix and rebuilt app asset
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          git -C candidate add -A go-runtime/internal/webui/assets
+          git -C candidate diff --cached --check
+          git -C candidate diff --cached --name-only > evidence/files.txt
+          test "$(wc -l < evidence/files.txt)" -eq 4
+          git -C candidate diff --cached --binary > evidence/tested-retry.patch
           git -C candidate config user.name 'github-actions[bot]'
           git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git -C candidate commit -m 'docs: reconcile implemented recording with retained field acceptance evidence'
+          git -C candidate commit -m 'fix: release failed recording admission and allow explicit audio-resume retry'
           git -C candidate rev-parse HEAD HEAD^{tree} > evidence/source.txt
+          git -C candidate ls-files -s > evidence/source-manifest.txt
           authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-open-work-ledger
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-open-work-candidate
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: open-work-ledger-proof
+          name: open-work-recording-retry-proof
           path: evidence/
           retention-days: 7

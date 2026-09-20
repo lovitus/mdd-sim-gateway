@@ -1,0 +1,68 @@
+diff --git a/webui/src/callRecording.js b/webui/src/callRecording.js
+--- a/webui/src/callRecording.js
++++ b/webui/src/callRecording.js
+@@ -37,8 +37,10 @@ export class LocalCallRecording {
+   start(consent) {
+     if (consent !== true) throw new Error('Explicit recording consent is required')
+     if (this.state !== 'idle') throw new Error('This recording has already been used')
+-    if (!recordingSupported(this.Recorder) || this.context?.state !== 'running' || !this.microphone || !this.playback)
++    if (!recordingSupported(this.Recorder) || this.context?.state !== 'running' || !this.microphone || !this.playback) {
++      this.fail('start_failed') // A later explicit retry must not inherit an idle owner.
+       throw new Error('Local recording is unavailable')
++    }
+     try {
+       // Record two channels, not two competing call owners. Mute removes the
+       // local microphone from the recording too. Never monitor it in speakers.
+diff --git a/webui/tests/callRecording.mjs b/webui/tests/callRecording.mjs
+--- a/webui/tests/callRecording.mjs
++++ b/webui/tests/callRecording.mjs
+@@ -26,7 +26,7 @@ function fixture(options = {}) {
+     Recorder: Encoder, now: () => clock, onChange: x => changes.push(x),
+     setTimer: (fn, delay) => { const key = ++id; timers.set(key, { fn, delay }); return key },
+     clearTimer: key => timers.delete(key), ...options })
+-  return { owned, mic, remote, context, graph, edges, disconnected, timers, changes,
++  return { owned, mic, remote, context, graph, edges, disconnected, timers, changes, Recorder: Encoder,
+     recorder: () => recorder, tick(ms) { clock += ms }, stops: () => trackStops,
+     fire(delay) { const [key, timer] = [...timers].find(([, t]) => t.delay === delay); timers.delete(key); timer.fn() } }
+ }
+@@ -122,6 +122,24 @@ const broken = fixture(); broken.owned.start(true); broken.recorder().onerror()
+ assert.equal(broken.owned.state, 'failed'); assert.equal(broken.timers.size, 0)
+ const empty = fixture(); empty.owned.start(true); empty.recorder().ended()
+ assert.equal(empty.owned.reason, 'empty_recording')
++// Browser suspension can race recording admission. Failure must not retain
++// an idle recorder that blocks a later explicit retry on the same call.
++{
++  const f = fixture(), saved = globalThis.MediaRecorder
++  globalThis.MediaRecorder = f.Recorder
++  const callMedia = new CallMedia(500)
++  Object.assign(callMedia, { context: f.context, source: f.mic, node: f.remote, phase: 'active', started: true })
++  try {
++    f.context.state = 'suspended'
++    assert.throws(() => callMedia.startRecording({ consent: true }), /unavailable/)
++    assert.equal(callMedia.recording.state, 'failed', 'failed recording admission must allow explicit retry')
++    assert.equal(f.graph.length, 0)
++    f.context.state = 'running'
++    const retry = callMedia.startRecording({ consent: true })
++    assert.equal(retry.state, 'recording')
++    retry.discard()
++  } finally { callMedia.recording?.discard(); globalThis.MediaRecorder = saved }
++}
+ // CallMedia owns recorder lifecycle, but recording teardown never submits calls.
+ const media = new CallMedia(500); const stops = []
+ media.recording = { stop: reason => stops.push(reason), setMuted: value => stops.push(value) }
+diff --git a/webui/tests/recordingBrowser.mjs b/webui/tests/recordingBrowser.mjs
+--- a/webui/tests/recordingBrowser.mjs
++++ b/webui/tests/recordingBrowser.mjs
+@@ -43,9 +43,11 @@ window.runRecordingTest = async () => {
+     }
+     const limited=make({maxMS:150});limited.start(true);await done(limited);check(limited.reason==='time_limit','automatic time limit');limited.discard();
+     const media=new CallMedia(500);Object.assign(media,{context,source:microphone,node:playback,phase:'active',started:true});
++    await context.suspend();let unavailable=false;try{media.startRecording({consent:true})}catch{unavailable=true};
++    check(unavailable&&media.recording?.state==='failed','suspended recording must release admission');await context.resume();
+     const ended=media.startRecording({consent:true});recordings.push(ended);await delay(300);media.close();await done(ended);
+     check(ended.reason==='call_ended','media close must finalize recording');check(ended.bytes>0,'missing final encoded data');
+-    return {passed:true,tests:output,callCloseFinalized:true,timeLimit:true,consent:true};
++    return {passed:true,tests:output,callCloseFinalized:true,timeLimit:true,consent:true,retryAfterSuspension:true};
+   } finally {for(const r of recordings)r.discard();try{microphone.stop();playback.stop()}catch{};if(context.state!=='closed')await context.close()}
+ };
+ </script>`
