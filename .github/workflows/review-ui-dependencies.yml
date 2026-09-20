@@ -1,0 +1,30 @@
+name: Retain UI audit dependencies
+on:
+  push:
+    branches: ['codex/review-postmerge-7f2e129']
+    paths: ['.github/workflows/review-ui-dependencies.yml']
+permissions:
+  contents: read
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 3e6d5db7657e468eedc0c31316bb97c04b2b599b
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install exact lockfile dependencies
+        working-directory: webui
+        run: |
+          npm ci
+          npm run test:all
+          tar -czf ../ui-audit-dependencies.tar.gz node_modules
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-audit-dependencies-3e6d5db
+          path: ui-audit-dependencies.tar.gz
+          retention-days: 1
