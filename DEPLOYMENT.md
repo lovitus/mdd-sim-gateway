@@ -1,5 +1,12 @@
 # MDD VoWiFi Gateway - 完整部署与维护手册
 
+## Current scope / 当前范围
+
+Windows、macOS、Linux 远程 Agent 是本轮主要范围；Android 延后。开启 4G 必须先证明隔离就绪，
+失败即拒绝数据，不回落宿主网络，不改变用户开关。macOS 本轮不做公证、不用 `.p8`，现有签名继续保留。
+既有部署/浏览器/隔离/恢复报告需按范围核对，不因本轮未复验作废；Git main、已构建工件和已部署版本必须分开。
+完整决定见 [当前范围](docs/decisions/2026-09-20-current-scope.md)。下文能力门禁不授权自动启用或部署。
+
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
 ---

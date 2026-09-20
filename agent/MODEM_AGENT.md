@@ -126,7 +126,7 @@ Agent 离线或 generation 变化时，Core 保持 unknown/blocked，不回退�
 - Windows：SCM 服务、PC/SC、MBN/辅助 AT、受控数据/短信/通话及按 capability 启用的媒体。
 - macOS：签名 App/CLI、LaunchAgent、PC/SC/eUICC；Modem/音频/私有数据面只按已验证硬件启用。
 - Linux：systemd Agent、PC/SC/eUICC、ModemManager 与明确支持的受隔离数据路径。
-- Android：当前没有受支持客户端。未来实现必须使用统一 Agent 高层协议和每设备凭据，不能恢复旧 VPCD
+- Android：当前没有受支持客户端，用户已延后，非本轮交付阻塞。未来实现必须使用统一 Agent 高层协议和每设备凭据，不能恢复旧 VPCD
   raw APDU 或共享 token 设计。
 
 实现与真实平台／设备／运营商验收分别记录在 [版本化台账](../docs/status/README.md)。历史私有报告、旧

@@ -1,22 +1,32 @@
-# Repository work and acceptance
+# Repository work, current decisions and acceptance
 
-Read docs/status/README.md and acceptance.json before changing scope. They are the versioned acceptance ledger;
-root TODO summaries are generated, and docs/archive plus archive are historical only. Machine-local instructions
-and private progress notes are not project completion evidence and must not override the code or this ledger.
+Read docs/decisions/2026-09-20-current-scope.md, docs/status/README.md and acceptance.json before changing scope.
+Latest explicit owner decisions govern requirements; a stale ledger or historical checklist must be corrected,
+not used to override those decisions. Root TODO summaries are generated; original plans remain historical.
+
+Final eSIM direction is physical deletion + retained deletion notifications + multiply-confirmed manual replay.
+Do not reopen abandoned soft deletion/customization. Android is deferred and does not block this delivery.
+Windows/macOS/Linux remote Agents are the current priority. Enabled 4G must be isolated and fail closed on all
+three: no host sharing or default-network fallback, no override of stored user intent, no automatic enabling.
+Notarization and .p8 credentials are excluded this round; preserve signing and track Universal work separately.
+
+Preserve scoped existing deployment, browser, isolation and recovery reports. Not revalidated by this review
+is not never tested or revoked acceptance. Reconcile source, artifact, environment and missing subcases before
+requesting new tests. Local reports can supply traceable evidence or newer decisions; migrate redacted references
+into the ledger instead of rejecting them merely because they are local. Unavailable evidence remains explicitly
+unverified, not fabricated or silently erased. Repository merge/CI, workspace synchronization and production
+version are separate facts. CI checks metadata and consistency, not the physical truth of field reports.
 
 Use one authoritative owner per credential, hardware attachment, paid operation and call lifetime. Preserve exact
 SIM/Agent/equipment/generation identity, unknown outcomes, active-call/maintenance guards, disabled rekey choices
 and carrier holdoffs. Do not restore Python/VPCD/Asterisk, duplicate UI/call owners, automatic paid retries or
 process-wide restarts to hide a missing state transition.
 
-Implement fixes with deterministic pre-fix counterexamples where possible. Run DEVELOPMENT.md checks, including
-production-graph/context tests and full Linux Core race tests; inspect skip reasons and final CI head/tree. Never
-count a build, HTTP response, saved configuration, process presence or simulator as actual deployed hardware acceptance.
+Implement fixes with deterministic pre-fix counterexamples when possible. Run DEVELOPMENT.md checks, including
+production graph/context tests and full Linux Core race tests; inspect skipped cases and exact CI head/tree.
+No live SIM mutation, notification replay, paid SMS/call or disruptive deployment without specific authorization.
+Do not clean unknown files, devices, processes or branches; preserve unique evidence before branch cleanup.
 
-Public records must be bounded and redacted. No live SIM mutation, paid SMS/call or disruptive deployment without
-specific authorization. eSIM custom deletion remains an explicitly last, interactive workstream. Do not clean unknown
-files, devices, processes or branches. Reference preserved audit commits before disposing of branch names.
-
-Update the ledger with scope, source/test paths, evidence and limitations; regenerate its summaries with
-`node tools/repository-check.mjs --write`. A product gap or hardware acceptance item remains open even when a related
-cleanup PR is green. A finite review cannot certify the absence of all functional flaws.
+Update the versioned ledger with current scope, reasons, decision references and evidence; regenerate with
+`node tools/repository-check.mjs --write`. Preserve workstream identities while allowing supported completed,
+accepted, superseded, deferred or cancelled transitions. Product decisions and hardware acceptance are distinct.
