@@ -38,9 +38,10 @@ jobs:
           echo "f699557ba3f6273e0a4840072c26717833ccc26a56b2280c383ef5a126d37bfa  $RUNNER_TEMP/open-work.patch" | sha256sum --check
           git -C candidate apply --check "$RUNNER_TEMP/open-work.patch"
           git -C candidate apply "$RUNNER_TEMP/open-work.patch"
+          git -C candidate apply "$GITHUB_WORKSPACE/harness/audit/open-work/followup.patch"
           mapfile -t files < harness/audit/open-work/files.txt
           git -C candidate add -- "${files[@]}"
-          test "$(git -C candidate write-tree)" = 1a15cce7d3a0119098671675dc026e2a1178011d
+          test "$(git -C candidate write-tree)" = 28a5ead4f155c38570e0a188756dd0e919f274af
           git -C candidate diff --cached --check
       - name: Repository, recording and actual installer function contracts
         shell: bash
@@ -58,7 +59,7 @@ jobs:
           set -euo pipefail
           npm ci
           npm run test:all | tee ../../evidence/webui-tests.log
-          npm run test:recording-browser | tee ../../evidence/recording-browser.log
+          npm run test:recording-browser 2>&1 | tee ../../evidence/recording-browser.log
           MDD_KEEP_EMBED_SOURCE=1 npm run build:go | tee ../../evidence/webui-build.log
       - name: Test typed topology diagnostics under race detector
         shell: bash
@@ -72,8 +73,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Store the reviewed normal-workflow blob; the authorized connector
-          # attaches it separately, without a workflow write through this token.
           gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" -f encoding=utf-8 -F content=@candidate/.github/workflows/go-runtime.yml --jq .sha > evidence/workflow-blob.txt
           git -C candidate reset -- .github/workflows/go-runtime.yml
           git -C candidate add -A -- go-runtime/internal/webui/assets

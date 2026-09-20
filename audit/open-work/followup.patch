@@ -1,0 +1,24 @@
+diff --git a/webui/src/goCallCoordinator.jsx b/webui/src/goCallCoordinator.jsx
+--- a/webui/src/goCallCoordinator.jsx
++++ b/webui/src/goCallCoordinator.jsx
+@@ -73,7 +73,7 @@
+       let owned
+       owned = await requestLocalRecording(call, {
+         isCurrent: expected => currentRef.current === expected && !recordingRef.current,
+-        confirm: () => dialogs.confirm(t('Record both sides on this browser only? Confirm that everyone has given the required consent. The microphone is excluded while muted. Nothing is uploaded. Save explicitly before leaving; unsaved audio is discarded on logout or page close. Limit: 30 minutes / 32 MiB.')),
++        confirm: async () => await dialogs.confirm(t('Record both sides on this browser only? Confirm that everyone has given the required consent. The microphone is excluded while muted. Nothing is uploaded. Save explicitly before leaving; unsaved audio is discarded on logout or page close. Limit: 30 minutes / 32 MiB.')),
+         onChange: value => {
+           if (owned && recordingRef.current === owned) setRecording(value)
+         },
+diff --git a/webui/tests/callRecording.mjs b/webui/tests/callRecording.mjs
+--- a/webui/tests/callRecording.mjs
++++ b/webui/tests/callRecording.mjs
+@@ -105,7 +105,7 @@
+ assert.deepEqual(stops, [true, 'call_ended'])
+ assert.throws(() => media.startRecording({ consent: true }), /active call/)
+ const source = readFileSync(new URL('../src/goCallCoordinator.jsx', import.meta.url), 'utf8')
+-assert.ok(source.includes('currentRef.current !== call') && source.includes('confirm: () => dialogs.confirm'))
++assert.ok(source.includes('currentRef.current !== call') && source.includes('confirm: async () => await dialogs.confirm'))
+ assert.ok(source.includes('recordingRef.current === owned'))
+ assert.ok(source.includes('discardRecordingNow()'))
+ assert.ok(!readFileSync(new URL('../src/callRecording.js', import.meta.url), 'utf8').match(/\b(fetch|localStorage|indexedDB|XMLHttpRequest)\s*[.(]/))
