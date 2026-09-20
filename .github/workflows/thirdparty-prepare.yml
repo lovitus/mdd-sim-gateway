@@ -1,0 +1,75 @@
+name: Independently verify third-party review corrections
+on:
+  push:
+    branches: ['audit/thirdparty-review-3e6d5db']
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 3e6d5db7657e468eedc0c31316bb97c04b2b599b
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 3e6d5db7657e468eedc0c31316bb97c04b2b599b
+          path: baseline
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: candidate/providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            candidate/go-runtime/go.sum
+            candidate/providers/vowifi-go/go.sum
+            candidate/providers/vowifi-go/upstream/vowifi-go/go.sum
+      - name: Materialize exact reviewed source
+        run: python3 harness/audit/prepare.py apply candidate harness/audit evidence
+      - name: Native test dependencies
+        run: |
+          source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$source"; then sudo mv "$source" "$source.disabled"; fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pkg-config xorg-dev
+      - name: Verify ledger and mounted UI
+        run: |
+          set -euo pipefail
+          node --version > evidence/node-version.txt
+          go version > evidence/go-version.txt
+          node candidate/tools/repository-check.mjs | tee evidence/ledger-check.log
+          node candidate/tools/repository-check.test.mjs | tee evidence/ledger-tests.log
+          npm --prefix candidate/webui ci
+          npm --prefix candidate/webui run test:all 2>&1 | tee evidence/webui-tests.log
+          node candidate/webui/scripts/source-graph.mjs --check > evidence/final-graph.json
+          node candidate/tools/verify-thirdparty-baseline.mjs "$GITHUB_WORKSPACE/baseline" 2>&1 | tee evidence/baseline-counterexamples.log
+          MDD_KEEP_EMBED_SOURCE=1 npm --prefix candidate/webui run build:go 2>&1 | tee evidence/embedded-build.log
+      - name: Full Core race suite and selected modules
+        run: |
+          set -euo pipefail
+          go -C candidate/go-runtime test -json -race -count=1 -timeout 5m ./... 2>&1 | tee evidence/core-race.jsonl
+          go -C candidate/providers/vowifi-go test -json -race -count=1 -timeout 3m ./... 2>&1 | tee evidence/provider-race.jsonl
+          GOWORK=off go -C candidate/providers/vowifi-go/upstream/vowifi-go test -json -race -count=1 -timeout 3m ./engine/swu/... ./runtimehost/... 2>&1 | tee evidence/upstream-race.jsonl
+          go -C candidate/go-runtime vet ./...
+          go -C candidate/providers/vowifi-go vet ./...
+      - name: Retain reviewed source objects without changing a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 harness/audit/prepare.py publish-objects candidate harness/audit evidence
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: thirdparty-review-preparation-evidence
+          path: evidence/
+          retention-days: 7
