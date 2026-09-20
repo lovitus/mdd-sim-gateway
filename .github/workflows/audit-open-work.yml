@@ -41,7 +41,7 @@ jobs:
           git -C candidate apply "$GITHUB_WORKSPACE/harness/audit/open-work/followup.patch"
           mapfile -t files < harness/audit/open-work/files.txt
           git -C candidate add -- "${files[@]}"
-          test "$(git -C candidate write-tree)" = 28a5ead4f155c38570e0a188756dd0e919f274af
+          test "$(git -C candidate write-tree)" = "$(cat harness/audit/open-work/expected-tree.txt)"
           git -C candidate diff --cached --check
       - name: Repository, recording and actual installer function contracts
         shell: bash

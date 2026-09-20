@@ -22,3 +22,50 @@ diff --git a/webui/tests/callRecording.mjs b/webui/tests/callRecording.mjs
  assert.ok(source.includes('recordingRef.current === owned'))
  assert.ok(source.includes('discardRecordingNow()'))
  assert.ok(!readFileSync(new URL('../src/callRecording.js', import.meta.url), 'utf8').match(/\b(fetch|localStorage|indexedDB|XMLHttpRequest)\s*[.(]/))
+diff --git a/webui/src/callRecording.js b/webui/src/callRecording.js
+--- a/webui/src/callRecording.js
++++ b/webui/src/callRecording.js
+@@ -12,7 +12,8 @@ export function recordingSupported(Recorder = globalThis.MediaRecorder) {
+ export class LocalCallRecording {
+   constructor({ context, microphone, playback, muted = false, onChange = () => {},
+     Recorder = globalThis.MediaRecorder, maxBytes = RECORDING_LIMIT_BYTES, maxMS = RECORDING_LIMIT_MS,
+-    now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout }) {
++    now = () => Date.now(), setTimer = (fn, ms) => globalThis.setTimeout(fn, ms),
++    clearTimer = id => globalThis.clearTimeout(id) }) {
+     if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > RECORDING_LIMIT_BYTES ||
+         !Number.isSafeInteger(maxMS) || maxMS <= 0 || maxMS > RECORDING_LIMIT_MS)
+       throw new RangeError('Invalid local recording limit')
+diff --git a/webui/tests/callRecording.mjs b/webui/tests/callRecording.mjs
+--- a/webui/tests/callRecording.mjs
++++ b/webui/tests/callRecording.mjs
+@@ -30,6 +30,30 @@ function fixture(options = {}) {
+     recorder: () => recorder, tick(ms) { clock += ms }, stops: () => trackStops,
+     fire(delay) { const [key, timer] = [...timers].find(([, t]) => t.delay === delay); timers.delete(key); timer.fn() } }
+ }
++// DOM timer methods require the global receiver. Node and injected arrow
++// timers otherwise conceal Illegal invocation errors on real browsers.
++{
++  const savedSet = globalThis.setTimeout, savedClear = globalThis.clearTimeout
++  const pending = new Set()
++  let next = 0
++  globalThis.setTimeout = function (callback, delay) {
++    assert.equal(this, globalThis, 'browser timer must keep its global receiver')
++    assert.equal(typeof callback, 'function'); assert.ok(delay > 0)
++    const id = ++next; pending.add(id); return id
++  }
++  globalThis.clearTimeout = function (id) {
++    assert.equal(this, globalThis, 'browser clearTimer must keep its global receiver')
++    pending.delete(id)
++  }
++  try {
++    const realDefaults = fixture({ setTimer: undefined, clearTimer: undefined })
++    realDefaults.owned.start(true)
++    realDefaults.recorder().chunk('encoded')
++    const encoder = realDefaults.recorder()
++    realDefaults.owned.stop(); encoder.ended(); realDefaults.owned.discard()
++    assert.equal(pending.size, 0, 'default timer resources must be released')
++  } finally { globalThis.setTimeout = savedSet; globalThis.clearTimeout = savedClear }
++}
+ assert.equal(recordingSupported(undefined), false)
+ assert.throws(() => new LocalCallRecording({ maxBytes: Infinity }), /Invalid/)
+ const denied = fixture()
