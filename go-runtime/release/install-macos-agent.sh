@@ -37,12 +37,14 @@ fi
 
 hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
 agent_pids() {
-	ps -axo pid=,command= | awk '$0 ~ /\/mdd-agent([[:space:]]|$)/ || $0 ~ /\/MDD-Agent-macOS-arm64([[:space:]]|$)/ {print $1}'
+	# Only the installed per-user launchd label owns this cutover. Other users,
+	# CLI hosts and separately configured Agents must not be discovered by name.
+	/bin/launchctl print "$(launch_domain)/com.mdd.agent" 2>/dev/null |
+		awk '$1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ {print $3; exit}'
 }
 agent_program() {
-	running_pid=$(agent_pids | head -n 1)
-	[ -n "$running_pid" ] || return 1
-	ps -p "$running_pid" -o comm= | sed -e 's/[[:space:]]*$//'
+	[ -f "$launch_plist" ] || return 1
+	plist_string "$launch_plist" ProgramArguments.0
 }
 launch_domain() { printf 'gui/%s\n' "$(id -u)"; }
 launch_plist="$HOME/Library/LaunchAgents/com.mdd.agent.plist"
@@ -131,38 +133,42 @@ EOF
 	chmod 600 "$launch_plist"
 }
 
+wait_cutover_delay() {
+	remaining=$(( deadline - $(date +%s) ))
+	[ "$remaining" -gt 0 ] || return 1
+	wait_seconds=$delay
+	[ "$wait_seconds" -le "$remaining" ] || wait_seconds=$remaining
+	sleep "$wait_seconds"
+	[ "$delay" -ge 5 ] || delay=$(( delay * 2 ))
+	[ "$delay" -le 5 ] || delay=5
+}
+
 stop_launch_agent() {
-	/bin/launchctl bootout "$(launch_domain)" "$launch_plist" >/dev/null 2>&1 || true
-	running_pid=$(agent_pids | head -n 1)
+	# Capture the labelled PID before bootout can remove it from launchd.
+	running_pid=$(agent_pids)
+	if ! /bin/launchctl bootout "$(launch_domain)" "$launch_plist" >/dev/null 2>&1; then
+		[ -z "$running_pid" ] || { printf '%s\n' 'cannot unload the owned Agent; cutover blocked' >&2; return 1; }
+	fi
 	[ -n "$running_pid" ] || return 0
-	kill -TERM "$running_pid"
 	deadline=$(( $(date +%s) + 180 ))
-	delay=30
+	delay=1
 	while kill -0 "$running_pid" 2>/dev/null; do
-		[ "$(date +%s)" -lt "$deadline" ] || {
-			printf '%s\n' 'running Agent did not exit before cutover' >&2
-			exit 1
-		}
-		sleep "$delay"
-		[ "$delay" -ge 60 ] || delay=$(( delay * 2 ))
+		wait_cutover_delay || { printf '%s\n' 'owned Agent did not exit before cutover' >&2; return 1; }
 	done
 }
 
 start_launch_agent() {
-	/bin/launchctl bootstrap "$(launch_domain)" "$launch_plist"
+	/bin/launchctl bootstrap "$(launch_domain)" "$launch_plist" || return 1
 	deadline=$(( $(date +%s) + 180 ))
-	delay=30
+	delay=1
 	while :; do
-		sleep "$delay"
-		if [ -n "$(agent_pids | head -n 1)" ] &&
-			"$launch_program" status --config "$config" >/dev/null 2>&1; then
+		# Observe before sleeping; a healthy fast startup has no 30-second floor.
+		if [ -n "$(agent_pids)" ] &&
+			status_json=$("$launch_program" status --config "$config" 2>/dev/null) &&
+			[ "$(printf '%s' "$status_json" | plutil -extract state raw -o - - 2>/dev/null)" = running ]; then
 			return 0
 		fi
-		[ "$(date +%s)" -lt "$deadline" ] || {
-			printf '%s\n' 'launchd did not start the MDD Agent' >&2
-			return 1
-		}
-		[ "$delay" -ge 60 ] || delay=$(( delay * 2 ))
+		wait_cutover_delay || { printf '%s\n' 'launchd did not start the owned MDD Agent' >&2; return 1; }
 	done
 }
 
@@ -222,6 +228,9 @@ else
 	write_launch_plist "$target/MDD Agent.app/Contents/MacOS/mdd-agent"
 fi
 if ! start_launch_agent; then
+	# Failed readiness does not imply process exit. Confirm candidate release
+	# before restoring the old symlink/plist; never overlap two hardware owners.
+	stop_launch_agent || { printf '%s\n' 'rollback blocked: candidate stop unconfirmed' >&2; exit 1; }
 	if [ -n "$previous_target" ] && [ -d "$previous_target" ]; then
 		next_current="$state/.current.rollback.$$"
 		ln -s "$previous_target" "$next_current"

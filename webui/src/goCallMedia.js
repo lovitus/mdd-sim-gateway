@@ -1,3 +1,5 @@
+import { LocalCallRecording } from './callRecording.js'
+
 const FRAME_SAMPLES = 160
 const FRAME_BYTES = 320
 
@@ -200,6 +202,7 @@ export class CallMedia {
     socket.onerror = () => {}
     socket.onclose = event => {
       if (this.socket !== socket || this.closed) return
+      this.recording?.stop('media_disconnected')
       this.socket = null
       this.started = false
       if (this.phase === 'active' && event.code === 1000) {
@@ -232,10 +235,25 @@ export class CallMedia {
     this.onEvent('active')
   }
 
-  setMuted(value) { this.muted = Boolean(value) }
+  startRecording({ consent, onChange } = {}) {
+    if (consent !== true) throw new Error('Explicit recording consent is required')
+    if (this.closed || this.phase !== 'active' || !this.started ||
+        (this.recording && !['discarded', 'failed'].includes(this.recording.state)))
+      throw new Error('An active call and no retained recording are required')
+    const recording = new LocalCallRecording({ context: this.context, microphone: this.source,
+      playback: this.node, muted: this.muted, onChange })
+    this.recording = recording
+    return recording.start(consent)
+  }
+
+  setMuted(value) {
+    this.muted = Boolean(value)
+    this.recording?.setMuted(this.muted)
+  }
 
   fail(error) {
     if (this.closed) return
+    this.recording?.stop('media_failed')
     clearTimeout(this.readyTimer)
     const reject = this.readyReject
     this.readyResolve = this.readyReject = null
@@ -247,6 +265,7 @@ export class CallMedia {
   close() {
     if (this.closed) return
     this.closed = true
+    this.recording?.stop('call_ended')
     this.audioReject?.(new Error('Browser audio was cancelled'))
     this.audioReject = null
     clearInterval(this.evidenceTimer)

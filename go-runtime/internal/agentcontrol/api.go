@@ -111,7 +111,7 @@ func (api *API) currentTopology(response http.ResponseWriter, _ *http.Request) {
 	if err := topology.Validate(); err != nil {
 		// Validate returns fixed rule descriptions, never raw topology or credentials.
 		writeAPIJSON(response, http.StatusInternalServerError, map[string]string{
-			"code": "topology_invalid", "detail": err.Error(),
+			"code": "topology_invalid", "detail": err.Error(), "field": agentlink.TopologyValidationField(err),
 		})
 		return
 	}

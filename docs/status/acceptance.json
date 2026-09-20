@@ -1124,12 +1124,16 @@
       "requirement": "有音频能力的 Modem 完成浏览器双向语音、静音和录音验证：呼出双向语音已通过，来电、\n      静音和录音仍待人工验收。",
       "implementation": "partial",
       "acceptance": "pending_product",
-      "rationale": "Previously reported outgoing audio is retained. Recording is genuinely unimplemented; actual incoming audio and mute are scoped evidence gaps. A mixed criterion must not erase its already reported subcases.",
+      "rationale": "Previously reported outgoing audio is retained. Recording is genuinely unimplemented; actual incoming audio and mute are scoped evidence gaps. A mixed criterion must not erase its already reported subcases. Browser-local opt-in recording is now implemented; no new call, mute, or recording hardware acceptance is claimed.",
       "evidence": [
         "go-runtime/internal/agentmedia/broker.go",
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
-        "webui/src/goCallCoordinator.jsx"
+        "webui/src/goCallCoordinator.jsx",
+        "docs/features/local-recording.md",
+        "webui/src/callRecording.js",
+        "webui/tests/callRecording.mjs",
+        "webui/tests/recordingBrowser.mjs"
       ],
       "historicalEvidence": [
         "H-CALL-PARTIAL"
@@ -1441,23 +1445,40 @@
     },
     {
       "id": "RECORDING",
-      "state": "not_implemented",
-      "summary": "Recording is not delivered by current browser call controls; removal of an old UI stub is cleanup only.",
-      "acceptance": "Define explicit consent, storage/retention/security and lifecycle semantics, implement, then authorize real acceptance.",
+      "state": "completed",
+      "summary": "Implemented per-recording consent, browser-local bounded stereo recording through the existing global call owner, with explicit save/discard and mute/end/disconnect handling. This is not new carrier/hardware acceptance.",
+      "acceptance": "Unit tests plus real-browser synthetic tone/codec validation; preserve existing real-line evidence and reconcile only missing field subcases.",
       "evidence": [
-        "webui/src/mdd/views/Softphone.jsx",
-        "webui/src/goCallCoordinator.jsx"
+        "docs/features/local-recording.md",
+        "webui/src/callRecording.js",
+        "webui/src/goCallCoordinator.jsx",
+        "webui/tests/callRecording.mjs",
+        "webui/tests/recordingBrowser.mjs"
       ],
-      "releaseRelevance": "current"
+      "releaseRelevance": "current",
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Opt-in local recording is implemented with consent, security/storage limits and exact call lifecycle; field acceptance is tracked separately.",
+        "evidence": [
+          "docs/features/local-recording.md",
+          "webui/src/callRecording.js",
+          "webui/src/goCallCoordinator.jsx",
+          "webui/tests/callRecording.mjs",
+          "webui/tests/recordingBrowser.mjs"
+        ]
+      }
     },
     {
       "id": "INSTALLER_WAIT",
       "state": "partial",
-      "summary": "Go installers exist, but lifecycle waiting still includes bounded polling; event-driven/cancellation improvements and least-privilege architecture remain a separate work item.",
+      "summary": "Exact service/launchd ownership, captured-process waiting, bounded immediate readiness and rollback-stop protection are implemented. Fully event-driven service waiting and least-privilege service architecture are still partial.",
       "acceptance": "Verify exact polling paths on Windows/macOS before changing them; retain bounded waits and error diagnostics.",
       "evidence": [
         "go-runtime/release/install-windows-agent.ps1",
-        "go-runtime/release/install-macos-agent.sh"
+        "go-runtime/release/install-macos-agent.sh",
+        "go-runtime/release/test-deployment-waits.ps1",
+        "tools/installer-waits.test.mjs",
+        "docs/reviews/open-work-08de1fb.md"
       ],
       "releaseRelevance": "current"
     },
@@ -1486,11 +1507,14 @@
     {
       "id": "INCIDENT_TOPOLOGY",
       "state": "unresolved_cause",
-      "summary": "Historical topology_invalid report did not identify the exact rejected field. It is not evidence of a newly reproduced current defect.",
+      "summary": "Historical topology_invalid report did not identify the exact rejected field. It is not evidence of a newly reproduced current defect. Additive fixed-schema field diagnostics now narrow reader/card and modem-network readback failures without disclosing raw values; this does not prove the old incident cause.",
       "acceptance": "Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.",
       "evidence": [
         "go-runtime/agentlink/types.go",
-        "go-runtime/agentlink/server.go"
+        "go-runtime/agentlink/server.go",
+        "go-runtime/agentlink/topology_diagnostic.go",
+        "go-runtime/agentlink/topology_diagnostic_test.go",
+        "go-runtime/internal/agentcontrol/api_test.go"
       ],
       "releaseRelevance": "current"
     },

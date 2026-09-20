@@ -380,3 +380,6 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-device-option-status { display:flex; align-items:center; gap:6px; min-width:0; }
 .u-device-option-status .u-badge { flex:none; }
 .u-device-option-status>[role="status"], .u-device-option-status>.u-muted { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; line-height:18px; }
+
+.u-local-recording { display:flex; flex-wrap:wrap; gap:6px; align-items:center; max-width:100%; }
+.u-local-recording small { flex-basis:100%; }

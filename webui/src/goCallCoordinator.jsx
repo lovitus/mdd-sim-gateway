@@ -4,6 +4,8 @@ import { getCallAudioBufferMS } from './browserPreferences.js'
 import { CallMedia, normalizeDialTarget } from './goCallMedia.js'
 import { operationID } from './goV1Adapter.js'
 import { useI18n } from './mdd/i18n.jsx'
+import { dialogs } from './dialogs.js'
+import { recordingSupported, requestLocalRecording } from './callRecording.js'
 import { runCallStabilityTest } from './mdd/callStability.js'
 
 function observeTestCall(call,type,cause='') {
@@ -46,9 +48,57 @@ function presentStatus(status, call) {
 }
 
 export function useGoCallCoordinator({ enabled, instances, subscribe, showToast }) {
+  const { t } = useI18n()
   const routes = useMemo(() => routesFor(instances), [instances])
   const [current, setCurrent] = useState(null)
   const currentRef = useRef(null)
+  const recordingRef = useRef(null)
+  const recordingRequestRef = useRef(null)
+  const [recording, setRecording] = useState(null)
+  const [recordingBusy, setRecordingBusy] = useState(false)
+  const discardRecordingNow = useCallback(() => {
+    const owned = recordingRef.current
+    recordingRef.current = null
+    owned?.discard()
+    setRecording(null)
+  }, [])
+  const startRecording = useCallback(async () => {
+    const call = currentRef.current
+    if (!call || call.phase !== 'active' || call.ending || call.cancelled ||
+        call.media.closed || recordingRef.current || recordingRequestRef.current) return
+    const request = {}
+    recordingRequestRef.current = request
+    setRecordingBusy(true)
+    try {
+      let owned
+      owned = await requestLocalRecording(call, {
+        isCurrent: expected => currentRef.current === expected && !recordingRef.current,
+        confirm: async () => await dialogs.confirm(t('Record both sides on this browser only? Confirm that everyone has given the required consent. The microphone is excluded while muted. Nothing is uploaded. Save explicitly before leaving; unsaved audio is discarded on logout or page close. Limit: 30 minutes / 32 MiB.')),
+        onChange: value => {
+          if (owned && recordingRef.current === owned) setRecording(value)
+        },
+      })
+      if (!owned) return
+      recordingRef.current = owned
+      setRecording(owned.snapshot())
+    } catch (error) { showToastRef.current?.(error.message) }
+    finally {
+      if (recordingRequestRef.current === request) {
+        recordingRequestRef.current = null
+        setRecordingBusy(false)
+      }
+    }
+  }, [t])
+  const stopRecording = useCallback(() => recordingRef.current?.stop(), [])
+  const saveRecording = useCallback(() => {
+    try { recordingRef.current?.save() } catch (error) { showToastRef.current?.(error.message) }
+  }, [])
+  const discardRecording = useCallback(async () => {
+    const owned = recordingRef.current
+    if (!owned) return
+    const consent = await dialogs.confirm(t('Discard this local recording? Unsaved audio cannot be recovered.'))
+    if (consent && recordingRef.current === owned) discardRecordingNow()
+  }, [discardRecordingNow, t])
   const mediaProbeRef = useRef(null)
   const cancelMediaTest = useCallback(() => {
     const probe = mediaProbeRef.current
@@ -151,16 +201,17 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   }), [subscribe, refreshStatuses])
 
   useEffect(() => {
-    const stopEvidence = () => { currentRef.current?.media?.close(); cancelMediaTest() }
+    const stopEvidence = () => { currentRef.current?.media?.close(); cancelMediaTest(); discardRecordingNow() }
     window.addEventListener('pagehide', stopEvidence)
     return () => { window.removeEventListener('pagehide', stopEvidence); stopEvidence() }
-  }, [cancelMediaTest])
+  }, [cancelMediaTest, discardRecordingNow])
 
   useEffect(() => {
     if (enabled) return
     currentRef.current?.media?.close()
     cancelMediaTest()
-  }, [enabled, cancelMediaTest])
+    discardRecordingNow()
+  }, [enabled, cancelMediaTest, discardRecordingNow])
 
   const mediaEvent = useCallback((call, type, detail) => {
     if (currentRef.current !== call) return
@@ -401,6 +452,8 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
 
   return {
     routes, current, incoming, statuses, history, historyLoading, selectHistoryScope,
+    recording, recordingBusy, startRecording, stopRecording, saveRecording, discardRecording,
+    canRecord: recordingSupported() && current?.phase === 'active' && current?.media?.started && !current?.media?.closed,
     refresh: refreshStatuses, loadHistory, startOutgoing, answerIncoming, rejectIncoming,
     hangup, retryStart, sendDTMF, toggleMute, deleteHistory, line, lines: {}, verifyMedia, cancelMediaTest, runStabilityTest,
   }
@@ -417,8 +470,23 @@ export function GlobalGoCallOverlay({ coordinator, translate }) {
     const timer = setInterval(() => tick(value => value + 1), 1000)
     return () => clearInterval(timer)
   }, [call?.started_at])
-  if (!call && !incoming) return null
-  if (!call && incoming) return <div className="u-global-call"><div><b>{t('Incoming call')}</b><span>{incoming.call.number || incoming.call.caller || t('Unknown')}</span><small>{incoming.line.name || incoming.line.id} · {incoming.mode}</small></div><div className="u-inline"><button className="btn btn-primary" disabled={incoming.mode === 'cellular' && incoming.call.actionable !== true} onClick={() => coordinator.answerIncoming(incoming.line.id, incoming.mode, incoming.call, getCallAudioBufferMS()).catch(() => {})}>{t('Answer')}</button><button className="btn btn-danger" onClick={() => coordinator.rejectIncoming(incoming.line.id, incoming.mode, incoming.call).catch(() => {})}>{t('Reject')}</button></div></div>
+  const recordingControls = <LocalRecordingControls coordinator={coordinator} t={t} />
+  if (!call && !incoming) return coordinator?.recording ? <div className="u-global-call">{recordingControls}</div> : null
+  if (!call && incoming) return <div className="u-global-call"><div><b>{t('Incoming call')}</b><span>{incoming.call.number || incoming.call.caller || t('Unknown')}</span><small>{incoming.line.name || incoming.line.id} · {incoming.mode}</small></div><div className="u-inline"><button className="btn btn-primary" disabled={incoming.mode === 'cellular' && incoming.call.actionable !== true} onClick={() => coordinator.answerIncoming(incoming.line.id, incoming.mode, incoming.call, getCallAudioBufferMS()).catch(() => {})}>{t('Answer')}</button><button className="btn btn-danger" onClick={() => coordinator.rejectIncoming(incoming.line.id, incoming.mode, incoming.call).catch(() => {})}>{t('Reject')}</button>{recordingControls}</div></div>
   const seconds = call.started_at ? Math.max(0, Math.floor((Date.now() - call.started_at) / 1000)) : 0
-  return <div className="u-global-call"><div><b>{call.callee}</b><span>{call.mode} · {call.phase} · {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}</span><small>{call.message}</small></div><div className="u-inline">{call.phase === 'active' && <button className="btn btn-ghost" onClick={coordinator.toggleMute}>{t(call.muted ? 'Unmute' : 'Mute')}</button>}<button className="btn btn-danger" onClick={coordinator.hangup}>{t('Hang up')}</button></div></div>
+  return <div className="u-global-call"><div><b>{call.callee}</b><span>{call.mode} · {call.phase} · {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}</span><small>{call.message}</small></div><div className="u-inline">{call.phase === 'active' && <button className="btn btn-ghost" onClick={coordinator.toggleMute}>{t(call.muted ? 'Unmute' : 'Mute')}</button>}<button className="btn btn-danger" onClick={coordinator.hangup}>{t('Hang up')}</button>{recordingControls}</div></div>
+}
+
+
+export function LocalRecordingControls({ coordinator, t }) {
+  const recording = coordinator?.recording
+  if (!recording) return coordinator?.canRecord ? <button className="btn btn-ghost" disabled={coordinator.recordingBusy} onClick={coordinator.startRecording}>{t('Record locally')}</button> : null
+  return <div className="u-local-recording" role="region" aria-label={t('Local recording')}>
+    <span role="status">{t(recording.state === 'recording' ? 'Recording locally' : recording.state === 'finalizing' ? 'Finalizing recording' : recording.state === 'ready' ? 'Local recording ready' : 'Recording failed')} · {Math.floor(recording.durationMS / 1000)}s</span>
+    {recording.reason && recording.reason !== 'manual' && <small>{t(`recording.${recording.reason}`)}</small>}
+    {recording.state === 'recording' && <button className="btn btn-ghost" onClick={coordinator.stopRecording}>{t('Stop recording')}</button>}
+    {recording.state === 'ready' && <button className="btn btn-primary" onClick={coordinator.saveRecording}>{t('Save recording')}</button>}
+    <button className="btn btn-ghost" onClick={coordinator.discardRecording}>{t('Discard recording')}</button>
+    <small>{t('Browser memory only; save before logout or closing this page.')}</small>
+  </div>
 }
