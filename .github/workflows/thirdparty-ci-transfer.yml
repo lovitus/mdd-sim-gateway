@@ -1,0 +1,49 @@
+name: Retain reviewed CI blob
+on:
+  push:
+    branches: ['audit/thirdparty-review-3e6d5db']
+    paths: ['.github/workflows/thirdparty-ci-transfer.yml']
+permissions:
+  contents: read
+jobs:
+  retain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: be713bc533102935f994e1e6f0dc6bb93063fcff
+          path: candidate
+          persist-credentials: false
+      - name: Reconstruct the reviewed workflow without moving product refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,lzma,subprocess
+          from pathlib import Path
+          payload=b''.join(p.read_bytes() for p in sorted(Path('harness/audit').glob('payload.*')))
+          assert hashlib.sha256(payload).hexdigest()=='dbf59c7754bd58d7de79f85b52d1a7a73c95a46a300eae86f9ab1b8f0494dc2f'
+          patch=json.loads(lzma.decompress(payload))['patch'].encode()
+          subprocess.run(['git','-C','candidate','apply','--include=.github/workflows/go-runtime.yml'],input=patch,check=True)
+          source=Path('candidate/.github/workflows/go-runtime.yml').read_bytes()
+          sha=hashlib.sha1(('blob '+str(len(source))+'\0').encode()+source).hexdigest()
+          assert sha=='8ccf745dd3be9ac9e46475c51196a63eecc4849d'
+          Path('candidate/reviewed-ci-transfer.txt').write_bytes(source)
+          subprocess.run(['git','-C','candidate','restore','--source=HEAD','--staged','--worktree','--','.github/workflows/go-runtime.yml'],check=True)
+          PY
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C candidate add reviewed-ci-transfer.txt
+          test "$(git -C candidate diff --cached --name-only)" = reviewed-ci-transfer.txt
+          git -C candidate commit -m 'audit: retain reviewed CI text for exact blob transfer'
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/audit/thirdparty-ci-transfer
+          git -C candidate rev-parse HEAD
