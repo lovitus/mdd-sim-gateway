@@ -31,8 +31,9 @@ jobs:
           import assert from 'node:assert/strict';
           const before=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+'/dependency-evidence/package-lock-before.json'));
           const after=JSON.parse(fs.readFileSync('webui/package-lock.json'));
+          assert.deepEqual(before.packages[''],after.packages[''],'root dependencies must remain identical');
           const names=new Set([...Object.keys(before.packages),...Object.keys(after.packages)]);
-          const changes=[...names].filter(name=>JSON.stringify(before.packages[name])!==JSON.stringify(after.packages[name]));
+          const changes=[...names].filter(name=>name && JSON.stringify(before.packages[name])!==JSON.stringify(after.packages[name]));
           const allowed=new Set(['browserslist','baseline-browser-mapping','caniuse-lite','node-releases','electron-to-chromium','update-browserslist-db'].map(n=>'node_modules/'+n));
           assert(changes.length && changes.every(name=>allowed.has(name)), JSON.stringify(changes));
           fs.writeFileSync(process.env.RUNNER_TEMP+'/dependency-evidence/dependency-changes.json',JSON.stringify(changes.map(name=>({name,before:before.packages[name]?.version,after:after.packages[name]?.version})),null,2));
