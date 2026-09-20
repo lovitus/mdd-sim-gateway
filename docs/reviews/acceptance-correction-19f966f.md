@@ -64,3 +64,23 @@ checks remain. Synthetic hashes in tests are explicitly fixtures, never asserted
 No test thresholds are relaxed and no existing runtime, eSIM confirmation, call, credential, recovery, isolation,
 paid-operation or release gate is changed. Final source identity and exact CI results belong in the PR and issue
 #3 evidence record; this document does not predeclare a remote pass.
+
+## Resumed final-check correction
+
+The first PR candidate allowed future transitions in `validateLedger`, but its normal test entry still
+asserted today's status counts, `M50=evidence_review_pending`, Android deferral and eSIM acceptance.
+A synthetic future ledger with documented completions and an existing hardware-evidence record passed
+validation but failed the normal test suite (`Missing expected exception` in the old missing-evidence
+fixture). This would have recreated the same lifecycle problem outside the validator.
+
+The normal suite now builds deliberately invalid fixtures independently of the live ledger, copies
+reconciled-evidence report paths, derives counts from the data, and tests grouping against each record's
+actual state. Dated original-snapshot assertions remain an explicit audit helper, not a perpetual CI gate.
+`acceptance-evolution.test.mjs` runs the full normal entry point in a disposable checkout with all five
+supported terminal/deferral states, an extra workstream, changed scope and verified existing evidence.
+Only the recursive self-test is suppressed in that child; the real ledger, policy, negative and rendering
+checks all run. Synthetic future decisions/hashes exist only in the test fixture and are not project claims.
+
+This fix changes checker tests and documentation only. The current owner decisions and their historical
+report index are unchanged. The complete original and corrected failure/pass records are retained in the
+PR verification evidence.

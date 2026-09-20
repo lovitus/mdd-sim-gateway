@@ -6,15 +6,18 @@ import { defaultRoot, readLedger, validateLedger, summaries, checkRepository } f
 
 const original = readLedger()
 validateLedger(original)
+const negativeFixture = structuredClone(original)
+Object.assign(negativeFixture.criteria[0], { implementation: 'implemented', acceptance: 'covered_by_tests' })
+delete negativeFixture.criteria[0].acceptanceEvidence
 const rejects = (change, pattern) => {
-  const candidate = structuredClone(original)
+  const candidate = structuredClone(negativeFixture)
   change(candidate)
   assert.throws(() => validateLedger(candidate), pattern)
 }
-rejects(d => d.criteria.pop(), /false|assert|63/i)
+rejects(d => { d.criteria = d.criteria.filter(c => c.id !== 'M01') }, /criterion count changed|false|assert|63/i)
 rejects(d => { d.criteria[0].id = d.criteria[1].id }, /duplicate criterion/)
 rejects(d => { d.criteria[0].requirement = 'all complete' }, /original requirement lost/)
-rejects(d => { d.criteria[0].acceptance = 'accepted_hardware' }, /hardware evidence missing/)
+rejects(d => { d.criteria[0].acceptance = 'accepted_hardware'; delete d.criteria[0].acceptanceEvidence }, /hardware evidence missing/)
 rejects(d => { d.criteria[0].acceptance = 'not_applicable' }, /live criterion cannot disappear/)
 rejects(d => { d.criteria[0].evidence = ['../outside'] }, /invalid evidence path/)
 rejects(d => { d.archives[0].sha256 = '0'.repeat(64) }, /historical bytes changed/)
@@ -32,6 +35,9 @@ try {
     ...original.criteria.flatMap(c => c.evidence), ...original.workstreams.flatMap(w => w.evidence),
     ...original.decisions.map(d => d.sourcePath), ...original.evidenceRecords.map(e => e.reportPath),
     ...original.workstreams.flatMap(w => w.resolution?.evidence || []),
+    ...original.criteria.flatMap(c => c.acceptanceEvidence ? [c.acceptanceEvidence.reportPath] : []),
+    ...original.evidenceRecords.flatMap(e => [e.reviewReportPath, e.verification?.reportPath].filter(Boolean)),
+    ...original.workstreams.flatMap(w => w.resolution?.acceptanceEvidence ? [w.resolution.acceptanceEvidence.reportPath] : []),
   ])
   const resources = JSON.parse(fs.readFileSync(path.join(defaultRoot, 'docs/reviews/retired-resources-3e6d5db.json')))
   resources.files.filter(f => f.activeCopy).forEach(f => needed.add(f.activeCopy))
@@ -42,7 +48,11 @@ try {
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.copyFileSync(path.join(defaultRoot, relative), target)
   }
-  assert.deepEqual(checkRepository(root), { criteria: 63, workstreams: 10, historicalReports: 8, recordedHardwareAcceptance: 0 })
+  assert.deepEqual(checkRepository(root), {
+    criteria: original.criteria.length, workstreams: original.workstreams.length,
+    historicalReports: original.evidenceRecords.length,
+    recordedHardwareAcceptance: original.criteria.filter(c => c.acceptance === 'accepted_hardware').length,
+  })
   fs.appendFileSync(path.join(root, 'TODO.md'), '\nEverything is finished.\n')
   assert.throws(() => checkRepository(root), /regenerate TODO.md/)
   checkRepository(root, { write: true })
@@ -64,4 +74,6 @@ console.log('Repository contracts reject dropped criteria, unsupported acceptanc
 // Scope/lifecycle and continuity regressions are part of the existing normal
 // main/PR ledger gate, not a separate optional workflow.
 await import('./acceptance-policy.test.mjs')
-await import('./acceptance-regressions.mjs')
+// The dated pre-fix counterexample runner is audit-only: do not require today's
+// scope or evidence-review states forever in the evolving normal CI ledger.
+await import('./acceptance-evolution.test.mjs')

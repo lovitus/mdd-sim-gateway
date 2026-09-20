@@ -1,7 +1,8 @@
 # Development and reproducible validation
 
 Current product scope and acceptance are versioned in [docs/status/README.md](docs/status/README.md).
-Local notes, a green build, historical screenshots and a running PID are not production acceptance.
+A green build or running PID alone does not prove production deployment. Preserve scoped local and historical
+reports for provenance reconciliation; not revalidated by this review does not mean never accepted.
 The supported build/install surfaces are Go binaries plus the embedded React UI and manifest-listed native helpers.
 Docker, Python Control, VPCD and Asterisk are retired; they are not local development prerequisites.
 
@@ -106,9 +107,9 @@ node tools/repository-check.mjs --write
 node tools/repository-check.mjs
 node tools/repository-check.test.mjs
 node tools/acceptance-policy.test.mjs
-node tools/acceptance-regressions.mjs
+node tools/acceptance-evolution.test.mjs
 ```
 
 The normal CI runs the scope/transition regressions through the existing repository-check.test.mjs gate.
-`node tools/verify-acceptance-baseline.mjs <checkout-at-19f966f>` additionally proves the four old-ledger failures without changing production code.
+`node tools/verify-acceptance-baseline.mjs <checkout-at-19f966f>` additionally proves the four old-ledger failures without changing production code. Its dated `acceptance-regressions.mjs` assertions describe the original correction snapshot only; they are not permanent current-state gates. Normal tests exercise documented future completion, changed scope and reconciled historical evidence through the full checker without freezing today's counts or statuses.
 This check does not perform SIM deletion/replay, paid operations, hardware tests or deployment.

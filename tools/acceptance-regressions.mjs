@@ -1,3 +1,5 @@
+// Dated audit counterexamples for the 2026-09-20 correction. Invoke explicitly
+// against the original/correction snapshot; never import into evolving normal CI.
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
