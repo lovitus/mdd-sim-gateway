@@ -1,3 +1,5 @@
+> Current scope (2026-09-20): Android is deferred and non-blocking. The final eSIM direction is physical deletion with retained deletion notifications and multiply-confirmed manual replay, not a pending soft-delete customization. See the [owner decision record](../../../docs/decisions/2026-09-20-current-scope.md). Historical implementation/acceptance notes below do not reset earlier scoped evidence or authorize new device operations.
+
 # Customized MDD User Interface
 
 Source: this repository, immediately before the first Go runtime rewrite.

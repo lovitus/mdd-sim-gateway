@@ -1,10 +1,10 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "baseline": "3e6d5db7657e468eedc0c31316bb97c04b2b599b",
   "baselineTree": "f0f6b038519bdce6520ea805c4c77c5aecd0535a",
   "reviewDate": "2026-09-20",
   "issue": "https://github.com/lovitus/mdd-sim-gateway/issues/3",
-  "scope": "Repository audit and isolated tests; no live hardware acceptance, paid operations or production deployment.",
+  "scope": "Repository/source and evidence-provenance review only; no new live tests or production deployment. Latest owner decisions govern current scope; historical acceptance is not reset by this review.",
   "archives": [
     {
       "original": "TODO.md",
@@ -41,8 +41,8 @@
       },
       "requirement": "仍未达到“所有平台可直接交付”：Windows 一次提权安装器/低权限守卫服务、持久 URC companion、\n      飞行模式最终状态验收、短信页视觉验收、Linux/macOS Provider 和拔插/崩溃/换卡矩阵仍待完成。",
       "implementation": "partial",
-      "acceptance": "pending_hardware",
-      "rationale": "Composite release target is not closed. Go builds/installers are delivered; cross-device radio/audio, privilege and failure matrices are not established by CI alone.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Existing deployment and browser reports are retained, not reset. Cross-device and least-privilege gaps are separate from whether any deployment occurred.",
       "evidence": [
         ".github/workflows/go-runtime.yml",
         "TODO_MACOS_AGENT.md",
@@ -52,6 +52,18 @@
         "go-runtime/internal/linuxmodem/data_linux.go",
         "go-runtime/release/install-macos-agent.sh",
         "go-runtime/release/install-windows-agent.ps1"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-BEARER",
+        "H-BROWSER-PAGES",
+        "H-HOST-READBACK",
+        "H-USER-HANDOFF"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "currentRequirement": "Current Windows/macOS/Linux delivery and native qualification: preserve prior deployment/installer reports, then verify only unresolved privilege, backend and failure-matrix cases. Android is deferred.",
+      "decisionRefs": [
+        "PRIMARY_AGENTS",
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -70,7 +82,8 @@
         "go-runtime/internal/linecatalog/deletion_test.go",
         "go-runtime/internal/linecatalog/store.go",
         "go-runtime/internal/linecatalog/store_test.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M03",
@@ -90,7 +103,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M04",
@@ -109,7 +123,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M05",
@@ -128,7 +143,8 @@
         "go-runtime/internal/runtimereconcile/liveness_chain_test.go",
         "go-runtime/internal/runtimereconcile/reconciler.go",
         "go-runtime/vowifiipc/recovery.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M06",
@@ -147,7 +163,8 @@
         "go-runtime/internal/agentdata/broker.go",
         "go-runtime/internal/linuxdataguard/guard_linux.go",
         "go-runtime/internal/linuxmodem/data_linux.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M07",
@@ -170,7 +187,8 @@
         "webui/src/goCallCoordinator.jsx",
         "webui/src/mdd/smsAdapter.js",
         "webui/tests/smsSubmissionSafety.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M08",
@@ -189,7 +207,8 @@
         "go-runtime/vowifiipc/types.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M09",
@@ -207,7 +226,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M10",
@@ -225,7 +245,8 @@
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/mdd/smsAdapter.js",
         "webui/tests/smsSubmissionSafety.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M11",
@@ -242,7 +263,8 @@
         "go-runtime/internal/agentconnection/manager.go",
         "go-runtime/internal/agenthost/worker.go",
         "go-runtime/vowifiipc/types.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M12",
@@ -260,7 +282,8 @@
         "go-runtime/internal/agenthost/worker.go",
         "go-runtime/release/install-macos-agent.sh",
         "go-runtime/release/install-windows-agent.ps1"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M13",
@@ -277,7 +300,8 @@
         "go-runtime/internal/agentconnection/manager.go",
         "go-runtime/internal/agenthost/worker.go",
         "go-runtime/internal/linuxmodem/mm_linux.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M14",
@@ -295,7 +319,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M15",
@@ -313,7 +338,8 @@
         "go-runtime/internal/agenthost/worker.go",
         "go-runtime/release/install-macos-agent.sh",
         "go-runtime/release/install-windows-agent.ps1"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M16",
@@ -323,14 +349,18 @@
       },
       "requirement": "端口选择基于 PnP parent、IMEI 和无副作用能力探测；优先选择支持所需 URC 且未被系统数据栈\n      占用的 AT function。COM 编号、USB interface 顺序、产品名和驱动显示名称都只是 attachment\n      属性，拔插或换型号后允许变化。",
       "implementation": "implemented",
-      "acceptance": "pending_hardware",
+      "acceptance": "evidence_review_pending",
       "rationale": "Discovery uses stable equipment/attachment identities, with native port attributes kept local. Cross-vendor and multi-device selection still need hardware acceptance.",
       "evidence": [
         "go-runtime/agentlink/types.go",
         "go-runtime/internal/agentat/call.go",
         "go-runtime/internal/agentmodem/operations.go",
         "go-runtime/internal/linuxmodem/mm_linux.go"
-      ]
+      ],
+      "historicalEvidence": [
+        "H-MAC-READBACK-AUDIO"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review."
     },
     {
       "id": "M17",
@@ -347,7 +377,8 @@
         "go-runtime/internal/agentconnection/manager.go",
         "go-runtime/internal/agenthost/worker.go",
         "go-runtime/vowifiipc/types.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M18",
@@ -357,12 +388,22 @@
       },
       "requirement": "蜂窝接口启用后必须进入“仅 MDD 可用”的独占隔离：插入机器上的浏览器、更新器、\n      EasyTier/组网软件以及其他进程，即使主动枚举或绑定该网卡，也不能使用这张 SIM 出网。\n      单纯提高 metric、修改默认路由或让 SOCKS 绑定源地址都不算完成。",
       "implementation": "partial",
-      "acceptance": "pending_hardware",
-      "rationale": "Linux quarantine uses nftables, device groups, cgroup ownership and socket marks/policy routes; it is not merely metric changes. Broad crash/bound-socket leak acceptance is still required.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Linux protection has source implementation and scoped prior field reports. Reconcile those reports before completing the remaining per-platform bound-socket/crash/no-leak matrix.",
       "evidence": [
         "go-runtime/internal/agentdata/broker.go",
         "go-runtime/internal/linuxdataguard/guard_linux.go",
         "go-runtime/internal/linuxmodem/data_linux.go"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-BEARER",
+        "H-LINUX-WSS-ISOLATION"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "currentRequirement": "When the user enables 4G on Windows/macOS/Linux, isolate it exclusively for MDD. If protection fails, refuse data; never share with the host, fall back to the default route, or change the stored user switch.",
+      "decisionRefs": [
+        "PRIMARY_AGENTS",
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -373,8 +414,8 @@
       },
       "requirement": "Linux netns/nftables 仍待实现和实机验收。macOS 不再把 PF、路由 metric 或专用账户当作\n      首选安全边界；按专项 TODO 优先保证蜂窝 IP 从未进入宿主网络栈。",
       "implementation": "partial",
-      "acceptance": "pending_hardware",
-      "rationale": "The literal Linux netns plan is not implemented. Current code uses nftables/cgroup/mark isolation instead; whether it satisfies the entire no-leak threat model needs the matrix. macOS private USB/IP code stays gated off by default.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "The Linux nftables/cgroup/mark path and scoped EC20 field reports are retained. macOS private data capability remains gated; the cross-platform no-leak matrix is not newly certified.",
       "evidence": [
         "TODO_MACOS_AGENT.md",
         "agent/cellular-io/CMakeLists.txt",
@@ -382,6 +423,16 @@
         "go-runtime/internal/linuxdataguard/guard_linux.go",
         "go-runtime/internal/linuxmodem/data_linux.go",
         "go-runtime/release/install-macos-agent.sh"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-BEARER",
+        "H-LINUX-WSS-ISOLATION"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "currentRequirement": "Use each platform's enforced fail-closed isolation, not the superseded literal netns design. Do not enable an off switch or treat a disabled capability as a successful enabled-isolation test.",
+      "decisionRefs": [
+        "PRIMARY_AGENTS",
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -392,8 +443,8 @@
       },
       "requirement": "`CellularDataBackend.ensure` 负责以幂等方式建立或恢复蜂窝数据连接；本地实现复用现有\n      ModemManager，远程实现请求 Agent 使用平台蜂窝接口。`status` 只报告状态，`endpoint`\n      只在连接和出口健康检查均通过后返回可用入口。",
       "implementation": "implemented",
-      "acceptance": "pending_hardware",
-      "rationale": "Current data ownership, health/ensure and scoped reservations exist. Linux admits supported static IPv4 bearers; DHCP/PPP/IPv6 do not silently fall back to the host network.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Existing exact-bearer recovery and IP/interface/APN readback reports remain linked. Supported static IPv4 admission and fail-closed unsupported bearer behavior require no speculative host fallback.",
       "evidence": [
         "go-runtime/internal/agentdata/broker.go",
         "go-runtime/internal/agentpolicy/connection_recovery_test.go",
@@ -401,6 +452,14 @@
         "go-runtime/internal/agentpolicy/manager_test.go",
         "go-runtime/internal/linuxdataguard/guard_linux.go",
         "go-runtime/internal/linuxmodem/data_linux.go"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-BEARER",
+        "H-HOST-READBACK"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -411,8 +470,8 @@
       },
       "requirement": "模块拔出或 Agent 掉线时保留 profile、国家出口分配和依赖；同一 ICCID 在任意 Agent\n      重新出现且健康检查通过后自动恢复。",
       "implementation": "implemented",
-      "acceptance": "pending_hardware",
-      "rationale": "Persisted policy/catalog and reconnect reconciliation retain stable SIM configuration. Live SIM movement, loss and recovery must be validated across the supported hardware matrix.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Persisted policy/catalog and reconnect reconciliation retain SIM configuration. Prior same-device bearer recovery is retained but does not establish the separate same-SIM cross-Agent movement matrix.",
       "evidence": [
         "go-runtime/internal/agentpolicy/connection_recovery_test.go",
         "go-runtime/internal/agentpolicy/manager.go",
@@ -423,6 +482,13 @@
         "go-runtime/internal/runtimereconcile/liveness_chain_test.go",
         "go-runtime/internal/runtimereconcile/reconciler.go",
         "go-runtime/vowifiipc/recovery.go"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-BEARER"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -442,7 +508,8 @@
         "webui/src/mdd/networkAdapter.js",
         "webui/src/mdd/views/UnifiedPages.jsx",
         "webui/tests/mddNetworkAdapter.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M23",
@@ -452,8 +519,8 @@
       },
       "requirement": "profile 状态统一派生自同一个服务端状态源：`在线`、`正在连接`、`离线`、`不可用`、`冲突`。",
       "implementation": "partial",
-      "acceptance": "pending_hardware",
-      "rationale": "Shared server facts and mounted adapters provide status projections. Exhaustive five-state cross-page transitions have not been independently accepted in a real browser/device matrix.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "The previous Chrome/device-state report is retained. Review its coverage of the current artifact, then fill specific five-state transition gaps rather than replaying every page from zero.",
       "evidence": [
         "go-runtime/internal/linecatalog/deletion_test.go",
         "go-runtime/internal/linecatalog/store.go",
@@ -461,6 +528,13 @@
         "webui/src/mdd/networkAdapter.js",
         "webui/src/mdd/views/UnifiedPages.jsx",
         "webui/tests/mddNetworkAdapter.mjs"
+      ],
+      "historicalEvidence": [
+        "H-BROWSER-PAGES"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -471,8 +545,8 @@
       },
       "requirement": "设备页、线路页和代理页不得各自推断一套状态；依赖出口的线路可跳转到对应 profile。",
       "implementation": "partial",
-      "acceptance": "pending_hardware",
-      "rationale": "Pages share the current Go adapter and health projection; end-to-end cross-page consistency still needs acceptance, not a claim based on each page passing source tests.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "The prior Chrome checks and shared Go projection are retained; the specific missing cross-page transitions remain a scoped evidence review.",
       "evidence": [
         "go-runtime/internal/runtimereconcile/liveness_chain_test.go",
         "go-runtime/internal/runtimereconcile/reconciler.go",
@@ -480,6 +554,13 @@
         "webui/src/mdd/networkAdapter.js",
         "webui/src/mdd/views/UnifiedPages.jsx",
         "webui/tests/mddNetworkAdapter.mjs"
+      ],
+      "historicalEvidence": [
+        "H-BROWSER-PAGES"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -499,7 +580,8 @@
         "webui/src/mdd/networkAdapter.js",
         "webui/src/mdd/views/UnifiedPages.jsx",
         "webui/tests/mddNetworkAdapter.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M26",
@@ -518,7 +600,8 @@
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/mdd/smsAdapter.js",
         "webui/tests/smsSubmissionSafety.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M27",
@@ -536,7 +619,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M28",
@@ -553,7 +637,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M29",
@@ -563,7 +648,7 @@
       },
       "requirement": "Agent 将 `dial/answer/hangup/status/dtmf` 映射到当前 Provider：Windows 优先 MBN/设备服务，\n      Linux 优先 ModemManager；只有 `GenericAtProvider` 才映射到标准 3GPP AT 命令。",
       "implementation": "partial",
-      "acceptance": "pending_hardware",
+      "acceptance": "evidence_review_pending",
       "rationale": "Current native adapters include Go AT and Linux ModemManager; the original Windows MBN preference is not proof of a universal supported provider. Support is capability-gated per platform and hardware.",
       "evidence": [
         "go-runtime/internal/agentat/call.go",
@@ -572,7 +657,11 @@
         "go-runtime/internal/linuxmodem/mm_linux.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": [
+        "H-CALL-PARTIAL"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review."
     },
     {
       "id": "M30",
@@ -590,7 +679,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M31",
@@ -610,7 +700,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M32",
@@ -620,7 +711,7 @@
       },
       "requirement": "`CallAudioBackend` 至少包含两个可独立探测的 provider：首选按同一硬件 container 精确匹配的\n      UAC/WASAPI（模块自身是虚拟声卡，不要求主机有物理声卡）；Windows Audio 服务、UAC endpoint\n      或打开流失败时回退 NMEA serial PCM。Linux/macOS 使用各自原生 UAC backend；未经该平台实机\n      验证只上报 unavailable，不用 Windows 名称、COM 号或默认音频设备推断。",
       "implementation": "partial",
-      "acceptance": "pending_hardware",
+      "acceptance": "evidence_review_pending",
       "rationale": "Exact-device audio helper and platform audio routes are implemented. This is not independent real-hardware acceptance of every fallback, service state or brand.",
       "evidence": [
         "TODO_MACOS_AGENT.md",
@@ -630,7 +721,12 @@
         "go-runtime/release/install-macos-agent.sh",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": [
+        "H-CALL-PARTIAL",
+        "H-MAC-READBACK-AUDIO"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review."
     },
     {
       "id": "M33",
@@ -651,7 +747,8 @@
         "go-runtime/internal/linecatalog/deletion_test.go",
         "go-runtime/internal/linecatalog/store.go",
         "go-runtime/internal/linecatalog/store_test.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M34",
@@ -673,7 +770,8 @@
         "go-runtime/internal/runtimereconcile/liveness_chain_test.go",
         "go-runtime/internal/runtimereconcile/reconciler.go",
         "go-runtime/vowifiipc/recovery.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M35",
@@ -683,8 +781,8 @@
       },
       "requirement": "网关重启：持久化配置和稳定本地入口不变；等待 Agent 重连后恢复运行时 attachment。",
       "implementation": "implemented",
-      "acceptance": "pending_hardware",
-      "rationale": "Persistent catalog and desired-intent reconciliation restore sessions after process start; actual deployed host and device recovery is not proven by mock or loopback tests.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Prior per-user Agent soft restart and deployment reports are retained. They do not prove whole-gateway reboot acceptance or that current main is installed on production hosts.",
       "evidence": [
         "go-runtime/internal/linecatalog/deletion_test.go",
         "go-runtime/internal/linecatalog/store.go",
@@ -692,6 +790,14 @@
         "go-runtime/internal/runtimereconcile/liveness_chain_test.go",
         "go-runtime/internal/runtimereconcile/reconciler.go",
         "go-runtime/vowifiipc/recovery.go"
+      ],
+      "historicalEvidence": [
+        "H-HOST-READBACK",
+        "H-USER-HANDOFF"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -712,7 +818,8 @@
         "webui/src/goCallCoordinator.jsx",
         "webui/src/mdd/smsAdapter.js",
         "webui/tests/smsSubmissionSafety.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M37",
@@ -729,7 +836,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M38",
@@ -748,7 +856,8 @@
         "webui/src/mdd/networkAdapter.js",
         "webui/src/mdd/views/UnifiedPages.jsx",
         "webui/tests/mddNetworkAdapter.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M39",
@@ -765,7 +874,8 @@
         "go-runtime/internal/agentat/call.go",
         "go-runtime/internal/linuxmodem/mm_linux.go",
         "go-runtime/vowifiipc/types.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M40",
@@ -775,8 +885,8 @@
       },
       "requirement": "本地与远程实现运行同一组 `CellularDataBackend`、`SmsBackend`、`CallBackend`、\n      `CallAudioBackend` 和状态结果合约测试；不声明音频能力的实现可通过明确的 unsupported\n      合约结果完成 `CallAudioBackend` 测试。",
       "implementation": "partial",
-      "acceptance": "pending_hardware",
-      "rationale": "Go domain contracts and optional capability tests replace the named Python interfaces. Cross-platform native equivalence still needs qualification rather than passing one platform stub.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Existing native/readback, remote-relay and isolation reports are retained alongside Go domain tests. Additional platform/backend scenarios require scoped qualification, not a claim of zero earlier testing.",
       "evidence": [
         "go-runtime/agentlink/types.go",
         "go-runtime/internal/agentdata/broker.go",
@@ -787,6 +897,14 @@
         "go-runtime/vowifiipc/types.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-WSS-ISOLATION",
+        "H-MAC-READBACK-AUDIO"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -805,7 +923,8 @@
         "go-runtime/release/install-macos-agent.sh",
         "go-runtime/release/install-windows-agent.ps1",
         "go-runtime/vowifiipc/types.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M42",
@@ -823,7 +942,8 @@
         "go-runtime/agentlink/types.go",
         "go-runtime/internal/agentconnection/manager.go",
         "go-runtime/internal/agenthost/worker.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M43",
@@ -842,7 +962,8 @@
         "go-runtime/internal/linecatalog/deletion_test.go",
         "go-runtime/internal/linecatalog/store.go",
         "go-runtime/internal/linecatalog/store_test.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M44",
@@ -852,12 +973,19 @@
       },
       "requirement": "断开蜂窝接口但保留 Agent 默认网络，验证任何测试流量都不会从默认网络泄漏。",
       "implementation": "needs_verification",
-      "acceptance": "pending_hardware",
-      "rationale": "Requires real default-network-preserved failure injection and evidence of no fallback. Existing fail-closed contracts are necessary but not a hardware leak matrix.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Reconcile the recorded Linux relay/disconnect isolation cases first. The default-network-preserved loss case must be checked separately if absent from the raw report.",
       "evidence": [
         "go-runtime/internal/agentdata/broker.go",
         "go-runtime/internal/linuxdataguard/guard_linux.go",
         "go-runtime/internal/linuxmodem/data_linux.go"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-WSS-ISOLATION"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -868,12 +996,19 @@
       },
       "requirement": "在 Agent 主机启动普通浏览器及 EasyTier/同类组网进程，并测试普通 socket 与显式绑定\n      蜂窝接口；它们必须全部失败，同时 MDD 的 TCP、UDP 和 DNS 代理测试仍成功。",
       "implementation": "needs_verification",
-      "acceptance": "pending_hardware",
-      "rationale": "Requires ordinary and explicitly bound TCP/UDP/DNS clients under the supported host/kernel configurations. Do not run on production without authorization.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Historical Linux WSS/isolation coverage is retained but does not alone prove ordinary browsers and explicitly bound TCP/UDP/DNS clients all failed. Reconcile that specific matrix before authorized gap testing.",
       "evidence": [
         "go-runtime/internal/agentdata/broker.go",
         "go-runtime/internal/linuxdataguard/guard_linux.go",
         "go-runtime/internal/linuxmodem/data_linux.go"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-WSS-ISOLATION"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -884,12 +1019,20 @@
       },
       "requirement": "删除隔离规则、重启 Agent、重枚举蜂窝接口和强制结束守卫进程，验证出口立即 fail-closed，\n      不会退化成“临时允许本机共用”。",
       "implementation": "needs_verification",
-      "acceptance": "pending_hardware",
-      "rationale": "Requires bounded destructive guard/rule/process/interface failure injection on a disposable host. No blanket resistance to privileged host tampering is claimed.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Prior Agent-stop isolation and exact-bearer recovery reports remain linked. Rule deletion, guard death and interface re-enumeration require their own evidence; production safeguards and user intent are unchanged.",
       "evidence": [
         "go-runtime/internal/agentdata/broker.go",
         "go-runtime/internal/linuxdataguard/guard_linux.go",
         "go-runtime/internal/linuxmodem/data_linux.go"
+      ],
+      "historicalEvidence": [
+        "H-LINUX-BEARER",
+        "H-LINUX-WSS-ISOLATION"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -909,7 +1052,8 @@
         "go-runtime/internal/agentpolicy/manager_test.go",
         "go-runtime/internal/linuxdataguard/guard_linux.go",
         "go-runtime/internal/linuxmodem/data_linux.go"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M48",
@@ -925,7 +1069,8 @@
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/mdd/smsAdapter.js",
         "webui/tests/smsSubmissionSafety.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M49",
@@ -943,7 +1088,8 @@
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/mdd/smsAdapter.js",
         "webui/tests/smsSubmissionSafety.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M50",
@@ -953,13 +1099,20 @@
       },
       "requirement": "浏览器可以通过远程 Modem 拨号、接听、挂断和发送 DTMF：呼出、挂断和双向语音已实机\n      通过；来电事件与接听界面已实机验证，实际接听仍待人工验收；DTMF 等待通话中人工验收。",
       "implementation": "implemented",
-      "acceptance": "pending_hardware",
-      "rationale": "Dial/answer/hangup/DTMF paths exist. This review does not perform paid calls or certify live answering/DTMF without explicit authorization.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Preserve the original reported outgoing dial/hangup/bidirectional audio and incoming-event/UI acceptance. Reconcile its artifact and transport; actual incoming answer and DTMF are separate unresolved cases, not a reset of outgoing-call evidence.",
       "evidence": [
         "go-runtime/internal/agentmedia/broker.go",
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
+      ],
+      "historicalEvidence": [
+        "H-CALL-PARTIAL"
+      ],
+      "remainingAcceptance": "Check original artifact/transport evidence first; only actual incoming answer, in-call DTMF, and any proven uncovered scenarios remain. Do not automatically repeat paid outgoing calls.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -971,13 +1124,20 @@
       "requirement": "有音频能力的 Modem 完成浏览器双向语音、静音和录音验证：呼出双向语音已通过，来电、\n      静音和录音仍待人工验收。",
       "implementation": "partial",
       "acceptance": "pending_product",
-      "rationale": "Current media and mute controls exist; audio recording is not implemented in the mounted UI. Removing the retired recording stub does not deliver recording. Live media/mute acceptance also remains open.",
+      "rationale": "Previously reported outgoing audio is retained. Recording is genuinely unimplemented; actual incoming audio and mute are scoped evidence gaps. A mixed criterion must not erase its already reported subcases.",
       "evidence": [
         "go-runtime/internal/agentmedia/broker.go",
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": [
+        "H-CALL-PARTIAL"
+      ],
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
+      ],
+      "remainingAcceptance": "Recording implementation remains missing. Reconcile outgoing-audio records; verify only unrecorded incoming audio/mute cases with authorization."
     },
     {
       "id": "M52",
@@ -994,7 +1154,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M53",
@@ -1011,7 +1172,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M54",
@@ -1028,7 +1190,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M55",
@@ -1048,7 +1211,8 @@
         "webui/src/mdd/networkAdapter.js",
         "webui/src/mdd/views/UnifiedPages.jsx",
         "webui/tests/mddNetworkAdapter.mjs"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M56",
@@ -1058,8 +1222,8 @@
       },
       "requirement": "验证在线、正在连接、离线、不可用和冲突状态，以及离线 SIM 可配置、删除依赖警告和\n      跨页面状态一致性。",
       "implementation": "needs_verification",
-      "acceptance": "pending_hardware",
-      "rationale": "Run actual five-state transitions, offline selection and dependency prompts across mounted pages. Unit/source contracts are recorded but do not certify this visual/field matrix.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "The September 17 Chrome report covers real pages/selectors/diagnostics and is retained. Reconcile exact transition coverage before adding missing offline/conflict/dependency-prompt scenarios.",
       "evidence": [
         "go-runtime/internal/linecatalog/deletion_test.go",
         "go-runtime/internal/linecatalog/store.go",
@@ -1067,6 +1231,13 @@
         "webui/src/mdd/networkAdapter.js",
         "webui/src/mdd/views/UnifiedPages.jsx",
         "webui/tests/mddNetworkAdapter.mjs"
+      ],
+      "historicalEvidence": [
+        "H-BROWSER-PAGES"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -1084,7 +1255,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M58",
@@ -1101,7 +1273,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "M59",
@@ -1118,7 +1291,8 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "MAC01",
@@ -1128,8 +1302,8 @@
       },
       "requirement": "复用现有 SMS/Call 领域合约已验证列表与状态读取；本轮未重复发送收费短信、未拨号，也未重做\n  来电接听，因此发送/接收/通话端到端保持待人工授权验收。任何 unknown 均不自动重试。",
       "implementation": "implemented",
-      "acceptance": "pending_hardware",
-      "rationale": "Native SMS/call contracts have source tests; no additional paid SMS/call or bidirectional carrier/media validation was performed in this audit.",
+      "acceptance": "evidence_review_pending",
+      "rationale": "Retain prior identity/list/state/capability readback and non-paid exact-device audio checks. No new paid send/call was performed; only uncovered carrier and bidirectional-media cases need authorized follow-up.",
       "evidence": [
         "TODO_MACOS_AGENT.md",
         "agent/cellular-io/CMakeLists.txt",
@@ -1138,6 +1312,14 @@
         "go-runtime/release/install-macos-agent.sh",
         "providers/vowifi-go/internal/service/call.go",
         "webui/src/goCallCoordinator.jsx"
+      ],
+      "historicalEvidence": [
+        "H-HOST-READBACK",
+        "H-MAC-READBACK-AUDIO"
+      ],
+      "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
+      "decisionRefs": [
+        "EVIDENCE_CONTINUITY"
       ]
     },
     {
@@ -1149,14 +1331,27 @@
       "requirement": "universal、公证与 CI release 尚未完成；当前 Developer ID 签名不能冒充已 notarize。",
       "implementation": "partial",
       "acceptance": "pending_product",
-      "rationale": "macOS arm64 release CI and signing flow exist. Universal packaging and notarization remain unfinished; passing an arm64 build does not establish either.",
+      "rationale": "The original combined checkbox is historical. Preserve signing evidence; split arm64 signing, Universal packaging and excluded notarization rather than treating all three as one current product gap.",
       "evidence": [
         ".github/workflows/go-runtime.yml",
         "TODO_MACOS_AGENT.md",
         "agent/cellular-io/CMakeLists.txt",
         "go-runtime/release/install-macos-agent.sh",
         "go-runtime/release/install-windows-agent.ps1"
-      ]
+      ],
+      "historicalEvidence": [
+        "H-MAC-SIGNING"
+      ],
+      "currentRequirement": "Current macOS arm64 CI/signing is delivered separately. Universal packaging is a distinct future consideration. Notarization and .p8 credentials are excluded for this round and do not block delivery.",
+      "decisionRefs": [
+        "MACOS_RELEASE",
+        "EVIDENCE_CONTINUITY"
+      ],
+      "workstreamRefs": [
+        "MACOS_UNIVERSAL",
+        "MACOS_NOTARIZATION"
+      ],
+      "remainingAcceptance": "Universal packaging priority/acceptance is separate. No notarization/.p8 task is required this round. No claim of current production deployment."
     },
     {
       "id": "MAC03",
@@ -1174,7 +1369,8 @@
         "go-runtime/internal/agentconnection/manager.go",
         "go-runtime/internal/agenthost/worker.go",
         "go-runtime/release/install-macos-agent.sh"
-      ]
+      ],
+      "historicalEvidence": []
     },
     {
       "id": "MAC04",
@@ -1190,29 +1386,58 @@
         "TODO_MACOS_AGENT.md",
         "agent/cellular-io/CMakeLists.txt",
         "go-runtime/release/install-macos-agent.sh"
-      ]
+      ],
+      "historicalEvidence": []
     }
   ],
   "workstreams": [
     {
       "id": "ANDROID",
-      "state": "not_implemented",
-      "summary": "Required Android unified-protocol reader/OMAPI/OTG product support is not delivered. Retired VPCD APK is not an implementation.",
-      "acceptance": "Define protocol/security/native permissions, implement and test on authorized devices; do not claim code from a README badge.",
+      "state": "deferred",
+      "summary": "Android unified-protocol reader support is not delivered and is explicitly deferred; it does not block current Windows/macOS/Linux delivery.",
+      "acceptance": "Future implementation requires a new prioritized work item and authorized device/permission tests. Deferral is neither implementation nor cancellation.",
       "evidence": [
         "README.md",
         "go-runtime/agentlink/types.go"
-      ]
+      ],
+      "releaseRelevance": "deferred",
+      "resolution": {
+        "basis": "user_decision",
+        "reason": "Owner deferred Android in favor of the three primary desktop/server Agents.",
+        "decisionRefs": [
+          "PRIMARY_AGENTS"
+        ],
+        "evidence": [
+          "docs/decisions/2026-09-20-current-scope.md"
+        ]
+      }
     },
     {
       "id": "ESIM_DELETE",
-      "state": "partial",
-      "summary": "Current standard delete with retained notification is a transition, not the requested custom deletion behavior.",
-      "acceptance": "User explicitly requested this last and interactive. Design/review and authorize exact-card destructive tests separately.",
+      "state": "accepted",
+      "summary": "The final accepted direction is standard physical deletion, retained deletion notifications and manual replay with multiple confirmations. Abandoned soft deletion is not pending customization.",
+      "acceptance": "Acceptance here records the owner-approved product direction and existing source contracts, not newly executed card/carrier acceptance. Preserve explicit confirmations, exact identities, retained records and unknown outcomes.",
       "evidence": [
         "webui/src/mdd/esimAdapter.js",
-        "webui/tests/mddEsimAdapter.mjs"
-      ]
+        "webui/tests/mddEsimAdapter.mjs",
+        "go-runtime/internal/euiccprofiles/standard_delete_test.go",
+        "go-runtime/internal/euiccprofiles/soft_delete_test.go",
+        "webui/src/mdd/views/DeletionNotifications.jsx"
+      ],
+      "releaseRelevance": "current",
+      "resolution": {
+        "basis": "user_decision",
+        "reason": "Owner accepted the implemented physical-delete direction instead of the abandoned keep-profile/report-delete proposal.",
+        "decisionRefs": [
+          "ESIM_FINAL"
+        ],
+        "evidence": [
+          "docs/decisions/2026-09-20-current-scope.md",
+          "go-runtime/internal/euiccprofiles/standard_delete.go",
+          "go-runtime/internal/euiccprofiles/notification_archive.go",
+          "webui/src/mdd/views/DeletionNotifications.jsx"
+        ]
+      }
     },
     {
       "id": "RECORDING",
@@ -1222,7 +1447,8 @@
       "evidence": [
         "webui/src/mdd/views/Softphone.jsx",
         "webui/src/goCallCoordinator.jsx"
-      ]
+      ],
+      "releaseRelevance": "current"
     },
     {
       "id": "INSTALLER_WAIT",
@@ -1232,17 +1458,19 @@
       "evidence": [
         "go-runtime/release/install-windows-agent.ps1",
         "go-runtime/release/install-macos-agent.sh"
-      ]
+      ],
+      "releaseRelevance": "current"
     },
     {
       "id": "IDENTICAL_REINSERT",
       "state": "needs_verification",
       "summary": "A SIM unplug/reinsert with identical observed USB/ICCID/owner between samples cannot be certified by ordinary snapshot tests.",
-      "acceptance": "Native event/generation evidence and narrowly timed real HIL on all supported platforms; report uncertainty when indistinguishable.",
+      "acceptance": "First reconcile any native event/generation and narrowly timed reports. Test only the identical-identity between-samples gap on specifically authorized hardware; report uncertainty when indistinguishable.",
       "evidence": [
         "go-runtime/internal/agentmodem/sim_session_test.go",
         "go-runtime/internal/linuxmodem/mm_linux.go"
-      ]
+      ],
+      "releaseRelevance": "current"
     },
     {
       "id": "INCIDENT_MM_CLOSE",
@@ -1252,7 +1480,8 @@
       "evidence": [
         "go-runtime/internal/linuxmodem/mm_linux.go",
         "go-runtime/internal/agentpolicy/connection_recovery_test.go"
-      ]
+      ],
+      "releaseRelevance": "current"
     },
     {
       "id": "INCIDENT_TOPOLOGY",
@@ -1262,7 +1491,8 @@
       "evidence": [
         "go-runtime/agentlink/types.go",
         "go-runtime/agentlink/server.go"
-      ]
+      ],
+      "releaseRelevance": "current"
     },
     {
       "id": "FORK_MAINTENANCE",
@@ -1272,7 +1502,240 @@
       "evidence": [
         "providers/vowifi-go/UPSTREAM.md",
         "go-runtime/agentlink/server.go"
+      ],
+      "releaseRelevance": "ongoing"
+    },
+    {
+      "id": "MACOS_NOTARIZATION",
+      "state": "deferred",
+      "releaseRelevance": "excluded",
+      "summary": "Notarization and .p8 credentials are outside this round; absence is not a delivery blocker. Existing signing remains in force.",
+      "acceptance": "Only a later explicit scope decision may schedule notarization. Do not label signed artifacts notarized.",
+      "evidence": [
+        "docs/decisions/2026-09-20-current-scope.md",
+        ".github/workflows/go-runtime.yml"
+      ],
+      "resolution": {
+        "basis": "user_decision",
+        "reason": "Owner excluded notarization and .p8 for this round, independently of Universal packaging.",
+        "decisionRefs": [
+          "MACOS_RELEASE"
+        ],
+        "evidence": [
+          "docs/decisions/2026-09-20-current-scope.md"
+        ]
+      }
+    },
+    {
+      "id": "MACOS_UNIVERSAL",
+      "state": "not_implemented",
+      "releaseRelevance": "needs_decision",
+      "summary": "Universal packaging is not delivered by the current arm64 job. Track future priority separately from excluded notarization.",
+      "acceptance": "Clarify a future packaging target before implementing Universal output; preserve current arm64 build/signing evidence.",
+      "evidence": [
+        "docs/decisions/2026-09-20-current-scope.md",
+        ".github/workflows/go-runtime.yml",
+        "go-runtime/release/build-macos-agent.sh"
       ]
     }
-  ]
+  ],
+  "decisions": [
+    {
+      "id": "ESIM_FINAL",
+      "date": "2026-09-20",
+      "authority": "project_owner",
+      "sourcePath": "docs/decisions/2026-09-20-current-scope.md",
+      "summary": "Physical deletion, retained notification and multiply-confirmed manual replay are the accepted final direction; abandoned soft deletion is superseded."
+    },
+    {
+      "id": "PRIMARY_AGENTS",
+      "date": "2026-09-20",
+      "authority": "project_owner",
+      "sourcePath": "docs/decisions/2026-09-20-current-scope.md",
+      "summary": "Windows/macOS/Linux remote Agents are the current priority; Android is deferred. Enabled 4G must be isolated and fail closed without overriding user intent."
+    },
+    {
+      "id": "MACOS_RELEASE",
+      "date": "2026-09-20",
+      "authority": "project_owner",
+      "sourcePath": "docs/decisions/2026-09-20-current-scope.md",
+      "summary": "No notarization or .p8 this round. Preserve signing and track Universal packaging separately."
+    },
+    {
+      "id": "EVIDENCE_CONTINUITY",
+      "date": "2026-09-20",
+      "authority": "project_owner",
+      "sourcePath": "docs/decisions/2026-09-20-current-scope.md",
+      "summary": "Reconcile scoped historical evidence before scheduling missing tests; not revalidated is not never accepted."
+    }
+  ],
+  "releaseScope": [
+    {
+      "id": "ESIM",
+      "disposition": "accepted",
+      "decision": "ESIM_FINAL",
+      "summary": "Physical deletion + retained deletion notifications + multiple-confirmation manual replay. No soft-delete implementation backlog."
+    },
+    {
+      "id": "REMOTE_AGENTS",
+      "disposition": "required",
+      "decision": "PRIMARY_AGENTS",
+      "summary": "Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly."
+    },
+    {
+      "id": "ENABLED_4G",
+      "disposition": "required",
+      "decision": "PRIMARY_AGENTS",
+      "summary": "Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override."
+    },
+    {
+      "id": "ANDROID",
+      "disposition": "deferred",
+      "decision": "PRIMARY_AGENTS",
+      "summary": "Unified reader client deferred; not a current delivery blocker and not a completed feature."
+    },
+    {
+      "id": "MACOS_NOTARIZATION",
+      "disposition": "excluded",
+      "decision": "MACOS_RELEASE",
+      "summary": "No notarization and no .p8 credentials in this round; existing signing remains required."
+    },
+    {
+      "id": "MACOS_UNIVERSAL",
+      "disposition": "needs_decision",
+      "decision": "MACOS_RELEASE",
+      "summary": "Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build."
+    }
+  ],
+  "evidenceRecords": [
+    {
+      "id": "H-LINUX-BEARER",
+      "reportPath": "docs/archive/2026-09-20/postponed-tasks.md",
+      "startLine": 5,
+      "endLine": 9,
+      "excerptSHA256": "a94edb18f2b37573543f683a005de752480a6b8b3c53af092023f58f8347a8c1",
+      "reviewState": "reported_not_revalidated",
+      "summary": "September 17 report: Core/helper/Linux Agent deployed; exact bearer loss recovered without Agent/business PID or desired-intent change, and no WWAN route in the host main table.",
+      "limitations": "Only the reported device, artifact and bearer-recovery case. This is not a full traffic leak/tampering or reboot matrix. Initial forced-close cause was not established.",
+      "criteria": [
+        "M01",
+        "M18",
+        "M19",
+        "M20",
+        "M21",
+        "M46"
+      ]
+    },
+    {
+      "id": "H-BROWSER-PAGES",
+      "reportPath": "docs/archive/2026-09-20/postponed-tasks.md",
+      "startLine": 13,
+      "endLine": 17,
+      "excerptSHA256": "7f63a599a86a95bd4cdc0164e0805cdda77399fa0405188657da404589e7972e",
+      "reviewState": "reported_not_revalidated",
+      "summary": "September 17 Chrome report: device/4G/APN, selectors, diagnostics and host pages checked; no browser errors recorded.",
+      "limitations": "No new call/SMS/fault injection in that report. Does not establish every five-state transition or all multi-client/active-call behavior.",
+      "criteria": [
+        "M01",
+        "M23",
+        "M24",
+        "M56"
+      ]
+    },
+    {
+      "id": "H-HOST-READBACK",
+      "reportPath": "docs/archive/2026-09-20/postponed-tasks.md",
+      "startLine": 82,
+      "endLine": 88,
+      "excerptSHA256": "40fa865d60e466daab824fcb3c16b0e796e87c90d2914f75233476738aa7c475",
+      "reviewState": "reported_not_revalidated",
+      "summary": "Earlier report retains Linux IP/interface/APN readback and Windows/macOS metadata, macOS per-user launchd/soft restart, with configuration unchanged.",
+      "limitations": "Historical artifact-specific report. A user-domain restart is not a machine reboot; identity labels must be reconciled privately rather than guessed.",
+      "criteria": [
+        "M01",
+        "M20",
+        "M35",
+        "MAC01"
+      ]
+    },
+    {
+      "id": "H-LINUX-WSS-ISOLATION",
+      "reportPath": "docs/archive/2026-09-20/postponed-tasks.md",
+      "startLine": 110,
+      "endLine": 111,
+      "excerptSHA256": "62ddbd3fcb8bd6f706890b2506409420b31b93d84c31aa5f6f5083b8ff461f24",
+      "reviewState": "reported_not_revalidated",
+      "summary": "Earlier report describes the Linux EC20 on-host and cross-host WSS relay plus disconnection/Agent-stop isolation cases as tested.",
+      "limitations": "Independent remote Linux hardware, whole-host restart and other cases are explicitly outside that report; do not close the entire isolation matrix.",
+      "criteria": [
+        "M18",
+        "M19",
+        "M40",
+        "M44",
+        "M45",
+        "M46"
+      ]
+    },
+    {
+      "id": "H-CALL-PARTIAL",
+      "reportPath": "docs/archive/2026-09-20/TODO.md",
+      "startLine": 320,
+      "endLine": 323,
+      "excerptSHA256": "7df8c80fb1b42be97718bc9d97176ad27c3835452b256a63f3bd246e8e993ab2",
+      "reviewState": "reported_not_revalidated",
+      "summary": "Original criteria explicitly record outgoing dial/hangup/bidirectional audio and incoming-event/answer UI as previously hardware-tested.",
+      "limitations": "Actual incoming answer and in-call DTMF remain explicit gaps; mute and recording were not accepted. Older media architecture evidence must be reconciled with the deployed version.",
+      "criteria": [
+        "M29",
+        "M32",
+        "M50",
+        "M51"
+      ]
+    },
+    {
+      "id": "H-MAC-READBACK-AUDIO",
+      "reportPath": "docs/archive/2026-09-20/TODO_MACOS_AGENT.md",
+      "startLine": 282,
+      "endLine": 290,
+      "excerptSHA256": "c84131e0dbb60c771a806c79bc3b5b628b692bcb9e718fc9800af81f4f7132bb",
+      "reviewState": "reported_not_revalidated",
+      "summary": "macOS plan records private USB identity/status, list/state readback, capability readback and exact-device non-paid audio self-test as passed.",
+      "limitations": "Not a new carrier call/SMS acceptance or broad multi-device/vendor matrix. Default-disabled modem policy is unchanged.",
+      "criteria": [
+        "M16",
+        "M32",
+        "M40",
+        "MAC01"
+      ]
+    },
+    {
+      "id": "H-MAC-SIGNING",
+      "reportPath": "docs/archive/2026-09-20/TODO_MACOS_AGENT.md",
+      "startLine": 294,
+      "endLine": 299,
+      "excerptSHA256": "7b4133db1dafa0edaef9f3fccc38f464013dc0ca77b6742d348fa93f5c67e974",
+      "reviewState": "reported_not_revalidated",
+      "summary": "August 25 arm64 CLI/App signing, TeamIdentifier and Hardened Runtime checks were recorded; installer/UI artifacts existed.",
+      "limitations": "The original manifest digest is abbreviated, not a verifiable complete artifact hash. Signing is not notarization, and this report does not establish Universal packaging.",
+      "criteria": [
+        "MAC02"
+      ]
+    },
+    {
+      "id": "H-USER-HANDOFF",
+      "reportPath": "docs/decisions/2026-09-20-current-scope.md",
+      "startLine": 46,
+      "endLine": 48,
+      "excerptSHA256": "008ba085cda6b7d3940fc2c375b2a00290aa11a02c292f0dd3a17c342163ad6c",
+      "reviewState": "reported_not_revalidated",
+      "summary": "Latest supplied team handoff: local checkout fast-forwarded to 19f966f; latest recorded production version is 7f2e129.",
+      "limitations": "User-supplied report, not independent inspection of that workspace/host. PR #2/#4 merged state must not be conflated with deployment.",
+      "criteria": [
+        "M01",
+        "M35"
+      ]
+    }
+  ],
+  "correctionBaseline": "19f966f7d673a074e7218680d6c0ed8b1d530e1c",
+  "correctionBaselineTree": "49935012e44af8e006a01b6795f26a3c94851885"
 }

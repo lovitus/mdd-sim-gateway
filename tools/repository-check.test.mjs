@@ -30,6 +30,8 @@ try {
     'AGENTS.md', 'README.md', 'DEPLOYMENT.md', 'DEVELOPMENT.md', 'GO_REWRITE.md', 'agent/MODEM_AGENT.md', 'webui/src/mdd/UPSTREAM.md',
     ...Object.keys(summaries(original)), ...original.archives.map(a => a.path),
     ...original.criteria.flatMap(c => c.evidence), ...original.workstreams.flatMap(w => w.evidence),
+    ...original.decisions.map(d => d.sourcePath), ...original.evidenceRecords.map(e => e.reportPath),
+    ...original.workstreams.flatMap(w => w.resolution?.evidence || []),
   ])
   const resources = JSON.parse(fs.readFileSync(path.join(defaultRoot, 'docs/reviews/retired-resources-3e6d5db.json')))
   resources.files.filter(f => f.activeCopy).forEach(f => needed.add(f.activeCopy))
@@ -40,7 +42,7 @@ try {
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.copyFileSync(path.join(defaultRoot, relative), target)
   }
-  assert.deepEqual(checkRepository(root), { criteria: 63, workstreams: 8, claimsOfNewHardwareAcceptance: 0 })
+  assert.deepEqual(checkRepository(root), { criteria: 63, workstreams: 10, historicalReports: 8, recordedHardwareAcceptance: 0 })
   fs.appendFileSync(path.join(root, 'TODO.md'), '\nEverything is finished.\n')
   assert.throws(() => checkRepository(root), /regenerate TODO.md/)
   checkRepository(root, { write: true })
@@ -58,3 +60,8 @@ try {
   assert.throws(() => checkRepository(root), /update reviewed provenance/)
 } finally { fs.rmSync(root, { recursive: true, force: true }) }
 console.log('Repository contracts reject dropped criteria, unsupported acceptance, stale docs and orphan restoration')
+
+// Scope/lifecycle and continuity regressions are part of the existing normal
+// main/PR ledger gate, not a separate optional workflow.
+await import('./acceptance-policy.test.mjs')
+await import('./acceptance-regressions.mjs')

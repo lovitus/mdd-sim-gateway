@@ -1,3 +1,5 @@
+> Scope correction (2026-09-20): the historical review below is retained as an audit record, not the current product backlog. The owner's [latest decisions](../decisions/2026-09-20-current-scope.md) accept physical eSIM deletion/retained notifications/confirmed manual replay, defer Android, exclude notarization/.p8 this round, and preserve prior field evidence. Conflicting open-item conclusions below are superseded; use [the corrected ledger](../status/README.md).
+
 # Independent disposition of the third-party rewrite report
 
 Reviewed baseline: `3e6d5db7657e468eedc0c31316bb97c04b2b599b`, complete tree

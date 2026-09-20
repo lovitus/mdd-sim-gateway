@@ -93,3 +93,22 @@ in the task's own inventory. Never clean broad directories, unknown sockets or o
 Public evidence must be redacted and bounded. Credentials belong in owner-only product configuration or stdin, never source,
 argv examples, logs or bundles. Separate the claims: source verified, automated tests passed, artifact built, installed on a
 named authorized host, and real data-plane acceptance. New evidence updates the tracked ledger, not a hidden progress file.
+
+## Scope/acceptance ledger changes
+
+Owner scope decisions live in `docs/decisions/`; `docs/status/acceptance.json` separates current requirements,
+implementation, scoped historical evidence and current review coverage. Original criteria remain immutable history,
+but workstreams may complete, be accepted, superseded, deferred or cancelled with rationale and evidence.
+Existing reports not revalidated this round are reconciled before requesting new field tests.
+
+```bash
+node tools/repository-check.mjs --write
+node tools/repository-check.mjs
+node tools/repository-check.test.mjs
+node tools/acceptance-policy.test.mjs
+node tools/acceptance-regressions.mjs
+```
+
+The normal CI runs the scope/transition regressions through the existing repository-check.test.mjs gate.
+`node tools/verify-acceptance-baseline.mjs <checkout-at-19f966f>` additionally proves the four old-ledger failures without changing production code.
+This check does not perform SIM deletion/replay, paid operations, hardware tests or deployment.
