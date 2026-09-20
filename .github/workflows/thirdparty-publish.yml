@@ -28,26 +28,49 @@ jobs:
         run: |
           set -euo pipefail
           python3 harness/audit/prepare.py apply candidate harness/audit evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('candidate/tools/repository-check.mjs')
+          s=p.read_text()
+          old="'docs/status/README.md': status }"
+          assert s.count(old)==1
+          p.write_text(s.replace(old,"'docs/status/README.md': status.trimEnd() + '\\n' }"))
+          PY
+          node candidate/tools/repository-check.mjs --write
+          node candidate/tools/repository-check.test.mjs
+          git -C candidate add tools/repository-check.mjs docs/status/README.md
           npm --prefix candidate/webui ci
           npm --prefix candidate/webui run test:all 2>&1 | tee evidence/webui-tests.log
           MDD_KEEP_EMBED_SOURCE=1 npm --prefix candidate/webui run build:go 2>&1 | tee evidence/embedded-build.log
           git -C candidate add -u -- go-runtime/internal/webui/assets
           git -C candidate diff --cached --check
           test -z "$(git -C candidate diff)"
-          test "$(git -C candidate write-tree)" = d14d6e020f537d72802f66701eec8088da2ec2f1
+          test "$(git -C candidate write-tree)" = d6c21ce7fe1608402ee6222f43516ac66b1b5186
           git -C candidate diff --cached --binary > evidence/tested-fix.patch
+      - name: Retain exact dependency audit for review
+        run: |
+          set +e
+          npm --prefix candidate/webui audit --json > evidence/npm-audit.json
+          result=$?
+          set -e
+          test "$result" -le 1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          audit=json.loads(Path('evidence/npm-audit.json').read_text())
+          assert 'metadata' in audit and 'error' not in audit
+          print(json.dumps(audit.get('vulnerabilities',{}),indent=2))
+          PY
       - name: Publish source branch without workflow privilege changes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # The connector will install the separately reviewed workflow change.
-          # The runtime/docs/UI tree below is otherwise exactly the tested tree.
           git -C candidate restore --source=HEAD --staged --worktree -- .github/workflows/go-runtime.yml
           git -C candidate config user.name 'github-actions[bot]'
           git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git -C candidate diff --cached --check
-          test "$(git -C candidate diff --cached --name-only | wc -l)" -eq 115
+          test "$(git -C candidate diff --cached --no-renames --name-only | wc -l)" -eq 115
           git -C candidate commit -m 'fix: unify mounted UI state and version acceptance evidence' -m 'Address verified findings in issue #3. Preserve all original acceptance criteria and historical provenance, remove unused UI/runtime resources, and fix the split language context. Hardware and unfinished product work remain explicitly open.'
           git -C candidate rev-parse HEAD HEAD^{tree} > evidence/published-source.txt
           authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
