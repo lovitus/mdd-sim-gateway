@@ -1,0 +1,1548 @@
+name: Go Runtime CI and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths:
+      - 'go-runtime/**'
+      - 'webui/**'
+      - 'agent/call-audio-helper/**'
+      - 'agent/cellular-io/**'
+      - 'providers/vowifi-go/**'
+      - '**/*.py'
+      - 'install.sh'
+      - 'offline-install.sh'
+      - 'README.md'
+      - 'DEPLOYMENT.md'
+      - 'GO_REWRITE.md'
+      - 'DEVELOPMENT.md'
+      - 'AGENTS.md'
+      - 'TODO*.md'
+      - 'postponed-tasks.md'
+      - 'docs/**'
+      - 'tools/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'THIRD_PARTY_LICENSES.md'
+      - '.github/workflows/go-runtime.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'go-runtime/**'
+      - 'webui/**'
+      - 'agent/call-audio-helper/**'
+      - 'agent/cellular-io/**'
+      - 'providers/vowifi-go/**'
+      - '**/*.py'
+      - 'install.sh'
+      - 'offline-install.sh'
+      - 'README.md'
+      - 'DEPLOYMENT.md'
+      - 'GO_REWRITE.md'
+      - 'DEVELOPMENT.md'
+      - 'AGENTS.md'
+      - 'TODO*.md'
+      - 'postponed-tasks.md'
+      - 'docs/**'
+      - 'tools/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'THIRD_PARTY_LICENSES.md'
+      - '.github/workflows/go-runtime.yml'
+  workflow_dispatch:
+    inputs:
+      require_macos_signing:
+        description: Require the production Developer ID instead of a development signature
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: '1'
+
+jobs:
+  validate-core:
+    name: Validate Core runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify Go-only source installation surface
+        run: |
+          set -euo pipefail
+          sh -n install.sh
+          bash -n offline-install.sh
+          test -x install.sh
+          test -x offline-install.sh
+          ! grep -Eiq 'legacy-docker|docker|compose|python' install.sh offline-install.sh
+          for retired in docker-compose.yml compose.production.yaml control/Dockerfile engine/Dockerfile \
+              deploy/mdd-compose.sh .github/workflows/build.yml agent/go-agent/go.mod \
+              agent/go-agent/main.go agent/go-agent/build.sh agent/go-agent/build_cross.sh \
+              agent/android/settings.gradle.kts agent/mdd-card-agent.service agent/README.md \
+              agent/mdd-agent.spec agent/mdd-modem-agent.spec agent/mdd-agent-gui.spec \
+              agent/macos/Build-MacOS-Package.sh agent/windows/Build-Windows-Package.ps1 \
+              agent/windows/Test-GuiTray.ps1 agent/windows/install.ps1 \
+              agent/requirements-modem-build.txt agent/run-macos.command agent/run-windows.bat \
+              engine/collect-runtime-packages.sh agent/windows/ec20-upgrade/README.md \
+              agent/windows/mbn-provider/Mdd.WindowsMbn.csproj agent/windows/mdd_network_guard.c \
+              go-runtime/cmd/mdd-shadow/main.go go-runtime/internal/legacy/snapshot.go; do
+            test ! -e "$retired"
+          done
+          test -z "$(git ls-files '*.py')"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            agent/call-audio-helper/go.sum
+            go-runtime/go.sum
+            providers/vowifi-go/go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+          package-manager-cache: false
+
+      - name: Verify versioned acceptance and repository contracts
+        run: |
+          node tools/repository-check.mjs
+          node tools/repository-check.test.mjs
+
+      - name: Rebuild and verify embedded React WebUI
+        working-directory: webui
+        run: |
+          npm ci
+          npm run test:all
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+
+      - name: Check out exact third-party review baseline
+        uses: actions/checkout@v7
+        with:
+          ref: 3e6d5db7657e468eedc0c31316bb97c04b2b599b
+          path: review-hygiene-baseline
+          persist-credentials: false
+
+      - name: Prove orphan graph and language-context counterexample
+        run: node tools/verify-thirdparty-baseline.mjs "$GITHUB_WORKSPACE/review-hygiene-baseline"
+
+      - name: Retain deterministic WebUI build for provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-ui-node24-${{ github.sha }}
+          path: webui/.go-dist
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
+
+      - name: Verify embedded React WebUI matches Linux build
+        working-directory: webui
+        run: |
+          git diff --exit-code -- ../go-runtime/internal/webui/assets
+
+      - name: Install native build dependencies
+        run: |
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+
+      - name: Verify Core module
+        working-directory: go-runtime
+        run: go mod verify
+
+      - name: Test Core runtime
+        working-directory: go-runtime
+        run: go test -timeout 2m ./...
+
+      - name: Race-test entire Linux Core module
+        working-directory: go-runtime
+        run: go test -race -count=1 -timeout 5m ./...
+
+      - name: Test exact-modem audio helper
+        run: GOWORK=off go -C agent/call-audio-helper test -race ./...
+
+      - name: Race-test changed Core boundaries
+        working-directory: go-runtime
+        run: >-
+          go test -race
+          ./adminauth
+          ./mediaauth
+          ./internal/boltsnapshot
+          ./internal/systembackup
+          ./internal/systemstatus
+          ./internal/notifications
+          ./agentlink
+          ./internal/agentpolicy
+          ./internal/agentdata
+          ./internal/agentcall
+          ./internal/cellulardata
+          ./internal/cellularmedia
+          ./internal/cellularmessages
+          ./internal/egressexec
+          ./internal/egressconfig
+          ./internal/egressdesired
+          ./internal/agentmedia
+          ./internal/runtimereconcile
+          ./internal/linebootstrap
+          ./internal/linecatalog
+          ./internal/agentrawusb
+          ./internal/agentusbip
+          ./internal/rawmodem
+          ./internal/rawusb
+          ./cmd/mdd-core
+          ./internal/core
+          ./internal/webui
+          ./providercontrol
+
+      - name: Vet Core runtime
+        working-directory: go-runtime
+        run: go vet ./...
+
+      - name: Check embedded WebUI JavaScript
+        run: find go-runtime/internal/webui/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+
+  validate-windows-agent:
+    name: Validate Windows Agent and raw Modem handoff
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+
+      - name: Verify pinned usbipd-win installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Join-Path $env:RUNNER_TEMP 'usbipd-win_5.3.0_x64.msi'
+          Invoke-WebRequest -Uri 'https://github.com/dorssel/usbipd-win/releases/download/v5.3.0/usbipd-win_5.3.0_x64.msi' -OutFile $msi
+          $expectedHash = '1C984914AEC944DE19B64EFF232421439629699F8138E3DDC29301175BC6D938'
+          if ((Get-FileHash -Algorithm SHA256 $msi).Hash -ne $expectedHash) {
+            throw 'usbipd-win MSI hash mismatch'
+          }
+          $signature = Get-AuthenticodeSignature $msi
+          $expectedSubject = 'CN="Open Source Developer, Frans van Dorsselaer", O=Open Source Developer, L=Sassenheim, S=Zuid-Holland, C=NL'
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -ne $expectedSubject -or
+              $signature.SignerCertificate.Thumbprint -ne '30EC478E9FEC6174D949FFF5C00EC028A7D2E8F9') {
+            throw 'usbipd-win MSI Authenticode signer mismatch'
+          }
+
+      - name: Parse Go Agent deployment script
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Get-Content -Raw go-runtime/release/install-windows-agent.ps1
+          [void][scriptblock]::Create($script)
+          Write-Output 'install-windows-agent.ps1 syntax parsed'
+
+      - name: Test Windows Agent ownership and raw USB boundaries
+        working-directory: go-runtime
+        run: >-
+          go test
+          -tags with_system_vboxusb,with_external_usbip_drivers
+          -timeout 2m
+          ./internal/agentrawusb
+          ./internal/agentusbip
+          ./internal/rawmodem
+          ./internal/rawusb
+          ./internal/windowsmbn
+          ./cmd/mdd-agent
+
+      - name: Vet Windows Agent ownership and raw USB boundaries
+        working-directory: go-runtime
+        run: >-
+          go vet
+          -tags with_system_vboxusb,with_external_usbip_drivers
+          ./internal/agentrawusb
+          ./internal/agentusbip
+          ./internal/rawmodem
+          ./internal/rawusb
+          ./internal/windowsmbn
+          ./cmd/mdd-agent
+
+      - name: Test fresh Windows single-service installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $package = Join-Path $env:RUNNER_TEMP 'mdd-agent-fresh'
+          New-Item -ItemType Directory -Force $package | Out-Null
+          $agent = Join-Path $package 'mdd-agent.exe'
+          $msi = Join-Path $env:RUNNER_TEMP 'usbipd-win_5.3.0_x64.msi'
+          Copy-Item $msi (Join-Path $package 'usbipd-win_5.3.0_x64.msi')
+          $env:CGO_ENABLED = '0'
+          go -C go-runtime build -tags 'with_system_vboxusb,with_external_usbip_drivers' -trimpath -o $agent ./cmd/mdd-agent
+
+          $config = Join-Path $env:RUNNER_TEMP 'mdd-agent-fresh.json'
+          & $agent config init "--config=$config" | Out-Null
+          & $agent config set agent_id ci-windows-agent "--config=$config" | Out-Null
+          & $agent config set server '127.0.0.1:8443' "--config=$config" | Out-Null
+          & $agent config set tls_sha256 ('00' * 32) "--config=$config" | Out-Null
+          '0123456789abcdef0123456789abcdef' | & $agent config set token --stdin "--config=$config" | Out-Null
+          & $agent config set modem_enabled true "--config=$config" | Out-Null
+          & $agent config set raw_usb_source_enabled true "--config=$config" | Out-Null
+          $serviceInstalled = $false
+          try {
+            & $agent service-install "--config=$config" | Out-Null
+            $serviceInstalled = $true
+            $mdd = Get-CimInstance Win32_Service -Filter "Name='MDDAgent'"
+            $usbipd = Get-CimInstance Win32_Service -Filter "Name='usbipd'"
+            if ($mdd.StartMode -ne 'Auto' -or $mdd.StartName -ne 'LocalSystem') {
+              throw 'MDD Agent SCM contract mismatch'
+            }
+            $dependencies = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\MDDAgent').DependOnService
+            $dependencyList = @($dependencies)
+            if ($dependencyList.Count -ne 1 -or $dependencyList[0] -ne 'VBoxUSBMon') {
+              throw 'MDD Agent driver dependency mismatch'
+            }
+            if ($usbipd.StartMode -ne 'Disabled' -or $usbipd.State -ne 'Stopped') {
+              throw 'usbipd TCP service is not disabled and stopped'
+            }
+            if (Get-NetTCPConnection -State Listen -LocalPort 3240 -ErrorAction SilentlyContinue) {
+              throw 'unexpected TCP 3240 listener'
+            }
+          }
+          finally {
+            if ($serviceInstalled) {
+              & $agent service-uninstall "--config=$config" | Out-Null
+            }
+          }
+
+  validate-provider:
+    name: Validate VoWiFi Provider
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            agent/call-audio-helper/go.sum
+            providers/vowifi-go/go.sum
+            providers/vowifi-go/upstream/vowifi-go/go.sum
+
+      - name: Install AMR codec dependency
+        run: |
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libopencore-amrnb-dev pkg-config
+
+      - name: Verify Provider module
+        working-directory: providers/vowifi-go
+        run: go mod verify
+
+      - name: Test optional-IMEI eUICC compatibility
+        run: GOWORK=off go -C go-runtime/third_party/euicc-go test -race ./lpa ./v2 ./http -run TestMDD
+
+      - name: Verify patched upstream module
+        run: GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go mod verify
+
+      - name: Test Provider
+        working-directory: providers/vowifi-go
+        run: go test -v -timeout 2m ./...
+
+      - name: Race-test Provider
+        working-directory: providers/vowifi-go
+        run: go test -race ./...
+
+      - name: Race-test patched upstream SWu and runtime
+        run: |
+          set -o pipefail
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go \
+            test -v -race -count=1 -timeout 5m ./engine/swu/... ./runtimehost/... \
+            2>&1 | tee patched-upstream-tests.log
+
+      - name: Vet patched upstream SWu and runtime
+        run: GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go vet ./engine/swu/... ./runtimehost/...
+
+      - name: Preserve patched upstream test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: patched-upstream-test-evidence
+          path: patched-upstream-tests.log
+          if-no-files-found: warn
+
+      - name: Vet Provider
+        working-directory: providers/vowifi-go
+        run: go vet ./...
+
+  validate-liveness:
+    name: Validate full VoWiFi recovery chains
+    uses: ./.github/workflows/review-liveness.yml
+
+  release-linux-amd64:
+    name: Build verified Linux amd64 release
+    needs:
+      - validate-core
+      - validate-provider
+      - validate-liveness
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            agent/call-audio-helper/go.sum
+            providers/vowifi-go/go.sum
+            providers/vowifi-go/upstream/vowifi-go/go.sum
+
+      - name: Install native build dependencies
+        run: |
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils libasound2-dev libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pcscd pkg-config xorg-dev
+
+      - name: Fetch pinned Xray source
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/mdd-xray-source"
+          mkdir -p "$source"
+          git -C "$source" init --quiet
+          git -C "$source" remote add origin https://github.com/XTLS/Xray-core.git
+          timeout 120 git -C "$source" fetch --depth=1 origin d2758a023cd7f4174a5a5fa4ff66e487d4342ba0
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = d2758a023cd7f4174a5a5fa4ff66e487d4342ba0
+
+      - name: Build release executables
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_ROOT/bin"
+          mkdir -p "$BUILD_ROOT/source"
+          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-core" ./cmd/mdd-core
+          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-agent" ./cmd/mdd-agent
+          go -C agent/call-audio-helper build -trimpath -o "$BUILD_ROOT/bin/mdd-call-audio-helper" .
+          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-release" ./cmd/mdd-release
+          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-updater" ./cmd/mdd-updater
+          CGO_ENABLED=0 go -C "$RUNNER_TEMP/mdd-xray-source" build -mod=readonly -trimpath -o "$BUILD_ROOT/bin/xray" ./main
+          "$BUILD_ROOT/bin/xray" version
+          git -C "$RUNNER_TEMP/mdd-xray-source" archive --format=tar HEAD | gzip -n > "$BUILD_ROOT/source/xray-source.tar.gz"
+          GOBIN="$BUILD_ROOT/bin" go install github.com/google/go-licenses/v2@v2.0.1
+          CGO_ENABLED=1 go -C providers/vowifi-go build \
+            -tags netgo,osusergo \
+            -trimpath \
+            -ldflags '-linkmode external -extldflags "-static"' \
+            -o "$BUILD_ROOT/bin/mdd-vowifi" \
+            ./cmd/mdd-vowifi
+          if readelf -d "$BUILD_ROOT/bin/mdd-vowifi" 2>/dev/null | grep -q '(NEEDED)'; then
+            echo 'mdd-vowifi unexpectedly has dynamic library dependencies' >&2
+            readelf -d "$BUILD_ROOT/bin/mdd-vowifi" >&2
+            exit 1
+          fi
+
+      - name: Verify systemd units
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /usr/libexec/mdd
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-core" /usr/libexec/mdd/mdd-core
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-agent" /usr/libexec/mdd/mdd-agent
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-call-audio-helper" /usr/libexec/mdd/mdd-call-audio-helper
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-vowifi" /usr/libexec/mdd/mdd-vowifi
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-updater" /usr/libexec/mdd/mdd-updater
+          systemd-analyze verify \
+            go-runtime/release/mdd-core.service \
+            go-runtime/release/mdd-agent.service \
+            go-runtime/release/mdd-cellular-guard.service \
+            go-runtime/release/mdd-egress.service \
+            go-runtime/release/mdd-provider-apply.service \
+            go-runtime/release/mdd-vowifi@.service
+          systemd-analyze verify go-runtime/release/mdd-updater.service go-runtime/release/mdd-updater.path
+          grep -Fxq \
+            'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+            go-runtime/release/mdd-egress.service
+
+      - name: Verify real Xray XHTTP UDP in loopback-only namespace
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+        run: |
+          set -euo pipefail
+          test -x "$BUILD_ROOT/bin/xray"
+          go -C go-runtime test -race -c ./internal/egressexec -o "$BUILD_ROOT/bin/egressexec.test"
+          sudo unshare --net -- /bin/bash -euc '
+            ip link set lo up
+            export MDD_TEST_XRAY="$1"
+            exec "$2" -test.run "^TestXrayRealProcessXHTTPUDP$" -test.v -test.timeout 60s
+          ' bash "$BUILD_ROOT/bin/xray" "$BUILD_ROOT/bin/egressexec.test"
+
+      - name: Assemble strict release bundle
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+          RELEASE_ROOT: ${{ runner.temp }}/mdd-release
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          release_id="mdd-${SOURCE_REVISION:0:12}"
+          release_dir="$RELEASE_ROOT/$release_id"
+          mkdir -p "$BUILD_ROOT/source" "$RELEASE_ROOT"
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$GITHUB_WORKSPACE" \
+            -cf - providers/vowifi-go \
+            | gzip -n > "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz"
+          license_root="$BUILD_ROOT/licenses"
+          mkdir -p "$license_root"
+          (
+            cd go-runtime
+            "$BUILD_ROOT/bin/go-licenses" save \
+              ./cmd/mdd-core ./cmd/mdd-agent ./cmd/mdd-release ./cmd/mdd-updater \
+              --ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+              --ignore github.com/sagernet/sing/common \
+              --ignore github.com/sagernet/sing-mux \
+              --ignore github.com/sagernet/sing-usbip \
+              --save_path "$license_root/go-runtime"
+          )
+          (
+            cd agent/call-audio-helper
+            "$BUILD_ROOT/bin/go-licenses" save . \
+              --ignore mdd-call-audio-helper \
+              --save_path "$license_root/call-audio-helper"
+          )
+          (
+            cd providers/vowifi-go
+            "$BUILD_ROOT/bin/go-licenses" save ./cmd/mdd-vowifi \
+              --ignore github.com/lovitus/mdd-sim-gateway \
+              --ignore github.com/boa-z/vowifi-go \
+              --save_path "$license_root/vowifi-provider"
+          )
+          provider_source_listing="$BUILD_ROOT/source/mdd-vowifi-source.list"
+          tar -tzf "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz" > "$provider_source_listing"
+          for source_path in \
+            providers/vowifi-go/LICENSE-NOTICE.md \
+            providers/vowifi-go/cmd/mdd-vowifi/main.go \
+            providers/vowifi-go/upstream/vowifi-go/LICENSE \
+            providers/vowifi-go/upstream/vowifi-go/go.mod; do
+            grep -Fxq "$source_path" "$provider_source_listing"
+          done
+          cp -R go-runtime/licenses "$license_root/curated"
+          (
+            cd "$RUNNER_TEMP/mdd-xray-source"
+            "$BUILD_ROOT/bin/go-licenses" save ./main \
+              --ignore github.com/sagernet/sing \
+              --ignore github.com/sagernet/sing-shadowsocks \
+              --save_path "$license_root/xray"
+            # The scanner cannot classify these upstream short GPL notices.
+            # Preserve both exact modules plus notices and the full license.
+            curated="$license_root/xray-curated"
+            mkdir -p "$curated"
+            cp "$GITHUB_WORKSPACE/LICENSE" "$curated/GPL-3.0.txt"
+            for dependency in 'github.com/sagernet/sing@v0.5.1' 'github.com/sagernet/sing-shadowsocks@v0.2.7'; do
+              module=${dependency%@*}
+              version=${dependency##*@}
+              metadata=$(go list -m -json "$module")
+              test "$(printf '%s' "$metadata" | jq -r .Version)" = "$version"
+              directory=$(printf '%s' "$metadata" | jq -r .Dir)
+              test -d "$directory"
+              printf '%s  %s\n' 2f02b7486bcfa90d115c71a20437f3906b6fd5bef81c5dc0efd341399e89d0fd "$directory/LICENSE" | sha256sum -c -
+              name=${module##*/}
+              cp "$directory/LICENSE" "$curated/$name-NOTICE.txt"
+              tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+                -C "$directory" -cf - . | gzip -n > "$curated/$name-$version-source.tar.gz"
+              printf '%s\n' "$dependency" >> "$curated/SOURCES.txt"
+            done
+          )
+          for license in \
+            "$license_root/curated/sagernet-sing-GPL-3.0-or-later.txt" \
+            "$license_root/curated/sagernet-sing-mux-GPL-3.0-or-later.txt" \
+            "$license_root/curated/sagernet-sing-usbip-GPL-3.0-or-later.txt"; do
+            test -s "$license"
+            printf '%s  %s\n' \
+              2f02b7486bcfa90d115c71a20437f3906b6fd5bef81c5dc0efd341399e89d0fd \
+              "$license" | sha256sum -c -
+          done
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$license_root" \
+            -cf - . \
+            | gzip -n > "$BUILD_ROOT/source/go-dependency-licenses.tar.gz"
+          "$BUILD_ROOT/bin/mdd-release" \
+            -output "$release_dir" \
+            -release-id "$release_id" \
+            -source-revision "$SOURCE_REVISION" \
+            -architecture amd64 \
+            -core "$BUILD_ROOT/bin/mdd-core" \
+            -agent "$BUILD_ROOT/bin/mdd-agent" \
+            -agent-audio-helper "$BUILD_ROOT/bin/mdd-call-audio-helper" \
+            -updater "$BUILD_ROOT/bin/mdd-updater" \
+            -updater-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-updater.service" \
+            -updater-path "$GITHUB_WORKSPACE/go-runtime/release/mdd-updater.path" \
+            -provider "$BUILD_ROOT/bin/mdd-vowifi" \
+            -xray "$BUILD_ROOT/bin/xray" \
+            -xray-source "$BUILD_ROOT/source/xray-source.tar.gz" \
+            -xray-notice "$GITHUB_WORKSPACE/go-runtime/release/XRAY-NOTICE.md" \
+            -core-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-core.service" \
+            -agent-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-agent.service" \
+            -cellular-guard-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-cellular-guard.service" \
+            -provider-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-vowifi@.service" \
+            -provider-apply-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-provider-apply.service" \
+            -egress-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-egress.service" \
+            -provider-source "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz" \
+            -provider-notice "$GITHUB_WORKSPACE/providers/vowifi-go/LICENSE-NOTICE.md" \
+            -project-license "$GITHUB_WORKSPACE/LICENSE" \
+            -project-notice "$GITHUB_WORKSPACE/NOTICE" \
+            -third-party-notices "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.md" \
+            -go-dependency-licenses "$BUILD_ROOT/source/go-dependency-licenses.tar.gz"
+          install -m 0755 "$GITHUB_WORKSPACE/go-runtime/release/install-release.sh" \
+            "$RELEASE_ROOT/install-release.sh"
+          tar -C "$RELEASE_ROOT" -cf "$RUNNER_TEMP/$release_id-linux-amd64.tar" \
+            install-release.sh "$release_id"
+          printf 'artifact_path=%s\n' "$RUNNER_TEMP/$release_id-linux-amd64.tar" >> "$GITHUB_ENV"
+
+      - name: Upload immutable release tar
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-release-linux-amd64-${{ github.sha }}
+          path: ${{ env.artifact_path }}
+          if-no-files-found: error
+          # Deployment consumers delete the artifact immediately after a verified
+          # download. Keep only the shortest GitHub-supported fallback window.
+          retention-days: 1
+
+  validate-fresh-linux-artifact:
+    name: Install fresh artifact without source checkout
+    needs:
+      - release-linux-amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Deliberately no actions/checkout step: this gate must prove that the
+      # published artifact, rather than a source tree, is independently usable.
+      - name: Download exact Linux release artifact
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mdd-release-linux-amd64-*
+          path: ${{ runner.temp }}/artifact
+          merge-multiple: true
+
+      - name: Install PC/SC runtime dependency
+        run: |
+          set -euo pipefail
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pcscd
+
+      - name: Extract artifact and install fail-fast legacy shims
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/artifact
+          FRESH_ROOT: ${{ runner.temp }}/fresh
+          LEGACY_TRACE: ${{ runner.temp }}/legacy-command-trace
+          SHIM_ROOT: ${{ runner.temp }}/legacy-command-shims
+        run: |
+          set -euo pipefail
+          for command in realpath curl openssl timeout; do
+            command -v "$command" >/dev/null
+          done
+          test -x /bin/systemctl
+          test -x /usr/sbin/useradd
+          test -x /usr/sbin/groupadd
+          test -x /usr/sbin/nologin
+          mkdir -p "$FRESH_ROOT" "$SHIM_ROOT"
+          mapfile -t archives < <(find "$ARTIFACT_ROOT" -maxdepth 1 -type f -name '*.tar' -print)
+          test "${#archives[@]}" -eq 1
+          tar -xf "${archives[0]}" -C "$FRESH_ROOT"
+          test -x "$FRESH_ROOT/install-release.sh"
+          mapfile -t releases < <(find "$FRESH_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'mdd-*' -print)
+          test "${#releases[@]}" -eq 1
+          printf 'release_dir=%s\n' "${releases[0]}" >> "$GITHUB_ENV"
+          : > "$LEGACY_TRACE"
+          for command in docker docker-compose python python3; do
+            printf '%s\n' '#!/bin/sh' \
+              "printf '%s\\n' '$command' >> '$LEGACY_TRACE'" \
+              'exit 97' > "$SHIM_ROOT/$command"
+            chmod 0755 "$SHIM_ROOT/$command"
+          done
+          printf 'shim_root=%s\n' "$SHIM_ROOT" >> "$GITHUB_ENV"
+          printf 'legacy_trace=%s\n' "$LEGACY_TRACE" >> "$GITHUB_ENV"
+
+      - name: Install, bootstrap and start only the Go services
+        env:
+          MDD_CI_PASSWORD: fresh-artifact-ci-password
+        run: |
+          set -euo pipefail
+          assert_orphan_refused() {
+            if printf '%s\n' "$MDD_CI_PASSWORD" |
+                sudo env "PATH=$shim_root:$PATH" \
+                  "$RUNNER_TEMP/fresh/install-release.sh" install "$release_dir"; then
+              echo 'fresh install accepted orphaned durable state' >&2
+              exit 1
+            fi
+            test ! -e /usr/lib/mdd/current
+            test ! -e /var/lib/mdd-system/release-install/current.json
+            test ! -s "$legacy_trace"
+          }
+          for database in events.db messages.db messages.db.cellular-operations \
+              calls.db catalog.db egress.db allowance.db notifications.db preferences.db egress-ipc-token; do
+            sudo install -d -m 0700 /var/lib/mdd
+            sudo touch "/var/lib/mdd/$database"
+            assert_orphan_refused
+            sudo rm -f "/var/lib/mdd/$database"
+            sudo rmdir /var/lib/mdd
+          done
+          sudo install -d -m 0700 /var/lib/mdd/providers
+          sudo touch /var/lib/mdd/providers/orphan
+          assert_orphan_refused
+          sudo rm -f /var/lib/mdd/providers/orphan
+          sudo rmdir /var/lib/mdd/providers /var/lib/mdd
+          sudo install -d -m 0750 /var/lib/mdd-egress-config
+          sudo touch /var/lib/mdd-egress-config/desired.json
+          assert_orphan_refused
+          sudo rm -f /var/lib/mdd-egress-config/desired.json
+          sudo rmdir /var/lib/mdd-egress-config
+          sudo install -d -m 0755 /etc/mdd
+          sudo touch /etc/mdd/providers-current
+          assert_orphan_refused
+          sudo rm -f /etc/mdd/providers-current
+          sudo rmdir /etc/mdd
+          sudo install -d -m 0755 /etc/mdd/providers/releases
+          sudo touch /etc/mdd/providers/releases/orphan
+          assert_orphan_refused
+          sudo rm -f /etc/mdd/providers/releases/orphan
+          sudo rmdir /etc/mdd/providers/releases /etc/mdd/providers /etc/mdd
+
+          printf '%s\n' "$MDD_CI_PASSWORD" |
+            sudo env "PATH=$shim_root:$PATH" \
+              "$RUNNER_TEMP/fresh/install-release.sh" install "$release_dir"
+          test ! -s "$legacy_trace"
+          release_id=$(basename "$release_dir")
+          test "$(readlink -f /usr/lib/mdd/current)" = "/usr/lib/mdd/releases/$release_id"
+          test "$(readlink -f /usr/libexec/mdd/mdd-agent)" = "/usr/lib/mdd/releases/$release_id/mdd-agent"
+          test "$(readlink -f /usr/libexec/mdd/mdd-call-audio-helper)" = "/usr/lib/mdd/releases/$release_id/mdd-call-audio-helper"
+          test "$(readlink -f /etc/systemd/system/mdd-agent.service)" = "/usr/lib/mdd/releases/$release_id/mdd-agent.service"
+          test "$(readlink -f /etc/systemd/system/mdd-cellular-guard.service)" = "/usr/lib/mdd/releases/$release_id/mdd-cellular-guard.service"
+          test "$(systemctl is-active mdd-agent.service || true)" = inactive
+          test "$(systemctl is-enabled mdd-agent.service || true)" = linked
+          test ! -e /etc/systemd/system/multi-user.target.wants/mdd-agent.service
+          test "$(systemctl is-active mdd-cellular-guard.service || true)" = inactive
+          test "$(systemctl is-enabled mdd-cellular-guard.service || true)" = linked
+          test ! -e /etc/systemd/system/multi-user.target.wants/mdd-cellular-guard.service
+          agent_config_dir=/var/lib/mdd-agent
+          sudo install -d -m 0700 "$agent_config_dir"
+          sudo /usr/libexec/mdd/mdd-agent config init \
+            -config "$agent_config_dir/config.json" >/dev/null
+          sudo /usr/libexec/mdd/mdd-agent config set agent_id ci-linux-agent \
+            -config "$agent_config_dir/config.json" >/dev/null
+          sudo /usr/libexec/mdd/mdd-agent config set server localhost:8443 \
+            -config "$agent_config_dir/config.json" >/dev/null
+          sudo jq -r '.agent_token' /etc/mdd/auth.json |
+            sudo /usr/libexec/mdd/mdd-agent config set token --stdin \
+              -config "$agent_config_dir/config.json" >/dev/null
+          cert_fingerprint=$(sudo openssl x509 -in /etc/mdd/tls/server.crt -outform DER |
+            sha256sum | awk '{print $1}')
+          sudo /usr/libexec/mdd/mdd-agent config set tls_sha256 "$cert_fingerprint" \
+            -config "$agent_config_dir/config.json" >/dev/null
+          test "$(sudo stat -c '%U:%G:%a' "$agent_config_dir/config.json")" = root:root:600
+          sudo /usr/libexec/mdd/mdd-agent config show \
+            -config "$agent_config_dir/config.json" | jq -e \
+              '.ready == true and .settings.agent.modem_enabled == false and
+               .settings.agent.server_token == "<redacted>"' >/dev/null
+          test "$(sudo stat -c '%U:%G:%a' /etc/mdd)" = root:root:755
+          for path in /etc/mdd/core.json /etc/mdd/auth.json \
+              /etc/mdd/tls/server.crt /etc/mdd/tls/server.key; do
+            test "$(sudo stat -c '%U:%G:%a' "$path")" = mdd:mdd:600
+          done
+          ci_ca_path="$RUNNER_TEMP/mdd-ci-ca.pem"
+          sudo install -m 0644 /etc/mdd/tls/server.crt "$ci_ca_path"
+          printf 'MDD_CI_CA_PATH=%s\n' "$ci_ca_path" >> "$GITHUB_ENV"
+          sudo cat /var/lib/mdd-system/release-install/current.json |
+            jq -e --arg release "$release_id" \
+              '.state == "applied" and .release_id == $release' >/dev/null
+          config_digest=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          printf 'config_digest_before=%s\n' "$config_digest" >> "$GITHUB_ENV"
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" start
+          test ! -s "$legacy_trace"
+          for attempt in $(seq 1 30); do
+            if sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" status; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service; do
+            test "$(systemctl is-active "$unit")" = active
+            test "$(systemctl show -p NRestarts --value "$unit")" = 0
+          done
+          sudo systemctl start mdd-agent.service
+          for attempt in $(seq 1 30); do
+            test "$(systemctl is-active mdd-agent.service)" = active && break
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          test "$(systemctl show -p NRestarts --value mdd-agent.service)" = 0
+          printf 'core_pid_before=%s\n' "$(systemctl show -p MainPID --value mdd-core.service)" >> "$GITHUB_ENV"
+          printf 'agent_pid_before=%s\n' "$(systemctl show -p MainPID --value mdd-agent.service)" >> "$GITHUB_ENV"
+
+      - name: Prove TLS login, authenticated WSS and zero paid state
+        env:
+          MDD_CI_PASSWORD: fresh-artifact-ci-password
+        run: |
+          set -euo pipefail
+          request="$RUNNER_TEMP/login-request.json"
+          response="$RUNNER_TEMP/login-response.json"
+          cookie_jar="$RUNNER_TEMP/login-cookies"
+          printf '{"username":"admin","password":"%s"}\n' "$MDD_CI_PASSWORD" > "$request"
+          chmod 0600 "$request"
+          curl --fail --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 \
+            -c "$cookie_jar" -H 'Content-Type: application/json' \
+            --data-binary "@$request" \
+            https://localhost:8443/api/auth/login > "$response"
+          jq -e '.authenticated == true and (.csrf | length > 20)' "$response" >/dev/null
+          cookie=$(sed 's/^#HttpOnly_//' "$cookie_jar" |
+            awk -F '\t' '!/^#/ && NF >= 7 {print $6 "=" $7; exit}')
+          test -n "$cookie"
+
+          websocket_response="$RUNNER_TEMP/websocket-response"
+          websocket_key=$(openssl rand -base64 16)
+          set +e
+          {
+            printf 'GET /v1/browser/ws HTTP/1.1\r\n'
+            printf 'Host: localhost:8443\r\n'
+            printf 'Origin: https://localhost:8443\r\n'
+            printf 'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+            printf 'Sec-WebSocket-Key: %s\r\n' "$websocket_key"
+            printf 'Sec-WebSocket-Version: 13\r\n'
+            printf 'Cookie: %s\r\n\r\n' "$cookie"
+          } | timeout 5s openssl s_client \
+              -connect 127.0.0.1:8443 -servername localhost \
+              -CAfile "$MDD_CI_CA_PATH" -verify_return_error -quiet \
+              > "$websocket_response" 2>&1
+          websocket_status=$?
+          set -e
+          test "$websocket_status" -eq 0 || test "$websocket_status" -eq 124
+          grep -Fq '101 Switching Protocols' "$websocket_response"
+
+          common=(--fail --silent --show-error --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 -b "$cookie_jar")
+          curl "${common[@]}" https://localhost:8443/v1/lines |
+            jq -e '.lines == []' >/dev/null
+          curl "${common[@]}" 'https://localhost:8443/v1/calls?limit=100' |
+            jq -e '.calls == []' >/dev/null
+          curl "${common[@]}" https://localhost:8443/v1/messages |
+            jq -e '.messages == []' >/dev/null
+          unauthenticated_notifications=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 \
+            -o /dev/null -w '%{http_code}' \
+            https://localhost:8443/v1/notifications/config)
+          test "$unauthenticated_notifications" = 401
+          curl "${common[@]}" https://localhost:8443/v1/notifications/config |
+            jq -e '
+              .schema_version == 1 and .revision == 1 and
+              .supported_events == ["incoming_sms","incoming_call","host_alert","activation_reminder","line_unrecoverable"] and
+              .webhook.events.line_unrecoverable == false and
+              .telegram.events.line_unrecoverable == false and
+              .pushplus.events.line_unrecoverable == false and
+              .webhook.enabled == false and .webhook.url.configured == false and
+              .telegram.enabled == false and .telegram.bot_token.configured == false and
+              .pushplus.enabled == false and .pushplus.token.configured == false' >/dev/null
+          test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/notifications.db)" = mdd:mdd:600
+          test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/preferences.db)" = mdd:mdd:600
+          curl "${common[@]}" https://localhost:8443/v1/system/runtime |
+            jq -e '.public.certificate.self_signed == true and
+              (.public.certificate.dns_names | index("localhost")) != null and
+              (.public.certificate.not_after | length) > 0' >/dev/null
+          recovery_unauthenticated=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" --resolve localhost:8443:127.0.0.1 \
+            -o /dev/null -w '%{http_code}' https://localhost:8443/v1/lines/nonexistent/recovery)
+          test "$recovery_unauthenticated" = 401
+          recovery_missing=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" --resolve localhost:8443:127.0.0.1 \
+            -b "$cookie_jar" -o "$RUNNER_TEMP/recovery-missing.json" -w '%{http_code}' \
+            https://localhost:8443/v1/lines/nonexistent/recovery)
+          test "$recovery_missing" = 404
+          jq -e '.code == "line_not_found"' "$RUNNER_TEMP/recovery-missing.json" >/dev/null
+          curl "${common[@]}" https://localhost:8443/v1/system/preferences |
+            jq -e '.preferences.audit_enabled == true and .preferences.trusted_proxies == [] and .preferences.updates.proxy_mode == "direct"' >/dev/null
+          audit_unauthenticated=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" --resolve localhost:8443:127.0.0.1 \
+            -o /dev/null -w '%{http_code}' https://localhost:8443/v1/system/audit)
+          test "$audit_unauthenticated" = 401
+          curl "${common[@]}" https://localhost:8443/v1/system/audit |
+            jq -e 'any(.entries[]; .method == "POST" and .route == "/api/auth/login" and .status == 200) and
+              all(.entries[]; keys == ["at","client","method","route","status"])' >/dev/null
+          unauthenticated_status=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 \
+            -o /dev/null -w '%{http_code}' \
+            https://localhost:8443/v1/system/status)
+          test "$unauthenticated_status" = 401
+          systemd_major=$(systemd --version | awk 'NR == 1 {print $2}')
+          test "$systemd_major" -ge 230
+          system_status="$RUNNER_TEMP/system-status.json"
+          for attempt in $(seq 1 60); do
+            curl "${common[@]}" https://localhost:8443/v1/system/status > "$system_status"
+            if jq -e --arg revision "$GITHUB_SHA" '
+                .schema_version == 1 and .state == "complete" and .stale == false and
+                .provenance.kind == "release" and .provenance.state == "verified" and
+                .provenance.verified == true and .provenance.source_revision == $revision and
+                .host.state == "available" and .cpu.state == "available" and
+                .memory.state == "available" and .disk.state == "available" and
+                .systemd.state == "available" and
+                (.systemd.value.fixed | length) == 5 and
+                any(.systemd.value.fixed[]; .name == "mdd-core.service" and
+                  .load_state == "loaded" and .active_state == "active" and
+                  .main_pid > 1 and .nrestarts == 0) and
+                any(.systemd.value.fixed[]; .name == "mdd-agent.service" and
+                  .load_state == "loaded" and .active_state == "active" and
+                  .main_pid > 1 and .nrestarts == 0) and
+                any(.systemd.value.fixed[]; .name == "mdd-cellular-guard.service") and
+                .systemd.value.providers_loaded_only == true and
+                .systemd.value.providers == []' "$system_status" >/dev/null; then
+              break
+            fi
+            if test "$attempt" -eq 60; then
+              jq '{
+                schema_version, sampled_at, interval_seconds, state, code, stale, errors,
+                provenance: (.provenance | {
+                  kind, state, verified, code, release_id, source_revision, core_sha256
+                }),
+                sections: {
+                  host: {state: .host.state, code: .host.code},
+                  cpu: {state: .cpu.state, code: .cpu.code},
+                  memory: {state: .memory.state, code: .memory.code},
+                  disk: {state: .disk.state, code: .disk.code},
+                  network: {state: .network.state, code: .network.code},
+                  temperatures: {state: .temperatures.state, code: .temperatures.code},
+                  systemd: {state: .systemd.state, code: .systemd.code}
+                },
+                systemd: {
+                  errors: (.systemd.value.errors // []),
+                  fixed: ((.systemd.value.fixed // []) | map({
+                    name, load_state, active_state, sub_state, main_pid, nrestarts, result, errors
+                  })),
+                  providers_loaded_only: .systemd.value.providers_loaded_only,
+                  provider_count: ((.systemd.value.providers // []) | length)
+                }
+              }' "$system_status" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          for attempt in $(seq 1 30); do
+            if curl "${common[@]}" https://localhost:8443/v1/agents |
+                jq -e 'any(.agents[]; .agent_id == "ci-linux-agent" and
+                  (.process_generation | length) > 0 and (.last_seen | length) > 0 and
+                  .topology.reader_condition == "ready" and .topology.readers == [])' >/dev/null; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          test -z "$(systemctl list-units 'mdd-vowifi@*.service' --state=running --no-legend --plain)"
+          test ! -s "$legacy_trace"
+          if test -x /usr/bin/docker; then
+            test -z "$(sudo /usr/bin/docker ps -a --format '{{.Names}}' 2>/dev/null |
+              grep -E '^mdd-sim-gateway-(control|engine)' || true)"
+          fi
+
+      - name: Prove reinstall is non-disruptive, then test explicit restart
+        env:
+          MDD_CI_PASSWORD: fresh-artifact-ci-password
+        run: |
+          set -euo pipefail
+          sudo env "PATH=$shim_root:$PATH" \
+            "$RUNNER_TEMP/fresh/install-release.sh" install "$release_dir"
+          test "$(systemctl show -p MainPID --value mdd-core.service)" = "$core_pid_before"
+          config_digest_after=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          test "$config_digest_after" = "$config_digest_before"
+          test ! -s "$legacy_trace"
+
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" restart
+          core_pid_after=$(systemctl show -p MainPID --value mdd-core.service)
+          test "$core_pid_after" -gt 1
+          test "$core_pid_after" != "$core_pid_before"
+          test "$(systemctl show -p MainPID --value mdd-agent.service)" = "$agent_pid_before"
+          test "$(systemctl show -p NRestarts --value mdd-agent.service)" = 0
+          for attempt in $(seq 1 30); do
+            if sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" status; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          request="$RUNNER_TEMP/restart-login-request.json"
+          response="$RUNNER_TEMP/restart-login-response.json"
+          cookie_jar="$RUNNER_TEMP/restart-login-cookies"
+          printf '{"username":"admin","password":"%s"}\n' "$MDD_CI_PASSWORD" > "$request"
+          chmod 0600 "$request"
+          curl --fail --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 \
+            -c "$cookie_jar" -H 'Content-Type: application/json' \
+            --data-binary "@$request" \
+            https://localhost:8443/api/auth/login > "$response"
+          jq -e '.authenticated == true' "$response" >/dev/null
+          common=(--fail --silent --show-error --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 -b "$cookie_jar")
+          agent_config_dir=/var/lib/mdd-agent
+          agent_reconnected=false
+          for delay in 30 60 120; do
+            sleep "$delay"
+            if curl --max-time 15 "${common[@]}" https://localhost:8443/v1/agents |
+                jq -e 'any(.agents[]; .agent_id == "ci-linux-agent" and
+                  (.process_generation | length) > 0 and
+                  .topology.reader_condition == "ready" and .topology.readers == [])' >/dev/null; then
+              agent_reconnected=true
+              break
+            fi
+          done
+          test "$agent_reconnected" = true
+
+          # The Core runs as mdd while /etc/mdd remains root-owned 0755.
+          # Exercise the authenticated root helper instead of accepting a
+          # unit test that can only replace auth.json in a writable temp dir.
+          old_generation=$(curl "${common[@]}" https://localhost:8443/v1/agents |
+            jq -r '.agents[] | select(.agent_id == "ci-linux-agent") | .process_generation')
+          csrf=$(jq -r '.csrf' "$response")
+          old_shared="$RUNNER_TEMP/old-shared-agent-token"
+          scoped_response="$RUNNER_TEMP/scoped-agent-credential.json"
+          sudo jq -r '.agent_token' /etc/mdd/auth.json | (umask 077; cat > "$old_shared")
+          curl "${common[@]}" -H 'Content-Type: application/json' \
+            -H "X-MDD-CSRF-Token: $csrf" \
+            --data-binary '{"action":"issue","agent_id":"ci-linux-agent"}' \
+            https://localhost:8443/api/auth/agent-credentials > "$scoped_response"
+          chmod 0600 "$scoped_response"
+          jq -e '.agent_id == "ci-linux-agent" and .agent_must_restart == true and
+            (.agent_token | length) >= 32 and .credentials.mode == "transition" and
+            .credentials.active == ["ci-linux-agent"]' "$scoped_response" >/dev/null
+          jq -r '.agent_token' "$scoped_response" |
+            sudo /usr/libexec/mdd/mdd-agent config set token --stdin \
+              -config "$agent_config_dir/config.json" >/dev/null
+          sudo systemctl restart mdd-agent.service
+          agent_replaced=false
+          for delay in 30 60 120; do
+            sleep "$delay"
+            if curl --max-time 15 "${common[@]}" https://localhost:8443/v1/agents |
+                jq -e --arg old "$old_generation" 'any(.agents[];
+                  .agent_id == "ci-linux-agent" and .process_generation != $old)' >/dev/null; then
+              agent_replaced=true
+              break
+            fi
+          done
+          test "$agent_replaced" = true || { echo 'Agent generation did not recover after credential update'; exit 1; }
+          curl "${common[@]}" -H 'Content-Type: application/json' \
+            -H "X-MDD-CSRF-Token: $csrf" \
+            --data-binary '{"action":"set_mode","mode":"scoped"}' \
+            https://localhost:8443/api/auth/agent-credentials |
+            jq -e '.credentials.mode == "scoped" and
+              .credentials.legacy_fallback_enabled == false' >/dev/null
+          credential_status="$RUNNER_TEMP/agent-credential-status.json"
+          curl "${common[@]}" https://localhost:8443/api/auth/agent-credentials > "$credential_status"
+          jq -e '.mode == "scoped" and .active == ["ci-linux-agent"] and .revoked == [] and
+            has("agent_token") == false' "$credential_status" >/dev/null
+          if grep -Fq "$(jq -r '.agent_token' "$scoped_response")" "$credential_status"; then
+            exit 1
+          fi
+          rogue_status=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" --resolve localhost:8443:127.0.0.1 \
+            -H 'X-MDD-Agent-ID: unregistered-agent' \
+            -H "Authorization: Bearer $(cat "$old_shared")" \
+            -o /dev/null -w '%{http_code}' https://localhost:8443/v1/agent/ws)
+          test "$rogue_status" = 401
+          test "$(sudo stat -c '%U:%G:%a' /etc/mdd/auth.json)" = mdd:mdd:600
+          test -z "$(sudo find /etc/mdd -maxdepth 1 -type f -name '.auth.json-*' -print)"
+          scoped_agent_connected=false
+          for delay in 30 60 120; do
+            sleep "$delay"
+            if curl --max-time 15 "${common[@]}" https://localhost:8443/v1/agents |
+                jq -e 'any(.agents[]; .agent_id == "ci-linux-agent")' >/dev/null; then
+              scoped_agent_connected=true
+              break
+            fi
+          done
+          test "$scoped_agent_connected" = true || { echo 'Agent did not recover after scoped-credential cutover'; exit 1; }
+          config_digest=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          printf 'config_digest_before=%s\n' "$config_digest" >> "$GITHUB_ENV"
+          for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service; do
+            test "$(systemctl is-active "$unit")" = active
+            test "$(systemctl show -p NRestarts --value "$unit")" = 0
+          done
+          curl "${common[@]}" https://localhost:8443/v1/notifications/config |
+            jq -e '.schema_version == 1 and .revision == 1 and
+              .webhook.enabled == false and .telegram.enabled == false and .pushplus.enabled == false' >/dev/null
+          test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/notifications.db)" = mdd:mdd:600
+          test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/preferences.db)" = mdd:mdd:600
+          test -z "$(systemctl list-units 'mdd-vowifi@*.service' --state=running --no-legend --plain)"
+          test ! -s "$legacy_trace"
+
+      - name: Prove stop, preserved-data uninstall and reinstall
+        run: |
+          # This lifecycle gate is intentionally traced: a bare shell assertion
+          # must identify the exact path or systemd state that violated the
+          # destructive-operation contract.
+          set -euxo pipefail
+          enabled_provider=mdd-vowifi@line-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service
+          loaded_provider=mdd-vowifi@line-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.service
+          sudo systemctl enable "$enabled_provider"
+          systemctl show "$loaded_provider" >/dev/null
+          test "$(systemctl is-enabled "$enabled_provider")" = enabled
+          test "$(systemctl is-enabled "$loaded_provider" || true)" != enabled
+
+          sudo install -o mdd -g mdd -m 0600 /dev/null /var/lib/mdd/uninstall-preserved
+          sudo install -o root -g root -m 0600 /dev/null /var/lib/mdd-agent/uninstall-preserved
+          sudo install -o root -g root -m 0600 /dev/null /var/lib/mdd-system/uninstall-preserved
+          agent_pid_before_stop=$(systemctl show -p MainPID --value mdd-agent.service)
+
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" stop
+          test "$(systemctl is-active mdd-core.service || true)" = inactive
+          test "$(systemctl is-active mdd-provider-apply.service || true)" = inactive
+          test "$(systemctl is-active mdd-egress.service || true)" = inactive
+          test "$(systemctl is-active mdd-agent.service)" = active
+          test "$(systemctl show -p MainPID --value mdd-agent.service)" = "$agent_pid_before_stop"
+          test "$(systemctl is-enabled "$enabled_provider")" = enabled
+          test ! -s "$legacy_trace"
+
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" uninstall
+          for path in \
+              /usr/lib/mdd/current \
+              /usr/libexec/mdd/mdd-core \
+              /usr/libexec/mdd/mdd-agent \
+              /usr/libexec/mdd/mdd-call-audio-helper \
+              /usr/libexec/mdd/mdd-vowifi \
+              /etc/systemd/system/mdd-core.service \
+              /etc/systemd/system/mdd-agent.service \
+              /etc/systemd/system/mdd-cellular-guard.service \
+              /etc/systemd/system/mdd-provider-apply.service \
+              /etc/systemd/system/mdd-egress.service \
+              /etc/systemd/system/mdd-vowifi@.service; do
+            test ! -e "$path" && test ! -L "$path"
+          done
+          test ! -d /usr/lib/mdd/releases
+          test ! -d /usr/libexec/mdd
+          for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service \
+              mdd-agent.service mdd-cellular-guard.service "$enabled_provider" "$loaded_provider"; do
+            state=$(systemctl is-active "$unit" 2>/dev/null || true)
+            test "$state" != active
+            enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+            test "$enabled" != enabled
+            test "$enabled" != enabled-runtime
+          done
+          test -f /etc/mdd/core.json
+          test -f /etc/mdd/auth.json
+          sudo test -f /var/lib/mdd/uninstall-preserved
+          sudo test -f /var/lib/mdd-agent/uninstall-preserved
+          sudo test -f /var/lib/mdd-system/uninstall-preserved
+          config_digest_after_uninstall=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          test "$config_digest_after_uninstall" = "$config_digest_before"
+          test ! -s "$legacy_trace"
+
+          sudo env "PATH=$shim_root:$PATH" \
+            "$RUNNER_TEMP/fresh/install-release.sh" install "$release_dir"
+          test "$(readlink -f /usr/lib/mdd/current)" = "/usr/lib/mdd/releases/$(basename "$release_dir")"
+          sudo test -f /var/lib/mdd/uninstall-preserved
+          sudo test -f /var/lib/mdd-agent/uninstall-preserved
+          sudo test -f /var/lib/mdd-system/uninstall-preserved
+          config_digest_after_reinstall=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          test "$config_digest_after_reinstall" = "$config_digest_before"
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" start
+          for attempt in $(seq 1 30); do
+            if sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" status; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          test "$(systemctl is-active mdd-agent.service || true)" = inactive
+          test ! -s "$legacy_trace"
+
+      - name: Stop fresh-host services
+        if: always()
+        run: |
+          sudo systemctl disable --now \
+            mdd-agent.service mdd-cellular-guard.service mdd-core.service mdd-provider-apply.service mdd-egress.service || true
+
+  release-windows-amd64:
+    name: Build Windows amd64 Agent
+    needs:
+      - validate-core
+      - validate-windows-agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: |
+            agent/call-audio-helper/go.sum
+            go-runtime/go.sum
+
+      - name: Install Windows cross compiler
+        run: |
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+
+      - name: Build service, CLI and tray GUI package
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          MDD_SHARED_CACHE_ROOT: ${{ runner.temp }}/mdd-agent-cache
+          TMPDIR: ${{ runner.temp }}/mdd-agent-build-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" "$MDD_SHARED_CACHE_ROOT"
+          tools_root="$RUNNER_TEMP/mdd-tools"
+          mkdir -p "$tools_root"
+          GOBIN="$tools_root" go install github.com/google/go-licenses/v2@v2.0.1
+          export GO_LICENSES="$tools_root/go-licenses"
+          CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+            go -C go-runtime test -tags='with_system_vboxusb,with_external_usbip_drivers' \
+              -c ./internal/rawusb -o "$RUNNER_TEMP/mdd-rawusb.test.exe"
+          output="$RUNNER_TEMP/MDD-Agent-Windows-amd64"
+          go-runtime/release/build-windows-agent.sh \
+            --output "$output" \
+            --version 0.1.0 \
+            --build "$BUILD_NUMBER" \
+            --arch amd64 \
+            --cc x86_64-w64-mingw32-gcc
+          go version -m "$output/mdd-agent.exe" > "$RUNNER_TEMP/mdd-agent.modules.txt"
+          grep -Fq 'github.com/sagernet/sing-usbip' "$RUNNER_TEMP/mdd-agent.modules.txt"
+          grep -Fq 'github.com/lovitus/sing-usbip' "$RUNNER_TEMP/mdd-agent.modules.txt"
+          grep -Fq 'v0.0.0-20260831204559-463a80475917' "$RUNNER_TEMP/mdd-agent.modules.txt"
+          grep -Fq 'github.com/sagernet/sing-mux' "$RUNNER_TEMP/mdd-agent.modules.txt"
+          printf '%s  %s\n' \
+            1c984914aec944de19b64eff232421439629699f8138e3ddc29301175bc6d938 \
+            "$output/usbipd-win_5.3.0_x64.msi" | sha256sum -c -
+          test -s "$output/THIRD-PARTY-LICENSES/usbipd-win-GPL-3.0-only.txt"
+          test -s "$output/THIRD-PARTY-LICENSES/USBIPD-WIN-SOURCE.txt"
+          test -s "$output/LICENSE"
+          test -s "$output/NOTICE"
+          test -s "$output/THIRD_PARTY_LICENSES.md"
+          for directory in \
+            "$output/THIRD-PARTY-LICENSES/go-cli" \
+            "$output/THIRD-PARTY-LICENSES/go-gui" \
+            "$output/THIRD-PARTY-LICENSES/go-audio-helper" \
+            "$output/THIRD-PARTY-LICENSES/sing-usbip-windows-drivers"; do
+            find "$directory" -type f -size +0c -print -quit | grep -q .
+          done
+          for license in \
+            "$output/THIRD-PARTY-LICENSES/sagernet-sing-GPL-3.0-or-later.txt" \
+            "$output/THIRD-PARTY-LICENSES/sagernet-sing-mux-GPL-3.0-or-later.txt" \
+            "$output/THIRD-PARTY-LICENSES/sagernet-sing-usbip-GPL-3.0-or-later.txt"; do
+            test -s "$license"
+            printf '%s  %s\n' \
+              2f02b7486bcfa90d115c71a20437f3906b6fd5bef81c5dc0efd341399e89d0fd \
+              "$license" | sha256sum -c -
+          done
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/MDD-Agent-Windows-amd64.tar.gz" \
+            MDD-Agent-Windows-amd64
+
+      - name: Upload Windows Agent package
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-agent-windows-amd64-${{ github.sha }}
+          path: ${{ runner.temp }}/MDD-Agent-Windows-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release-macos-arm64:
+    name: Build macOS arm64 Agent
+    needs:
+      - validate-core
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Select macOS signing mode
+        id: signing
+        env:
+          CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.BUILD_CERTIFICATE_BASE64 || '' }}
+          REQUIRE_SIGNING: ${{ inputs.require_macos_signing || startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$CERTIFICATE" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          elif [[ "$REQUIRE_SIGNING" == true ]]; then
+            echo '::error::Developer ID signing requires BUILD_CERTIFICATE_BASE64 and P12_PASSWORD repository secrets.'
+            exit 1
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Development signature only; this artifact cannot replace a Developer ID installation.'
+          fi
+
+      - name: Import Developer ID into temporary keychain
+        if: steps.signing.outputs.enabled == 'true'
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.P12_PASSWORD }}
+
+      - name: Select the existing production Developer ID
+        if: steps.signing.outputs.enabled == 'true'
+        id: developer_id
+        run: |
+          set -euo pipefail
+          identities=$(security find-identity -v -p codesigning signing_temp.keychain)
+          matches=$(printf '%s\n' "$identities" | sed -nE 's/^[[:space:]]*[0-9]+\) ([A-Fa-f0-9]{40}) "Developer ID Application: .* \(8WPJLUNLY8\)"$/\1/p')
+          if [[ -z "$matches" || $(printf '%s\n' "$matches" | wc -l | tr -d ' ') != 1 ]]; then
+            echo '::error::Expected exactly one valid Developer ID Application identity for the production team.'
+            exit 1
+          fi
+          printf 'identity=%s\n' "$matches" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: |
+            agent/call-audio-helper/go.sum
+            go-runtime/go.sum
+
+      - name: Test macOS modem and Agent boundaries
+        env:
+          TMPDIR: ${{ runner.temp }}/mdd-agent-test-tmp
+          GOCACHE: ${{ runner.temp }}/mdd-agent-cache/go-build
+          GOMODCACHE: ${{ runner.temp }}/mdd-agent-cache/go-mod
+          GOTMPDIR: ${{ runner.temp }}/mdd-agent-test-tmp/go-tmp
+        run: |
+          set -euo pipefail
+          go-runtime/release/test-install-macos-agent.sh
+          sh -n go-runtime/release/build-macos-agent.sh
+          for args in '--identity - --team-id 8WPJLUNLY8' '--identity unavailable' '--team-id 8WPJLUNLY8'; do
+            set +e
+            # These inputs must fail before any packaging or signing begins.
+            go-runtime/release/build-macos-agent.sh $args > "$RUNNER_TEMP/signing-input-check.txt" 2>&1
+            result=$?
+            set -e
+            test "$result" = 2
+            grep -Fq 'Developer ID signing requires' "$RUNNER_TEMP/signing-input-check.txt"
+          done
+          test "$(uname -m)" = arm64
+          mkdir -p "$TMPDIR" "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
+          go -C go-runtime test -race \
+            ./internal/agentat \
+            ./internal/cellulario \
+            ./internal/darwinmodem \
+            ./cmd/mdd-agent
+          go -C go-runtime test -race -tags gui ./cmd/mdd-agent
+          go -C go-runtime vet \
+            ./internal/agentat \
+            ./internal/cellulario \
+            ./internal/darwinmodem \
+            ./cmd/mdd-agent
+          go -C go-runtime vet -tags gui ./cmd/mdd-agent
+
+      - name: Build CLI, tray app and isolated modem helpers
+        env:
+          MDD_SIGNING_IDENTITY: ${{ steps.developer_id.outputs.identity }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          MDD_SHARED_CACHE_ROOT: ${{ runner.temp }}/mdd-agent-cache
+          TMPDIR: ${{ runner.temp }}/mdd-agent-build-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" "$MDD_SHARED_CACHE_ROOT"
+          tools_root="$RUNNER_TEMP/mdd-tools"
+          mkdir -p "$tools_root"
+          GOBIN="$tools_root" go install github.com/google/go-licenses/v2@v2.0.1
+          export GO_LICENSES="$tools_root/go-licenses"
+          output="$RUNNER_TEMP/MDD-Agent-macOS-arm64"
+          set --
+          if [[ -n "$MDD_SIGNING_IDENTITY" ]]; then
+            set -- --identity "$MDD_SIGNING_IDENTITY" --team-id 8WPJLUNLY8
+          fi
+          go-runtime/release/build-macos-agent.sh \
+            --output "$output" \
+            --version 0.1.0 \
+            --build "$BUILD_NUMBER" "$@"
+          test -x "$output/mdd-agent"
+          test -x "$output/mdd-cellular-io"
+          test -x "$output/mdd-call-audio-helper"
+          test -s "$output/LICENSE"
+          test -s "$output/NOTICE"
+          test -s "$output/THIRD_PARTY_LICENSES.md"
+          test -s "$output/licenses/cellular-io-THIRD-PARTY.md"
+          test -s "$output/licenses/libusb-LGPL-2.1.txt"
+          test -s "$output/licenses/lwip-BSD-3-Clause.txt"
+          test -s "$output/corresponding-source/libusb-1.0.30.tar.bz2"
+          test -s "$output/corresponding-source/lwip-STABLE-2_2_1_RELEASE.tar.gz"
+          test -s "$output/corresponding-source/SOURCE.md"
+          printf '%s  %s\n' \
+            fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf \
+            "$output/corresponding-source/libusb-1.0.30.tar.bz2" | shasum -a 256 -c -
+          printf '%s  %s\n' \
+            ce0b7461c0ad9602c376f0bf07c5eb7253b48c7bf66f011c6bf3e2a96731c539 \
+            "$output/corresponding-source/lwip-STABLE-2_2_1_RELEASE.tar.gz" | shasum -a 256 -c -
+          for directory in \
+            "$output/licenses/go-cli" \
+            "$output/licenses/go-gui" \
+            "$output/licenses/go-audio-helper"; do
+            find "$directory" -type f -size +0c -print -quit | grep -q .
+          done
+          test -x "$output/MDD Agent.app/Contents/MacOS/mdd-cellular-io"
+          test -x "$output/MDD Agent.app/Contents/MacOS/mdd-call-audio-helper"
+          plutil -extract NSMicrophoneUsageDescription raw \
+            "$output/MDD Agent.app/Contents/Info.plist" >/dev/null
+          app_executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+            "$output/MDD Agent.app/Contents/Info.plist")
+          for executable in \
+            "$output/mdd-agent" \
+            "$output/mdd-call-audio-helper" \
+            "$output/MDD Agent.app/Contents/MacOS/$app_executable_name" \
+            "$output/MDD Agent.app/Contents/MacOS/mdd-call-audio-helper"; do
+            codesign -d --entitlements :- "$executable" 2>/dev/null | \
+              grep -Fq 'com.apple.security.device.audio-input'
+          done
+          for executable in \
+            "$output/mdd-cellular-io" \
+            "$output/MDD Agent.app/Contents/MacOS/mdd-cellular-io"; do
+            if codesign -d --entitlements :- "$executable" 2>/dev/null | \
+              grep -Fq 'com.apple.security.device.audio-input'; then
+              echo 'cellular companion unexpectedly has microphone entitlement' >&2
+              exit 1
+            fi
+          done
+          otool -L "$output/mdd-cellular-io" | grep -Fq '/usr/lib/libSystem.B.dylib'
+          if otool -L "$output/mdd-cellular-io" | grep -qi libusb; then
+            echo 'mdd-cellular-io unexpectedly links dynamic libusb' >&2
+            exit 1
+          fi
+          codesign --verify --strict "$output/mdd-agent"
+          codesign --verify --deep --strict "$output/MDD Agent.app"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/MDD-Agent-macOS-arm64.tar.gz" \
+            MDD-Agent-macOS-arm64
+
+      - name: Upload macOS Agent package
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-agent-macos-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/MDD-Agent-macOS-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-tagged-release:
+    name: Publish verified tagged release
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs:
+      - validate-fresh-linux-artifact
+      - release-windows-amd64
+      - release-macos-arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout the exact tagged commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download all verified release packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: '*'
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Verify the tag and assemble checksums
+        env:
+          RELEASE_ROOT: ${{ runner.temp }}/release-assets
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "$GITHUB_SHA"
+          mapfile -t linux < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'mdd-*-linux-amd64.tar' -print)
+          mapfile -t windows < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'MDD-Agent-Windows-amd64.tar.gz' -print)
+          mapfile -t macos < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'MDD-Agent-macOS-arm64.tar.gz' -print)
+          test "${#linux[@]}" -eq 1
+          test "${#windows[@]}" -eq 1
+          test "${#macos[@]}" -eq 1
+          sha256sum "${linux[0]}" "${windows[0]}" "${macos[0]}" |
+            sed "s#  $RELEASE_ROOT/#  #" > "$RELEASE_ROOT/SHA256SUMS"
+          printf 'linux_asset=%s\n' "${linux[0]}" >> "$GITHUB_ENV"
+          printf 'windows_asset=%s\n' "${windows[0]}" >> "$GITHUB_ENV"
+          printf 'macos_asset=%s\n' "${macos[0]}" >> "$GITHUB_ENV"
+          printf 'checksums=%s\n' "$RELEASE_ROOT/SHA256SUMS" >> "$GITHUB_ENV"
+
+      - name: Publish versioned release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "$linux_asset" "$windows_asset" "$macos_asset" "$checksums" \
+            --verify-tag \
+            --title "MDD $GITHUB_REF_NAME" \
+            --notes "Verified Go-only server and unified Agent packages built from $GITHUB_SHA. See SHA256SUMS before installation."
