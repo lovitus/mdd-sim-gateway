@@ -125,6 +125,7 @@ jobs:
         run: |
           node tools/repository-check.mjs
           node tools/repository-check.test.mjs
+          node tools/installer-waits.test.mjs
 
       - name: Rebuild and verify embedded React WebUI
         working-directory: webui
@@ -132,6 +133,10 @@ jobs:
           npm ci
           npm run test:all
           MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+
+      - name: Real browser local recording with synthetic audio
+        working-directory: webui
+        run: npm run test:recording-browser
 
       - name: Check out exact third-party review baseline
         uses: actions/checkout@v7
@@ -263,6 +268,7 @@ jobs:
           $script = Get-Content -Raw go-runtime/release/install-windows-agent.ps1
           [void][scriptblock]::Create($script)
           Write-Output 'install-windows-agent.ps1 syntax parsed'
+          & ./go-runtime/release/test-deployment-waits.ps1
 
       - name: Test Windows Agent ownership and raw USB boundaries
         working-directory: go-runtime
