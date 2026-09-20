@@ -41,31 +41,25 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ### Implementation
 
-- implemented: 31
+- implemented: 32
 - needs_verification: 7
-- partial: 14
+- partial: 13
 - policy: 5
 - superseded: 6
 
 ### Acceptance / evidence
 
 - covered_by_tests: 18
-- evidence_review_pending: 18
+- evidence_review_pending: 19
 - not_applicable: 11
 - pending_hardware: 13
-- pending_product: 3
+- pending_product: 2
 
 ## Current open work
 
-### RECORDING
-
-**State: not_implemented; release relevance: current.** Recording is not delivered by current browser call controls; removal of an old UI stub is cleanup only.
-
-Acceptance scope / remaining action: Define explicit consent, storage/retention/security and lifecycle semantics, implement, then authorize real acceptance.
-
 ### INSTALLER_WAIT
 
-**State: partial; release relevance: current.** Go installers exist, but lifecycle waiting still includes bounded polling; event-driven/cancellation improvements and least-privilege architecture remain a separate work item.
+**State: partial; release relevance: current.** Exact service/launchd ownership, captured-process waiting, bounded immediate readiness and rollback-stop protection are implemented. Fully event-driven service waiting and least-privilege service architecture are still partial.
 
 Acceptance scope / remaining action: Verify exact polling paths on Windows/macOS before changing them; retain bounded waits and error diagnostics.
 
@@ -83,7 +77,7 @@ Acceptance scope / remaining action: Collect bounded redacted evidence at the re
 
 ### INCIDENT_TOPOLOGY
 
-**State: unresolved_cause; release relevance: current.** Historical topology_invalid report did not identify the exact rejected field. It is not evidence of a newly reproduced current defect.
+**State: unresolved_cause; release relevance: current.** Historical topology_invalid report did not identify the exact rejected field. It is not evidence of a newly reproduced current defect. Additive fixed-schema field diagnostics now narrow reader/card and modem-network readback failures without disclosing raw values; this does not prove the old incident cause.
 
 Acceptance scope / remaining action: Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.
 
@@ -104,6 +98,14 @@ Resolution (user_decision): Owner deferred Android in favor of the three primary
 Acceptance scope / remaining action: Acceptance here records the owner-approved product direction and existing source contracts, not newly executed card/carrier acceptance. Preserve explicit confirmations, exact identities, retained records and unknown outcomes.
 
 Resolution (user_decision): Owner accepted the implemented physical-delete direction instead of the abandoned keep-profile/report-delete proposal.
+
+### RECORDING
+
+**State: completed; release relevance: current.** Implemented per-recording consent, browser-local bounded stereo recording through the existing global call owner, with explicit save/discard and mute/end/disconnect handling. This is not new carrier/hardware acceptance.
+
+Acceptance scope / remaining action: Unit tests plus real-browser synthetic tone/codec validation; preserve existing real-line evidence and reconcile only missing field subcases.
+
+Resolution (implementation_evidence): Opt-in local recording is implemented with consent, security/storage limits and exact call lifecycle; field acceptance is tracked separately.
 
 ### FORK_MAINTENANCE
 
@@ -781,17 +783,17 @@ Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-ru
 
 ### M51
 
-**Implementation: partial; acceptance/evidence: pending_product.**
+**Implementation: implemented; acceptance/evidence: evidence_review_pending.**
 
 Preserved original ([TODO.md:322](../../docs/archive/2026-09-20/TODO.md#L322)): 有音频能力的 Modem 完成浏览器双向语音、静音和录音验证：呼出双向语音已通过，来电、       静音和录音仍待人工验收。
 
-Previously reported outgoing audio is retained. Recording is genuinely unimplemented; actual incoming audio and mute are scoped evidence gaps. A mixed criterion must not erase its already reported subcases.
+Browser voice, local mute and opt-in recording code paths are implemented. Preserve previously reported outgoing audio; reconcile that evidence and qualify only the uncovered incoming audio, mute and recording subcases. This code change claims no new hardware acceptance.
 
 Existing reports: [H-CALL-PARTIAL](#h-call-partial).
 
 Remaining scope: Recording implementation remains missing. Reconcile outgoing-audio records; verify only unrecorded incoming audio/mute cases with authorization.
 
-Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-runtime/internal/agentmedia/broker.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`providers/vowifi-go/internal/service/call.go`](../../providers/vowifi-go/internal/service/call.go), [`webui/src/goCallCoordinator.jsx`](../../webui/src/goCallCoordinator.jsx).
+Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-runtime/internal/agentmedia/broker.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`providers/vowifi-go/internal/service/call.go`](../../providers/vowifi-go/internal/service/call.go), [`webui/src/goCallCoordinator.jsx`](../../webui/src/goCallCoordinator.jsx), [`docs/features/local-recording.md`](../../docs/features/local-recording.md), [`webui/src/callRecording.js`](../../webui/src/callRecording.js), [`webui/tests/callRecording.mjs`](../../webui/tests/callRecording.mjs), [`webui/tests/recordingBrowser.mjs`](../../webui/tests/recordingBrowser.mjs).
 
 ### M52
 

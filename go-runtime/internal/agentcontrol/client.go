@@ -28,10 +28,14 @@ type APIError struct {
 	Status int
 	Code   string
 	Detail string
+	Field  string
 }
 
 func (err *APIError) Error() string {
 	if err.Detail != "" {
+		if err.Field != "" {
+			return fmt.Sprintf("Agent control request failed: HTTP %d (%s) at %s: %s", err.Status, err.Code, err.Field, err.Detail)
+		}
 		return fmt.Sprintf("Agent control request failed: HTTP %d (%s): %s", err.Status, err.Code, err.Detail)
 	}
 	return fmt.Sprintf("Agent control request failed: HTTP %d (%s)", err.Status, err.Code)
@@ -147,12 +151,13 @@ func (client *Client) requestBody(ctx context.Context, method, path string, body
 	var failure struct {
 		Code   string   `json:"code"`
 		Detail string   `json:"detail"`
+		Field  string   `json:"field"`
 		Status Snapshot `json:"status"`
 	}
 	if err := json.Unmarshal(responseBody, &failure); err != nil || failure.Code == "" {
 		failure.Code = "invalid_error_response"
 	}
-	return failure.Status, &APIError{Status: response.StatusCode, Code: failure.Code, Detail: failure.Detail}
+	return failure.Status, &APIError{Status: response.StatusCode, Code: failure.Code, Detail: failure.Detail, Field: failure.Field}
 }
 
 func decodeControlJSON(body []byte, result any) error {

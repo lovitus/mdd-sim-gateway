@@ -165,7 +165,7 @@ func TestInvalidTopologyReportsRuleWithoutRawFacts(t *testing.T) {
 	_, err = client.Topology(context.Background())
 	var failure *APIError
 	if !errors.As(err, &failure) || failure.Status != http.StatusInternalServerError ||
-		failure.Code != "topology_invalid" || failure.Detail != "Agent topology contains an invalid card fact" {
+		failure.Field != "readers[0].card_id" || failure.Code != "topology_invalid" || failure.Detail != "Agent topology contains an invalid card fact" {
 		t.Fatalf("unexpected failure: %v", err)
 	}
 	if strings.Contains(err.Error(), "private-") || !strings.Contains(err.Error(), failure.Detail) {

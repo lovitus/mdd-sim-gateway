@@ -17,15 +17,9 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
-### RECORDING
-
-**State: not_implemented; release relevance: current.** Recording is not delivered by current browser call controls; removal of an old UI stub is cleanup only.
-
-Acceptance scope / remaining action: Define explicit consent, storage/retention/security and lifecycle semantics, implement, then authorize real acceptance.
-
 ### INSTALLER_WAIT
 
-**State: partial; release relevance: current.** Go installers exist, but lifecycle waiting still includes bounded polling; event-driven/cancellation improvements and least-privilege architecture remain a separate work item.
+**State: partial; release relevance: current.** Exact service/launchd ownership, captured-process waiting, bounded immediate readiness and rollback-stop protection are implemented. Fully event-driven service waiting and least-privilege service architecture are still partial.
 
 Acceptance scope / remaining action: Verify exact polling paths on Windows/macOS before changing them; retain bounded waits and error diagnostics.
 
@@ -43,7 +37,7 @@ Acceptance scope / remaining action: Collect bounded redacted evidence at the re
 
 ### INCIDENT_TOPOLOGY
 
-**State: unresolved_cause; release relevance: current.** Historical topology_invalid report did not identify the exact rejected field. It is not evidence of a newly reproduced current defect.
+**State: unresolved_cause; release relevance: current.** Historical topology_invalid report did not identify the exact rejected field. It is not evidence of a newly reproduced current defect. Additive fixed-schema field diagnostics now narrow reader/card and modem-network readback failures without disclosing raw values; this does not prove the old incident cause.
 
 Acceptance scope / remaining action: Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.
 
@@ -64,6 +58,14 @@ Resolution (user_decision): Owner deferred Android in favor of the three primary
 Acceptance scope / remaining action: Acceptance here records the owner-approved product direction and existing source contracts, not newly executed card/carrier acceptance. Preserve explicit confirmations, exact identities, retained records and unknown outcomes.
 
 Resolution (user_decision): Owner accepted the implemented physical-delete direction instead of the abandoned keep-profile/report-delete proposal.
+
+### RECORDING
+
+**State: completed; release relevance: current.** Implemented per-recording consent, browser-local bounded stereo recording through the existing global call owner, with explicit save/discard and mute/end/disconnect handling. This is not new carrier/hardware acceptance.
+
+Acceptance scope / remaining action: Unit tests plus real-browser synthetic tone/codec validation; preserve existing real-line evidence and reconcile only missing field subcases.
+
+Resolution (implementation_evidence): Opt-in local recording is implemented with consent, security/storage limits and exact call lifecycle; field acceptance is tracked separately.
 
 ### FORK_MAINTENANCE
 

@@ -67,7 +67,7 @@ All 59 original general criteria and four macOS criteria remain preserved. Curre
 | [M48](docs/status/README.md#m48) | implemented | pending_hardware | 远程短信可以发送、接收、持久化和推送，且沿用现有 UI。 |
 | [M49](docs/status/README.md#m49) | implemented | covered_by_tests | 验证发送超时、重复响应、旧 session 响应、断线补扫和消息去重。 |
 | [M50](docs/status/README.md#m50) | implemented | evidence_review_pending | 浏览器可以通过远程 Modem 拨号、接听、挂断和发送 DTMF：呼出、挂断和双向语音已实机       通过；来电事件与接听界面已实机验证，实际接听仍待人工验收；DTMF 等待通话中人工验收。 |
-| [M51](docs/status/README.md#m51) | partial | pending_product | 有音频能力的 Modem 完成浏览器双向语音、静音和录音验证：呼出双向语音已通过，来电、       静音和录音仍待人工验收。 |
+| [M51](docs/status/README.md#m51) | implemented | evidence_review_pending | 有音频能力的 Modem 完成浏览器双向语音、静音和录音验证：呼出双向语音已通过，来电、       静音和录音仍待人工验收。 |
 | [M52](docs/status/README.md#m52) | implemented | pending_hardware | 来电可以同时通知多个已登录客户端，但只有服务端接受的首次接听生效，其他客户端同步进入       已由其他端接听的状态。 |
 | [M53](docs/status/README.md#m53) | partial | pending_hardware | 通话期间刷新浏览器页面或另一个客户端接入后，可以从服务端恢复当前通话状态，而不是依赖       原页面内存。 |
 | [M54](docs/status/README.md#m54) | partial | pending_hardware | Agent 在振铃、接通和通话中断线时，服务端、浏览器、Asterisk 和录音资源最终状态一致。 |

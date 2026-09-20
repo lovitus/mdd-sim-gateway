@@ -16,22 +16,53 @@ $required = @("mdd-agent.exe", "MDD Agent.exe", "mdd-call-audio-helper.exe", "BU
 
 function Hash([string]$Path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
 function Wait-State([string]$State, [int]$Seconds = 45) {
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    do {
-        $service = Get-Service -Name $serviceName -ErrorAction Stop
-        if ([string]$service.Status -eq $State) { return }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    throw "$serviceName did not reach $State"
+    if ($Seconds -le 0) { throw "service wait timeout must be positive" }
+    $service = Get-Service -Name $serviceName -ErrorAction Stop
+    try {
+        # Bounded ServiceController wait; this still polls inside .NET, but no
+        # repeated PowerShell process/service enumeration is performed here.
+        $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]$State, [TimeSpan]::FromSeconds($Seconds))
+    } finally { $service.Dispose() }
 }
-function Wait-AgentExit([int]$Seconds = 45) {
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    do {
-        $processes = Get-Process -Name "mdd-agent" -ErrorAction SilentlyContinue
-        if (-not $processes) { return }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    throw "mdd-agent process did not exit"
+function Get-ServiceProcess {
+    $currentService = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+    if (-not $currentService) { throw "service identity is unavailable" }
+    $servicePID = [int]$currentService.ProcessId
+    if ($servicePID -eq 0) { return $null }
+    try { $ownedProcess = Get-Process -Id $servicePID -ErrorAction Stop }
+    catch {
+        if ((Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop).ProcessId -eq 0) { return $null }
+        throw
+    }
+    # Open the native handle before stop. Waiting on a later name/PID scan can
+    # accidentally follow another Agent or a reused PID.
+    try {
+        $null = $ownedProcess.Handle
+        $checkService = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+        if (-not $checkService -or [int]$checkService.ProcessId -ne $servicePID) { throw "service process identity changed" }
+        return $ownedProcess
+    } catch { $ownedProcess.Dispose(); throw }
+}
+function Wait-AgentExit($OwnedProcess, [int]$Seconds = 45) {
+    if (-not $OwnedProcess) { return }
+    if ($Seconds -le 0) { throw "process wait timeout must be positive" }
+    # Process.WaitForExit waits on the captured process handle, not its name.
+    if (-not $OwnedProcess.WaitForExit($Seconds * 1000)) { throw "owned Agent process did not exit" }
+}
+function Stop-ExactAgent {
+    $ownedProcess = Get-ServiceProcess
+    try {
+        Stop-Service -Name $serviceName -ErrorAction Stop
+        Wait-State "Stopped"
+        Wait-AgentExit $ownedProcess
+    } finally { if ($ownedProcess) { $ownedProcess.Dispose() } }
+}
+function Assert-RunningAgent([string]$ExpectedPath) {
+    $ownedProcess = Get-ServiceProcess
+    if (-not $ownedProcess) { throw "running service has no process" }
+    try {
+        if ((Hash $ownedProcess.Path) -ne (Hash $ExpectedPath)) { throw "running Agent hash mismatch" }
+    } finally { $ownedProcess.Dispose() }
 }
 function Set-ServiceImagePath([string]$Value) {
     & sc.exe config $serviceName binPath= $Value | Out-Null
@@ -83,9 +114,7 @@ if ($Action -eq "Rollback") {
     if (-not (Test-Path -LiteralPath $previousImagePathFile -PathType Leaf)) { throw "rollback ImagePath receipt is missing" }
     $previousImagePath = (Get-Content -Raw -LiteralPath $previousImagePathFile).Trim()
     if (-not $previousImagePath) { throw "rollback ImagePath receipt is empty" }
-    Stop-Service -Name $serviceName
-    Wait-State "Stopped"
-    Wait-AgentExit
+    Stop-ExactAgent
     Set-ServiceImagePath $previousImagePath
     Start-Service -Name $serviceName
     Wait-State "Running"
@@ -113,19 +142,19 @@ foreach ($item in Get-ChildItem -LiteralPath $candidate -Force) {
     Copy-Item -LiteralPath $item.FullName -Destination $release -Recurse -Force
 }
 Assert-ReleaseMatchesCandidate $release
-Stop-Service -Name $serviceName
-Wait-State "Stopped"
-Wait-AgentExit
+Stop-ExactAgent
 try {
     Set-ServiceImagePath ('"{0}" service -config "{1}"' -f (Join-Path $release "mdd-agent.exe"), $configPath)
     Start-Service -Name $serviceName
     Wait-State "Running"
-    if ((Hash (Get-Process -Name "mdd-agent" -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Path)) -ne (Hash (Join-Path $release "mdd-agent.exe"))) { throw "running Agent hash mismatch" }
+    Assert-RunningAgent (Join-Path $release "mdd-agent.exe")
 } catch {
-    Stop-Service -Name $serviceName -ErrorAction SilentlyContinue
+    $deploymentFailure = $_.Exception.Message
+    # Never replace ImagePath / restart while candidate ownership is uncertain.
+    try { Stop-ExactAgent } catch { throw "rollback blocked because candidate stop is unconfirmed: $($_.Exception.Message); deployment failure: $deploymentFailure" }
     Set-ServiceImagePath $current
     Start-Service -Name $serviceName
     Wait-State "Running"
-    throw "deployment rolled back: $($_.Exception.Message)"
+    throw "deployment rolled back: $deploymentFailure"
 }
 [pscustomobject]@{ status = "installed"; source_revision = $build; agent_sha256 = Hash (Join-Path $release "mdd-agent.exe") } | ConvertTo-Json -Compress

@@ -2222,13 +2222,21 @@ func (topology TopologySnapshot) Validate() error {
 	previous := ""
 	for index, reader := range topology.Readers {
 		if !validReaderName(reader.ReaderName) || index > 0 && reader.ReaderName <= previous {
-			return errors.New("Agent topology reader names must be valid, unique, and sorted")
+			return topologyInvalid(fmt.Sprintf("readers[%d].reader_name", index), "Agent topology reader names must be valid, unique, and sorted")
 		}
 		previous = reader.ReaderName
-		if reader.SessionGeneration != "" && !validIdentifier(reader.SessionGeneration) ||
-			reader.CardID != "" && !validCardID(reader.CardID) ||
-			reader.ATRSHA256 != "" && !validSHA256(reader.ATRSHA256) || len(reader.IdentityDetail) > 1024 {
-			return errors.New("Agent topology contains an invalid card fact")
+		for _, check := range []struct {
+			field   string
+			invalid bool
+		}{
+			{"session_generation", reader.SessionGeneration != "" && !validIdentifier(reader.SessionGeneration)},
+			{"card_id", reader.CardID != "" && !validCardID(reader.CardID)},
+			{"atr_sha256", reader.ATRSHA256 != "" && !validSHA256(reader.ATRSHA256)},
+			{"identity_detail", len(reader.IdentityDetail) > 1024},
+		} {
+			if check.invalid {
+				return topologyInvalid(fmt.Sprintf("readers[%d].%s", index, check.field), "Agent topology contains an invalid card fact")
+			}
 		}
 		if err := validateReaderSIM(reader.SIM); err != nil {
 			return err
@@ -2359,11 +2367,18 @@ func (topology TopologySnapshot) validateModems() error {
 			return errors.New("Agent topology contains an invalid modem fact")
 		}
 		previous = modem.AttachmentID
-		if len(modem.Network.Interface) > 64 || !validSecretText(modem.Network.Interface, 64) ||
-			len(modem.Network.APN) > 256 || !validSecretText(modem.Network.APN, 256) ||
-			modem.Network.Address != "" && net.ParseIP(modem.Network.Address) == nil ||
-			!modem.Network.CountersAvailable && (modem.Network.RXBytes != 0 || modem.Network.TXBytes != 0) {
-			return errors.New("Agent topology contains invalid data connection readback")
+		for _, check := range []struct {
+			field   string
+			invalid bool
+		}{
+			{"interface", len(modem.Network.Interface) > 64 || !validSecretText(modem.Network.Interface, 64)},
+			{"apn", len(modem.Network.APN) > 256 || !validSecretText(modem.Network.APN, 256)},
+			{"address", modem.Network.Address != "" && net.ParseIP(modem.Network.Address) == nil},
+			{"counters_available", !modem.Network.CountersAvailable && (modem.Network.RXBytes != 0 || modem.Network.TXBytes != 0)},
+		} {
+			if check.invalid {
+				return topologyInvalid(fmt.Sprintf("modems[%d].network.%s", index, check.field), "Agent topology contains invalid data connection readback")
+			}
 		}
 		if modem.Condition != "ready" && modem.Condition != "degraded" ||
 			modem.Condition == "ready" && modem.Detail != "" || modem.Condition == "degraded" && modem.Detail == "" {
