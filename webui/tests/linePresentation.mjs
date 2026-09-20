@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { deviceForLine, lineServiceStatus } from '../src/mdd/linePresentation.js'
 
 const currentLine = { id: 'current', iccid: 'card', operations: {
@@ -14,18 +13,9 @@ assert.equal(lineServiceStatus(currentLine, 'sms'), 'VoWiFi SMS: Unavailable · 
 assert.equal(lineServiceStatus({ operations: {} }, 'call'), 'VoWiFi: Voice unavailable · Cellular modem: Voice unavailable')
 import {
   compactReaderName,
-  callOccupancy,
   lineCallReadinessStatus,
   lineCompositeStatus,
-} from '../src/linePresentation.js'
-
-assert.equal(callOccupancy(undefined, 'vowifi'), 'unknown')
-assert.equal(callOccupancy({status:{}}, 'vowifi'), 'unknown')
-assert.equal(callOccupancy({status:{runtime:{condition:'running'}}}, 'vowifi'), 'idle')
-assert.equal(callOccupancy({status:{runtime:{condition:'running'},active_call:{call_id:'call-1'}}}, 'vowifi'), 'occupied')
-assert.equal(callOccupancy({status:{state:'unknown'}}, 'cellular'), 'unknown')
-assert.equal(callOccupancy({status:{state:'stopped'}}, 'cellular'), 'idle')
-assert.equal(callOccupancy({status:{sessions:[{phase:'active'}]}}, 'cellular'), 'occupied')
+} from '../src/mdd/linePresentation.js'
 
 const zh = (value) => ({
   Stopped: '已停止',
@@ -156,34 +146,13 @@ const cellularVoiceDevice = {
 readiness = lineCallReadinessStatus(line, [cellularVoiceDevice], {
   coordinatorLine: { prov: { browser_media: { outbound: false } } },
 }, zh)
+assert.equal(readiness.cellularBrowserVoiceReady, false, 'hardware presence is not authoritative operation readiness')
+readiness = lineCallReadinessStatus({ ...line, operations: { cellular_call: { ready: true } } }, [cellularVoiceDevice], {
+  coordinatorLine: { prov: { browser_media: { outbound: false } } },
+}, zh)
 assert.equal(readiness.vowifiBrowserVoiceReady, false)
 assert.equal(readiness.vowifiBrowserVoiceLabel, '浏览器 WSS 语音不可用')
 assert.equal(readiness.cellularBrowserVoiceReady, true)
 assert.equal(readiness.browserVoiceReady, true)
-assert.equal(readiness.browserVoiceLabel, '蜂窝语音自检已通过，浏览器双向音频可用。')
-
-const i18nSource = readFileSync(new URL('../src/i18n.jsx', import.meta.url), 'utf8')
-const dictionary = (name) => {
-  const start = i18nSource.indexOf(`const ${name} = `) + `const ${name} = `.length
-  return new Function(`return (${i18nSource.slice(start, i18nSource.indexOf('\n}', start) + 2)})`)()
-}
-const unifiedSource = readFileSync(new URL('../src/views/UnifiedPages.jsx', import.meta.url), 'utf8')
-assert.ok(unifiedSource.includes('await api.testEgress(country)'),
-  'country-exit diagnostics must test the applied end-to-end route')
-assert.ok(unifiedSource.includes('await api.testEgressProfile(id, s.revision)'),
-	'saved node/SOCKS profiles must expose an isolated end-to-end UDP test')
-assert.ok(unifiedSource.includes('await api.testEgress(country)') && unifiedSource.includes('Apply saved configuration'),
-	'profile diagnostics and explicit applied-exit health must remain separate')
-for (const translation of [
-  '运营商 IMS 暂时不可用；Asterisk 将按计划在当前线路内重试注册。',
-  '服务器 P-CSCF 暂时拒绝 IMS 注册；已安排原位重试',
-  '服务器 P-CSCF {peer} 暂时返回 SIP {status}；将在 {retry_after} 秒后重试',
-  'Asterisk 将按已安排的延迟在当前线路内原位重试，不重建线路。',
-  '本地 VoWiFi Engine 未继续推进注册',
-  '通过安全检查后，只恢复当前确认空闲的 Engine 代际。',
-  'Engine 未上报 SIM 启动状态。',
-  '无法读取 Engine 内 Asterisk 的注册状态。',
-  'Engine 内 IMS 注册未启动。',
-]) {
-  assert.ok(i18nSource.includes(translation), `missing Chinese translation: ${translation}`)
-}
+assert.equal(readiness.browserVoiceLabel, 'Modem voice hardware ready; browser audio is checked per call.')
+console.log('Mounted line presentation and independent media-readiness tests passed')

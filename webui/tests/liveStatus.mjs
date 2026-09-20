@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { liveStatusFromWsMessage, mergeLiveLineStatus } from '../src/liveStatus.js'
+import { liveStatusFromWsMessage, mergeLiveLineStatus } from '../src/mdd/liveStatus.js'
 
 const status = liveStatusFromWsMessage({
   type: 'status',

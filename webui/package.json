@@ -12,9 +12,7 @@
     "test:live-status": "node tests/liveStatus.mjs",
     "test:control-ws": "node tests/controlWebSocket.mjs",
     "test:line-presentation": "node tests/linePresentation.mjs && node tests/dialogs.mjs",
-    "test:request-gate": "node tests/latestRequestGate.mjs",
     "test:legacy-surface": "node tests/legacySurfaceContracts.mjs",
-    "test:cellular-media": "node tests/cellularMediaMonitor.mjs",
     "test:go-call-media": "node tests/goCallMedia.mjs && node tests/goCallStability.mjs && node tests/advancedDiagnostics.mjs",
     "test:sms-submission": "node tests/smsSubmissionSafety.mjs",
     "test:vowifi-media": "node tests/vowifiMediaGate.mjs",
@@ -25,8 +23,10 @@
     "test:ui-migration": "node tests/uiMigrationContracts.mjs",
     "test:mdd-notifications": "node tests/mddNotificationAdapter.mjs",
     "test:mdd-adapters": "node tests/mddNotificationAdapter.mjs && node tests/mddSmsAdapter.mjs && node tests/mddCallView.mjs && node tests/mddHistoryAdapter.mjs && node tests/mddSystemAdapter.mjs && node tests/mddEsimAdapter.mjs && node tests/mddLineAdapter.mjs && node tests/mddHardwareAdapter.mjs && node tests/mddNetworkAdapter.mjs && node tests/mddUpdateContracts.mjs",
-    "test:all": "npm run test:mdd-adapters && npm run test:go-v1-adapter && npm run test:ui-migration && npm run test:legacy-surface && npm run test:agent-health && npm run test:live-status && npm run test:control-ws && npm run test:line-presentation && npm run test:request-gate && npm run test:cellular-media && npm run test:go-call-media && npm run test:sms-submission && npm run test:vowifi-media && npm run test:native-incoming-coordinator && npm run test:update-progress && npm run test:toast && npm run test:runtime-health",
-    "test:runtime-health": "node tests/runtimeHealth.mjs"
+    "test:all": "npm run test:mdd-adapters && npm run test:go-v1-adapter && npm run test:ui-migration && npm run test:legacy-surface && npm run test:agent-health && npm run test:live-status && npm run test:control-ws && npm run test:line-presentation && npm run test:go-call-media && npm run test:sms-submission && npm run test:vowifi-media && npm run test:native-incoming-coordinator && npm run test:update-progress && npm run test:toast && npm run test:runtime-health && npm run test:source-graph && npm run test:shared-i18n",
+    "test:runtime-health": "node tests/runtimeHealth.mjs",
+    "test:source-graph": "node tests/sourceGraph.mjs && node scripts/source-graph.mjs --check",
+    "test:shared-i18n": "node tests/sharedI18n.mjs"
   },
   "dependencies": {
     "jsqr": "^1.4.0",
@@ -37,6 +37,8 @@
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.3.3",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "@babel/parser": "7.29.7",
+    "@babel/traverse": "7.29.7"
   }
 }

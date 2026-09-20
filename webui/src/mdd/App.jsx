@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import DialogHost from '../DialogHost.jsx'
+import { createToastLifecycle } from '../toastLifecycle.js'
 import { api, connectWs, setCsrf, setAuthToken } from './api.js'
 import Softphone from './views/Softphone.jsx'
 import Messages from './views/Messages.jsx'
@@ -102,17 +103,10 @@ export default function App() {
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
-  const dismissToast = useCallback(() => {
-    clearTimeout(toastTimer.current)
-    toastTimer.current = null
-    setToast(null)
-  }, [])
-  const showToast = useCallback((message) => {
-    clearTimeout(toastTimer.current)
-    setToast({ message, id: Date.now() })
-    toastTimer.current = setTimeout(dismissToast, 15000)
-  }, [dismissToast])
-  useEffect(() => () => clearTimeout(toastTimer.current), [])
+  const toastLifecycle = useMemo(() => createToastLifecycle({ setToast, timerRef: toastTimer }), [])
+  const dismissToast = useCallback(() => toastLifecycle.dismiss(), [toastLifecycle])
+  const showToast = useCallback(message => toastLifecycle.show(message), [toastLifecycle])
+  useEffect(() => () => toastLifecycle.cleanup(), [toastLifecycle])
   const openUpdateDialog=useCallback(update=>{setSystemMeta(s=>({...s,update}));setUpdateDialog(update);setUpdateOpen(true)},[])
   const closeUpdateDialog=useCallback(()=>setUpdateOpen(false),[])
   const handleUpdateCompleted=useCallback(status=>{

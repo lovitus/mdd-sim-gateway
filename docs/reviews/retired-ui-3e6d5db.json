@@ -1,0 +1,371 @@
+{
+  "baseline": "3e6d5db7657e468eedc0c31316bb97c04b2b599b",
+  "graph": {
+    "entry": "src/main.jsx",
+    "totalModules": 83,
+    "reachableModules": 49,
+    "unreachableLines": 6355,
+    "unreachable": [
+      "src/App.jsx",
+      "src/cellularMediaMonitor.js",
+      "src/keyedTrailingRequests.js",
+      "src/latestRequestGate.js",
+      "src/linePresentation.js",
+      "src/liveStatus.js",
+      "src/mdd/CellularIncomingOverlay.jsx",
+      "src/mdd/browserMedia.js",
+      "src/mdd/browserMediaWorklet.js",
+      "src/mdd/callCoordinator.jsx",
+      "src/mdd/cellularBrowserCall.js",
+      "src/mdd/cellularIncomingCoordinator.js",
+      "src/mdd/cellularMediaMonitor.js",
+      "src/mdd/keyedTrailingRequests.js",
+      "src/mdd/remoteSimRefresh.js",
+      "src/mdd/vowifiIncomingFallback.js",
+      "src/remoteSimRefresh.js",
+      "src/routeSelection.js",
+      "src/toastLifecycle.js",
+      "src/views/AllowancePanel.jsx",
+      "src/views/CallsV1.jsx",
+      "src/views/DiagnosticsV1.jsx",
+      "src/views/EsimV1.jsx",
+      "src/views/HardwareV1.jsx",
+      "src/views/HostAlertsV1.jsx",
+      "src/views/MessagesV1.jsx",
+      "src/views/NotificationsV1.jsx",
+      "src/views/SimConfigV1.jsx",
+      "src/views/SimSelector.jsx",
+      "src/views/SystemV1.jsx",
+      "src/views/UnifiedPages.jsx",
+      "src/views/UpdateV1.jsx",
+      "src/views/VowifiHistoryV1.jsx",
+      "src/vowifiIncomingFallback.js"
+    ],
+    "testOnlyReferences": [
+      {
+        "test": "tests/cellularMediaMonitor.mjs",
+        "source": "src/cellularMediaMonitor.js"
+      },
+      {
+        "test": "tests/latestRequestGate.mjs",
+        "source": "src/latestRequestGate.js"
+      },
+      {
+        "test": "tests/linePresentation.mjs",
+        "source": "src/linePresentation.js"
+      },
+      {
+        "test": "tests/linePresentation.mjs",
+        "source": "src/views/UnifiedPages.jsx"
+      },
+      {
+        "test": "tests/liveStatus.mjs",
+        "source": "src/liveStatus.js"
+      },
+      {
+        "test": "tests/smsSubmissionSafety.mjs",
+        "source": "src/views/MessagesV1.jsx"
+      },
+      {
+        "test": "tests/toastLifecycle.mjs",
+        "source": "src/toastLifecycle.js"
+      },
+      {
+        "test": "tests/toastLifecycle.mjs",
+        "source": "src/App.jsx"
+      },
+      {
+        "test": "tests/uiMigrationContracts.mjs",
+        "source": "src/routeSelection.js"
+      },
+      {
+        "test": "tests/vowifiMediaGate.mjs",
+        "source": "src/routeSelection.js"
+      }
+    ],
+    "reachable": [
+      "src/DialogHost.jsx",
+      "src/agentHealthPresentation.js",
+      "src/api.js",
+      "src/browserMediaWorklet.js",
+      "src/browserPreferences.js",
+      "src/components/RuntimeHealth.jsx",
+      "src/dialogs.js",
+      "src/goCallCoordinator.jsx",
+      "src/goCallMedia.js",
+      "src/goV1Adapter.js",
+      "src/i18n.jsx",
+      "src/main.jsx",
+      "src/mdd/App.jsx",
+      "src/mdd/advancedDiagnostics.js",
+      "src/mdd/agentHealthPresentation.js",
+      "src/mdd/api.js",
+      "src/mdd/callStability.js",
+      "src/mdd/callView.js",
+      "src/mdd/esimAdapter.js",
+      "src/mdd/hardwareAdapter.js",
+      "src/mdd/historyAdapter.js",
+      "src/mdd/i18n.jsx",
+      "src/mdd/lineAdapter.js",
+      "src/mdd/linePresentation.js",
+      "src/mdd/liveStatus.js",
+      "src/mdd/networkAdapter.js",
+      "src/mdd/notificationAdapter.js",
+      "src/mdd/provisionRecovery.js",
+      "src/mdd/smsAdapter.js",
+      "src/mdd/systemAdapter.js",
+      "src/mdd/updateProgress.js",
+      "src/mdd/views/AdvancedDiagnostics.jsx",
+      "src/mdd/views/AgentCredentials.jsx",
+      "src/mdd/views/AllowancePanel.jsx",
+      "src/mdd/views/DeletionNotifications.jsx",
+      "src/mdd/views/Esim.jsx",
+      "src/mdd/views/HostAlerts.jsx",
+      "src/mdd/views/Logs.jsx",
+      "src/mdd/views/Maintenance.jsx",
+      "src/mdd/views/Messages.jsx",
+      "src/mdd/views/ProvisionActions.jsx",
+      "src/mdd/views/SimConfig.jsx",
+      "src/mdd/views/SimSelector.jsx",
+      "src/mdd/views/Softphone.jsx",
+      "src/mdd/views/UnifiedPages.jsx",
+      "src/mdd/views/VowifiHistory.jsx",
+      "src/notificationTestTracker.js",
+      "src/runtimeHealth.js",
+      "src/updateProgress.js"
+    ],
+    "errors": []
+  },
+  "removed": [
+    {
+      "path": "webui/src/App.jsx",
+      "sha256": "7e02ab9b611670f1f670524975eb32e7761df5f162dcbf2ac6bcdf60a7dd2ac0",
+      "lines": 176,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/cellularMediaMonitor.js",
+      "sha256": "10c31179142ac6369f7c171ef3f50c7b2aaad1bfa1b977ca2770bea46bf8dde6",
+      "lines": 30,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/keyedTrailingRequests.js",
+      "sha256": "e6713304d98c054e1ecf5b2c4edeaf705d4cb6ac829aacacd1fa7403d6987758",
+      "lines": 103,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/latestRequestGate.js",
+      "sha256": "1c58d073e46c36577eaabb3577a69d8c47ebd392379eb60a4dbe762ac606ae9a",
+      "lines": 17,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/linePresentation.js",
+      "sha256": "e68dd638a84bedc0d6c4066558735a846c897d3b93f07b0b7fc0fe15d8717920",
+      "lines": 107,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/liveStatus.js",
+      "sha256": "2ef5cac7568293f236cb2d14b12d8226585fde9d3d94eea6003650b5a204c6eb",
+      "lines": 47,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/CellularIncomingOverlay.jsx",
+      "sha256": "16dce649f6f921bc2209a0ae0a6c290045d8f3b1abcc1ed5453a350acfe21a85",
+      "lines": 108,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/browserMedia.js",
+      "sha256": "f7089f1606ef6c068d4691ae894f8521aad82c8613424bda52df5482ee61d81b",
+      "lines": 662,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/browserMediaWorklet.js",
+      "sha256": "12ca8020787a996d40cd691fe62f74d8636c22519831ea2a3e636c7d61a47941",
+      "lines": 90,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/callCoordinator.jsx",
+      "sha256": "ab7126556f2e80278b7ec52c5b9ef27e2d65d14f2722023996decd4c7af9ff21",
+      "lines": 1048,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/cellularBrowserCall.js",
+      "sha256": "c91a54f77daa7413824551dbc1033ca4e15b49ea4dbf5ccf11ae6a2fbb9db9d4",
+      "lines": 335,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/cellularIncomingCoordinator.js",
+      "sha256": "cc7aaf4f1981117f323ddeeae4363856b912dd54de262365d23a5fee7f3a8eed",
+      "lines": 149,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/cellularMediaMonitor.js",
+      "sha256": "10c31179142ac6369f7c171ef3f50c7b2aaad1bfa1b977ca2770bea46bf8dde6",
+      "lines": 30,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/keyedTrailingRequests.js",
+      "sha256": "e6713304d98c054e1ecf5b2c4edeaf705d4cb6ac829aacacd1fa7403d6987758",
+      "lines": 103,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/remoteSimRefresh.js",
+      "sha256": "1fd774344804409d4c7362014c49c8af777cba003d79cd47162940a976de797c",
+      "lines": 11,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/mdd/vowifiIncomingFallback.js",
+      "sha256": "7d57509440f659d96b6fbfae0c5855b061f4c3fcd42df6d3ef13ac268a07389f",
+      "lines": 170,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/remoteSimRefresh.js",
+      "sha256": "1fd774344804409d4c7362014c49c8af777cba003d79cd47162940a976de797c",
+      "lines": 11,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/routeSelection.js",
+      "sha256": "0153dbfb3505648456928efb7c3a33df70ff5b9249b819860ee966fcf485ed70",
+      "lines": 44,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/AllowancePanel.jsx",
+      "sha256": "7b2db4193930f50770a9dbbc2af074999d2ff9ab1faf27b6021f17b3fa2f1172",
+      "lines": 165,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/CallsV1.jsx",
+      "sha256": "10d70e9fad9d3691fe6b676048d66c732d79c1c174604c0c6a47ce9845bd0196",
+      "lines": 97,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/DiagnosticsV1.jsx",
+      "sha256": "6b5792cc0014cfb0749e3f6b59bca01eef3a7242a1173409303d0956d7c28ebf",
+      "lines": 59,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/EsimV1.jsx",
+      "sha256": "4fdfe06c5434a2b26244de5f1096f99cebda98961f2f0cf0c50ee9b59638059b",
+      "lines": 178,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/HardwareV1.jsx",
+      "sha256": "10e92075447ce7bb9571d981adbe5efe42c9d6d3184540517919c1cab673adc6",
+      "lines": 56,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/HostAlertsV1.jsx",
+      "sha256": "88637f8a2ee321a236b9498c1ccd3af2f089a49080d1d171a6d02ca65771ae4b",
+      "lines": 42,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/MessagesV1.jsx",
+      "sha256": "50244c1cea20aa0d1e7dcbcf563b50a3f60fdff2370a809f8224c66fd909c4c9",
+      "lines": 230,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/NotificationsV1.jsx",
+      "sha256": "d60c0aafd0a427dd12f6c37b4e17e6073d21b3b4b925e6580f1b9f6c0b08edcc",
+      "lines": 204,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/SimConfigV1.jsx",
+      "sha256": "4b96b0f1fb8d98007119dcc104181203a878c58e432544c0dde744cd30d6962e",
+      "lines": 381,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/SimSelector.jsx",
+      "sha256": "160a47054e14ca50d6f4751fa2562eb7cd00e2fcb396f3033460632c223d89f2",
+      "lines": 102,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/SystemV1.jsx",
+      "sha256": "8655b863d33b4d1e8874a3e4d921e294d78ba1a5197b3a02bc084a2553587868",
+      "lines": 138,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/UnifiedPages.jsx",
+      "sha256": "786440cd94ac86b11229ba812739eb3573c803dba5448a62bfb3329e36648b68",
+      "lines": 927,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/UpdateV1.jsx",
+      "sha256": "096ca1b8ecfed94071ba600a8d228e29d0132da4508f87ffec775549f82599e6",
+      "lines": 90,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/views/VowifiHistoryV1.jsx",
+      "sha256": "b4def3fe07153bb4b5449a1b6a2498260c938c21152ca4a855ee702b013b72e9",
+      "lines": 248,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/vowifiIncomingFallback.js",
+      "sha256": "7d57509440f659d96b6fbfae0c5855b061f4c3fcd42df6d3ef13ac268a07389f",
+      "lines": 170,
+      "reason": "unreachable from src/main.jsx including worker URLs"
+    },
+    {
+      "path": "webui/src/i18n.jsx",
+      "sha256": "65dde4043f3dc5447f146696f4266850a38606bc8531430a3827c17c71262cae",
+      "lines": 673,
+      "reason": "retired duplicate; mounted locale context/stylesheet retained"
+    },
+    {
+      "path": "webui/src/index.css",
+      "sha256": "ab93574dfcd070b36dae8b19f383cda4ef3ad65f16de3d7eebda08d9d1f3b04c",
+      "lines": 366,
+      "reason": "retired duplicate; mounted locale context/stylesheet retained"
+    },
+    {
+      "path": "webui/tests/cellularMediaMonitor.mjs",
+      "sha256": "7b822e34c887754bcbf7ff37ebd5f9b9b5e4ac6f15dfbd1ac39a697d4a877663",
+      "lines": 40,
+      "reason": "tests exclusively retired helper; live media/gating suites retained"
+    },
+    {
+      "path": "webui/tests/latestRequestGate.mjs",
+      "sha256": "88c75afd4ddbe1052908d4fbb58fa3d5e11e7e09dc68de5d9dcb2d4ff4a3bd21",
+      "lines": 19,
+      "reason": "tests exclusively retired helper; live media/gating suites retained"
+    }
+  ],
+  "retained_and_wired": [
+    "webui/src/toastLifecycle.js"
+  ],
+  "preserved_shared": [
+    "webui/src/api.js",
+    "webui/src/agentHealthPresentation.js",
+    "webui/src/updateProgress.js"
+  ]
+}

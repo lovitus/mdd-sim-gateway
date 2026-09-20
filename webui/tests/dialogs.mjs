@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { analyze, defaultRoot } from '../scripts/source-graph.mjs'
+import { join } from 'node:path'
 import { parse } from '@babel/parser'
 import traversePackage from '@babel/traverse'
 import { createDialogStore } from '../src/dialogs.js'
@@ -58,12 +60,14 @@ await notice
 unsubscribe()
 assert.ok(changes > 0)
 
-// Cover both the copied MDD pages and the retained V1 surfaces. Fail CI if a
-// native browser dialog is reintroduced or a Promise guard is not awaited.
-const sourceRoot = new URL('../src/', import.meta.url)
+// Audit every production-reachable module, not an obsolete fixed count of
+// dialog sites that included retired pages. Keep per-call await/native checks.
+const graph = analyze(defaultRoot)
+assert.deepEqual(graph.errors, [])
+assert.deepEqual(graph.unreachable, [])
 let convertedCalls = 0
-for (const file of readdirSync(sourceRoot, { recursive: true }).filter(file => /\.(js|jsx)$/.test(file))) {
-  const ast = parse(readFileSync(new URL(file, sourceRoot), 'utf8'), { sourceType: 'module', plugins: ['jsx'] })
+for (const file of graph.reachable) {
+  const ast = parse(readFileSync(join(defaultRoot, file), 'utf8'), { sourceType: 'module', plugins: ['jsx'] })
   traverse(ast, { CallExpression(path) {
     const callee = path.node.callee
     const member = callee.type === 'MemberExpression' && !callee.computed
@@ -77,7 +81,7 @@ for (const file of readdirSync(sourceRoot, { recursive: true }).filter(file => /
     }
   } })
 }
-assert.ok(convertedCalls >= 80, 'all page dialog call sites must remain covered')
+assert.ok(convertedCalls > 0, 'production graph must contain audited dialog call sites')
 const host = readFileSync(new URL('../src/DialogHost.jsx', import.meta.url), 'utf8')
 assert.ok(host.includes('onCancel=') && host.includes('opener.focus()'))
 assert.ok(host.includes('hashchange') && host.includes('mdd-auth-expired'))

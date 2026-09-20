@@ -2,9 +2,8 @@
 
 Status: Go Core, VoWiFi Provider, cross-platform Agent, whole-modem WSS passthrough, persistent data isolation,
 host release lifecycle, Notifications, cellular SMS/calls and the active React product are the production runtime.
-Docker/Compose and legacy frontend build/install surfaces have been removed. Exact deployed revisions, remaining
-hardware validation and the sole next action are recorded at the top of `TODO_CURRENT_RECOVERY.md`, which remains
-authoritative over older notes below.
+Docker/Compose and legacy frontend build/install surfaces have been removed. Implementation and acceptance scope are versioned in [docs/status/README.md](docs/status/README.md).
+The notes below describe historical design and migration provenance, not proof of current deployed revisions or hardware acceptance.
 
 The retired standalone `agent/go-agent` Card Agent and its distribution surface have also been removed. This includes
 the dead Android VPCD app, Python systemd unit, PyInstaller specs, legacy macOS/Windows package/install/run scripts,
@@ -61,7 +60,7 @@ delivery reports resolve through the existing message correlation, and deleting 
 preserves idempotency receipts and notification outbox state. These are migrations of the retired
 MDD `list_threads`/`list_messages` user workflow, not another message delivery implementation.
 
-Validation and deployment status for this batch remains in `TODO_CURRENT_RECOVERY.md`.
+Current acceptance is tracked in [docs/status/README.md](docs/status/README.md); historical local receipts are not independent field verification.
 
 ## Outcome
 

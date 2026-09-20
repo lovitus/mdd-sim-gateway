@@ -15,7 +15,8 @@
    - [macOS 客户端](#2-macos-客户端)
    - [Linux / 树莓派 / NAS 客户端](#3-linux--树莓派--nas-客户端)
 4. [语音通话与软电话使用](#四语音通话与软电话使用)
-5. [上游代码同步与维护 (Rebase / Cherry-Pick)](#五上游代码同步与维护-rebase--cherry-pick)
+5. [线路诊断与支持包](#五线路诊断与支持包)
+6. [上游代码同步与维护 (Rebase / Cherry-Pick)](#六上游代码同步与维护-rebase--cherry-pick)
 
 ---
 
@@ -25,9 +26,9 @@
 +-------------------------------------------------------------------------------+
 |                    客户端 (Windows / macOS / Linux)                          |
 |  - 插卡设备: USB CCID 读卡器 / ESTKme / 9e 卡槽                               |
-|  - 统一 Agent: Windows / macOS；Linux 统一 Agent 尚未交付                    |
+|  - 统一 Agent: Windows / macOS / Linux；能力按平台与硬件资格开放             |
 +-------------------------------------------------------------------------------+
-                                      │ WS/WSS（旧轻量 PC/SC 客户端另有 TCP 路径）
+                                      │ 统一认证 HTTPS/WSS（无 VPCD 兼容入口）
                                       ▼
 +-------------------------------------------------------------------------------+
 |                    服务端宿主机 (Linux VPS / 本地服务器)                       |
@@ -51,7 +52,7 @@
 ### 端口开放要求
 
 * **Web 控制台及统一 Agent**：默认 `8443`（HTTPS/WSS）；外部反向代理可使用自己的入口端口。
-* **旧轻量 PC/SC 客户端**：仅实际使用该兼容路径时开放 TCP VPCD 端口，限定在受信网络。
+* **PC/SC／eUICC**：复用统一 Agent 高层协议；旧 TCP VPCD／35963 兼容入口已删除，不应开放。
 * **浏览器音频**：不需要另外开放 RTP UDP 或 Asterisk SIP/WebRTC 端口。
 
 ### 多网卡 / VPN 与同源浏览器媒体
@@ -66,8 +67,8 @@ Asterisk 直连 RTP 或配置 TURN。VPN、域名、IPv6、反向代理和 local
 只有当前双向音频、实际采集/播放计数及新鲜挑战证据通过后才提交。重复请求不重放付费动作，
 同线路跨端或跨通话模式争用会被拒绝；未确认终态前保留占用。
 
-页面关闭、连接中断或媒体证据失效会进入精确终止流程；VoWiFi 和蜂窝分别保留 Asterisk/Agent
-本地有界租约作为兜底。界面区分“结束中”和“终止未确认”，不能将 HTTP 成功等同于物理挂断。
+页面关闭、连接中断或媒体证据失效会进入精确终止流程；VoWiFi 由 Go Provider 的精确通话 guard
+保留终止所有权，蜂窝由 Core／Agent 的精确调用与租约保护。Asterisk 不参与当前终止流程。界面区分“结束中”和“终止未确认”，不能将 HTTP 成功等同于物理挂断。
 麦克风仍受浏览器安全上下文约束：通常使用 HTTPS，localhost HTTP 是浏览器支持的例外；这与
 已经删除的媒体 IP 确认不是同一件事。升级后请刷新旧页面，旧 SIP/媒体确认接口已退役。
 
@@ -216,7 +217,8 @@ offline。旧 Agent 没有该能力时明确显示“此版本未上报”，不
 使用统一 `MDD Agent.app` 或 `mdd-agent`，当前部署默认 `modem_enabled=false`，仅管理多 PC/SC/eUICC
 读卡器；不会枚举或接管 Modem，也不会索取其麦克风权限。Modem 代码保留，但其语音和私有数据面
 尚未作为当前版本交付，不应自行开启或宣称 Intel/其他 Modem 已通过实机矩阵。
-首版不安装 launchd；菜单栏 GUI 或 CLI 只能运行一个，重复启动固定退出 `9`。GUI 首次运行会把
+当前 macOS 安装器支持当前用户的 LaunchAgent（GUI／CLI 模式），见统一 Agent 手册；手动启动仍只能
+有一个硬件运行时，重复启动固定退出 `9`。GUI 首次运行会把
 Token 保存到当前用户的 `~/Library/Application Support/MDD Agent/config.json`；目录权限为
 `0700`、配置文件为 `0600`。关闭状态窗口只隐藏到菜单栏，选择“退出 MDD Agent”才释放硬件。
 
@@ -250,8 +252,11 @@ sudo mdd-agent config set tls_sha256 "$MDD_TLS_CERT_SHA256" -config /var/lib/mdd
 sudo systemctl enable --now mdd-agent.service
 ```
 
-Linux Modem 适配与 raw USB 透传尚未开放。后者必须先完成当前 Agent、Modem equipment ID、ICCID
-三元显式绑定和服务端数据隔离；PC/SC/eUICC 不会切换到 raw USB 模式。
+Linux 已有原生 ModemManager／AT 适配和受隔离数据路径，并非只有读卡器。数据路径目前只接受受支持的
+静态 IPv4 bearer；DHCP／PPP／IPv6 保持 fail-closed。隔离由 nftables、设备组、cgroup 和 socket mark／策略路由
+实现，不能把它写成已实现 netns 或已通过完整跨设备无泄漏矩阵。raw USB 功能有独立身份和授权门禁，
+必须绑定精确 Agent、equipment、ICCID 与 generation；PC/SC/eUICC 不自动切换到 raw USB 模式。
+平台／HIL 未闭环项以 [验收台账](docs/status/README.md) 为准。
 
 ### 4. Agent 本地 SIM PIN
 
@@ -269,8 +274,8 @@ PIN；旧 Agent 未协商 `sim-pin-config-v1` 时保存入口禁用。移除保�
    * 支持通过浏览器麦克风直接拨打或接听来电。
    * 麦克风需要 HTTPS 或浏览器认可的 localhost 安全上下文；媒体使用同源 WS/WSS。
 2. **独立 SIP 客户端（MicroSIP / Linphone / Zoiper）**：
-   * 当前不支持。旧 SIP WebSocket 和媒体确认 API 已关闭；即使持有缓存 SIP 凭据，Engine 的
-     旧 WebRTC 端点也只能进入拒绝上下文，不能绕过 native owner 发起通话或短信。
+   * 当前不支持。旧 SIP WebSocket／Asterisk WebRTC 和媒体确认入口已退役；不能恢复旧端点
+     或使用缓存凭据绕过当前 native owner 发起通话或短信。
    * 不要通过重新暴露 8089 绕过该门禁。未来如需独立 SIP 客户端，应实现独立的受控
      admission 和断线挂断生命周期，而不是复用内置浏览器凭据。
 

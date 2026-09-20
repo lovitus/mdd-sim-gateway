@@ -1,0 +1,166 @@
+{
+  "baseline": "3e6d5db7657e468eedc0c31316bb97c04b2b599b",
+  "files": [
+    {
+      "path": "agent/resources/serviceproviders.xml",
+      "sha256": "662aac9441de05e83e120320e2f7d5addad6872de1632258124ccef5a7867831",
+      "bytes": 366795,
+      "activeCopy": "go-runtime/internal/agentpolicy/serviceproviders.xml",
+      "activeSHA256": "662aac9441de05e83e120320e2f7d5addad6872de1632258124ccef5a7867831",
+      "identical": true
+    },
+    {
+      "path": "control/app/mcc_country.json",
+      "sha256": "39c8e1cd9f75d3c8886a7eb57ec298b71a9c51f8507327c0c022dd649c608af9",
+      "bytes": 3379,
+      "activeCopy": "go-runtime/internal/linecatalog/mcc_country.json",
+      "activeSHA256": "39c8e1cd9f75d3c8886a7eb57ec298b71a9c51f8507327c0c022dd649c608af9",
+      "identical": true
+    },
+    {
+      "path": "control/app/resources/README.md",
+      "sha256": "12158a1e77aea0f02e127e5315598925fa71dc5550016d0efd3be87f0af4fa09",
+      "bytes": 648
+    },
+    {
+      "path": "control/app/resources/carrier_list.textpb",
+      "sha256": "a6a8cc44afb9ad091bda816da98e546c0d8eac86851ee28656ee6802e5ca0825",
+      "bytes": 233234
+    },
+    {
+      "path": "engine/patches/asterisk/LICENSE",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
+      "bytes": 17984
+    },
+    {
+      "path": "engine/patches/asterisk/chan_websocket/0001-Backport-Asterisk-media-WebSocket-support-to-sysmoco.patch",
+      "sha256": "86971fd1f77d4579e98dfd237461bd6f496528c1608620c463bc91acd34da0e2",
+      "bytes": 143544
+    },
+    {
+      "path": "engine/patches/asterisk/chan_websocket/0002-Fix-masqueraded-owner-and-EOF-lifecycle.patch",
+      "sha256": "2b6ccc0d52f4e46fc7197e3ca8396107aa555b49af18c8bbdade24b59c2490a0",
+      "bytes": 1409
+    },
+    {
+      "path": "engine/patches/asterisk/chan_websocket/README.md",
+      "sha256": "4a349b624720096830452ef708499afcac016f4fb52c30ca98084bd273c09db2",
+      "bytes": 3411
+    },
+    {
+      "path": "engine/patches/asterisk/mdd_admission/mdd_admission.h",
+      "sha256": "cc10768212e04d0ccc2edccf56587b3facabed244c4e97c5a2d486ec0226d298",
+      "bytes": 773
+    },
+    {
+      "path": "engine/patches/asterisk/mdd_admission/res_mdd_admission.c",
+      "sha256": "7ab28eded5c3863118e6f9888d1b967ff1d15e4c9e1a0c8d7cf35d254dde2a2c",
+      "bytes": 8928
+    },
+    {
+      "path": "engine/patches/asterisk/mdd_answer_bridged/app_mdd_answer_bridged.c",
+      "sha256": "a11cbdc35ee6da54999e6add4c70fb715094903fce5e1fecad51831cc90e032f",
+      "bytes": 14721
+    },
+    {
+      "path": "engine/templates/acl.conf.j2",
+      "sha256": "bc0cb79aff9eabbc61fdc2c47516565a9aff9e3642231534185879c882ef3ddc",
+      "bytes": 86
+    },
+    {
+      "path": "engine/templates/ami_usim.ini.j2",
+      "sha256": "a5089dc5200e1416b53f5946c916a8ae62b7696f9cc72a1518b6d50ad21f9067",
+      "bytes": 179
+    },
+    {
+      "path": "engine/templates/asterisk.conf.j2",
+      "sha256": "3342cb583de1e951b2eb5bfce5bbe1fbd6175cde1294b315a3cc648400a0a1af",
+      "bytes": 94
+    },
+    {
+      "path": "engine/templates/ccss.conf.j2",
+      "sha256": "e2f20d328684973a21194bf80f156298476a970ac90f546ecdb849ee386c311a",
+      "bytes": 125
+    },
+    {
+      "path": "engine/templates/cdr.conf.j2",
+      "sha256": "eecd7d00ccde75bd7f9ab745d678f47b309e434d988492944cd9f34cbfebf141",
+      "bytes": 22
+    },
+    {
+      "path": "engine/templates/cel.conf.j2",
+      "sha256": "eecd7d00ccde75bd7f9ab745d678f47b309e434d988492944cd9f34cbfebf141",
+      "bytes": 22
+    },
+    {
+      "path": "engine/templates/chan_websocket.conf.j2",
+      "sha256": "1776600745372261a64bf4f067b7ca68a92094434bcfd9be293308d1592fa3a4",
+      "bytes": 39
+    },
+    {
+      "path": "engine/templates/extensions.conf.j2",
+      "sha256": "aa5a12f0208662a7c7c1e13472b9021402e11dc40e204e19fc1e39ba4d92fad1",
+      "bytes": 16584
+    },
+    {
+      "path": "engine/templates/features.conf.j2",
+      "sha256": "5d45b882bd61de0b4649acd6a5eae62fa65fb5bf28de143ed9f482ac0262311a",
+      "bytes": 74
+    },
+    {
+      "path": "engine/templates/http.conf.j2",
+      "sha256": "8ec2ded198a669437b5785df1c4ae7a9ac93ba4edc2d6420718f5f0575dda6c6",
+      "bytes": 223
+    },
+    {
+      "path": "engine/templates/indications.conf.j2",
+      "sha256": "61808e1e7a940c162889e02952d1b55617bdbad0a69c0e0477737cfdf413ba22",
+      "bytes": 410
+    },
+    {
+      "path": "engine/templates/logger.conf.j2",
+      "sha256": "823a50e69b95d20d2cbe8b6a99b8ed21cf6ab0e8ad632c9067961ce3aa97918e",
+      "bytes": 217
+    },
+    {
+      "path": "engine/templates/manager.conf.j2",
+      "sha256": "975f82dfa7b4f862acf518d4877da0d9867a29e9f798ed2a73d7a2362ec037e0",
+      "bytes": 453
+    },
+    {
+      "path": "engine/templates/modules.conf.j2",
+      "sha256": "4259899a94ad7818910f157497a0e9218bebc941ea7a33ba19b0386358f77205",
+      "bytes": 2592
+    },
+    {
+      "path": "engine/templates/pjproject.conf.j2",
+      "sha256": "e8b3c0790565eb5ec3d9d1383a4031cc8f246f8e7f0fd6c6580840725d27efce",
+      "bytes": 90
+    },
+    {
+      "path": "engine/templates/pjsip.conf.j2",
+      "sha256": "62db91233ac689de447e1c84cf98e0d723fcbccef1b40060022556429593de66",
+      "bytes": 5519
+    },
+    {
+      "path": "engine/templates/rtp.conf.j2",
+      "sha256": "21a6088bf2a5614ac85cfdc501f3698f3ddfea7359cd261639b616af4ebbe832",
+      "bytes": 388
+    },
+    {
+      "path": "engine/templates/stasis.conf.j2",
+      "sha256": "131ed28c864ee107e3029d4677742eb0199ad411a73ca026e7f7ed742409c913",
+      "bytes": 72
+    },
+    {
+      "path": "engine/templates/udptl.conf.j2",
+      "sha256": "906e28aa6f9676ec5e982f6e31beb758a7bdfd1b00ff94fc0d151f434c3539b4",
+      "bytes": 89
+    },
+    {
+      "path": "engine/templates/websocket_client.conf.j2",
+      "sha256": "1de498ed5f007ac92115ddba2baf950a3625c3753e24e3af8ed0d0ba6be2398e",
+      "bytes": 508
+    }
+  ]
+}

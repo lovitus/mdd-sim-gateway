@@ -69,7 +69,7 @@ assert.ok(cleanup.cleared.includes(cleanupTimer))
 assert.equal(cleanup.timerRef.current, null)
 assert.equal(cleanup.timers.size, 0)
 
-const app = fs.readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+const app = fs.readFileSync(new URL('../src/mdd/App.jsx', import.meta.url), 'utf8')
 assert.ok(app.includes('createToastLifecycle({ setToast, timerRef: toastTimer })'))
 assert.match(app, /<button[^>]*type="button"[^>]*aria-label=\{t\('Dismiss'\)\}[^>]*onClick=\{dismissToast\}/)
 assert.ok(app.includes('role="status"'))

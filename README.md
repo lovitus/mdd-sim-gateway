@@ -1,7 +1,7 @@
 # MDD VoWiFi SIM Gateway (企业级多卡 VoWiFi / VoLTE 网关)
 
 [![Release](https://img.shields.io/github/v/release/lovitus/mdd-sim-gateway)](https://github.com/lovitus/mdd-sim-gateway/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android-green.svg)](https://github.com/lovitus/mdd-sim-gateway)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](https://github.com/lovitus/mdd-sim-gateway)
 [![License](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
 MDD VoWiFi SIM Gateway 是一个以 **Go Core、Go VoWiFi Provider 和统一 Agent** 为默认运行时的
@@ -22,13 +22,14 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 2. **统一 HTTPS/WSS 入口**：
    - 页面、管理 API、Agent 和浏览器 PCM 都复用一个公开 TCP 入口，不要求用户确认服务器网卡 IP，也不暴露 RTP 端口。
 3. **跨平台统一 Agent**：
-   - **Android APK**：支持手机卡槽 OMAPI 直接读取及 Type-C OTG 读卡器。
-   - **Go 单文件**：提供适用于 **Windows、macOS (Apple Silicon & Intel) 以及 Linux (amd64/arm64/armv7)** 的独立单文件客户端，无需安装 Python 或驱动，即插即用，内置物理防删指令安全拦截与自动重连机制。
+   - 当前 CI 发布矩阵为 **Linux amd64、Windows amd64、macOS arm64**；包内包含 manifest 声明的原生 helper／依赖，不能宣称所有硬件免驱或所有架构已验收。
+   - macOS 默认 **PC/SC-only**，Modem、音频和私有数据能力保留安全门禁。
+   - **Android 统一协议客户端尚未实现，但仍是必需产品范围**；已退役的 VPCD APK 不能冒充该功能。跨平台实现与实机验收分别见 [版本化状态](docs/status/README.md)。
 4. **证书固定与最小生命周期动作**：
    - Agent 使用保存的证书指纹；安装器的状态检查同时验证本地 CA 证书和服务端 SPKI pin，禁止 `-k`。
    - `install`、`start`、`restart` 分离；只有明确执行 `restart` 才会重启运行服务。
 5. **浏览器管理与通话**：
-   - 内置页面覆盖线路、设备、eSIM、短信、诊断和同源 WSS 语音；旧版拨号盘与通话历史保留为页面复用基线，不把尚未完成的对齐冒充已交付功能。
+   - 内置页面覆盖线路、设备、eSIM、短信、诊断和同源 WSS 语音；当前挂载页面只使用同一个会话级 Go 通话 owner；未完成的录音、Android 和平台实机矩阵不计入已交付能力。
 
 ---
 
@@ -67,7 +68,7 @@ artifact 安装见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 仓库根 `install.sh` 只转发到同一个 Go 安装器；在线与离线安装没有第二套运行时。
 
 详细安装与配置说明参见：[完整部署与维护手册 (DEPLOYMENT.md)](DEPLOYMENT.md)。
-开发、构建、镜像溯源和临时证据规则见：[DEVELOPMENT.md](DEVELOPMENT.md)。
+开发、构建、制品溯源和临时证据规则见：[DEVELOPMENT.md](DEVELOPMENT.md)。
 
 ---
 
@@ -82,6 +83,11 @@ Windows、macOS 和 Linux 只使用 release 中的统一 `mdd-agent`（macOS 也
 
 ---
 
+## 实现与验收状态
+
+[docs/status/README.md](docs/status/README.md) 和同目录 JSON 是公开、可版本化的验收台账；根 TODO 摘要由它生成。
+代码存在、CI 通过和生产实机验收是三种不同证据，未授权的收费或卡片写测试不会被补做来凑齐勾选。
+
 ## 🛠 代码维护与上游同步
 
-本项目严格保持清晰模块化的 Commit 记录，详情请参阅 [DEPLOYMENT.md - 上游代码同步与维护](DEPLOYMENT.md#五上游代码同步与维护-rebase--cherry-pick)。
+本项目严格保持清晰模块化的 Commit 记录，详情请参阅 [DEPLOYMENT.md - 上游代码同步与维护](DEPLOYMENT.md#六上游代码同步与维护-rebase--cherry-pick)。
