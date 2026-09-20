@@ -1,0 +1,60 @@
+name: Publish verified third-party cleanup candidate
+on:
+  push:
+    branches: ['audit/thirdparty-review-3e6d5db']
+    paths: ['.github/workflows/thirdparty-publish.yml']
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 3e6d5db7657e468eedc0c31316bb97c04b2b599b
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Recreate and verify the exact tested source
+        run: |
+          set -euo pipefail
+          python3 harness/audit/prepare.py apply candidate harness/audit evidence
+          npm --prefix candidate/webui ci
+          npm --prefix candidate/webui run test:all 2>&1 | tee evidence/webui-tests.log
+          MDD_KEEP_EMBED_SOURCE=1 npm --prefix candidate/webui run build:go 2>&1 | tee evidence/embedded-build.log
+          git -C candidate add -u -- go-runtime/internal/webui/assets
+          git -C candidate diff --cached --check
+          test -z "$(git -C candidate diff)"
+          test "$(git -C candidate write-tree)" = d14d6e020f537d72802f66701eec8088da2ec2f1
+          git -C candidate diff --cached --binary > evidence/tested-fix.patch
+      - name: Publish source branch without workflow privilege changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The connector will install the separately reviewed workflow change.
+          # The runtime/docs/UI tree below is otherwise exactly the tested tree.
+          git -C candidate restore --source=HEAD --staged --worktree -- .github/workflows/go-runtime.yml
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C candidate diff --cached --check
+          test "$(git -C candidate diff --cached --name-only | wc -l)" -eq 115
+          git -C candidate commit -m 'fix: unify mounted UI state and version acceptance evidence' -m 'Address verified findings in issue #3. Preserve all original acceptance criteria and historical provenance, remove unused UI/runtime resources, and fix the split language context. Hardware and unfinished product work remain explicitly open.'
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/published-source.txt
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-thirdparty-cleanup
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: thirdparty-cleanup-publish-evidence
+          path: evidence/
+          retention-days: 7
