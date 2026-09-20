@@ -1,0 +1,82 @@
+name: Verify owner-scope and evidence-continuity corrections
+on:
+  push:
+    branches: ['codex/audit-acceptance-scope-19f966f']
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 19f966f7d673a074e7218680d6c0ed8b1d530e1c
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 19f966f7d673a074e7218680d6c0ed8b1d530e1c
+          path: baseline
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Verify and apply reviewed source-only patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/baseline-source.txt
+          node --version > evidence/node-version.txt
+          cat harness/audit/acceptance/part-*.b64 | base64 -d | xz -d > "$RUNNER_TEMP/acceptance.patch"
+          echo "e9e82b9831d538244e968c69e11150e923a04f6a98a7a31333695a8a322d062d  $RUNNER_TEMP/acceptance.patch" | sha256sum --check
+          git -C candidate apply --check "$RUNNER_TEMP/acceptance.patch"
+          git -C candidate apply "$RUNNER_TEMP/acceptance.patch"
+          node candidate/tools/repository-check.mjs --write | tee evidence/generation.log
+      - name: Prove all four original ledger defects
+        shell: bash
+        run: |
+          set -euo pipefail
+          node candidate/tools/verify-acceptance-baseline.mjs "$GITHUB_WORKSPACE/baseline" | tee evidence/baseline-counterexamples.log
+      - name: Validate corrected ledger and legitimate future transitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          node candidate/tools/repository-check.mjs | tee evidence/ledger.log
+          node candidate/tools/repository-check.test.mjs | tee evidence/positive-and-negative-tests.log
+          for path in candidate/tools/acceptance-*.mjs candidate/tools/verify-acceptance-baseline.mjs; do node --check "$path"; done
+      - name: Verify exact candidate tree and publish only reviewed files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < harness/audit/acceptance/files.txt
+          git -C candidate add -f -- "${files[@]}"
+          git -C candidate diff --cached --name-only > evidence/published-files.txt
+          diff -u harness/audit/acceptance/files.txt evidence/published-files.txt
+          git -C candidate diff --cached --check
+          tree=$(git -C candidate write-tree)
+          test "$tree" = 7e829e757e28f61127e851dec37ded7d52c1df27
+          git -C candidate diff --cached --binary > evidence/tested-fix.patch
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C candidate commit -m 'fix: honor accepted product scope and retain historical acceptance evidence' -m 'Keep physical eSIM deletion final, defer Android, exclude notarization and p8 from this release, retain mandatory remote access and fail-closed 4G isolation. Permit documented terminal workstream states and reconcile scoped historical evidence without inventing new field acceptance.'
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/candidate-source.txt
+          git -C candidate ls-files -s > evidence/source-manifest.txt
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-acceptance-scope
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: acceptance-scope-proof
+          path: evidence/
+          retention-days: 7
