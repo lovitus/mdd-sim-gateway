@@ -55,6 +55,7 @@ jobs:
             android-agent/app/build/test-results/
           retention-days: 14
   device:
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -81,6 +82,10 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
           log-accepted-android-sdk-licenses: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: android-preview-build
+          path: release-bundle
       - uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api }}
@@ -91,7 +96,8 @@ jobs:
           script: |
             gradle -p android-agent --no-daemon connectedDebugAndroidTest
             mkdir -p android-screens
-            adb shell am start -W -n com.lovitus.mddagent.preview/.MainActivity
+            adb install -r release-bundle/android-evidence/mdd-agent-preview.apk
+            adb shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity
             adb exec-out screencap -p > android-screens/setup.png
       - uses: actions/upload-artifact@v7
         if: always()
