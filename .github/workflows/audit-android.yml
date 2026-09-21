@@ -1,0 +1,78 @@
+name: Prepare reviewed native Android draft
+on:
+  push:
+    branches: [codex/audit-android-8fc2]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: 8fc2c29d3bb575f054115a435a40e81036aa9ba9
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Verify and apply exact source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/baseline.txt
+          cat harness/audit/android/part-*.b64 | base64 -d | xz -d > "$RUNNER_TEMP/android.patch"
+          echo "18d3bb24dc8903eb457c09580e0cf199eff96f15ca04b9d5b3a23e3542b17eb6  $RUNNER_TEMP/android.patch" | sha256sum --check
+          git -C candidate apply --check "$RUNNER_TEMP/android.patch"
+          git -C candidate apply "$RUNNER_TEMP/android.patch"
+          git -C candidate add .github/workflows/android-agent.yml AGENTS.md TODO.md TODO_MACOS_AGENT.md android-agent docs go-runtime/agentlink/android_fixture_test.go go-runtime/internal/core/mobile.go go-runtime/internal/core/mobile_test.go go-runtime/internal/core/server.go postponed-tasks.md webui/src/goCallCoordinator.jsx webui/src/goCallMedia.js webui/tests/goCallMedia.mjs
+          test "$(git -C candidate write-tree)" = 7176692028b3a1d565ea2dc898ad6a77ae350cb6
+          git -C candidate diff --cached --check
+      - name: Preserve owner scope and repository contracts
+        run: |
+          set -o pipefail
+          node candidate/tools/repository-check.mjs | tee evidence/ledger.txt
+          node candidate/tools/repository-check.test.mjs | tee evidence/ledger-tests.txt
+      - name: Test incoming-call identity and rebuild embedded UI
+        working-directory: candidate/webui
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run test:all | tee ../../evidence/webui-tests.txt
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go | tee ../../evidence/webui-build.txt
+      - name: Publish source draft only after preparation passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" -f encoding=utf-8 -F content=@candidate/.github/workflows/android-agent.yml --jq .sha > evidence/workflow-blob.txt
+          git -C candidate reset -- .github/workflows/android-agent.yml
+          git -C candidate add -A -- go-runtime/internal/webui/assets
+          git -C candidate diff --cached --check
+          git -C candidate diff --cached --name-only > evidence/files.txt
+          git -C candidate diff --cached --binary > evidence/draft.patch
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C candidate commit -m 'feat: draft native Android reader and remote calling agent' -m 'Guided HTTPS setup, encrypted sessions, CCID/OMAPI reader ownership, native call media and exact server call/SMS identities. Add compact session-authorized mobile status feed and preserve incoming VoWiFi call identity. Android build, emulator qualification and preview release remain separate gates.'
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/source.txt
+          git -C candidate ls-files -s > evidence/source-manifest.txt
+          git -C candidate archive --format=tar.gz HEAD > evidence/source.tar.gz
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/android-v2
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android-draft-preparation
+          path: evidence/
+          retention-days: 14
