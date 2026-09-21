@@ -28,6 +28,9 @@ const (
 )
 
 type Server struct {
+	mobileMu           sync.Mutex
+	mobileAt           time.Time
+	mobileCached       mobileData
 	audit              *adminAudit
 	replay             *events.Replay
 	eventStore         *events.BoltStore
@@ -684,6 +687,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.browser != nil {
 		server.mux.HandleFunc("GET /ws", server.browserState)
 		server.mux.HandleFunc("GET /v1/browser/ws", server.browserState)
+		server.mux.HandleFunc("GET /v1/mobile/ws", server.mobileState)
 	}
 	return server
 }

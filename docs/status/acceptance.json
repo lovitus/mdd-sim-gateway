@@ -1397,24 +1397,16 @@
   "workstreams": [
     {
       "id": "ANDROID",
-      "state": "deferred",
-      "summary": "Android unified-protocol reader support is not delivered and is explicitly deferred; it does not block current Windows/macOS/Linux delivery.",
-      "acceptance": "Future implementation requires a new prioritized work item and authorized device/permission tests. Deferral is neither implementation nor cancellation.",
+      "state": "partial",
+      "summary": "Native Android preview implementation: guided HTTPS login/QR, USB CCID/OMAPI reader authentication, native remote calls/SMS and network recovery. Not yet physically qualified.",
+      "acceptance": "Require compilation, unit and emulator tests and signed preview artifact evidence. Real USB/card/OMAPI permissions, calls/carriers, background/OEM delivery and battery measurements remain unaccepted.",
       "evidence": [
-        "README.md",
-        "go-runtime/agentlink/types.go"
+        "android-agent/README.md",
+        "android-agent/app/src/main/java/com/lovitus/mddagent/AgentService.java",
+        "android-agent/app/src/androidTest/java/com/lovitus/mddagent/DeviceTest.java",
+        "docs/decisions/2026-09-21-android-agent.md"
       ],
-      "releaseRelevance": "deferred",
-      "resolution": {
-        "basis": "user_decision",
-        "reason": "Owner deferred Android in favor of the three primary desktop/server Agents.",
-        "decisionRefs": [
-          "PRIMARY_AGENTS"
-        ],
-        "evidence": [
-          "docs/decisions/2026-09-20-current-scope.md"
-        ]
-      }
+      "releaseRelevance": "current"
     },
     {
       "id": "ESIM_DELETE",
@@ -1591,6 +1583,13 @@
       "authority": "project_owner",
       "sourcePath": "docs/decisions/2026-09-20-current-scope.md",
       "summary": "Reconcile scoped historical evidence before scheduling missing tests; not revalidated is not never accepted."
+    },
+    {
+      "id": "ANDROID_NATIVE",
+      "date": "2026-09-21",
+      "authority": "project_owner",
+      "sourcePath": "docs/decisions/2026-09-21-android-agent.md",
+      "summary": "Android reprioritized: native reader/call/SMS app, safe recovery and battery-conscious UX; draft PR and test APK, not production or paid-operation acceptance."
     }
   ],
   "releaseScope": [
@@ -1614,9 +1613,9 @@
     },
     {
       "id": "ANDROID",
-      "disposition": "deferred",
-      "decision": "PRIMARY_AGENTS",
-      "summary": "Unified reader client deferred; not a current delivery blocker and not a completed feature."
+      "disposition": "required",
+      "decision": "ANDROID_NATIVE",
+      "summary": "Native Android agent is now requested as a draft/preview workstream; hardware and screen-off qualification remain separate."
     },
     {
       "id": "MACOS_NOTARIZATION",

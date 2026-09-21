@@ -26,7 +26,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 | ESIM | accepted | Physical deletion + retained deletion notifications + multiple-confirmation manual replay. No soft-delete implementation backlog. |
 | REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. |
 | ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. |
-| ANDROID | deferred | Unified reader client deferred; not a current delivery blocker and not a completed feature. |
+| ANDROID | required | Native Android agent is now requested as a draft/preview workstream; hardware and screen-off qualification remain separate. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
 | MACOS_UNIVERSAL | needs_decision | Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build. |
 
@@ -36,6 +36,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 - **PRIMARY_AGENTS** (2026-09-20, project_owner): Windows/macOS/Linux remote Agents are the current priority; Android is deferred. Enabled 4G must be isolated and fail closed without overriding user intent. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **MACOS_RELEASE** (2026-09-20, project_owner): No notarization or .p8 this round. Preserve signing and track Universal packaging separately. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **EVIDENCE_CONTINUITY** (2026-09-20, project_owner): Reconcile scoped historical evidence before scheduling missing tests; not revalidated is not never accepted. [Source](../../docs/decisions/2026-09-20-current-scope.md).
+- **ANDROID_NATIVE** (2026-09-21, project_owner): Android reprioritized: native reader/call/SMS app, safe recovery and battery-conscious UX; draft PR and test APK, not production or paid-operation acceptance. [Source](../../docs/decisions/2026-09-21-android-agent.md).
 
 ## Disposition counts
 
@@ -56,6 +57,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 - pending_product: 2
 
 ## Current open work
+
+### ANDROID
+
+**State: partial; release relevance: current.** Native Android preview implementation: guided HTTPS login/QR, USB CCID/OMAPI reader authentication, native remote calls/SMS and network recovery. Not yet physically qualified.
+
+Acceptance scope / remaining action: Require compilation, unit and emulator tests and signed preview artifact evidence. Real USB/card/OMAPI permissions, calls/carriers, background/OEM delivery and battery measurements remain unaccepted.
 
 ### INSTALLER_WAIT
 
@@ -82,14 +89,6 @@ Acceptance scope / remaining action: Collect bounded redacted evidence at the re
 Acceptance scope / remaining action: Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.
 
 ## Accepted, deferred, excluded and separately prioritized work
-
-### ANDROID
-
-**State: deferred; release relevance: deferred.** Android unified-protocol reader support is not delivered and is explicitly deferred; it does not block current Windows/macOS/Linux delivery.
-
-Acceptance scope / remaining action: Future implementation requires a new prioritized work item and authorized device/permission tests. Deferral is neither implementation nor cancellation.
-
-Resolution (user_decision): Owner deferred Android in favor of the three primary desktop/server Agents.
 
 ### ESIM_DELETE
 

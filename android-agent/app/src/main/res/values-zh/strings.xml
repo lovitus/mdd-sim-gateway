@@ -1,0 +1,52 @@
+<resources>
+<string name="app_name">MDD 助手预览版</string>
+<string name="home">首页</string>
+<string name="calls">通话</string>
+<string name="messages">短信</string>
+<string name="readers">读卡器</string>
+<string name="settings">设置</string>
+<string name="connect">安全连接</string>
+<string name="server">服务器 · https://gateway.example</string>
+<string name="username">用户名</string>
+<string name="password">密码（不保存）</string>
+<string name="fingerprint">可选：服务器证书 SHA-256</string>
+<string name="login_hint">使用网关账号登录。自签证书请从可信服务器终端复制 SHA-256 指纹；不提供跳过验证。</string>
+<string name="pause">暂停在线</string>
+<string name="resume">保持在线</string>
+<string name="logout">退出并停止</string>
+<string name="scan">扫描配置二维码</string>
+<string name="import_setup">粘贴配置 JSON</string>
+<string name="share">共享连接的读卡器</string>
+<string name="usb_permission">授权 USB 读卡器</string>
+<string name="refresh">刷新</string>
+<string name="dial">呼叫</string>
+<string name="number">国际号码（+…）</string>
+<string name="sms_body">短信内容</string>
+<string name="send">发送一次</string>
+<string name="answer">接听</string>
+<string name="reject">拒接</string>
+<string name="hangup">挂断</string>
+<string name="mute">切换静音</string>
+<string name="speaker">切换扬声器</string>
+<string name="device_dial">使用手机 SIM（系统拨号器）</string>
+<string name="battery">电池设置</string>
+<string name="gateway">打开网关管理</string>
+<string name="help">读卡器与后台说明</string>
+<string name="confirm">确认</string>
+<string name="cancel">取消</string>
+<string name="ready">就绪</string>
+<string name="offline">离线</string>
+<string name="login_required">需要登录</string>
+<string name="not_available">不可用</string>
+<string name="consent_share">仅向此网关共享支持的 USB/OMAPI SIM 认证？本预览版不会开放任意 APDU、PIN 尝试、配置删除或下载。</string>
+<string name="call_confirm">使用此 SIM 和线路拨号？可能产生费用；断网不会自动重拨。</string>
+<string name="sms_confirm">仅发送一次？可能产生费用；结果不明确时请先核对历史，避免重复发送。</string>
+<string name="help_text">Android 9+，OTG USB CCID 读卡器需支持 APDU 级交换，并已有启用的 SIM 配置。锁卡不会自动尝试 PIN。OMAPI 取决于设备和卡片访问规则。读卡器不是无线电：通话、短信经服务器 VoWiFi；手机内置 SIM 使用系统拨号器。
+
+保持在线使用可见前台通知、网络变更回调，无空闲唤醒锁、定时重启、精确闹钟或付费操作重试。Doze 和厂商限制仍可能延迟来电，请实际测试息屏接收。读卡器模式遵循现有 Core 每 10 秒心跳。暂停会停止共享和通知。不提供宿主蜂窝转发。</string>
+<string name="foreground">网关设备会话</string>
+<string name="incoming_call">网关来电</string>
+<string name="incoming_sms">网关新短信</string>
+<string name="tap_open">点击打开 MDD 查看</string>
+<string name="unknown_result">结果未知，请在网关历史中核对，不会自动重试。</string>
+</resources>
