@@ -55,6 +55,13 @@ function playFrame(node, frame) {
   node.port.postMessage({ type: 'play', samples }, [samples.buffer])
 }
 
+export function selectCallID(mode, incoming, create) {
+  if (!incoming) return create()
+  const id = mode === 'cellular' ? incoming.incoming_event_id : incoming.call_id
+  if (typeof id !== 'string' || !id) throw new Error('Incoming call identity is missing')
+  return id
+}
+
 export function normalizeDialTarget(value) {
   const compact = String(value || '').trim().replace(/[\s().-]/g, '')
   const normalized = compact.startsWith('00') ? `+${compact.slice(2)}` : compact

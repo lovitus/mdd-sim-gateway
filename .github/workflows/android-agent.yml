@@ -1,0 +1,181 @@
+name: Android native agent preview
+on:
+  push:
+    branches: [codex/android-v2]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-preview-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MDD_ANDROID_VERSION_CODE: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
+      - name: Compile, lint and unit-test native app
+        run: gradle -p android-agent --no-daemon testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
+      - name: Sign non-debuggable test APK and verify it
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p android-evidence
+          keytool -genkeypair -keystore "$RUNNER_TEMP/android-preview.jks" -storepass android -keypass android -alias androiddebugkey -dname 'CN=MDD disposable preview test signing' -keyalg RSA -keysize 3072 -validity 365 -noprompt
+          MDD_ANDROID_KEYSTORE="$RUNNER_TEMP/android-preview.jks" gradle -p android-agent --no-daemon assembleRelease
+          cp android-agent/app/build/outputs/apk/release/app-release.apk android-evidence/mdd-agent-preview.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs android-evidence/mdd-agent-preview.apk > android-evidence/signature.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging android-evidence/mdd-agent-preview.apk > android-evidence/package.txt
+          ! grep -q application-debuggable android-evidence/package.txt
+          (cd android-evidence && sha256sum mdd-agent-preview.apk > SHA256SUMS)
+          git rev-parse HEAD HEAD^{tree} > android-evidence/source.txt
+          cp android-agent/README.md android-evidence/README.md
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android-preview-build
+          path: |
+            android-evidence/
+            android-agent/app/build/reports/
+            android-agent/app/build/test-results/
+          retention-days: 14
+  device:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [28, 35]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: KVM permission for disposable emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: android-preview-build
+          path: release-bundle
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: |
+            gradle -p android-agent --no-daemon connectedDebugAndroidTest
+            mkdir -p android-screens
+            adb install -r release-bundle/android-evidence/mdd-agent-preview.apk
+            adb shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity
+            adb exec-out screencap -p > android-screens/setup.png
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android-emulator-${{ matrix.api }}
+          path: |
+            android-screens/
+            android-agent/app/build/reports/androidTests/
+            android-agent/app/build/outputs/androidTest-results/
+          retention-days: 14
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Native dependencies
+        run: |
+          source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$source"; then sudo mv "$source" "$source.disabled"; fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpcsclite-dev libopencore-amrnb-dev libasound2-dev pkg-config
+      - name: Mobile state and existing Agent boundaries
+        run: |
+          set -o pipefail
+          go -C go-runtime test -json -race -count=1 -timeout 3m ./internal/core ./agentlink | tee android-core.jsonl
+          go -C go-runtime vet ./internal/core ./agentlink
+          node tools/repository-check.mjs
+          node tools/repository-check.test.mjs
+      - name: Existing incoming call identity and embedded UI
+        working-directory: webui
+        run: |
+          npm ci
+          npm run test:all
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+          git diff --exit-code -- ../go-runtime/internal/webui/assets
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android-core-contracts
+          path: android-core.jsonl
+          retention-days: 14
+  preview:
+    if: github.ref == 'refs/heads/codex/android-v2'
+    needs: [build, device, core]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: android-preview-build
+          path: bundle
+      - name: Publish only the tested head as a prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api 'repos/${{ github.repository }}/git/ref/heads/codex/android-v2' --jq .object.sha)" = "$GITHUB_SHA"
+          cd bundle/android-evidence
+          sha256sum --check SHA256SUMS
+          cat > release-notes.md <<'NOTES'
+          Native Android Agent preview — draft PR implementation, not a production rollout.
+
+          Android 9+; native setup, server calls/SMS, USB APDU-level CCID slot-0 / access-controlled OMAPI reader sharing, bounded network recovery and foreground availability.
+          Requires the matching Core /v1/mobile/ws implementation in the draft PR. No production server is automatically updated.
+          APK is non-debuggable but signed with a disposable test key, NOT the owner's stable production certificate. Future preview updates may require uninstalling the previous preview.
+          API 28/35 emulators, unit tests and Core protocol tests gate this prerelease. Synthetic audio is not a real SIM/carrier or screen-off/OEM/battery acceptance.
+          No paid calls/SMS or physical SIM operations were performed. See README and signature/checksum evidence.
+          NOTES
+          gh release create "android-preview-${GITHUB_SHA:0:12}" mdd-agent-preview.apk SHA256SUMS signature.txt package.txt source.txt README.md --target "$GITHUB_SHA" --prerelease --title "Android Agent 0.1 preview ${GITHUB_SHA:0:7}" --notes-file release-notes.md

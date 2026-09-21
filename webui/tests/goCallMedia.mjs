@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
-import { CallMedia, Downsampler, FRAME_BYTES, normalizeDialTarget } from '../src/goCallMedia.js'
+import { CallMedia, Downsampler, FRAME_BYTES, normalizeDialTarget, selectCallID } from '../src/goCallMedia.js'
 
 const downsampler = new Downsampler(8000)
 const samples = new Float32Array(161).fill(0.5)
@@ -73,3 +73,11 @@ try {
 const coordinator=readFileSync(new URL('../src/goCallCoordinator.jsx',import.meta.url),'utf8')
 assert.equal((coordinator.match(/await media\.openAudioFromGesture\(\)/g)||[]).length,2,'call and canary must await the microphone before creating a lease')
 console.log('Go call media behavior tests passed')
+
+let minted = 0
+const mint = () => { minted++; return 'outgoing-id' }
+assert.equal(selectCallID('vowifi', {call_id:'provider-incoming'}, mint), 'provider-incoming')
+assert.equal(selectCallID('cellular', {incoming_event_id:'native-incoming'}, mint), 'native-incoming')
+assert.equal(minted, 0, 'Incoming answer must not invent another call identity')
+assert.equal(selectCallID('vowifi', null, mint), 'outgoing-id')
+assert.throws(() => selectCallID('vowifi', {}, mint), /identity/)
