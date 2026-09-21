@@ -27,7 +27,7 @@ public final class AgentService extends Service {
     private volatile boolean destroyed,available,sharing,online;private boolean foreground;
     volatile JSONObject snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());
     volatile String connection="Paused",readerStatus="Reader sharing off",notice="";volatile RemoteCall call;
-    private final AtomicBoolean smsPending=new AtomicBoolean();
+    private final AtomicBoolean smsPending=new AtomicBoolean(),enrollmentPending=new AtomicBoolean();
     private final BroadcastReceiver usbReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){refreshReaders();}};
     public IBinder onBind(Intent intent){return new LocalBinder();}
     @Override public void onCreate(){super.onCreate();store=new ConfigStore(this);config=store.load();
@@ -61,6 +61,7 @@ public final class AgentService extends Service {
         changed();
     }
     private void startReaderLink(){
+        if(agent!=null){agent.close();agent=null;}
         if(hub==null||hub.closed)hub=new ReaderHub(this);
         agent=new Link(api,loop,"/v1/agent/ws",config.optString("agent_id"),config.optString("agent_token"),process,new Link.Events(){
             public void state(String text,boolean connected){readerStatus=text;changed();if(connected){Link link=agent;if(link!=null)link.health(lastReaders);refreshReaders();}}
@@ -78,16 +79,18 @@ public final class AgentService extends Service {
     volatile JSONObject lastReaders=Json.obj("reader_condition","ready","readers",new JSONArray(),"modem_condition","disabled");
     void shareReaders(boolean enabled){if(call!=null){notice="Finish the call before changing reader sharing";changed();return;}if(!available||api==null){notice="Connect first";changed();return;}
         if(!enabled){sharing=false;save("share",false);if(agent!=null)agent.close();agent=null;ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);readerStatus="Reader sharing off";promote(false);changed();return;}
+        if(!enrollmentPending.compareAndSet(false,true)){notice="Reader enrollment already in progress";changed();return;}
         notice="Enrolling reader access…";changed();final GatewayApi owner=api;
         io.execute(()->{try{String token=config.optString("agent_token"),id=config.optString("agent_id");if(id.isEmpty())id="android-"+Json.id();if(token.isEmpty()){JSONObject response=owner.json("POST","/api/auth/agent-credentials",Json.obj("action","issue","agent_id",id));token=response.getString("agent_token");}
-            final String credential=token,identity=id;main.post(()->{if(!available||api!=owner)return;save("agent_id",identity);save("agent_token",credential);save("share",true);sharing=true;promote(false);startReaderLink();notice="Reader sharing enabled. Grant USB access if prompted.";changed();});
-        }catch(Exception e){notice="Reader enrollment failed: "+RemoteCall.safe(e);changed();}});
+            final String credential=token,identity=id;main.post(()->{try{if(!available||api!=owner)return;save("agent_id",identity);save("agent_token",credential);save("share",true);sharing=true;promote(false);startReaderLink();notice="Reader sharing enabled. Grant USB access if prompted.";changed();}finally{enrollmentPending.set(false);}});
+        }catch(Exception e){notice="Reader enrollment failed: "+RemoteCall.safe(e);enrollmentPending.set(false);changed();}});
     }
     synchronized void save(String key,Object value){try{config.put(key,value);store.save(config);}catch(Exception failure){notice="Could not save private configuration";}}
     JSONObject config(){return store.load();}
     boolean online(){return available&&online;}
     boolean available(){return available;}
     boolean sharing(){return sharing;}
+    boolean accountBusy(){return call!=null||smsPending.get()||enrollmentPending.get();}
     void addListener(Runnable l){listeners.addIfAbsent(l);}
     void removeListener(Runnable l){listeners.remove(l);}
     void changed(){main.post(()->{if(destroyed)return;for(Runnable l:listeners)l.run();if(foreground&&(Build.VERSION.SDK_INT<33||checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)==android.content.pm.PackageManager.PERMISSION_GRANTED))getSystemService(NotificationManager.class).notify(1,notification());});}
@@ -124,7 +127,7 @@ public final class AgentService extends Service {
     private void announce(String id,boolean actionable,boolean isCall){if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED)return;if(!actionable||!announced.add(id))return;Notification n=new Notification.Builder(this,"incoming").setSmallIcon(R.drawable.ic_agent).setContentTitle(getString(isCall?R.string.incoming_call:R.string.incoming_sms)).setContentText(getString(R.string.tap_open)).setContentIntent(openIntent(2)).setAutoCancel(true).setTimeoutAfter(isCall?60000:600000).setCategory(isCall?Notification.CATEGORY_CALL:Notification.CATEGORY_MESSAGE).setVisibility(Notification.VISIBILITY_PRIVATE).build();getSystemService(NotificationManager.class).notify(100+(id.hashCode()&0xffff),n);}
     private void networkChanged(){if(!available)return;Link o=observer,a=agent;if(o!=null)o.networkChanged();if(a!=null)a.networkChanged();RemoteCall c=call;if(c!=null&&c.audio!=null)c.audio.networkChanged();}
     private void closeLinks(){if(observer!=null)observer.close();if(agent!=null)agent.close();observer=agent=null;online=false;}
-    void pause(){if(call!=null){notice="Hang up or resolve the current call before pausing";changed();return;}available=false;save("available",false);closeLinks();ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);if(api!=null){api.close();api=null;}connection="Paused";stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();}
-    void logout(){if(call!=null){notice="Resolve the current call before signing out";changed();return;}pause();store.clear();config=new JSONObject();snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());announced.clear();seenMessageSnapshot=false;notice="Signed out. Reader credential can be revoked in gateway settings.";getSystemService(NotificationManager.class).cancelAll();changed();}
+    void pause(){if(smsPending.get()){notice="Wait for the current message result before pausing";changed();return;}if(call!=null){notice="Hang up or resolve the current call before pausing";changed();return;}available=false;save("available",false);closeLinks();ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);if(api!=null){api.close();api=null;}connection="Paused";stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();}
+    void logout(){if(smsPending.get()){notice="Wait for the current message result before signing out";changed();return;}if(call!=null){notice="Resolve the current call before signing out";changed();return;}pause();store.clear();config=new JSONObject();snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());announced.clear();seenMessageSnapshot=false;notice="Signed out. Reader credential can be revoked in gateway settings.";getSystemService(NotificationManager.class).cancelAll();changed();}
     @Override public void onDestroy(){destroyed=true;closeLinks();if(call!=null&&call.audio!=null)call.audio.close();if(call!=null)releaseWake(call);if(api!=null)api.close();try{connectivity.unregisterNetworkCallback(networkCallback);unregisterReceiver(usbReceiver);}catch(Exception ignored){}ReaderHub old=hub;if(old!=null)readerIO.execute(old::close);loop.shutdownNow();io.shutdownNow();readerIO.shutdown();super.onDestroy();}
 }

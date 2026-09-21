@@ -17,7 +17,7 @@ public class DeviceTest {
     @Test public void nativeSetupAndKeystoreRoundTrip()throws Exception{
         Context c=ApplicationProvider.getApplicationContext();ConfigStore store=new ConfigStore(c);store.clear();
         try(ActivityScenario<MainActivity> scene=ActivityScenario.launch(MainActivity.class)){
-            scene.onActivity(a->{assertNotNull(a.findViewById(1001));});
+            scene.onActivity(a->{assertNotNull(a.findViewById(R.id.connect_gateway));});
             store.save(Json.obj("server","https://gateway.test","token","opaque-test","csrf","csrf"));assertEquals("opaque-test",new ConfigStore(c).load().getString("token"));
             String raw=c.getSharedPreferences("private_config",0).getString("sealed","");assertFalse(raw.contains("opaque-test"));assertFalse(raw.isEmpty());
         }finally{store.clear();}
