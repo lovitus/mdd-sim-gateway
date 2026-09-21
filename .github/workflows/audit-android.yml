@@ -1,33 +1,17 @@
-name: Complete Android preview distribution bundle
+name: Clarify Android distribution dependency scope
 on:
   push:
     branches: [codex/audit-android-8fc2]
 permissions:
   contents: read
 jobs:
-  bundle:
+  notices:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-        with:
-          path: harness
-          persist-credentials: false
-      - uses: actions/checkout@v7
-        with:
-          ref: c639dd2b77007a023e2ce44214f1a79503bb5dc3
-          path: source
-          persist-credentials: false
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
-      - name: Verify the published APK and collect source and notices
+      - name: Distinguish test-only notices without changing the released APK
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -35,31 +19,28 @@ jobs:
         run: |
           set -euo pipefail
           tag=android-preview-c639dd2b7700
-          test "$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)" = c639dd2b77007a023e2ce44214f1a79503bb5dc3
-          mkdir -p distribution evidence
+          mkdir distribution
           gh release download "$tag" -D distribution
-          (cd distribution && sha256sum --check SHA256SUMS)
+          (cd distribution && sha256sum --check DISTRIBUTION-SHA256SUMS)
           echo '6fe4209ac18dbdf24168eac2b7c1601cc70c10b5b33581b7adf80ae22fce94bd  distribution/mdd-agent-preview.apk' | sha256sum --check
-          git -C source rev-parse HEAD HEAD^{tree} > evidence/source.txt
-          git -C source archive --format=tar.gz HEAD android-agent LICENSE > distribution/android-agent-source.tar.gz
-          cp source/LICENSE distribution/LICENSE
-          cp source/NOTICE distribution/REPOSITORY_NOTICE
-          cp source/THIRD_PARTY_LICENSES.md distribution/REPOSITORY_THIRD_PARTY_LICENSES.md
-          cp harness/audit/android/THIRD_PARTY_NOTICES.md distribution/
-          test -s /usr/share/common-licenses/Apache-2.0
-          cp /usr/share/common-licenses/Apache-2.0 distribution/APACHE-2.0.txt
-          unzip -p distribution/mdd-agent-preview.apk okhttp3/internal/publicsuffix/NOTICE > distribution/publicsuffix-NOTICE
-          gradle -p source/android-agent --no-daemon :app:dependencies --configuration releaseRuntimeClasspath > distribution/runtime-dependencies.txt
-          test -s distribution/publicsuffix-NOTICE
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('distribution/THIRD_PARTY_NOTICES.md')
+          old='The APK includes the following runtime dependency families. See runtime-dependencies.txt for the exact Gradle-resolved graph:'
+          new='The Android source distribution references the following dependency families across application and test code. Only the application dependencies listed in runtime-dependencies.txt are on the release runtime classpath; AndroidX testing libraries are not shipped in the release APK:'
+          s=p.read_text()
+          assert old in s
+          p.write_text(s.replace(old,new))
+          PY
+          rm distribution/mdd-android-preview-distribution.tar.gz
           (cd distribution && sha256sum LICENSE APACHE-2.0.txt THIRD_PARTY_NOTICES.md REPOSITORY_NOTICE REPOSITORY_THIRD_PARTY_LICENSES.md publicsuffix-NOTICE runtime-dependencies.txt android-agent-source.tar.gz mdd-agent-preview.apk > DISTRIBUTION-SHA256SUMS)
           tar -czf mdd-android-preview-distribution.tar.gz -C distribution .
-          gh release upload "$tag" distribution/LICENSE distribution/APACHE-2.0.txt distribution/THIRD_PARTY_NOTICES.md distribution/REPOSITORY_NOTICE distribution/REPOSITORY_THIRD_PARTY_LICENSES.md distribution/publicsuffix-NOTICE distribution/runtime-dependencies.txt distribution/android-agent-source.tar.gz distribution/DISTRIBUTION-SHA256SUMS mdd-android-preview-distribution.tar.gz
+          gh release upload "$tag" --clobber distribution/THIRD_PARTY_NOTICES.md distribution/DISTRIBUTION-SHA256SUMS mdd-android-preview-distribution.tar.gz
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: android-preview-distribution
+          name: android-preview-distribution-final
           path: |
             distribution/
-            evidence/
             mdd-android-preview-distribution.tar.gz
           retention-days: 14
