@@ -40,7 +40,8 @@ final class UsbCard implements SimProtocol.Card {
     public void select(String application)throws Exception{byte[] aid=Json.unhex(application.equals("isim")?"A0000000871004":"A0000000871002");byte[] q=new byte[5+aid.length];q[1]=(byte)0xa4;q[2]=4;q[3]=4;q[4]=(byte)aid.length;System.arraycopy(aid,0,q,5,aid.length);SimProtocol.success(SimProtocol.exchange(this,q));}
     void status()throws Exception{exchange(0x65,new byte[0],0x81);}
     private void watch(){
-        try(UsbRequest request=new UsbRequest()){
+        UsbRequest request=new UsbRequest();
+        try{
             if(!request.initialize(connection,interrupt))return;
             while(!closed){ByteBuffer b=ByteBuffer.allocate(8);if(!request.queue(b))break;
                 // requestWait uses a native wait; this is not APDU or network polling.
@@ -48,6 +49,7 @@ final class UsbCard implements SimProtocol.Card {
                 int size=b.position();if(size>=2&&(b.get(0)&255)==0x50&&(b.get(1)&2)!=0)insertion.incrementAndGet();
             }
         }catch(Exception ignored){if(!closed)insertion.incrementAndGet();}
+        finally{request.close();}
     }
     public void close(){closed=true;insertion.incrementAndGet();connection.close();}
 }

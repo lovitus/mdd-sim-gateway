@@ -13,7 +13,7 @@ final class GatewayApi {
     static final MediaType JSON=MediaType.get("application/json; charset=utf-8");
     GatewayApi(Endpoint e,String token,String csrf) throws Exception {
         this.endpoint=e;this.token=token;this.csrf=csrf;
-        OkHttpClient.Builder b=new OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(210,TimeUnit.SECONDS).callTimeout(220,TimeUnit.SECONDS).retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false);
+        OkHttpClient.Builder b=new OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(210,TimeUnit.SECONDS).callTimeout(220,TimeUnit.SECONDS).pingInterval(30,TimeUnit.SECONDS).retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false);
         if(!e.fingerprint.isEmpty()){
             X509TrustManager trust=new X509TrustManager(){public X509Certificate[] getAcceptedIssuers(){return new X509Certificate[0];} public void checkClientTrusted(X509Certificate[] chain,String type)throws CertificateException{throw new CertificateException("Client TLS not supported");}
                 public void checkServerTrusted(X509Certificate[] chain,String type)throws CertificateException{if(chain==null||chain.length==0)throw new CertificateException("Missing server certificate");chain[0].checkValidity();if(!MessageDigest.isEqual(Json.unhex(e.fingerprint),Json.unhex(Json.sha(chain[0].getEncoded()))))throw new CertificateException("Server certificate changed");}};
