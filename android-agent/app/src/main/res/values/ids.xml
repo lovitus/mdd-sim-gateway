@@ -1,1 +1,31 @@
-<resources><item type="id" name="connect_gateway" /></resources>
+<resources>
+  <item type="id" name="page_title" /><item type="id" name="login_remember" />
+  <item type="id" name="login_saved" /><item type="id" name="certificate_options" />
+  <item type="id" name="forget_login" />
+  <item type="id" name="sign_in_again" />
+  <item type="id" name="logout" />
+  <item type="id" name="connect_gateway" />
+  <item type="id" name="tab_home" /><item type="id" name="tab_calls" />
+  <item type="id" name="tab_messages" /><item type="id" name="tab_readers" />
+  <item type="id" name="tab_settings" /><item type="id" name="gateway_status" />
+  <item type="id" name="gateway_server" /><item type="id" name="gateway_pin" />
+  <item type="id" name="gateway_username" /><item type="id" name="gateway_password" />
+  <item type="id" name="dial_number" /><item type="id" name="message_body" />
+  <item type="id" name="line_selector" /><item type="id" name="route_selector" />
+  <item type="id" name="call_dial" /><item type="id" name="call_hangup" />
+  <item type="id" name="message_send" /><item type="id" name="call_answer" />
+  <item type="id" name="message_operations" /><item type="id" name="message_reconcile" />
+  <item type="id" name="message_sync" /><item type="id" name="message_history" />
+  <item type="id" name="message_history_list" /><item type="id" name="message_history_more" />
+  <item type="id" name="message_conversations" /><item type="id" name="message_conversation_list" />
+  <item type="id" name="call_reject" /><item type="id" name="all_incoming" />
+  <item type="id" name="call_surface" /><item type="id" name="reader_share" />
+  <item type="id" name="call_line_identity" /><item type="id" name="call_audio_state" />
+  <item type="id" name="diagnostics_open" /><item type="id" name="diagnostics_content" />
+  <item type="id" name="call_mute" /><item type="id" name="call_speaker" />
+  <item type="id" name="call_dtmf" /><item type="id" name="dtmf_signal" />
+  <item type="id" name="call_reconcile" />
+  <item type="id" name="gateway_manage" /><item type="id" name="availability_toggle" />
+  <item type="id" name="route_vowifi" /><item type="id" name="route_cellular" />
+  <item type="id" name="dial_plus" /><item type="id" name="dial_backspace" />
+</resources>

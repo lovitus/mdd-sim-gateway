@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
@@ -37,6 +38,7 @@ type Handler struct {
 	requestMu   sync.RWMutex
 	requester   RuntimeIntentRequester
 	callTimeout func() (time.Duration, error)
+	browserAuth mediaauth.BrowserMutationAuthorizer
 }
 
 type CallRecorder interface {
@@ -67,6 +69,16 @@ type RuntimeIntentRequester interface {
 }
 
 type Option func(*Handler) error
+
+func WithBrowserAuthorization(auth mediaauth.BrowserMutationAuthorizer) Option {
+	return func(h *Handler) error {
+		if auth == nil {
+			return errors.New("missing browser authorizer")
+		}
+		h.browserAuth = auth
+		return nil
+	}
+}
 
 func (handler *Handler) operationDuration(prepared preparedOperation) (time.Duration, error) {
 	if prepared.call == nil || prepared.call.action != "start" || handler.callTimeout == nil {
@@ -314,6 +326,10 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		writeFailure(response, http.StatusBadRequest, vowifiipc.OperationError{Kind: vowifiipc.ErrorInvalid, Code: "invalid_route"})
 		return
 	}
+	if operation == "calls/recovery" {
+		handler.recoverCall(response, request, lineID)
+		return
+	}
 	if !knownOperation(operation) {
 		handler.writeError(response, errUnknownOperation)
 		return
@@ -344,7 +360,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			})
 			return
 		}
-		if !line.Enabled {
+		if !line.Enabled && !prepared.receipt {
 			writeFailure(response, http.StatusPreconditionFailed, vowifiipc.OperationError{
 				Kind: vowifiipc.ErrorNotReady, Code: "line_disabled", Layer: "intent",
 			})
@@ -399,12 +415,8 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		writeJSON(response, http.StatusOK, result)
 		return
 	}
-	if prepared.call != nil && prepared.call.action == "start" && handler.calls != nil {
-		_ = handler.calls.Start(lineID, "vowifi", prepared.call.callID,
-			prepared.call.direction, prepared.call.peer, time.Now().UTC())
-	}
-
 	var result any
+	callAdmitted := false
 	err = handler.providers.UseCurrent(operationContext, lineID, func(provider mediaauth.Provider) error {
 		if prepared.expectedCardID != "" && provider.CardID != prepared.expectedCardID {
 			return errPaidCardMismatch
@@ -421,6 +433,24 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		if err != nil {
 			return err
 		}
+		if prepared.call != nil && prepared.call.action == "start" {
+			if store, ok := handler.calls.(*callhistory.Store); ok {
+				subject := ""
+				if handler.browserAuth != nil {
+					subject, _ = handler.browserAuth.AuthorizeBrowserMutation(request)
+				}
+				if err := store.ValidateRecoveryDispatch(lineID, "vowifi", prepared.call.callID, prepared.call.operationID, prepared.call.sessionID, subject, provider.CardID, provider.Generation); err != nil {
+					if errors.Is(err, callhistory.ErrRecoveryIdentity) {
+						return &vowifiipc.OperationError{Kind: vowifiipc.ErrorConflict, Code: "call_recovery_binding_mismatch", Layer: "call"}
+					}
+					return err
+				}
+			}
+			callAdmitted = true
+			if handler.calls != nil {
+				_ = handler.calls.Start(lineID, "vowifi", prepared.call.callID, prepared.call.direction, prepared.call.peer, time.Now().UTC())
+			}
+		}
 		result, err = prepared.invoke(operationContext, client)
 		if err != nil {
 			return err
@@ -428,7 +458,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return validateIdentity(result, lineID, provider.ProviderID, provider.Generation)
 	})
 	if err != nil {
-		if prepared.call != nil && prepared.call.action == "start" && handler.calls != nil {
+		if callAdmitted && prepared.call != nil && prepared.call.action == "start" && handler.calls != nil {
 			_ = handler.calls.Finish(lineID, "vowifi", prepared.call.callID, "failed", time.Now().UTC())
 		}
 		handler.writeError(response, err)
@@ -460,10 +490,12 @@ type preparedOperation struct {
 	call             *callMutation
 	runtime          *runtimeMutation
 	status           bool
+	receipt          bool
 }
 
 type callMutation struct {
 	action, callID, direction, peer string
+	operationID, sessionID          string
 }
 
 type runtimeMutation struct {
@@ -548,7 +580,7 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		}
 		return preparedOperation{
 			expectedCardID: strings.TrimSpace(input.ExpectedCardID),
-			call:           &callMutation{action: "start", callID: input.CallID, direction: "out", peer: input.Callee},
+			call:           &callMutation{action: "start", callID: input.CallID, direction: "out", peer: input.Callee, operationID: input.OperationID, sessionID: input.MediaSessionID},
 			invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 				return client.StartCall(ctx, providerRequest)
 			},
@@ -581,7 +613,7 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{call: &callMutation{action: "start", callID: input.CallID, direction: "in"}, invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+		return preparedOperation{call: &callMutation{action: "start", callID: input.CallID, direction: "in", operationID: input.OperationID, sessionID: input.MediaSessionID}, invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 			return client.AnswerIncomingCall(ctx, input)
 		}}, nil
 	case "calls/incoming/reject":
@@ -595,7 +627,7 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		return preparedOperation{call: &callMutation{action: "reject", callID: input.CallID, direction: "in"}, invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 			return client.RejectIncomingCall(ctx, input)
 		}}, nil
-	case "messages/send":
+	case "messages/send", "messages/receipt":
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest
 		}
@@ -615,6 +647,15 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		}
 		if providerRequest.Validate() != nil || !validCardID(input.ExpectedCardID) {
 			return preparedOperation{}, errInvalidRequest
+		}
+		if operation == "messages/receipt" {
+			if input.AllowanceQueryID != "" {
+				return preparedOperation{}, errInvalidRequest
+			}
+			return preparedOperation{expectedCardID: strings.TrimSpace(input.ExpectedCardID), receipt: true,
+				invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+					return client.MessageReceipt(ctx, providerRequest)
+				}}, nil
 		}
 		return preparedOperation{expectedCardID: strings.TrimSpace(input.ExpectedCardID), message: true,
 			allowanceQueryID: strings.TrimSpace(input.AllowanceQueryID), messageRequest: &providerRequest,
@@ -641,7 +682,7 @@ func validCardID(value string) bool {
 
 func knownOperation(operation string) bool {
 	switch operation {
-	case "status", "runtime/start", "runtime/stop", "register", "calls/start", "calls/end", "calls/dtmf", "calls/incoming/answer", "calls/incoming/reject", "messages/send":
+	case "status", "runtime/start", "runtime/stop", "register", "calls/start", "calls/end", "calls/dtmf", "calls/incoming/answer", "calls/incoming/reject", "messages/send", "messages/receipt":
 		return true
 	default:
 		return false

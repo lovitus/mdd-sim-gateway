@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	ModemCallReceiptFeature    = "modem-call-receipt-v1"
 	agentFeaturesHeader        = "X-MDD-Agent-Features"
 	agentCapabilitiesHeader    = "X-MDD-Agent-Capabilities"
 	modemEventsFeature         = "modem-events-v1"

@@ -40,9 +40,10 @@ type MediaCallConfig struct {
 // It deliberately does not own registration recovery or browser heartbeat
 // policy. End always closes media, even when the peer does not accept BYE.
 type MediaCall struct {
-	agent  *voicehost.IMSOutboundAgent
-	bridge *media.Bridge
-	dialog voicehost.DialogInfo
+	agent       *voicehost.IMSOutboundAgent
+	bridge      *media.Bridge
+	dialog      voicehost.DialogInfo
+	remoteEnded <-chan struct{}
 
 	endMu     sync.Mutex
 	ended     bool
@@ -97,6 +98,7 @@ func StartMediaCall(
 		PTimeMS: 20, MaxPTimeMS: 20,
 	})
 	request.RemoteSDP = localSDP
+	remoteEnded := agent.WatchRemoteEnd(request.CallID)
 	result, err := agent.StartOutboundCall(ctx, request)
 	if err != nil || !result.Accepted {
 		return nil, result, err
@@ -121,8 +123,22 @@ func StartMediaCall(
 	closeBridge = false
 	return &MediaCall{
 		agent: agent, bridge: bridge,
-		dialog: voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
+		remoteEnded: remoteEnded,
+		dialog:      voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
 	}, result, nil
+}
+
+func (call *MediaCall) RemoteEnded() <-chan struct{} {
+	if call == nil {
+		return nil
+	}
+	return call.remoteEnded
+}
+func (call *MediaCall) CloseMedia() error {
+	if call == nil {
+		return nil
+	}
+	return closeMedia(call.bridge)
 }
 
 // End serializes BYE attempts and then stops RTP/RTCP regardless of the BYE
@@ -137,6 +153,16 @@ func (call *MediaCall) End(ctx context.Context) (voicehost.DialogInfoResult, err
 	if call.ended {
 		return call.endResult, nil
 	}
+	select {
+	case <-call.remoteEnded:
+		if err := closeMedia(call.bridge); err != nil {
+			return voicehost.DialogInfoResult{}, err
+		}
+		call.ended = true
+		call.endResult = voicehost.DialogInfoResult{Accepted: true, StatusCode: 200, Reason: "carrier ended exact dialog"}
+		return call.endResult, nil
+	default:
+	}
 	result, err := call.agent.EndVoiceCallWithResult(ctx, call.dialog)
 	if closeErr := closeMedia(call.bridge); closeErr != nil {
 		err = errors.Join(err, closeErr)
@@ -144,6 +170,9 @@ func (call *MediaCall) End(ctx context.Context) (voicehost.DialogInfoResult, err
 	if err == nil && result.Accepted {
 		call.ended = true
 		call.endResult = result
+	}
+	if err == nil && !result.Accepted {
+		err = errors.New("IMS dialog termination is unconfirmed")
 	}
 	return result, err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +16,10 @@ func (service *Service) serveCall(response http.ResponseWriter, request *http.Re
 	operation := strings.TrimSpace(request.PathValue("operation"))
 	if !validID(lineID) || request.URL.RawQuery != "" {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_call_route"})
+		return
+	}
+	if operation == "recovery" && request.Method == http.MethodPost {
+		service.recoverCall(response, request, lineID)
 		return
 	}
 	if operation == "status" && request.Method == http.MethodGet {
@@ -82,6 +87,13 @@ func (service *Service) answerIncoming(response http.ResponseWriter, request *ht
 		current.incoming.nativeCallIndex != input.NativeCallIndex || current.incoming.session != input.SIMSessionGeneration ||
 		current.target.CardID != input.ExpectedCardID {
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_incoming_session_not_found"})
+		return
+	}
+	current.mu.Lock()
+	operationMatches := current.startOperation == "" || current.startOperation == input.OperationID
+	current.mu.Unlock()
+	if !operationMatches {
+		writeJSON(response, 409, map[string]string{"code": "call_operation_identity_changed"})
 		return
 	}
 	if _, err := service.liveIncoming(lineID, input.IncomingEventID); err != nil {
@@ -222,7 +234,7 @@ func (service *Service) sendDTMF(response http.ResponseWriter, request *http.Req
 		return
 	}
 	current := service.lookup(strings.TrimSpace(input.SessionID))
-	if current == nil || current.subject != subject || current.lineID != lineID || current.direction != "out" {
+	if current == nil || current.subject != subject || current.lineID != lineID || (current.direction != "out" && current.direction != "in") {
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_call_not_found"})
 		return
 	}
@@ -279,6 +291,11 @@ func (service *Service) startCall(response http.ResponseWriter, request *http.Re
 	}
 	now := service.config.Now().UTC()
 	current.mu.Lock()
+	if current.startOperation != "" && current.startOperation != input.OperationID {
+		current.mu.Unlock()
+		writeJSON(response, 409, map[string]string{"code": "call_operation_identity_changed"})
+		return
+	}
 	if current.phase != "ready" || !current.canaryReady || current.connection == nil || now.Sub(current.lastHeartbeat) >= heartbeatTimeout {
 		current.mu.Unlock()
 		writeJSON(response, http.StatusPreconditionFailed, map[string]string{"code": "cellular_media_not_ready"})
@@ -402,15 +419,23 @@ func (service *Service) hangup(current *session, operationID, reason string) (bo
 	}
 	current.phase = "ending"
 	current.hangupStarted = true
+	recovery := current.recovery
 	current.mu.Unlock()
+	leaseID := current.id
+	if status, found := service.config.Agents.Status(current.target.AgentID); found && !slices.Contains(status.Capabilities, agentlink.ModemCallReceiptFeature) && recovery == nil {
+		leaseID = ""
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	result, err := service.config.Agents.ExecuteModem(ctx, current.target.AgentID, current.target.ProcessGeneration,
 		agentlink.ModemRequest{
 			OperationID: operationID, AttachmentID: current.target.AttachmentID,
 			EquipmentID: current.target.EquipmentID, CardID: current.target.CardID,
-			Action: agentlink.ModemCallHangup,
+			Action: agentlink.ModemCallHangup, LeaseID: leaseID,
 		})
 	cancel()
+	if err == nil && result.Call != nil && result.Call.TerminalConfirmed && recovery != nil {
+		err = service.config.Recovery.ConfirmRecovery(*recovery, result.Call.ObservedAt, "agent_terminal_receipt")
+	}
 	current.mu.Lock()
 	if err == nil && result.Call != nil && result.Call.TerminalConfirmed {
 		current.phase = "ended"

@@ -60,9 +60,9 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ### ANDROID
 
-**State: partial; release relevance: current.** Native Android preview implementation: guided HTTPS login/QR, USB CCID/OMAPI reader authentication, native remote calls/SMS and network recovery. Not yet physically qualified.
+**State: partial; release relevance: current.** 0435b7e passed Android workflow 35800536660: API28/35 each 40 passed and one owner-deferred landscape method; all process/control groups passed. Normal signed preview upgraded without losing remembered login. Source-equivalent full-Go evidence remains ad54450 run 35795549641. A physical presentation geometry assertion remains unresolved despite complete text in its retained image; it is not a claimed pass or a reason for further layout work. Subsequent real CCID/Core interruption reproduced a U5 defect: App entered terminal auth/TLS state and did not register after original Core/certificate returned. Link treated all SSLException instances as permanent. The pending candidate distinguishes certificate causes from TLS transport loss, keeps all trust/auth/paid-operation fences, and adds three regression methods; corrected CI and hardware recovery remain unverified.
 
-Acceptance scope / remaining action: Require compilation, unit and emulator tests and signed preview artifact evidence. Real USB/card/OMAPI permissions, calls/carriers, background/OEM delivery and battery measurements remain unaccepted.
+Acceptance scope / remaining action: Validate the U7 portrait English/Chinese, 320dp/200% dropdown/page and diagnostic redaction scope on exact CI/device artifacts. Per the owner's 2026-09-23 correction in docs/decisions/2026-09-22-android-recovery-remediation.md, landscape is incidental compatibility only: known issues are deferred and non-blocking, with no further adaptation or repeated CI until explicitly requested. Retain failed evidence without claiming a pass. Real cellular handover, other reader/OMAPI, background/OEM and battery qualification remain open. Synthetic call/SMS and IMS registration are not carrier business acceptance; production has not been upgraded.
 
 ### INSTALLER_WAIT
 

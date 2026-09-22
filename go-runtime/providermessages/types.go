@@ -62,6 +62,7 @@ type Record struct {
 	Event
 	Transport  string    `json:"transport"`
 	ReceivedAt time.Time `json:"received_at"`
+	Realtime   bool      `json:"realtime,omitempty"`
 }
 
 type NotificationSource struct {

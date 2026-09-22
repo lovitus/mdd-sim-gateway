@@ -3,7 +3,6 @@ package com.lovitus.mddagent;
 import android.content.Context;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
-import android.util.AtomicFile;
 import android.util.Base64;
 import org.json.JSONObject;
 import javax.crypto.*;
@@ -15,14 +14,19 @@ import java.nio.charset.StandardCharsets;
 /** One process-wide writer. A failed read never erases or initializes saved state. */
 final class ConfigStore {
     private static final Object LOCK = new Object();
+    // Lifecycle intent keeps UI order even across Service destruction/rebinding.
+    private static final java.util.concurrent.ExecutorService INTENTS = java.util.concurrent.Executors.newSingleThreadExecutor();
+    static java.util.concurrent.Future<?> intent(Runnable action) { return INTENTS.submit(action); }
     private static final String ALIAS = "mdd-agent-v2-config";
+    private static final int MAX_STATE_BYTES = 1024 * 1024;
     private final Context context;
-    private final AtomicFile file;
+    private final DurableFile file;
+    private final AndroidStateIO files = new AndroidStateIO();
     private static boolean writeFault;
     interface Update { void apply(JSONObject current) throws Exception; }
     ConfigStore(Context c) {
         context = c.getApplicationContext();
-        file = new AtomicFile(new File(context.getNoBackupFilesDir(), "private-state-v1"));
+        file = new DurableFile(new File(context.getNoBackupFilesDir(), "private-state-v1"), files);
     }
     private javax.crypto.SecretKey key(boolean initialize) throws Exception {
         KeyStore s = KeyStore.getInstance("AndroidKeyStore"); s.load(null);
@@ -36,23 +40,23 @@ final class ConfigStore {
         return (javax.crypto.SecretKey) s.getKey(ALIAS, null);
     }
     private JSONObject decrypt(byte[] bytes) throws Exception {
-        if (bytes.length < 28 || bytes.length > 1024 * 1024) throw new IOException("Invalid private state");
+        if (bytes.length < 28 || bytes.length > MAX_STATE_BYTES) throw new IOException("Invalid private state");
         Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
         c.init(Cipher.DECRYPT_MODE, key(false), new GCMParameterSpec(128, bytes, 0, 12));
         return new JSONObject(new String(c.doFinal(bytes, 12, bytes.length - 12), StandardCharsets.UTF_8));
     }
     private JSONObject read() throws Exception {
-        File base = file.getBaseFile();
-        if (base.exists() || new File(base + ".bak").exists()) {
-            JSONObject envelope = decrypt(file.readFully());
+        File base = file.base;
+        if (file.exists()) {
+            JSONObject envelope = decrypt(file.read());
             if (envelope.getInt("schema") != 1) throw new IOException("Unsupported saved state version");
             return envelope.getJSONObject("data");
         }
-        if (new File(base + ".new").exists() || new File(base + ".owned").exists()) throw new IOException("Interrupted or missing private state write");
+        if (file.hasRecoveryMaterial()) throw new IOException("Interrupted or missing private state write");
         File legacy = new File(context.getApplicationInfo().dataDir, "shared_prefs/private_config.xml");
-        if (legacy.exists() || new File(legacy + ".bak").exists()) {
+        if (files.exists(legacy) || files.exists(new File(legacy + ".bak"))) {
             File backup = new File(legacy + ".bak");
-            File source = backup.exists() ? backup : legacy;
+            File source = files.exists(backup) ? backup : legacy;
             if (source.length() > 1024 * 1024) throw new IOException("Legacy settings too large");
             String sealed = "";
             try (FileInputStream input = new FileInputStream(source)) {
@@ -95,31 +99,49 @@ final class ConfigStore {
         });
     }
     private void write(JSONObject value) throws Exception {
+        byte[] plain = Json.obj("schema", 1, "commit_id", Json.id(), "data", value).toString().getBytes(StandardCharsets.UTF_8);
+        if (plain.length > MAX_STATE_BYTES - 28) throw new IOException("Private state capacity reached; existing data preserved");
         Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
         c.init(Cipher.ENCRYPT_MODE, key(true));
-        byte[] plain = Json.obj("schema", 1, "data", value).toString().getBytes(StandardCharsets.UTF_8);
         byte[] encrypted = c.doFinal(plain), iv = c.getIV();
-        FileOutputStream out = null;
+        byte[] bytes = new byte[iv.length + encrypted.length];
+        System.arraycopy(iv, 0, bytes, 0, iv.length); System.arraycopy(encrypted, 0, bytes, iv.length, encrypted.length);
         try {
-            // Once the new store owns state, loss of it must never resurrect legacy credentials.
-            try(FileOutputStream marker=new FileOutputStream(new File(file.getBaseFile()+".owned"),true)){marker.getFD().sync();}
-            out = file.startWrite(); out.write(iv); out.write(encrypted); out.getFD().sync();
-            file.finishWrite(out); out = null;
-            if (!read().toString().equals(value.toString())) throw new IOException("Private state readback mismatch");
+            file.write(bytes);
+            decrypt(file.read());
         } catch (Exception e) {
             writeFault = true;
-            if (out != null) file.failWrite(out);
             throw e;
         }
     }
     JSONObject retry() {
-        synchronized (LOCK) { JSONObject current = load(); writeFault = false; return current; }
+        synchronized (LOCK) {
+            try {
+                if (!file.exists() && files.exists(file.staged())) {
+                    byte[] staged = file.stagedBytes();
+                    JSONObject envelope = decrypt(staged);
+                    if (envelope.getInt("schema") != 1 || !envelope.has("commit_id")) throw new IOException("Unsupported interrupted state");
+                    envelope.getJSONObject("data");
+                    file.publish(staged);
+                }
+                JSONObject current = read();
+                files.syncDirectory(file.base.getParentFile());
+                writeFault = false;
+                return current;
+            } catch (Exception e) { throw new IllegalStateException("Saved settings unavailable; data preserved", e); }
+        }
     }
     void clear() {
         update(current -> {
             if (current.has("pending_call")) throw new IllegalStateException("Resolve previous call before signing out");
+            org.json.JSONArray messages=current.optJSONArray("message_operations");
+            if(messages!=null)for(int i=0;i<messages.length();i++)if(!MessageJournal.resolved(messages.getJSONObject(i)))throw new IllegalStateException("Unresolved messages must be retained");
             java.util.ArrayList<String> keys = new java.util.ArrayList<>(); current.keys().forEachRemaining(keys::add);
             for (String key : keys) current.remove(key);
         });
     }
+    JSONObject signOut(){return update(current->{
+        for(String key:new String[]{"token","csrf","agent_token","agent_id"})current.remove(key);
+        current.put("available",false).put("share",false);
+    });}
 }

@@ -24,6 +24,8 @@ var (
 	cellularNotificationSourceBucket = []byte("cellular-notification-source-outbox-v1")
 	cellularSourceBucket             = []byte("cellular-call-source-v1")
 	purgedLinesBucket                = []byte("purged-lines-v1")
+	recoveryBucket                   = []byte("call-recovery-v1")
+	recoverySessionsBucket           = []byte("call-recovery-sessions-v1")
 )
 
 type Record struct {
@@ -102,9 +104,11 @@ func (source NotificationSource) validate() error {
 }
 
 type Store struct {
-	db        *bolt.DB
-	closeOnce sync.Once
-	closeErr  error
+	db            *bolt.DB
+	closeOnce     sync.Once
+	closeErr      error
+	observationMu sync.RWMutex
+	observations  map[string]CallObservation
 }
 
 func Open(path string, timeout time.Duration) (*Store, error) {
@@ -120,12 +124,12 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range [][]byte{recordsBucket, notificationSourceBucket, cellularNotificationSourceBucket, cellularSourceBucket, purgedLinesBucket} {
+		for _, bucket := range [][]byte{recordsBucket, notificationSourceBucket, cellularNotificationSourceBucket, cellularSourceBucket, purgedLinesBucket, recoveryBucket, recoverySessionsBucket} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
 		}
-		return nil
+		return indexRecoverySessions(tx)
 	}); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -296,6 +300,7 @@ func (store *Store) ObserveVoWiFiSnapshot(snapshot vowifiipc.Snapshot, cardID st
 	if snapshot.Validate() != nil || at.IsZero() {
 		return errors.New("invalid VoWiFi call snapshot")
 	}
+	store.observeCall(snapshot, cardID, at)
 	if pending := snapshot.PendingIncomingCall; pending != nil {
 		if err := store.start(snapshot.LineID, "vowifi", pending.CallID, "in", pending.Caller,
 			pending.ReceivedAt, cardID, pending.ReceivedAt); err != nil {

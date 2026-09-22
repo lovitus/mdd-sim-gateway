@@ -25,7 +25,47 @@ final class SimProtocol {
         }
     }
     static void check(byte[] r)throws IOException{if(r==null||r.length<2)throw new IOException("Short SIM response");}
-    static byte[] success(byte[] r)throws IOException{check(r);if((r[r.length-2]&255)!=0x90||r[r.length-1]!=0)throw new IOException("SIM access denied or unavailable");return Arrays.copyOf(r,r.length-2);}
+    static final class StatusError extends IOException {
+        final int sw1,sw2;
+        StatusError(byte[] response){super(String.format(Locale.ROOT,"SIM status %02X%02X",response[response.length-2]&255,response[response.length-1]&255));sw1=response[response.length-2]&255;sw2=response[response.length-1]&255;}
+    }
+    static byte[] success(byte[] r)throws IOException{check(r);if((r[r.length-2]&255)!=0x90||r[r.length-1]!=0)throw new StatusError(r);return Arrays.copyOf(r,r.length-2);}
+    // Port of agentsim/apdu.go: full EF.DIR AIDs first, then partial-name fallback,
+    // both SELECT response modes, and at most 32 read-only directory records.
+    static void selectApplication(Card card,String application)throws Exception{
+        String prefix=application.equals("isim")?"A0000000871004":"A0000000871002";
+        LinkedHashSet<String> aids=new LinkedHashSet<>();
+        try{
+            file(card,0x3f00);file(card,0x2f00);
+            for(int record=1;record<=32;record++){
+                byte[] response=exchange(card,new byte[]{0,(byte)0xb2,(byte)record,4,0});
+                if((response[response.length-2]&255)!=0x90||response[response.length-1]!=0)break;
+                findAIDs(Arrays.copyOf(response,response.length-2),0,aids);
+            }
+        }catch(StatusError unavailable){/* A missing directory permits standards-based partial selection. */}
+        ArrayList<String> candidates=new ArrayList<>();for(String aid:aids)if(aid.startsWith(prefix))candidates.add(aid);candidates.add(prefix);
+        StatusError last=null;
+        for(String aid:candidates)for(int p2:new int[]{4,0}){
+            byte[] bytes=Json.unhex(aid),command=new byte[5+bytes.length];command[1]=(byte)0xa4;command[2]=4;command[3]=(byte)p2;command[4]=(byte)bytes.length;System.arraycopy(bytes,0,command,5,bytes.length);
+            byte[] response=exchange(card,command);int sw=response[response.length-2]&255;
+            if(sw==0x90&&response[response.length-1]==0||sw==0x62||sw==0x63)return;
+            last=new StatusError(response);
+        }
+        if(last!=null)throw last;throw new IOException("SIM application unavailable");
+    }
+    private static void findAIDs(byte[] bytes,int depth,Set<String> aids)throws IOException{
+        if(depth>8||bytes.length>4096)throw new IOException("SIM directory bounds exceeded");
+        for(int offset=0;offset<bytes.length;){
+            int tag=bytes[offset++]&255;if(tag==0||tag==255)continue;
+            if((tag&31)==31)return;
+            if(offset>=bytes.length)return;int length=bytes[offset++]&255;
+            if((length&128)!=0){int octets=length&127;if(octets<1||octets>2||offset+octets>bytes.length)return;length=0;for(int i=0;i<octets;i++)length=(length<<8)|(bytes[offset++]&255);}
+            if(length>bytes.length-offset)return;
+            byte[] value=Arrays.copyOfRange(bytes,offset,offset+length);offset+=length;
+            if(tag==0x4f&&value.length>0&&value.length<=16)aids.add(Json.hex(value).toUpperCase(Locale.ROOT));
+            if((tag&32)!=0)findAIDs(value,depth+1,aids);
+        }
+    }
     static void file(Card c,int id)throws Exception{success(exchange(c,new byte[]{0,(byte)0xa4,0,4,2,(byte)(id>>8),(byte)id,0}));}
     static String iccid(Card c)throws Exception{file(c,0x3f00);file(c,0x2fe2);byte[] b=success(exchange(c,new byte[]{0,(byte)0xb0,0,0,10}));if(b.length!=10)throw new IOException("Invalid ICCID size");return bcd(b,false);}
     static String bcd(byte[] data,boolean imsi)throws IOException{
@@ -42,7 +82,11 @@ final class SimProtocol {
         String id=iccid(c);JSONObject sim;
         try{c.select("usim");String imsi=bcd(ef(c,0x6f07,9),true);sim=Json.obj("identity_state","partial","imsi",imsi,"mcc",imsi.substring(0,3),"error_code","reader_sim_mnc_length_unavailable");
             try{byte[] ad=ef(c,0x6fad,4);int len=ad[3]&15;if((len==2||len==3)&&imsi.length()>=3+len){sim.put("mnc",imsi.substring(3,3+len));sim.put("identity_state","ready");sim.remove("error_code");}}catch(Exception ignored){}
-        }catch(Exception unavailable){sim=Json.obj("identity_state","unavailable","error_code","reader_sim_identity_unavailable");}
+        }catch(Exception unavailable){
+            boolean pin=unavailable instanceof StatusError&&((StatusError)unavailable).sw1==0x69&&((StatusError)unavailable).sw2==0x82;
+            String code=pin?"reader_sim_pin_required":unavailable instanceof StatusError?String.format(Locale.ROOT,"reader_sim_status_%02x%02x",((StatusError)unavailable).sw1,((StatusError)unavailable).sw2):"reader_sim_identity_unavailable";
+            sim=Json.obj("identity_state",pin?"pin_required":"unavailable","error_code",code);
+        }
         return Json.obj("card_id",id,"sim",sim);
     }
     static byte[] aka(Card c,String application,byte[] rand,byte[] autn)throws Exception{

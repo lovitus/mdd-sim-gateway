@@ -10,30 +10,42 @@ import java.nio.charset.StandardCharsets;
 /** One serialized I/O owner per Hub. Readiness is never inferred from USB presence alone. */
 final class ReaderHub implements AutoCloseable {
     private final UsbManager usb;private SEService se;private final TreeMap<String,Entry> entries=new TreeMap<>();
-    volatile boolean closed;volatile String diagnostic="No reader permission granted";
+    volatile boolean closed;volatile UiText diagnostic=UiText.of(R.string.reader_permission_missing);
     private final LinkedHashMap<String,Receipt> receipts=new LinkedHashMap<>();
-    private static final class Entry{String name,generation=Json.id(),id="";JSONObject sim;SimProtocol.Card card;long insertion;Entry(String name,SimProtocol.Card card){this.name=name;this.card=card;}}
+    private static final class Entry{String name,generation=Json.id(),id="";JSONObject sim;SimProtocol.Card card;long insertion,metadataNext;int metadataAttempts;Entry(String name,SimProtocol.Card card){this.name=name;this.card=card;}}
     private static final class Receipt{String fingerprint;JSONObject response;Receipt(String f,JSONObject r){fingerprint=f;response=r;}}
     ReaderHub(Context context){usb=context.getSystemService(UsbManager.class);try{se=new SEService(context,Runnable::run,()->{});}catch(Exception ignored){}}
-    synchronized void scan(){if(closed)return;
+    synchronized void scan(){scan(false);}
+    synchronized void scan(boolean explicitMetadata){if(closed)return;
         Set<String> seen=new HashSet<>();
         for(UsbDevice d:usb.getDeviceList().values()){
             if(!usb.hasPermission(d))continue;boolean ccid=false;for(int i=0;i<d.getInterfaceCount();i++)ccid|=d.getInterface(i).getInterfaceClass()==11;if(!ccid)continue;
             String name="USB-"+d.getVendorId()+"-"+d.getProductId()+"-"+d.getDeviceId()+"-slot0";seen.add(name);
-            try{Entry e=entries.get(name);if(e!=null){UsbCard c=(UsbCard)e.card;c.status();if(c.insertion.get()!=e.insertion){remove(name);e=null;}}
+            try{Entry e=entries.get(name);if(e!=null){UsbCard c=(UsbCard)e.card;c.status();if(c.insertion.get()!=e.insertion){remove(name);e=null;}else repairMetadata(e,explicitMetadata);}
                 if(e==null&&entries.size()<8){UsbCard card=new UsbCard(usb,d);e=new Entry(name,card);entries.put(name,e);discover(e);e.insertion=card.insertion.get();}
-            }catch(Exception failure){remove(name);diagnostic="USB reader unavailable: permission, card or APDU capability";}
+            }catch(Exception failure){remove(name);diagnostic=UiText.of(R.string.reader_usb_unavailable);}
         }
         if(se!=null&&se.isConnected())for(Reader reader:se.getReaders()){
             String name="OMAPI-"+reader.getName();seen.add(name);
             try{Entry e=entries.get(name);if(!reader.isSecureElementPresent()){remove(name);continue;}
-                if(e==null&&entries.size()<8){e=new Entry(name,new OmapiCard(reader));entries.put(name,e);discover(e);}
-            }catch(Exception failure){remove(name);diagnostic="OMAPI blocked by device/SIM access rules; use a compatible USB reader";}
+                if(e==null&&entries.size()<8){e=new Entry(name,new OmapiCard(reader));entries.put(name,e);discover(e);}else if(e!=null)repairMetadata(e,explicitMetadata);
+            }catch(Exception failure){remove(name);diagnostic=UiText.of(R.string.reader_omapi_blocked);}
         }
         for(String name:new ArrayList<>(entries.keySet()))if(!seen.contains(name))remove(name);
-        if(!entries.isEmpty())diagnostic=entries.size()+" reader(s) identified; slot 0 / access-controlled OMAPI";
+        if(!entries.isEmpty())diagnostic=UiText.of(R.string.reader_count,entries.size());
     }
-    private void discover(Entry e)throws Exception{JSONObject identity=SimProtocol.identity(e.card);e.id=identity.getString("card_id");e.sim=identity.getJSONObject("sim");}
+    private void discover(Entry e)throws Exception{JSONObject identity=SimProtocol.identity(e.card);e.id=identity.getString("card_id");e.sim=identity.getJSONObject("sim");e.metadataNext=android.os.SystemClock.elapsedRealtime()+60000;}
+    private void repairMetadata(Entry e,boolean explicit)throws Exception{
+        String state=e.sim==null?"unavailable":e.sim.optString("identity_state");
+        if(state.equals("ready")||state.equals("pin_required")&&!explicit)return;
+        long now=android.os.SystemClock.elapsedRealtime();
+        if(explicit){e.metadataAttempts=0;e.metadataNext=0;}
+        if(e.metadataAttempts>=3||now<e.metadataNext)return;
+        e.metadataAttempts++;e.metadataNext=now+(1L<<e.metadataAttempts)*30000;
+        JSONObject identity=SimProtocol.identity(e.card);
+        if(!e.id.equals(identity.getString("card_id")))throw new java.io.IOException("Card identity changed during metadata read");
+        e.sim=identity.getJSONObject("sim");
+    }
     private void remove(String n){Entry e=entries.remove(n);if(e!=null)e.card.close();}
     synchronized JSONObject topology(){JSONArray readers=new JSONArray();for(Entry e:entries.values()){
         if(e.card instanceof UsbCard&&((UsbCard)e.card).insertion.get()!=e.insertion)continue;

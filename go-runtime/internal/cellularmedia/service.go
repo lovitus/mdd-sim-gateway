@@ -57,6 +57,7 @@ type Config struct {
 	Agents   AgentRuntime
 	Broker   *agentmedia.Broker
 	Calls    CallRecorder
+	Recovery *callhistory.Store
 	Incoming IncomingCallStore
 	Now      func() time.Time
 	Capacity int
@@ -107,6 +108,8 @@ type session struct {
 	renewing        bool
 	hangupStarted   bool
 	terminal        bool
+	recovery        *callhistory.RecoveryRecord
+	startOperation  string
 	lastFailure     string
 	connection      *browserConnection
 	connectionID    uint64
@@ -221,6 +224,7 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 			CallID               string `json:"call_id"`
 			ExpectedCardID       string `json:"expected_card_id"`
 			OperationID          string `json:"operation_id,omitempty"`
+			RecoveryKey          string `json:"recovery_key,omitempty"`
 			IncomingEventID      string `json:"incoming_event_id,omitempty"`
 			SIMSessionGeneration string `json:"sim_session_generation,omitempty"`
 			NativeCallIndex      int    `json:"native_call_index,omitempty"`
@@ -230,6 +234,24 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 			!validID(input.LineID) || !validID(input.CallID) || !validCardID(input.ExpectedCardID) {
 			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_media_lease"})
 			return
+		}
+		if input.RecoveryKey != "" && (!validID(input.OperationID) || len(input.RecoveryKey) < 64 || len(input.RecoveryKey) > 256 || service.config.Recovery == nil) {
+			writeJSON(response, 400, map[string]string{"code": "invalid_call_recovery"})
+			return
+		}
+		if input.RecoveryKey != "" {
+			target, err := service.config.Agents.ResolveModemTargetForCardAction(input.ExpectedCardID, agentlink.ModemCallStatus)
+			if err == nil {
+				err = service.requireCallReceiptTarget(target)
+			}
+			if errors.Is(err, errReceiptUpgrade) {
+				writeJSON(response, 409, map[string]string{"code": "agent_recovery_upgrade_required"})
+				return
+			}
+			if err != nil {
+				writeServiceError(response, err)
+				return
+			}
 		}
 		direction := "out"
 		var incoming *incomingFence
@@ -249,6 +271,10 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 				return
 			}
 			if existing != nil {
+				if err := service.bindRecovery(existing, input.OperationID, input.RecoveryKey); err != nil {
+					writeJSON(response, 409, map[string]string{"code": "call_recovery_conflict"})
+					return
+				}
 				writeJSON(response, http.StatusCreated, map[string]any{
 					"session_id": existing.id, "ws_path": "/api/cellular-browser-media/" + existing.id + "/ws",
 					"expires_at": existing.expiresAt,
@@ -271,6 +297,12 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 		}
 		if incoming != nil {
 			service.bindClaimSession(incoming.eventID, incoming.operationID, lease.id)
+		}
+		if err := service.bindRecovery(lease, input.OperationID, input.RecoveryKey); err != nil {
+			service.remove(lease)
+			service.stopMedia(lease)
+			writeJSON(response, 503, map[string]string{"code": "call_recovery_persist_failed"})
+			return
 		}
 		writeJSON(response, http.StatusCreated, map[string]any{
 			"session_id": lease.id, "ws_path": "/api/cellular-browser-media/" + lease.id + "/ws",

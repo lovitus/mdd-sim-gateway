@@ -44,10 +44,12 @@ func NewAPI(backend Backend, token string, operationTimeout time.Duration) (*API
 	api.mux.HandleFunc("POST /v1/register", api.authorized(api.register))
 	api.mux.HandleFunc("POST /v1/calls/start", api.authorized(api.startCall))
 	api.mux.HandleFunc("POST /v1/calls/end", api.authorized(api.endCall))
+	api.mux.HandleFunc("POST /v1/calls/receipt", api.authorized(api.callReceipt))
 	api.mux.HandleFunc("POST /v1/calls/dtmf", api.authorized(api.sendDTMF))
 	api.mux.HandleFunc("POST /v1/calls/incoming/answer", api.authorized(api.answerIncomingCall))
 	api.mux.HandleFunc("POST /v1/calls/incoming/reject", api.authorized(api.rejectIncomingCall))
 	api.mux.HandleFunc("POST /v1/messages/send", api.authorized(api.sendMessage))
+	api.mux.HandleFunc("POST /v1/messages/receipt", api.authorized(api.messageReceipt))
 	api.mux.HandleFunc("POST /v1/maintenance/drain", api.authorized(api.beginDrain))
 	api.mux.HandleFunc("POST /v1/maintenance/resume", api.authorized(api.endDrain))
 	return api, nil
@@ -89,6 +91,9 @@ func (api *API) authorized(next http.HandlerFunc) http.HandlerFunc {
 
 func (api *API) health(response http.ResponseWriter, _ *http.Request) {
 	capabilities := RecoveryStopCapability
+	if _, ok := api.backend.(CallReceiptBackend); ok {
+		capabilities += "," + CallReceiptCapability
+	}
 	if _, ok := api.backend.(RegistrationBackend); ok {
 		capabilities += "," + ManualRegisterCapability
 	}
@@ -271,6 +276,28 @@ func (api *API) sendMessage(response http.ResponseWriter, request *http.Request)
 		err = result.Validate()
 		if err == nil && (result.OperationID != input.OperationID || result.MessageID != input.MessageID) {
 			err = errors.New("provider returned mismatched message result identity")
+		}
+	}
+	writeResult(response, result, err)
+}
+
+func (api *API) messageReceipt(response http.ResponseWriter, request *http.Request) {
+	var input SendMessageRequest
+	if !decodeRequest(response, request, &input) || !validateRequest(response, input.Validate()) {
+		return
+	}
+	backend, ok := api.backend.(MessageReceiptBackend)
+	if !ok {
+		writeError(response, http.StatusNotImplemented, &OperationError{Kind: ErrorNotReady, Code: "message_receipt_unsupported"})
+		return
+	}
+	ctx, cancel := api.context(request)
+	defer cancel()
+	result, err := backend.MessageReceipt(ctx, input)
+	if err == nil {
+		err = result.Validate()
+		if err == nil && (result.OperationID != input.OperationID || result.MessageID != input.MessageID) {
+			err = errors.New("provider returned mismatched message receipt")
 		}
 	}
 	writeResult(response, result, err)

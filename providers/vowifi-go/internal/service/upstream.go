@@ -798,6 +798,9 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 		if agentErr != nil {
 			return nil, voicehost.OutboundCallResult{}, &StageError{Layer: "voice", Code: "voice_transport_unavailable", Err: agentErr}
 		}
+		if runtime.inbound != nil {
+			runtime.inbound.SetOutbound(agent)
+		}
 		return ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
 			LocalRTP: net.JoinHostPort(runtime.localIP, "0"), LocalRTCP: net.JoinHostPort(runtime.localIP, "0"),
 			Codec: media.CodecAMR, BufferMS: request.MediaBufferMS,

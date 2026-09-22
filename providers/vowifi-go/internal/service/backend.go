@@ -387,6 +387,20 @@ type MessagingRuntime interface {
 	SendMessage(context.Context, vowifiipc.SendMessageRequest) error
 }
 
+// Reuse the durable full-operation replay checks, without reserving or dispatching.
+func (backend *Backend) MessageReceipt(_ context.Context, request vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
+	if err := request.Validate(); err != nil {
+		return vowifiipc.MessageResult{}, err
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	result, err, found := backend.replayMessageLocked(request.OperationID, request.MessageID, operationKind("message_send", request.MessageID, request.Recipient, request.Body))
+	if !found && err == nil {
+		err = &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "message_receipt_not_found", Layer: "messaging"}
+	}
+	return result, err
+}
+
 func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
 	if err := request.Validate(); err != nil {
 		return vowifiipc.MessageResult{}, err

@@ -9,6 +9,51 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+// Page.loadEventFired has no navigation identity. A previous document's late
+// event must not release evaluation in the next document's empty context.
+function navigationBarrier() {
+  let expected, resolve
+  const loaded = new Set()
+  const promise = new Promise(done => { resolve = done })
+  const key = event => `${event.frameId}:${event.loaderId}`
+  return {
+    promise,
+    observe(event) {
+      if (event.name !== 'load') return
+      const identity = key(event)
+      loaded.add(identity)
+      if (expected === identity) resolve()
+    },
+    expect(navigation) {
+      assert.ok(navigation.frameId && navigation.loaderId, 'Cross-document navigation identity required')
+      expected = key(navigation)
+      if (loaded.has(expected)) resolve()
+    },
+  }
+}
+// Deterministic counterexamples for both event/reply orderings, before the
+// real-browser gate. These do not replace any recording/audio assertions.
+async function verifyNavigationBarrier() {
+  const target = {frameId: 'current-frame', loaderId: 'current-loader'}
+  const barrier = navigationBarrier()
+  let finished = false
+  barrier.promise.then(() => { finished = true })
+  barrier.observe({...target, loaderId: 'previous-loader', name: 'load'})
+  barrier.expect(target)
+  barrier.observe({...target, frameId: 'other-frame', name: 'load'})
+  barrier.observe({...target, name: 'DOMContentLoaded'})
+  await Promise.resolve()
+  assert.equal(finished, false, 'Only the requested frame and loader may become ready')
+  barrier.observe({...target, name: 'load'})
+  await barrier.promise
+  assert.equal(finished, true)
+  const early = navigationBarrier()
+  early.observe({...target, name: 'load'})
+  early.expect(target)
+  await early.promise
+}
+await verifyNavigationBarrier()
 const executable = process.env.MDD_TEST_CHROME || ['google-chrome', 'chromium', 'chromium-browser']
   .flatMap(name => (process.env.PATH || '').split(path.delimiter).map(p => path.join(p, name)))
   .find(p => fs.existsSync(p))
@@ -74,16 +119,16 @@ try {
   })
   clearTimeout(timeout)
   const port = new URL(endpoint).port
-  const tab = await (await fetch(`http://127.0.0.1:${port}/json/new?http://127.0.0.1:${server.address().port}/`, { method: 'PUT' })).json()
+  const tab = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json()
   socket = new WebSocket(tab.webSocketDebuggerUrl)
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject })
   let sequence = 0
   const pending = new Map()
-  let loadPage
+  const navigationReady = navigationBarrier()
   socket.onmessage = message => {
     const data = JSON.parse(message.data)
     if (process.env.MDD_BROWSER_DEBUG) console.error(JSON.stringify(data))
-    if (data.method === 'Page.loadEventFired') loadPage?.()
+    if (data.method === 'Page.lifecycleEvent') navigationReady.observe(data.params)
     const handlers = pending.get(data.id)
     if (!handlers) return
     pending.delete(data.id)
@@ -95,11 +140,12 @@ try {
   })
   const run = async () => {
     await send('Page.enable')
+    await send('Page.setLifecycleEventsEnabled', {enabled: true})
     await send('Runtime.enable')
-    const loaded = new Promise(resolve => { loadPage = resolve })
     const navigation = await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` })
     assert.ok(!navigation.errorText, navigation.errorText)
-    await loaded
+    navigationReady.expect(navigation)
+    await navigationReady.promise
     const data = await send('Runtime.evaluate', {
       expression: 'window.runRecordingTest()', awaitPromise: true, returnByValue: true,
     })

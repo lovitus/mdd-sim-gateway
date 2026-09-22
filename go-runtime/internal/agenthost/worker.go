@@ -505,7 +505,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
 			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems,
-			SMSSessionFencing: worker.config.Operations != nil, Media: media,
+			SMSSessionFencing: worker.config.Operations != nil, Media: media, CallReceipts: supportsCallReceipts(worker.config.Operations),
 			Data: dataExecutor, Policies: policyExecutor, DeviceDefaults: bindDefaults, DeviceDefaultsReset: resetDefaults, RawUSB: rawUSB, EUICC: manager,
 			ReaderReadback: manager, Recovery: recoveryExecutor,
 			HostHealth: worker.config.HostHealth != nil,
@@ -918,6 +918,8 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_call_lease_conflict"}
 		case errors.Is(err, agentcall.ErrLeaseNotFound):
 			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_call_lease_not_found"}
+		case errors.Is(err, agentcall.ErrTerminalUnconfirmed):
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_call_terminal_unconfirmed", Retryable: true}
 		case errors.Is(err, agentcall.ErrAuxiliaryDuringCall):
 			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_paid_call_active"}
 		case errors.Is(err, agentsms.ErrConflict):
@@ -1171,4 +1173,9 @@ func randomGeneration() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(value), nil
+}
+
+func supportsCallReceipts(operator agentmodem.Operator) bool {
+	supported, ok := operator.(interface{ SupportsCallReceipts() bool })
+	return ok && supported.SupportsCallReceipts()
 }

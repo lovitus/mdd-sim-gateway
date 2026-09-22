@@ -33,4 +33,9 @@ public class RecoveryStorageTest {
             try{store.clear();fail("Unresolved call erased");}catch(IllegalStateException expected){}
         }finally{store.update(c->c.remove("pending_call"));store.clear();}
     }
+    @Test public void oversizedStateIsRejectedBeforeReplacingTheReadableCiphertext()throws Exception{
+        Context context=ApplicationProvider.getApplicationContext();ConfigStore store=new ConfigStore(context);store.clear();store.save(Json.obj("marker","keep"));
+        File file=new File(context.getNoBackupFilesDir(),"private-state-v1");byte[] before=Files.readAllBytes(file.toPath());char[] large=new char[1024*1024];java.util.Arrays.fill(large,'x');
+        try{assertThrows(IllegalStateException.class,()->store.update(c->c.put("oversized",new String(large))));assertArrayEquals(before,Files.readAllBytes(file.toPath()));assertEquals("keep",store.load().getString("marker"));store.update(c->c.put("after",true));assertTrue(store.load().getBoolean("after"));}finally{store.clear();}
+    }
 }

@@ -42,7 +42,7 @@ public class DeviceTest {
                 }catch(Exception e){throw new AssertionError(e);}}
             }));server.start();
             GatewayApi api=new GatewayApi(new Endpoint(server.url("/").toString(),Json.sha(cert.certificate().getEncoded())),"token","csrf");
-            NativeAudio audio=new NativeAudio(context,api,timer,new NativeAudio.Events(){public void state(String s){}public void ended(String r){}});
+            NativeAudio audio=new NativeAudio(context,api,timer,new NativeAudio.Events(){public void state(int label){}public void ended(int label){}});
             try{audio.prepare(Json.obj("session_id","lease","ws_path","/media"),"call").get(15,TimeUnit.SECONDS);assertTrue(evidence.await(1,TimeUnit.SECONDS));audio.markActive();audio.networkChanged();assertTrue(resume.await(5,TimeUnit.SECONDS));assertEquals(2,handshakes.get());audio.mute();assertTrue(audio.muted);assertNotNull(server.takeRequest(1,TimeUnit.SECONDS));assertNotNull(server.takeRequest(1,TimeUnit.SECONDS));assertNull(server.takeRequest(100,TimeUnit.MILLISECONDS));}
             finally{audio.close();api.close();}
         }finally{timer.shutdownNow();}

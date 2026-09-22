@@ -137,9 +137,10 @@ type StartCallRequest struct {
 }
 
 type EndCallRequest struct {
-	OperationID string `json:"operation_id"`
-	CallID      string `json:"call_id"`
-	ReasonCode  string `json:"reason_code"`
+	OperationID              string `json:"operation_id"`
+	ExpectedStartOperationID string `json:"expected_start_operation_id,omitempty"`
+	CallID                   string `json:"call_id"`
+	ReasonCode               string `json:"reason_code"`
 }
 
 type SendDTMFRequest struct {
@@ -188,6 +189,11 @@ type CallResult struct {
 type MessageResult struct {
 	OperationResult
 	MessageID string `json:"message_id"`
+}
+
+// MessageReceiptBackend only reads an existing operation; a missing receipt must never send.
+type MessageReceiptBackend interface {
+	MessageReceipt(context.Context, SendMessageRequest) (MessageResult, error)
 }
 
 type MaintenanceResult struct {
@@ -392,7 +398,7 @@ func (request EndCallRequest) Validate() error {
 	if err := validateOperationID(request.OperationID); err != nil {
 		return err
 	}
-	if !validIdentifier(request.CallID) || !validCode(request.ReasonCode) {
+	if !validIdentifier(request.CallID) || !validCode(request.ReasonCode) || request.ExpectedStartOperationID != "" && !validIdentifier(request.ExpectedStartOperationID) {
 		return errors.New("call_id or reason_code is invalid")
 	}
 	return nil

@@ -33,8 +33,57 @@ type IMSOutboundAgent struct {
 	RemoteTargetURI    string
 	MediaRelay         *RTPRelayConfig
 
-	mu      sync.Mutex
-	dialogs map[string]imsDialogState
+	mu         sync.Mutex
+	dialogs    map[string]imsDialogState
+	remoteEnds map[string]chan struct{}
+}
+
+// WatchRemoteEnd observes only an identity-checked carrier BYE, never media EOF.
+func (a *IMSOutboundAgent) WatchRemoteEnd(callID string) <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.remoteEnds == nil {
+		a.remoteEnds = make(map[string]chan struct{})
+	}
+	if a.remoteEnds[callID] == nil {
+		a.remoteEnds[callID] = make(chan struct{})
+	}
+	return a.remoteEnds[callID]
+}
+
+func (a *IMSOutboundAgent) HandleRemoteBye(request voiceclient.SIPIncomingRequest) (voiceclient.SIPIncomingResponse, bool) {
+	if !strings.EqualFold(strings.TrimSpace(request.Method), "BYE") {
+		return voiceclient.SIPIncomingResponse{}, false
+	}
+	callID := strings.TrimSpace(firstVoiceHeader(request.Headers, "Call-ID"))
+	a.mu.Lock()
+	state, found := a.dialogs[callID]
+	if !found {
+		a.mu.Unlock()
+		return voiceclient.SIPIncomingResponse{}, false
+	}
+	fields := strings.Fields(firstVoiceHeader(request.Headers, "CSeq"))
+	sequence := 0
+	if len(fields) == 2 {
+		sequence, _ = strconv.Atoi(fields[0])
+	}
+	valid := len(fields) == 2 && strings.EqualFold(fields[1], "BYE") && sequence > 0 && state.cfg.LocalTag != "" && state.cfg.RemoteTag != "" &&
+		sipHeaderTag(firstVoiceHeader(request.Headers, "To")) == state.cfg.LocalTag && sipHeaderTag(firstVoiceHeader(request.Headers, "From")) == state.cfg.RemoteTag
+	if !valid {
+		a.mu.Unlock()
+		return voiceclient.SIPIncomingResponse{StatusCode: 481, Reason: "Call/Transaction Does Not Exist"}, true
+	}
+	stopDialogSessionRefresh(&state)
+	delete(a.dialogs, callID)
+	if ended := a.remoteEnds[callID]; ended != nil {
+		close(ended)
+		delete(a.remoteEnds, callID)
+	}
+	a.mu.Unlock()
+	if state.relay != nil {
+		_ = state.relay.Close()
+	}
+	return voiceclient.SIPIncomingResponse{StatusCode: 200, Reason: "OK"}, true
 }
 
 type IMSRegistrationUpdate struct {
@@ -298,6 +347,11 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 	if err != nil {
 		return OutboundCallResult{Accepted: false, Reason: "build IMS ACK failed"}, err
 	}
+	// A peer can send BYE as soon as ACK is observable. Publish the final
+	// dialog tags first, and never reinsert this dialog after that point.
+	byeCfg := cfg
+	byeCfg.CSeq = nextCSeq
+	a.storeDialog(strings.TrimSpace(req.CallID), imsDialogState{cfg: byeCfg, relay: relay, localSDPBody: localSDPBody})
 	if err := a.Transport.WriteRequest(ctx, ack); err != nil {
 		return OutboundCallResult{Accepted: false, Reason: "IMS ACK failed"}, err
 	}
@@ -342,9 +396,6 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 		}
 		localSDP = parsed
 	}
-	byeCfg := cfg
-	byeCfg.CSeq = nextCSeq
-	a.storeDialog(strings.TrimSpace(req.CallID), imsDialogState{cfg: byeCfg, relay: relay, localSDPBody: localSDPBody})
 	a.scheduleDialogSessionRefresh(strings.TrimSpace(req.CallID))
 	closeRelayOnError = false
 	return OutboundCallResult{
