@@ -17,9 +17,16 @@ public class DeviceTest {
     @Test public void nativeSetupAndKeystoreRoundTrip()throws Exception{
         Context c=ApplicationProvider.getApplicationContext();ConfigStore store=new ConfigStore(c);store.clear();
         try(ActivityScenario<MainActivity> scene=ActivityScenario.launch(MainActivity.class)){
-            scene.onActivity(a->{assertNotNull(a.findViewById(R.id.connect_gateway));});
+            java.util.concurrent.atomic.AtomicBoolean ready=new java.util.concurrent.atomic.AtomicBoolean();
+            long deadline=android.os.SystemClock.elapsedRealtime()+5000;
+            while(!ready.get()&&android.os.SystemClock.elapsedRealtime()<deadline){
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                scene.onActivity(a->ready.set(a.findViewById(R.id.connect_gateway)!=null));
+                if(!ready.get())android.os.SystemClock.sleep(100);
+            }
+            assertTrue("Native setup must become actionable after asynchronous storage load",ready.get());
             store.save(Json.obj("server","https://gateway.test","token","opaque-test","csrf","csrf"));assertEquals("opaque-test",new ConfigStore(c).load().getString("token"));
-            String raw=c.getSharedPreferences("private_config",0).getString("sealed","");assertFalse(raw.contains("opaque-test"));assertFalse(raw.isEmpty());
+            byte[] raw=java.nio.file.Files.readAllBytes(new java.io.File(c.getNoBackupFilesDir(),"private-state-v1").toPath());assertTrue(raw.length>28);assertFalse(new String(raw,java.nio.charset.StandardCharsets.UTF_8).contains("opaque-test"));
         }finally{store.clear();}
     }
     @Test public void realAudioCallbacksGateCanaryAndExactResume()throws Exception{

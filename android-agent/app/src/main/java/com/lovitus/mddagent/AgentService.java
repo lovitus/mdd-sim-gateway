@@ -20,7 +20,8 @@ public final class AgentService extends Service {
     private final Handler main=new Handler(Looper.getMainLooper());
     private final CopyOnWriteArrayList<Runnable> listeners=new CopyOnWriteArrayList<>();
     private final LinkedHashSet<String> announced=new LinkedHashSet<>();
-    private final AtomicBoolean scanPending=new AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicReference<ReaderHub> scanOwner=new java.util.concurrent.atomic.AtomicReference<>();
+    private volatile long readerEpoch;
     private final String process=Json.id();
     private ConnectivityManager connectivity;private ConnectivityManager.NetworkCallback networkCallback;
     private ConfigStore store;private volatile JSONObject config;private volatile GatewayApi api;private volatile Link observer,agent;private volatile ReaderHub hub;
@@ -30,7 +31,7 @@ public final class AgentService extends Service {
     private final AtomicBoolean smsPending=new AtomicBoolean(),enrollmentPending=new AtomicBoolean();
     private final BroadcastReceiver usbReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){refreshReaders();}};
     public IBinder onBind(Intent intent){return new LocalBinder();}
-    @Override public void onCreate(){super.onCreate();store=new ConfigStore(this);config=store.load();
+    @Override public void onCreate(){super.onCreate();store=new ConfigStore(this);config=new JSONObject();
         NotificationManager n=getSystemService(NotificationManager.class);
         n.createNotificationChannel(new NotificationChannel("availability","Gateway availability",NotificationManager.IMPORTANCE_LOW));
         NotificationChannel calls=new NotificationChannel("incoming","Gateway calls and messages",NotificationManager.IMPORTANCE_HIGH);calls.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);n.createNotificationChannel(calls);
@@ -43,8 +44,8 @@ public final class AgentService extends Service {
     }
     @Override public int onStartCommand(Intent intent,int flags,int id){
         if(intent!=null&&PAUSE.equals(intent.getAction())){pause();return START_NOT_STICKY;}
-        if(intent!=null&&START.equals(intent.getAction())||intent==null&&store.load().optBoolean("available")){
-            try{if(call!=null)return START_STICKY;config=store.load();available=true;sharing=config.optBoolean("share");promote(false);configure();}catch(Exception failure){connection="Unable to start availability";available=false;stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();}
+        if(intent!=null&&START.equals(intent.getAction())||intent==null&&config.optBoolean("available")){
+            try{if(call!=null)return START_STICKY;available=true;promote(false);io.execute(()->{try{JSONObject loaded=store.load();main.post(()->{if(destroyed||!available)return;try{config=loaded;sharing=config.optBoolean("share");configure();}catch(Exception e){connection="Saved settings unavailable; data preserved";changed();}});}catch(Exception e){connection="Saved settings unavailable; data preserved";changed();}});}catch(Exception failure){connection="Unable to start availability";available=false;stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();}
         }
         return available?START_STICKY:START_NOT_STICKY;
     }
@@ -52,6 +53,8 @@ public final class AgentService extends Service {
         closeLinks();snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());if(api!=null){api.close();api=null;}
         if(config.optString("token").isEmpty()){connection="Sign in required";changed();return;}
         api=new GatewayApi(new Endpoint(config.getString("server"),config.optString("pin")),config.getString("token"),config.getString("csrf"));
+        JSONObject pending=config.optJSONObject("pending_call");
+        if(pending!=null){call=new RemoteCall(this,api,pending,io);call.reconcile();}
         observer=new Link(api,loop,"/v1/mobile/ws","","",process,new Link.Events(){
             public void state(String text,boolean yes){connection=text;online=yes;changed();}
             public void message(JSONObject message){if(message.optString("type").equals("mobile.snapshot")){snapshot=Json.object(message,"data");notifyEvents();changed();}}
@@ -63,30 +66,34 @@ public final class AgentService extends Service {
     private void startReaderLink(){
         if(agent!=null){agent.close();agent=null;}
         if(hub==null||hub.closed)hub=new ReaderHub(this);
+        lastReaders=recoveringReaders();lastReaderAt=0;
+        final long epoch=++readerEpoch;
         agent=new Link(api,loop,"/v1/agent/ws",config.optString("agent_id"),config.optString("agent_token"),process,new Link.Events(){
-            public void state(String text,boolean connected){readerStatus=text;changed();if(connected){Link link=agent;if(link!=null)link.health(lastReaders);refreshReaders();}}
-            public void message(JSONObject message){if(message.optString("kind").equals("aka_request")){
+            public void state(String text,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerStatus=text;changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}}
+            public void message(JSONObject message){if(epoch!=readerEpoch||!sharing)return;if(message.optString("kind").equals("aka_request")){
                 final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;final long generation=owner.generation();
                 readerIO.execute(()->{JSONObject answer=device.authenticate(Json.object(message,"aka_request"));owner.respond(generation,message.optString("request_id"),answer);});
             }}
         });agent.connect();refreshReaders();
     }
-    void refreshReaders(){if(destroyed||!available||!sharing||hub==null||!scanPending.compareAndSet(false,true))return;ReaderHub owner=hub;
-        readerIO.execute(()->{try{owner.scan();if(owner==hub&&available&&sharing){Link link=agent;if(link!=null)link.health(owner.topology());lastReaders=owner.topology();lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();}}finally{scanPending.set(false);}});
+    void refreshReaders(){if(destroyed||!available||!sharing||hub==null||!scanOwner.compareAndSet(null,hub))return;ReaderHub owner=hub;
+        readerIO.execute(()->{try{owner.scan();if(owner==hub&&available&&sharing){JSONObject fresh=owner.topology();Link link=agent;if(link!=null)link.health(fresh);lastReaders=fresh;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();}}finally{scanOwner.compareAndSet(owner,null);}});
     }
     JSONObject readers(){ReaderHub h=hub;return h==null?Json.obj("readers",new JSONArray()):lastReaders;}
     volatile long lastReaderAt;
-    volatile JSONObject lastReaders=Json.obj("reader_condition","ready","readers",new JSONArray(),"modem_condition","disabled");
+    private static JSONObject recoveringReaders(){return Json.obj("reader_condition","recovering","reader_detail","Fresh reader observation required","readers",new JSONArray(),"modem_condition","disabled");}
+    volatile JSONObject lastReaders=recoveringReaders();
     void shareReaders(boolean enabled){if(call!=null){notice="Finish the call before changing reader sharing";changed();return;}if(!available||api==null){notice="Connect first";changed();return;}
-        if(!enabled){sharing=false;save("share",false);if(agent!=null)agent.close();agent=null;ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);readerStatus="Reader sharing off";promote(false);changed();return;}
+        if(!enabled){readerEpoch++;scanOwner.set(null);sharing=false;lastReaders=recoveringReaders();lastReaderAt=0;save("share",false);if(agent!=null)agent.close();agent=null;ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);readerStatus="Reader sharing off";promote(false);changed();return;}
         if(!enrollmentPending.compareAndSet(false,true)){notice="Reader enrollment already in progress";changed();return;}
         notice="Enrolling reader access…";changed();final GatewayApi owner=api;
         io.execute(()->{try{String token=config.optString("agent_token"),id=config.optString("agent_id");if(id.isEmpty())id="android-"+Json.id();if(token.isEmpty()){JSONObject response=owner.json("POST","/api/auth/agent-credentials",Json.obj("action","issue","agent_id",id));token=response.getString("agent_token");}
-            final String credential=token,identity=id;main.post(()->{try{if(!available||api!=owner)return;save("agent_id",identity);save("agent_token",credential);save("share",true);sharing=true;promote(false);startReaderLink();notice="Reader sharing enabled. Grant USB access if prompted.";changed();}finally{enrollmentPending.set(false);}});
+            final String credential=token,identity=id;JSONObject enrolled=store.update(current->{current.put("agent_id",identity);current.put("agent_token",credential);current.put("share",true);});
+            main.post(()->{try{if(!available||api!=owner)return;config=enrolled;sharing=true;promote(false);startReaderLink();notice="Reader sharing enabled. Grant USB access if prompted.";changed();}finally{enrollmentPending.set(false);}});
         }catch(Exception e){notice="Reader enrollment failed: "+RemoteCall.safe(e);enrollmentPending.set(false);changed();}});
     }
-    synchronized void save(String key,Object value){try{config.put(key,value);store.save(config);}catch(Exception failure){notice="Could not save private configuration";}}
-    JSONObject config(){return store.load();}
+    void save(String key,Object value){io.execute(()->{try{config=store.update(current->current.put(key,value));}catch(Exception failure){notice="Could not save private configuration; data preserved";}changed();});}
+    JSONObject config(){try{return new JSONObject(config.toString());}catch(Exception e){return new JSONObject();}}
     boolean online(){return available&&online;}
     boolean available(){return available;}
     boolean sharing(){return sharing;}
@@ -111,13 +118,13 @@ public final class AgentService extends Service {
         owner.json("POST","/v1/lines/"+CallPlan.encode(line.getString("id"))+"/"+mode+"/calls/"+(mode.equals("cellular")?"reject":"incoming/reject"),b);notice="Declined";
     }catch(Exception e){notice="Decline not confirmed; refresh call state";}changed();});}
     void sendSMS(JSONObject line,String mode,String to,String body)throws Exception{
-        if(!online()||api==null)throw new IllegalStateException("Gateway is offline");if(!smsPending.compareAndSet(false,true))throw new IllegalStateException("Message submission already in progress");
+        if(!online()||api==null)throw new IllegalStateException("Gateway is offline");validateLine(line);if(!smsPending.compareAndSet(false,true))throw new IllegalStateException("Message submission already in progress");
         final String id=Json.id();final JSONObject payload;try{payload=CallPlan.sms(line.getString("card_id"),to,body,id);}catch(Exception e){smsPending.set(false);throw e;}
         final String path="/v1/lines/"+CallPlan.encode(line.getString("id"))+"/"+mode+(mode.equals("cellular")?"/messages":"/messages/send");final GatewayApi owner=api;
         // Durable uncertainty marker before side effects, never an automatic resend queue.
-        synchronized(this){config.put("last_sms",Json.obj("operation_id",id,"line_id",line.getString("id"),"transport",mode,"state","unknown"));try{store.save(config);}catch(Exception e){smsPending.set(false);throw e;}}
-        notice="Submitting once · "+id;changed();io.execute(()->{try{JSONObject result=owner.json("POST",path,payload);save("last_sms",Json.obj("operation_id",id,"state",result.optString("code","submitted")));notice="Submission returned: "+result.optString("code","submitted")+". Check delivery history.";}catch(Exception e){notice=getString(R.string.unknown_result)+" · "+id;}finally{smsPending.set(false);changed();}});
+        notice="Submitting once · "+id;changed();io.execute(()->{try{store.update(current->current.put("last_sms",Json.obj("operation_id",id,"line_id",line.getString("id"),"transport",mode,"state","unknown")));JSONObject result=owner.json("POST",path,payload);save("last_sms",Json.obj("operation_id",id,"state",result.optString("code","submitted")));notice="Submission returned: "+result.optString("code","submitted")+". Check delivery history.";}catch(Exception e){notice=getString(R.string.unknown_result)+" · "+id;}finally{smsPending.set(false);changed();}});
     }
+    private void validateLine(JSONObject expected){JSONArray live=Json.array(snapshot,"lines");for(int i=0;i<live.length();i++){JSONObject row=live.optJSONObject(i);if(row!=null&&row.optBoolean("enabled")&&row.optString("id").equals(expected.optString("id"))&&row.optString("card_id").equals(expected.optString("card_id")))return;}throw new IllegalStateException("线路身份已变化，请重新选择");}
     private void notifyEvents(){JSONArray lines=Json.array(snapshot,"lines");for(int i=0;i<lines.length();i++){JSONObject in=Json.object(lines.optJSONObject(i),"incoming");announce("call:"+in.optString("call_id"),!in.optString("call_id").isEmpty(),true);}
         JSONArray cell=Json.array(snapshot,"cellular_calls");for(int i=0;i<cell.length();i++){JSONObject c=cell.optJSONObject(i);if(c!=null)announce("cell:"+c.optString("incoming_event_id"),c.optBoolean("actionable"),true);}
         JSONArray messages=Json.array(snapshot,"messages");boolean first=!seenMessageSnapshot;for(int i=messages.length()-1;i>=0;i--){JSONObject m=messages.optJSONObject(i);if(m==null)continue;String id=m.optString("event_id",m.optString("id"));if(id.isEmpty())continue;if(first)announced.add("sms:"+id);else announce("sms:"+id,m.optString("kind").equals("received"),false);}seenMessageSnapshot=true;
@@ -127,7 +134,7 @@ public final class AgentService extends Service {
     private void announce(String id,boolean actionable,boolean isCall){if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED)return;if(!actionable||!announced.add(id))return;Notification n=new Notification.Builder(this,"incoming").setSmallIcon(R.drawable.ic_agent).setContentTitle(getString(isCall?R.string.incoming_call:R.string.incoming_sms)).setContentText(getString(R.string.tap_open)).setContentIntent(openIntent(2)).setAutoCancel(true).setTimeoutAfter(isCall?60000:600000).setCategory(isCall?Notification.CATEGORY_CALL:Notification.CATEGORY_MESSAGE).setVisibility(Notification.VISIBILITY_PRIVATE).build();getSystemService(NotificationManager.class).notify(100+(id.hashCode()&0xffff),n);}
     private void networkChanged(){if(!available)return;Link o=observer,a=agent;if(o!=null)o.networkChanged();if(a!=null)a.networkChanged();RemoteCall c=call;if(c!=null&&c.audio!=null)c.audio.networkChanged();}
     private void closeLinks(){if(observer!=null)observer.close();if(agent!=null)agent.close();observer=agent=null;online=false;}
-    void pause(){if(smsPending.get()){notice="Wait for the current message result before pausing";changed();return;}if(call!=null){notice="Hang up or resolve the current call before pausing";changed();return;}available=false;save("available",false);closeLinks();ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);if(api!=null){api.close();api=null;}connection="Paused";stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();}
-    void logout(){if(smsPending.get()){notice="Wait for the current message result before signing out";changed();return;}if(call!=null){notice="Resolve the current call before signing out";changed();return;}pause();store.clear();config=new JSONObject();snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());announced.clear();seenMessageSnapshot=false;notice="Signed out. Reader credential can be revoked in gateway settings.";getSystemService(NotificationManager.class).cancelAll();changed();}
+    void pause(){if(smsPending.get()){notice="Wait for the current message result before pausing";changed();return;}if(call!=null){notice="Hang up or resolve the current call before pausing";changed();return;}available=false;readerEpoch++;scanOwner.set(null);lastReaders=recoveringReaders();lastReaderAt=0;save("available",false);closeLinks();ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);if(api!=null){api.close();api=null;}connection="Paused";stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();}
+    void logout(){if(smsPending.get()){notice="Wait for the current message result before signing out";changed();return;}if(call!=null){notice="Resolve the current call before signing out";changed();return;}pause();io.execute(()->{try{store.clear();config=new JSONObject();}catch(Exception e){notice="无法退出：恢复记录已保留";}changed();});snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());announced.clear();seenMessageSnapshot=false;notice="Signed out. Reader credential can be revoked in gateway settings.";getSystemService(NotificationManager.class).cancelAll();changed();}
     @Override public void onDestroy(){destroyed=true;closeLinks();if(call!=null&&call.audio!=null)call.audio.close();if(call!=null)releaseWake(call);if(api!=null)api.close();try{connectivity.unregisterNetworkCallback(networkCallback);unregisterReceiver(usbReceiver);}catch(Exception ignored){}ReaderHub old=hub;if(old!=null)readerIO.execute(old::close);loop.shutdownNow();io.shutdownNow();readerIO.shutdown();super.onDestroy();}
 }
