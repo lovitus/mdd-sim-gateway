@@ -21,7 +21,12 @@ public final class AgentService extends Service {
     private final Handler main=new Handler(Looper.getMainLooper());
     private final CopyOnWriteArrayList<Runnable> listeners=new CopyOnWriteArrayList<>();
     private final LinkedHashSet<String> announced=new LinkedHashSet<>();
-    private final java.util.concurrent.atomic.AtomicReference<ReaderHub> scanOwner=new java.util.concurrent.atomic.AtomicReference<>();
+    private final java.util.concurrent.atomic.AtomicReference<ReaderScan> scanOwner=new java.util.concurrent.atomic.AtomicReference<>();
+    static final class ReaderScan {
+        final ReaderHub owner; final long epoch;
+        ReaderScan(ReaderHub owner,long epoch){this.owner=owner;this.epoch=epoch;}
+    }
+    private volatile ReaderObservation readerObservation;
     private volatile long readerEpoch;
     private final String process=Json.id();
     private ConnectivityManager connectivity;private ConnectivityManager.NetworkCallback networkCallback;
@@ -39,6 +44,7 @@ public final class AgentService extends Service {
     private volatile long sharingIntentEpoch;
     private volatile boolean intentSaving;
     private volatile boolean configurationLoaded;
+    private boolean resettingStorage;
     private final BroadcastReceiver usbReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){refreshReaders();changed();}};
     public IBinder onBind(Intent intent){return new LocalBinder();}
     @Override public void onCreate(){super.onCreate();store=new ConfigStore(this);config=new JSONObject();
@@ -53,6 +59,7 @@ public final class AgentService extends Service {
         if(Build.VERSION.SDK_INT>=33)registerReceiver(usbReceiver,f,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(usbReceiver,f);
     }
     @Override public int onStartCommand(Intent intent,int flags,int id){
+        if(resettingStorage)return START_NOT_STICKY;
         if(intent!=null&&PAUSE.equals(intent.getAction())){pause();return START_NOT_STICKY;}
         if(intent==null||START.equals(intent.getAction())||RESTORE.equals(intent.getAction())){
             try{
@@ -75,7 +82,7 @@ public final class AgentService extends Service {
         healthTask=loop.scheduleWithFixedDelay(()->{
             if(!available||destroyed)return;
             if(observer!=null)observer.checkFreshness();
-            if(sharing){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}
+            main.post(()->{if(!destroyed&&available&&sharing){sendReaderHealth();refreshReaders();}});
         },1,10,TimeUnit.SECONDS);
     }
     void prepareLogin(){
@@ -106,10 +113,10 @@ public final class AgentService extends Service {
     private void startReaderLink(){
         if(agent!=null){agent.close();agent=null;}
         if(hub==null||hub.closed)hub=new ReaderHub(this);
-        lastReaders=recoveringReaders();lastReaderAt=0;
+        readerObservation=null;
         final long epoch=++readerEpoch;
         agent=new Link(api,loop,"/v1/agent/ws",config.optString("agent_id"),config.optString("agent_token"),process,new Link.Events(){
-            public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerStatus=UiText.of(label);changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}}
+            public void state(int label,boolean connected){main.post(()->{if(destroyed||epoch!=readerEpoch||!sharing)return;readerStatus=UiText.of(label);changed();if(connected){sendReaderHealth();refreshReaders();}});}
             public void message(JSONObject message){if(epoch!=readerEpoch||!sharing)return;if(message.optString("kind").equals("aka_request")){
                 final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;final long generation=owner.generation();
                 readerIO.execute(()->{JSONObject answer=device.authenticate(Json.object(message,"aka_request"));owner.respond(generation,message.optString("request_id"),answer);});
@@ -118,16 +125,31 @@ public final class AgentService extends Service {
     }
     void refreshReaders(){refreshReaders(false);}
     void refreshReaderMetadata(){refreshReaders(true);}
-    private void refreshReaders(boolean explicitMetadata){if(destroyed||!available||!sharing||hub==null||!scanOwner.compareAndSet(null,hub))return;ReaderHub owner=hub;
-        readerIO.execute(()->{try{owner.scan(explicitMetadata);if(owner==hub&&available&&sharing){JSONObject fresh=owner.topology();Link link=agent;if(link!=null)link.health(fresh);lastReaders=fresh;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();}}finally{scanOwner.compareAndSet(owner,null);}});
+    private void refreshReaders(boolean explicitMetadata){
+        if(Looper.myLooper()!=Looper.getMainLooper()){main.post(()->refreshReaders(explicitMetadata));return;}
+        if(destroyed||!available||!sharing||hub==null)return;
+        ReaderScan scan=new ReaderScan(hub,readerEpoch);
+        if(!scanOwner.compareAndSet(null,scan))return;
+        try{readerIO.execute(()->{
+            ReaderObservation observed=null;UiText diagnostic=UiText.of(R.string.reader_usb_unavailable);
+            try{scan.owner.scan(explicitMetadata);observed=new ReaderObservation(scan.owner,scan.epoch,SystemClock.elapsedRealtime(),scan.owner.topology());diagnostic=scan.owner.diagnostic;}
+            finally{final ReaderObservation result=observed;final UiText detail=diagnostic;main.post(()->completeReaderScan(scan,result,detail));}
+        });}catch(RejectedExecutionException stopped){scanOwner.compareAndSet(scan,null);}
     }
-    JSONObject readers(){ReaderHub h=hub;return h==null?Json.obj("readers",new JSONArray()):lastReaders;}
-    volatile long lastReaderAt;
-    private static JSONObject recoveringReaders(){return Json.obj("reader_condition","recovering","reader_detail","Fresh reader observation required","readers",new JSONArray(),"modem_condition","disabled");}
-    volatile JSONObject lastReaders=recoveringReaders();
+    // The same main-thread owner orders sharing changes and the complete
+    // validation/publication transition. No hardware or disk I/O holds that owner.
+    void completeReaderScan(ReaderScan scan,ReaderObservation result,UiText detail){
+        if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("Reader publication requires lifecycle owner");
+        try{
+            if(destroyed||!available||!sharing||hub!=scan.owner||readerEpoch!=scan.epoch||scanOwner.get()!=scan)return;
+            readerObservation=result;readerStatus=detail;sendReaderHealth();changed();
+        }finally{scanOwner.compareAndSet(scan,null);}
+    }
+    private void sendReaderHealth(){Link link=agent;if(link!=null)link.health(readers());}
+    JSONObject readers(){ReaderObservation seen=readerObservation;return seen==null?ReaderObservation.recovering():seen.snapshot(hub,readerEpoch,SystemClock.elapsedRealtime());}
     void shareReaders(boolean enabled){if(call!=null){notice=UiText.of(R.string.sharing_call_busy);changed();return;}
         if(!enabled){
-            final long expected=++sharingIntentEpoch;readerEpoch++;scanOwner.set(null);sharing=false;lastReaders=recoveringReaders();lastReaderAt=0;
+            final long expected=++sharingIntentEpoch;readerEpoch++;scanOwner.set(null);sharing=false;readerObservation=null;
             if(agent!=null)agent.close();agent=null;ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
             readerStatus=UiText.of(R.string.sharing_off);notice=UiText.EMPTY;if(available)promote(false);changed();
             ConfigStore.intent(()->{try{JSONObject saved=store.update(current->current.put("share",false));main.post(()->{if(destroyed||expected!=sharingIntentEpoch)return;config=saved;changed();});}
@@ -293,7 +315,7 @@ public final class AgentService extends Service {
             refreshPrivateState(owner);
             if(error!=null){notice=UiText.of(R.string.message_sync_failed);changed();Throwable cause=error instanceof ExecutionException&&error.getCause()!=null?error.getCause():error;
                 boolean rejected=cause instanceof GatewayApi.Failure&&((GatewayApi.Failure)cause).status<500&&((GatewayApi.Failure)cause).status!=408&&((GatewayApi.Failure)cause).status!=429;
-                messageSyncTerminal=rejected||cause instanceof javax.net.ssl.SSLException||!(cause instanceof java.io.IOException||cause instanceof TimeoutException);
+                messageSyncTerminal=rejected||Link.identityFailure(cause)||!(cause instanceof java.io.IOException||cause instanceof TimeoutException);
                 if(!messageSyncTerminal&&++messageSyncFailures<=6)messageSyncTimer=loop.schedule(()->main.post(this::startMessageSync),messageRetry.next(),TimeUnit.MILLISECONDS);else messageSyncStopped=true;
             }else{messageSyncFailures=0;messageRetry.healthy();if(messageSyncRequested)startMessageSync();else if(next)messageSyncTimer=loop.schedule(()->main.post(this::startMessageSync),30,TimeUnit.SECONDS);}
         });}});
@@ -335,7 +357,7 @@ public final class AgentService extends Service {
         available=false;configurationEpoch++;configurationLoaded=true;
         if(healthTask!=null)healthTask.cancel(false);
         if(messageSyncTimer!=null){messageSyncTimer.cancel(false);messageSyncTimer=null;}messageSyncRequested=false;
-        readerEpoch++;scanOwner.set(null);lastReaders=recoveringReaders();lastReaderAt=0;closeLinks();
+        readerEpoch++;scanOwner.set(null);readerObservation=null;closeLinks();
         ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
         if(api!=null){api.close();api=null;}
         readerStatus=UiText.of(sharing?R.string.sharing_paused:R.string.sharing_off);notice=UiText.EMPTY;
@@ -351,6 +373,19 @@ public final class AgentService extends Service {
         stopConnections();call=null;sharing=false;sharingIntentEpoch++;final long expected=configurationEpoch;intentSaving=true;
         ConfigStore.intent(()->{try{JSONObject saved=store.signOut();main.post(()->{if(destroyed||configurationEpoch!=expected)return;config=saved;intentSaving=false;snapshot=Json.obj("lines",new JSONArray(),"incoming_lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());synchronized(announced){announced.clear();}connection=UiText.of(R.string.paused);notice=UiText.of(R.string.signed_out_preserved);getSystemService(NotificationManager.class).cancelAll();stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();complete.run();});}
             catch(Exception e){main.post(()->{if(destroyed||configurationEpoch!=expected)return;intentSaving=false;notice=UiText.of(R.string.signout_failed);changed();});}});
+    }
+    void resetPrivateState(java.util.function.Consumer<JSONObject> success,java.util.function.Consumer<String> failure){
+        if(resettingStorage||intentSaving()||accountBusy()||call!=null){failure.accept(getString(R.string.account_busy));return;}
+        stopConnections();sharing=false;sharingIntentEpoch++;resettingStorage=true;intentSaving=true;
+        final long expected=configurationEpoch;connection=UiText.of(R.string.storage_resetting);changed();
+        ConfigStore.intent(()->{try{
+            JSONObject saved=store.resetAfterConsent();
+            main.post(()->{if(destroyed||configurationEpoch!=expected)return;store=new ConfigStore(this);config=saved;call=null;resettingStorage=false;intentSaving=false;
+                snapshot=Json.obj("lines",new JSONArray(),"incoming_lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());
+                synchronized(announced){announced.clear();}getSystemService(NotificationManager.class).cancelAll();
+                connection=UiText.of(R.string.paused);notice=UiText.of(R.string.storage_reset_completed);stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();success.accept(saved);
+            });
+        }catch(Exception error){main.post(()->{if(destroyed||configurationEpoch!=expected)return;resettingStorage=false;intentSaving=false;notice=UiText.of(R.string.storage_reset_failed);changed();failure.accept(getString(R.string.storage_reset_failed));});}});
     }
     @Override public void onDestroy(){destroyed=true;invalidateCall();closeLinks();if(call!=null)releaseWake(call);if(api!=null)api.close();try{connectivity.unregisterNetworkCallback(networkCallback);unregisterReceiver(usbReceiver);}catch(Exception ignored){}ReaderHub old=hub;if(old!=null)readerIO.execute(old::close);loop.shutdownNow();io.shutdownNow();controlIO.shutdownNow();readerIO.shutdown();super.onDestroy();}
 }

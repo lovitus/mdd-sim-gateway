@@ -24,6 +24,16 @@ import static org.junit.Assert.*;
 @RunWith(AndroidJUnit4.class)
 public class CallFlowTest {
     private static final String EVIDENCE="/data/local/tmp/mdd-native-ui-call-"+java.util.UUID.randomUUID();
+    @Test public void exactRejectedOutcomeReturnsToDialWithoutAnotherStartOrEnd()throws Exception{
+        run("vowifi",false,(fixture,scene)->{
+            fixture.rejectStart=true;click(R.id.tab_calls);await(scene,fixture,a->a.findViewById(R.id.call_dial)!=null&&a.findViewById(R.id.call_dial).isEnabled());
+            scene.onActivity(a->((EditText)a.findViewById(R.id.dial_number)).setText("+15550100999"));
+            dialogAfter(()->click(R.id.call_dial));click("android:id/button1");assertTrue(fixture.started.await(15,TimeUnit.SECONDS));
+            await(scene,fixture,a->a.findViewById(R.id.call_dial)!=null&&a.findViewById(R.id.call_dial).isEnabled()&&!fixture.store.load().has("pending_call"));
+            scene.onActivity(a->assertEquals(R.string.call_rejected_confirmed,service(a).notice.resource));
+            assertEquals(1,fixture.starts.get());assertEquals(0,fixture.ends.get());assertEquals(1,fixture.deletes.get());assertTrue(fixture.statuses.get()>0);
+        });
+    }
     @Test public void outgoingControlsAndExactHangupWorkOnBothTransports()throws Exception{
         for(String mode:new String[]{"vowifi","cellular"})run(mode,false,(fixture,scene)->{
             outgoing(fixture,scene,true);await(scene,fixture,a->a.findViewById(R.id.call_dtmf)!=null&&a.findViewById(R.id.call_dtmf).isEnabled());

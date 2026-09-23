@@ -36,7 +36,7 @@ type CallReceipt struct {
 }
 
 func (r CallReceipt) Validate() error {
-	if r.CallReceiptRequest.Validate() != nil || !validIdentifier(r.LineID) || !validIdentifier(r.ProviderID) || !validIdentifier(r.ProcessGeneration) || r.ConfirmedAt.IsZero() || r.ConfirmedAt.After(time.Now().Add(time.Minute)) || (r.Source != "carrier_bye" && r.Source != "confirmed_end") {
+	if r.CallReceiptRequest.Validate() != nil || !validIdentifier(r.LineID) || !validIdentifier(r.ProviderID) || !validIdentifier(r.ProcessGeneration) || r.ConfirmedAt.IsZero() || r.ConfirmedAt.After(time.Now().Add(time.Minute)) || (r.Source != "carrier_bye" && r.Source != "confirmed_end" && r.Source != "carrier_rejected") {
 		return errors.New("invalid call terminal receipt")
 	}
 	return nil

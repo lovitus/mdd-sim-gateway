@@ -19,6 +19,7 @@ final class RemoteCall {
     volatile NativeAudio audio;
     volatile UiText state=UiText.of(R.string.call_preparing);
     volatile String session="",phase="PREPARING";
+    private volatile String terminalOutcome="";
     private volatile String releasedSession="";
     volatile boolean submitted,ended;
     private boolean retired,retiring;
@@ -29,7 +30,7 @@ final class RemoteCall {
     }
     RemoteCall(AgentService s,GatewayApi a,JSONObject saved,ExecutorService executor)throws Exception{
         service=s;api=a;plan=new CallPlan(saved);io=executor;store=new ConfigStore(s);binding=saved.getString("binding");origin=saved.optString("gateway_origin");pin=saved.optString("gateway_pin");
-        phase=saved.getString("phase");session=saved.optString("session_id");
+        phase=saved.getString("phase");session=saved.optString("session_id");terminalOutcome=saved.optString("terminal_outcome");
         submitted=!phase.equals("PREPARING");state=UiText.of(R.string.call_pending);
     }
     boolean ownsRecord(){return !invalidated&&service.ownsCall(this);}
@@ -47,7 +48,7 @@ final class RemoteCall {
             if(create&&old!=null||!create&&(old==null||!plan.operation.equals(old.optString("operation_id"))))
                 throw new IllegalStateException("Call record ownership changed");
             if(old!=null&&("TERMINAL".equals(old.optString("phase"))&&!next.equals("TERMINAL")||"ENDING".equals(old.optString("phase"))&&(next.equals("PREPARING")||next.equals("START_MAY_HAVE_RUN"))))throw new IllegalStateException("Stale call transition");
-            JSONObject row=plan.record();row.put("binding",binding).put("phase",next).put("session_id",session).put("gateway_origin",origin).put("gateway_pin",pin);
+            JSONObject row=plan.record();row.put("binding",binding).put("phase",next).put("session_id",session).put("gateway_origin",origin).put("gateway_pin",pin).put("terminal_outcome",terminalOutcome);
             row.put("revision",old==null?1:old.optLong("revision")+1);config.put("pending_call",row);
         });
     }
@@ -80,7 +81,8 @@ final class RemoteCall {
         retire(UiText.of(R.string.call_not_started));
     }
     private boolean authorized(){return binding.equals(CallRecovery.bind(api))||!plan.recoveryKey.isEmpty()&&origin.equals(api.endpoint.origin)&&pin.equals(api.endpoint.fingerprint);}
-    private boolean recoveryTerminal(JSONObject result){return result.optBoolean("terminal_confirmed")&&plan.id.equals(result.optString("call_id"))&&plan.operation.equals(result.optString("operation_id"))&&!result.optString("session_id").isEmpty()&&(session.isEmpty()||session.equals(result.optString("session_id")));}
+    private boolean recoveryTerminal(JSONObject result){String outcome=result.optString("outcome");if(!outcome.isEmpty()&&!outcome.equals("ended")&&!outcome.equals("rejected"))return false;return result.optBoolean("terminal_confirmed")&&plan.id.equals(result.optString("call_id"))&&plan.operation.equals(result.optString("operation_id"))&&!result.optString("session_id").isEmpty()&&(session.isEmpty()||session.equals(result.optString("session_id")));}
+    private UiText terminalMessage(int fallback){return UiText.of(terminalOutcome.equals("rejected")?R.string.call_rejected_confirmed:fallback);}
     void reconcile(){reconcile(true);}
     private void reconcile(boolean reset){if(!ownsRecord()||!checking.compareAndSet(false,true))return;
         synchronized(this){if(retired){checking.set(false);return;}if(reset){reconcileAttempts=0;if(reconcileTimer!=null)reconcileTimer.cancel(false);}reconcileAttempts++;}
@@ -88,11 +90,11 @@ final class RemoteCall {
         if(!ownsRecord()){retry=false;return;}
         if(!authorized()){retry=false;state=UiText.of(R.string.call_owner_changed);return;}
         if(phase.equals("PREPARING")&&!submitted){finishPreparation();return;}
-        if(phase.equals("TERMINAL")){retire(UiText.of(R.string.call_ended));return;}
+        if(phase.equals("TERMINAL")){retire(terminalMessage(R.string.call_ended));return;}
         if(!plan.recoveryKey.isEmpty()){
             JSONObject result=api.json("POST",plan.prefix()+"recovery",plan.recovery("status"));
             if(!ownsRecord()){retry=false;return;}
-            if(recoveryTerminal(result)){session=result.getString("session_id");phase="TERMINAL";retire(UiText.of(R.string.call_original_ended));}
+            if(recoveryTerminal(result)){session=result.getString("session_id");terminalOutcome=result.optString("outcome");phase="TERMINAL";retire(terminalMessage(R.string.call_original_ended));}
             else{state=UiText.of(R.string.call_remote_state,UiLabels.unconfirmedCallState(result.optString("state")));String reason=result.optString("reason");if(!reason.isEmpty())state=UiText.of(R.string.call_reason,state,reason);}
             return;
         }
@@ -123,7 +125,7 @@ final class RemoteCall {
             if(!plan.recoveryKey.isEmpty()){
                 JSONObject result=api.json("POST",plan.prefix()+"recovery",plan.recovery("end"));
                 if(!service.ownsCall(this))return;
-                if(recoveryTerminal(result)){session=result.getString("session_id");phase="TERMINAL";retire(UiText.of(R.string.call_remote_ended));}
+                if(recoveryTerminal(result)){session=result.getString("session_id");terminalOutcome=result.optString("outcome");phase="TERMINAL";retire(terminalMessage(R.string.call_remote_ended));}
                 else state=UiText.of(R.string.call_end_unconfirmed);
                 return;
             }

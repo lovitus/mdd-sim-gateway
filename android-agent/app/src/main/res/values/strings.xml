@@ -295,4 +295,11 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="layer_media">Call audio</string>
 <string name="layer_call">Call admission</string>
 <string name="layer_gateway">Gateway dependency</string>
+    <string name="call_rejected_confirmed">The original call was rejected; no call was established.</string>
+    <string name="storage_reset">Reset local setup</string>
+    <string name="storage_reset_warning">Reset removes local login and recovery controls. It does NOT end any server call or prove that a message was not sent. Reconcile outstanding operations in the original gateway first. Readable unresolved operations block reset. Unreadable encrypted materials and their keys will be retained privately; recovery is not guaranteed.</string>
+    <string name="storage_reset_type">To confirm local reset, type RESET exactly. This is not remote call recovery.</string>
+    <string name="storage_reset_failed">Reset was not completed. Original encrypted materials are retained. Resolve known calls/messages first, or retry after storage is available.</string>
+    <string name="storage_reset_completed">Local setup reset. Original encrypted recovery materials retained privately; remote operations were not changed.</string>
+    <string name="storage_resetting">Preserving recovery materials and resetting local setup…</string>
 </resources>

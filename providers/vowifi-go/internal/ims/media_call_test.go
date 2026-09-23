@@ -111,11 +111,35 @@ func TestMediaCallEndsAcceptedDialogWhenAnswerCannotBeUsed(t *testing.T) {
 		LocalRTP: "10.0.0.1:0", LocalRTCP: "10.0.0.1:0",
 		Codec: media.CodecPCMU, BufferMS: 500,
 	}, voicehost.OutboundCallRequest{DeviceID: "device-media", CallID: "bad-media", Callee: "+100"})
-	if call != nil || !result.Accepted || !errors.Is(err, ErrMediaNegotiation) || !strings.Contains(err.Error(), "ptime") {
+	if call == nil || !result.Accepted || !errors.Is(err, ErrMediaNegotiation) || !strings.Contains(err.Error(), "ptime") {
 		t.Fatalf("StartMediaCall() = %v, %+v, %v", call, result, err)
+	}
+	// Confirmed cleanup remains available to the Backend without another BYE.
+	ended, endErr := call.End(ctx)
+	if endErr != nil || !ended.Accepted {
+		t.Fatal(ended, endErr)
 	}
 	finishVoiceFixture(t, registration, requests, serverDone,
 		[]string{"REGISTER", "INVITE", "ACK", "BYE", "REGISTER"})
+}
+
+func TestReviewFixMediaNegotiationAndRejectedBYERetainTheDialog(t *testing.T) {
+	clientStack, serverStack := openStackPair(t)
+	agent, registration, requests, serverDone := registeredVoiceFixture(t, clientStack, serverStack, []int{503, 200}, "a=ptime:30\r\n")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	call, result, err := StartMediaCall(ctx, agent, clientStack, MediaCallConfig{LocalRTP: "10.0.0.1:0", LocalRTCP: "10.0.0.1:0", Codec: media.CodecPCMU, BufferMS: 500}, voicehost.OutboundCallRequest{DeviceID: "device-media", CallID: "failed-media-cleanup", Callee: "+100"})
+	if call == nil || !result.Accepted || !errors.Is(err, ErrMediaNegotiation) {
+		t.Fatal(call, result, err)
+	}
+	if _, err = call.WritePCM(make([]byte, media.PCMFrameBytes), time.Now()); !errors.Is(err, media.ErrClosed) {
+		t.Fatal("failed media still writable", err)
+	}
+	ended, err := call.End(ctx)
+	if err != nil || !ended.Accepted {
+		t.Fatal(ended, err)
+	}
+	finishVoiceFixture(t, registration, requests, serverDone, []string{"REGISTER", "INVITE", "ACK", "BYE", "BYE", "REGISTER"})
 }
 
 func TestMediaCallClosesMediaWhenByeIsRejected(t *testing.T) {
