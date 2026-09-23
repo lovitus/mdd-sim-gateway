@@ -1,4 +1,4 @@
-name: Prepare exact PR8 follow-up candidate
+name: Prepare exact PR10 resumed amendments
 on:
   push:
     branches: [codex/audit-pr8-fixes]
@@ -17,29 +17,29 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
-          ref: ffb469798c047ba0bc2b7aa41b30348030b32801
+          ref: 67e90b079932bdd91c573b65da5b226ee7fd6332
           path: candidate
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Verify and apply the reviewed source patch
+      - name: Apply incremental changes without replacing the existing repair
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          cat harness/audit/pr8/part-*.b64 | base64 -d | xz -d > "$RUNNER_TEMP/fixes.patch"
-          echo "ee7c3b855c0250431506dee53a2677cd531207cd32437a04eac0ce8bb2458bd7  $RUNNER_TEMP/fixes.patch" | sha256sum --check
-          git -C candidate apply --unidiff-zero --check "$RUNNER_TEMP/fixes.patch"
-          git -C candidate apply --unidiff-zero "$RUNNER_TEMP/fixes.patch"
-          git -C candidate add android-agent docs/reviews/pr8-followup-ffb4697.md go-runtime providers
-          test "$(git -C candidate diff --cached --name-only | wc -l)" -eq 29
-          test "$(git -C candidate write-tree)" = 830a7c358add9e779fb948212a324cc81d8691e2
+          cat harness/audit/pr8/resumed.b64 | base64 -d | xz -d > "$RUNNER_TEMP/amend.patch"
+          echo "a680dbf1fbf33717d5f89f5f5d45400061c1cb8058bea71151609bce4ed2d7bc  $RUNNER_TEMP/amend.patch" | sha256sum --check
+          git -C candidate apply --unidiff-zero --check "$RUNNER_TEMP/amend.patch"
+          git -C candidate apply --unidiff-zero "$RUNNER_TEMP/amend.patch"
+          git -C candidate add -u
+          test "$(git -C candidate diff --cached --name-only | wc -l)" -eq 10
+          test "$(git -C candidate write-tree)" = 919a7d046e158f2a4ef9554ef483ce2d5d4b2174
           git -C candidate diff --cached --check
           node candidate/tools/repository-check.mjs | tee evidence/repository.log
           node candidate/tools/repository-check.test.mjs | tee evidence/repository-tests.log
-      - name: Publish candidate for full CI, not an approved release
+      - name: Publish successor for full Android and Go gates
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,15 +48,15 @@ jobs:
           git -C candidate config user.name 'github-actions[bot]'
           git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git -C candidate diff --cached --name-only > evidence/files.txt
-          git -C candidate diff --cached --binary > evidence/fixes.patch
-          git -C candidate commit -m 'fix: retain exact call cleanup and complete Android recovery failure paths' -m 'Preserve accepted-dialog cleanup across ACK and media errors; retain rejection and Stop receipts. Serialize reader publication, recover transient TLS catch-up, and offer explicit archived storage reset. New regression tests still require Android and Go CI validation. No merge or deployment.'
+          git -C candidate diff --cached --binary > evidence/amend.patch
+          git -C candidate commit -m 'fix: fence storage reset callbacks and retain unresolved message records' -m 'Preserve the existing PR10 repair. Add controlled reset/read/write interleavings, upstream negative control and rejection-refresh coverage. Require actual encoder progress in browser tests. Full Android/Go validation is a separate gate; no merge or deployment.'
           git -C candidate rev-parse HEAD HEAD^{tree} > evidence/source.txt
           git -C candidate archive --format=tar.gz HEAD > evidence/source.tar.gz
           authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-pr8-fixes
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/review-pr8-resumed-candidate
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: pr8-followup-candidate
+          name: pr10-resumed-candidate
           path: evidence/
           retention-days: 7
