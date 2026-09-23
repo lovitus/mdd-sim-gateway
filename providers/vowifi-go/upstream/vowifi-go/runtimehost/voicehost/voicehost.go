@@ -98,6 +98,9 @@ type OutboundCallRequest struct {
 }
 
 type OutboundCallResult struct {
+	// FinalRejected is evidence of a received final non-2xx INVITE response.
+	// An arbitrary local error, cancellation, or HTTP status cannot set it.
+	FinalRejected              bool
 	Accepted                   bool
 	StatusCode                 int
 	Reason                     string

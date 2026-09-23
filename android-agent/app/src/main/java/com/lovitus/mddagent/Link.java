@@ -33,11 +33,7 @@ final class Link implements AutoCloseable {
         deadline=loop.schedule(()->{if(epoch==mine&&!acknowledged)failed(mine,R.string.link_handshake_timeout,true);},15,TimeUnit.SECONDS);
     }
     // Same certificate-vs-transport distinction as OkHttp's retry policy; no HTTP retries enabled.
-    static boolean identityFailure(Throwable error){
-        for(Throwable cause=error;cause!=null;cause=cause.getCause())
-            if(cause instanceof java.security.cert.CertificateException||cause instanceof javax.net.ssl.SSLPeerUnverifiedException)return true;
-        return false;
-    }
+    static boolean identityFailure(Throwable error){return TransportFailures.identityFailure(error);}
     private void post(Runnable r){try{loop.execute(r);}catch(RejectedExecutionException ignored){}}
     private boolean current(long mine,WebSocket ws){return !stopped&&epoch==mine&&socket==ws;}
     private void failed(long mine,int label,boolean recover){if(epoch!=mine||stopped)return;epoch++;WebSocket old=socket;socket=null;acknowledged=false;if(old!=null)old.cancel();if(deadline!=null)deadline.cancel(false);events.state(label,false);if(recover&&!terminal){long wait=retry.next();pending=loop.schedule(this::open,wait,TimeUnit.MILLISECONDS);}}

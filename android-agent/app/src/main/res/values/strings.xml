@@ -295,4 +295,11 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="layer_media">Call audio</string>
 <string name="layer_call">Call admission</string>
 <string name="layer_gateway">Gateway dependency</string>
+    <string name="call_confirmed_rejected">Call rejected; no call was established</string>
+    <string name="storage_reset">Reset local settings…</string>
+    <string name="storage_reset_warning">This resets local credentials and recovery records. It does NOT end server calls or prove that messages were not sent. Check the gateway first. Existing encrypted files will be kept in a private on-device recovery archive; recovery is not guaranteed.</string>
+    <string name="storage_reset_final">Reset local settings now? You will need to sign in and enroll readers again. No calls, messages or SIM changes will be sent. This cannot be used as confirmation that an unknown remote operation ended.</string>
+    <string name="storage_reset_busy">Resolve the known call or wait for the current operation before resetting. Authorized Hang up remains available.</string>
+    <string name="storage_reset_failed">Reset could not finish. Recovery material was preserved. Retry storage or seek help; do not uninstall to bypass this warning.</string>
+    <string name="storage_reset_pending">Resolve the saved call or uncertain message submissions before resetting. Reset does not end a remote call or undo a sent message.</string>
 </resources>

@@ -83,6 +83,26 @@ jobs:
           persist-credentials: false
       - name: Prove exact follow-up counterexamples
         run: bash go-runtime/scripts/followup-counterexamples.sh "$GITHUB_WORKSPACE/followup-baseline"
+      - name: Check out PR8 pre-fix source
+        uses: actions/checkout@v7
+        with:
+          ref: ffb469798c047ba0bc2b7aa41b30348030b32801
+          path: pr8-baseline
+          persist-credentials: false
+      - name: Prove exact PR8 counterexamples
+        run: bash go-runtime/scripts/pr8-counterexamples.sh "$GITHUB_WORKSPACE/pr8-baseline"
+      - name: Repeat repaired call-result boundaries
+        run: |
+          set -o pipefail
+          go -C providers/vowifi-go test -json -race -count=10 -timeout 5m -run '^TestPR8' ./internal/service ./internal/ims | tee pr8-provider-tests.jsonl
+          go -C go-runtime test -json -race -count=10 -timeout 3m -run '^TestPR8' ./providercontrol | tee pr8-core-tests.jsonl
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go test -json -race -count=10 -timeout 3m -run '^TestPR8' ./runtimehost/voicehost | tee pr8-upstream-tests.jsonl
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr8-counterexample-evidence-${{ github.sha }}
+          path: pr8-evidence/
+          retention-days: 7
       - name: Check source formatting and patch whitespace
         run: |
           git diff --check f8a8c33793c95308e95043a4cb6acd3ebe01eeed HEAD

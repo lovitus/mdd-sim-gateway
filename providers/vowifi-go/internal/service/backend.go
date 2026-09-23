@@ -305,7 +305,7 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflict("operation_in_progress")
 	}
-	if active != nil && active.call == nil {
+	if active != nil && active.call == nil && !active.terminationConfirmed {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflictLayer("call_start_in_progress", "call")
 	}
@@ -324,29 +324,41 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 	backend.mu.Unlock()
 
 	var err error
-	callEnded := false
+	callEnded, runtimeCloseAttempted := false, false
 	failureLayer, stopFailureCode := "runtime", "close_failed"
 	if active != nil {
-		_, err = active.call.End(ctx)
+		backend.mu.Lock()
+		confirmed := active.terminationConfirmed
+		backend.mu.Unlock()
+		if !confirmed {
+			err = confirmedCallEnd(ctx, active.call)
+		}
 		if err == nil {
-			callEnded = true
-			active.session.EndStream("runtime stopped")
+			backend.mu.Lock()
+			active.terminationConfirmed = true
+			err = backend.persistCallTerminalLocked(active, "confirmed_end")
+			if err == nil {
+				backend.finishCallLocked(active)
+				callEnded = true
+			} else {
+				failureLayer, stopFailureCode = "call", "call_terminal_persist_failed"
+			}
+			backend.mu.Unlock()
+			active.session.EndStream("runtime stopped; terminal persistence pending if unavailable")
 		} else {
 			failureLayer, stopFailureCode = "call", "call_end_failed"
 		}
 	}
 	if err == nil {
+		runtimeCloseAttempted = true
 		err = runtime.Close(ctx)
 	}
 
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	if callEnded {
-		backend.finishCallLocked(active)
-	}
 	if err != nil {
 		var released locallyReleasedCloseError
-		if errors.As(err, &released) && released.LocalRuntimeReleased() {
+		if runtimeCloseAttempted && errors.As(err, &released) && released.LocalRuntimeReleased() {
 			backend.runtime = nil
 			backend.activeCall = nil
 			backend.transitionLocked(vowifiipc.RuntimeStopped, "deregister_failed")
@@ -360,7 +372,7 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		}
 		backend.transitionLocked(vowifiipc.RuntimeFailed, stopFailureCode)
 		if active != nil && !callEnded {
-			if guardContext := backend.restartCallGuardLocked(active, false); guardContext != nil {
+			if guardContext := backend.restartCallGuardLocked(active, active.terminationConfirmed); guardContext != nil {
 				go backend.guardCall(guardContext, active)
 			}
 		}

@@ -88,6 +88,26 @@ public class SmsFlowTest {
             fixture.observer.close(1001,"fixture recovered transport");await(fixture,()->fixture.connections.get()==2&&synced(fixture,2));assertFalse(flag(scene,"messageSyncStopped"));
         });
     }
+    @Test public void pr8TlsReadLossRecoversAfterObserverReconnectWithoutSending()throws Exception{
+        run("vowifi",(fixture,scene)->{
+            AtomicReference<GatewayApi> client=new AtomicReference<>();AtomicReference<okhttp3.OkHttpClient> previous=new AtomicReference<>();AtomicBoolean fail=new AtomicBoolean(true);CountDownLatch injected=new CountDownLatch(1);
+            scene.onActivity(a->{try{
+                AgentService owner=service(a);java.lang.reflect.Field api=AgentService.class.getDeclaredField("api");api.setAccessible(true);GatewayApi current=(GatewayApi)api.get(owner);client.set(current);previous.set(current.http);
+                okhttp3.OkHttpClient fault=current.http.newBuilder().addInterceptor(chain->{
+                    if(chain.request().url().encodedPath().equals("/v1/messages")&&"true".equals(chain.request().url().queryParameter("sync"))&&fail.compareAndSet(true,false)){injected.countDown();throw new javax.net.ssl.SSLException("synthetic interrupted TLS read");}
+                    return chain.proceed(chain.request());
+                }).build();java.lang.reflect.Field http=GatewayApi.class.getDeclaredField("http");http.setAccessible(true);http.set(current,fault);
+                java.lang.reflect.Field budget=AgentService.class.getDeclaredField("messageSyncFailures");budget.setAccessible(true);budget.setInt(owner,6);
+            }catch(Exception e){throw new AssertionError(e);}});
+            try{
+                fixture.appendReceived(1);assertTrue(injected.await(5,TimeUnit.SECONDS));await(fixture,()->flag(scene,"messageSyncStopped"));
+                assertFalse("ordinary TLS read was latched as identity failure",flag(scene,"messageSyncTerminal"));
+                long generation=observerGeneration(scene);fixture.observer.close(1001,"same certificate restored");
+                await(fixture,()->observerGeneration(scene)!=generation&&online(scene)&&synced(fixture,1)&&syncIdle(scene));
+                assertEquals(0,fixture.sends.get());assertFalse(flag(scene,"messageSyncStopped"));assertEquals(1,summaries());
+            }finally{java.lang.reflect.Field http=GatewayApi.class.getDeclaredField("http");http.setAccessible(true);http.set(client.get(),previous.get());}
+        });
+    }
     private static JSONObject row(SmsGatewayFixture fixture,String operation)throws Exception{return MessageJournal.find(fixture.store.load(),fixture.scope,operation);}
     private static boolean synced(SmsGatewayFixture fixture,int count){JSONObject state=MessageSync.state(fixture.store.load(),fixture.scope);return (fixture.stream+":"+count).equals(state.optString("cursor"))&&Json.array(state,"pending").length()==0;}
     private static int summaries(){int count=0;for(StatusBarNotification row:context().getSystemService(NotificationManager.class).getActiveNotifications())if(row.getId()==2)count++;return count;}

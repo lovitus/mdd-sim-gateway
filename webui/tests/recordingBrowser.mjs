@@ -63,7 +63,6 @@ import {LocalCallRecording} from '/src/callRecording.js';
 import {CallMedia} from '/src/goCallMedia.js';
 window.runRecordingTest = async () => {
   const check=(x,m)=>{if(!x)throw Error(m)};
-  const delay=ms=>new Promise(r=>setTimeout(r,ms));
   const context=new AudioContext(); await context.resume();
   const microphone=context.createOscillator(), playback=context.createOscillator();
   microphone.frequency.value=440; playback.frequency.value=660;
@@ -74,23 +73,30 @@ window.runRecordingTest = async () => {
     const deadline=performance.now()+4000;
     const inspect=()=>{if(r.state==='ready')resolve(r);else if(r.state==='failed'||performance.now()>deadline)reject(Error(r.reason||'recording timeout'));else setTimeout(inspect,10)};inspect();
   });
+  // A wall-time delay is not evidence that a headless encoder has produced
+  // audio. Keep the failure bound, but wait for actual encoded input before
+  // testing manual stop or call close. Decoding/RMS assertions remain below.
+  const sampled=r=>new Promise((resolve,reject)=>{
+    const deadline=performance.now()+4000;
+    const inspect=()=>{if(r.bytes>0)resolve();else if(r.state!=='recording'||performance.now()>deadline)reject(Error('no encoded sample: '+r.state+':'+r.reason));else setTimeout(inspect,10)};inspect();
+  });
   const rms=values=>Math.sqrt(values.reduce((n,x)=>n+x*x,0)/values.length);
   const output=[];
   try {
     const denied=make(); let rejected=false; try{denied.start(false)}catch{rejected=true};check(rejected&&!denied.destination,'consent must precede graph allocation');
     for(const muted of [false,true]){
-      const r=make({muted});r.start(true);await delay(300);r.stop();await done(r);
+      const r=make({muted});r.start(true);await sampled(r);r.stop();await done(r);
       const audio=await context.decodeAudioData(await r.clip.arrayBuffer());
       check(audio.numberOfChannels===2,'stereo channel count');
       const left=rms(audio.getChannelData(0)),right=rms(audio.getChannelData(1));
       check(right>0.05,'remote tone missing');check(muted?left<0.005:left>0.05,'mute/local tone mismatch');
       output.push({muted,leftRMS:left,rightRMS:right,mime:r.clip.type,bytes:r.bytes});r.discard();check(!r.clip,'discard must release clip');
     }
-    const limited=make({maxMS:150});limited.start(true);await done(limited);check(limited.reason==='time_limit','automatic time limit');limited.discard();
+    const limited=make({maxMS:2000});limited.start(true);await done(limited);check(limited.reason==='time_limit','automatic time limit');check(limited.snapshot().durationMS>=2000,'stop before configured limit');limited.discard();
     const media=new CallMedia(500);Object.assign(media,{context,source:microphone,node:playback,phase:'active',started:true});
     await context.suspend();let unavailable=false;try{media.startRecording({consent:true})}catch{unavailable=true};
     check(unavailable&&media.recording?.state==='failed','suspended recording must release admission');await context.resume();
-    const ended=media.startRecording({consent:true});recordings.push(ended);await delay(300);media.close();await done(ended);
+    const ended=media.startRecording({consent:true});recordings.push(ended);await sampled(ended);media.close();await done(ended);
     check(ended.reason==='call_ended','media close must finalize recording');check(ended.bytes>0,'missing final encoded data');
     return {passed:true,tests:output,callCloseFinalized:true,timeLimit:true,consent:true,retryAfterSuspension:true};
   } finally {for(const r of recordings)r.discard();try{microphone.stop();playback.stop()}catch{};if(context.state!=='closed')await context.close()}
