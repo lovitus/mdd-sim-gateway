@@ -36,7 +36,7 @@ func (handler *Handler) recoverCall(w http.ResponseWriter, r *http.Request, line
 		return
 	}
 	terminal := func() {
-		write(200, map[string]any{"state": "terminal", "call_id": record.CallID, "operation_id": record.OperationID, "session_id": record.SessionID, "terminal_confirmed": true, "terminal_at": record.TerminalAt})
+		write(200, map[string]any{"state": "terminal", "call_id": record.CallID, "operation_id": record.OperationID, "session_id": record.SessionID, "terminal_confirmed": true, "terminal_at": record.TerminalAt, "outcome": recoveryOutcome(record.TerminalSource)})
 	}
 	if !record.TerminalAt.IsZero() {
 		terminal()
@@ -57,10 +57,14 @@ func (handler *Handler) recoverCall(w http.ResponseWriter, r *http.Request, line
 			if proof.LineID != record.LineID || proof.ProviderID != record.ProviderID || proof.ProcessGeneration != record.ProviderGeneration {
 				return mediaauth.ErrProviderFenceConflict
 			}
-			if err := store.ConfirmRecovery(record, proof.ConfirmedAt, "provider_terminal_receipt"); err != nil {
+			source := "provider_terminal_receipt"
+			if proof.Source == "confirmed_rejected" {
+				source = "provider_rejection_receipt"
+			}
+			if err := store.ConfirmRecovery(record, proof.ConfirmedAt, source); err != nil {
 				return err
 			}
-			record.TerminalAt = proof.ConfirmedAt
+			record.TerminalAt, record.TerminalSource = proof.ConfirmedAt, source
 			return nil
 		}
 		// A replacement process can serve retained receipts, but cannot acquire control
@@ -92,10 +96,14 @@ func (handler *Handler) recoverCall(w http.ResponseWriter, r *http.Request, line
 			if proof.LineID != record.LineID || proof.ProviderID != record.ProviderID || proof.ProcessGeneration != record.ProviderGeneration {
 				return mediaauth.ErrProviderFenceConflict
 			}
-			if err := store.ConfirmRecovery(record, proof.ConfirmedAt, "provider_terminal_receipt"); err != nil {
+			source := "provider_terminal_receipt"
+			if proof.Source == "confirmed_rejected" {
+				source = "provider_rejection_receipt"
+			}
+			if err := store.ConfirmRecovery(record, proof.ConfirmedAt, source); err != nil {
 				return err
 			}
-			record.TerminalAt = proof.ConfirmedAt
+			record.TerminalAt, record.TerminalSource = proof.ConfirmedAt, source
 		}
 		return nil
 	})
@@ -108,4 +116,11 @@ func (handler *Handler) recoverCall(w http.ResponseWriter, r *http.Request, line
 		return
 	}
 	write(200, map[string]any{"state": "unresolved", "call_id": record.CallID, "session_id": record.SessionID, "can_end": true, "terminal_confirmed": false})
+}
+
+func recoveryOutcome(source string) string {
+	if source == "provider_rejection_receipt" {
+		return "rejected"
+	}
+	return "ended"
 }

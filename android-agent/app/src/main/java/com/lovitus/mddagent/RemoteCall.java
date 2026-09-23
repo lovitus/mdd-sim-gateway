@@ -92,7 +92,7 @@ final class RemoteCall {
         if(!plan.recoveryKey.isEmpty()){
             JSONObject result=api.json("POST",plan.prefix()+"recovery",plan.recovery("status"));
             if(!ownsRecord()){retry=false;return;}
-            if(recoveryTerminal(result)){session=result.getString("session_id");phase="TERMINAL";retire(UiText.of(R.string.call_original_ended));}
+            if(recoveryTerminal(result)){session=result.getString("session_id");phase="TERMINAL";retire("rejected".equals(result.optString("outcome"))?terminalLabel(result):UiText.of(R.string.call_original_ended));}
             else{state=UiText.of(R.string.call_remote_state,UiLabels.unconfirmedCallState(result.optString("state")));String reason=result.optString("reason");if(!reason.isEmpty())state=UiText.of(R.string.call_reason,state,reason);}
             return;
         }
@@ -123,16 +123,19 @@ final class RemoteCall {
             if(!plan.recoveryKey.isEmpty()){
                 JSONObject result=api.json("POST",plan.prefix()+"recovery",plan.recovery("end"));
                 if(!service.ownsCall(this))return;
-                if(recoveryTerminal(result)){session=result.getString("session_id");phase="TERMINAL";retire(UiText.of(R.string.call_remote_ended));}
+                if(recoveryTerminal(result)){session=result.getString("session_id");phase="TERMINAL";retire(terminalLabel(result));}
                 else state=UiText.of(R.string.call_end_unconfirmed);
                 return;
             }
             if(session.isEmpty()){state=UiText.of(R.string.call_missing_media);return;}
             JSONObject result=api.json("POST",plan.prefix()+(plan.mode.equals("cellular")?"hangup":"end"),plan.end(session));
             if(!service.ownsCall(this))return;
-            if(CallRecovery.terminal(plan,session,result)){phase="TERMINAL";retire(UiText.of(R.string.call_remote_ended));}
+            if(CallRecovery.terminal(plan,session,result)){phase="TERMINAL";retire(terminalLabel(result));}
             else state=UiText.of(R.string.call_end_unconfirmed);
         }catch(Exception e){state=UiText.of(R.string.call_end_unknown);}finally{ending.set(false);service.changed();service.reconcileSoon(this);}});
+    }
+    private static UiText terminalLabel(JSONObject result){
+        return UiText.of("rejected".equals(result.optString("outcome"))?R.string.call_confirmed_rejected:R.string.call_remote_ended);
     }
     private void retire(UiText message){
         if(!ownsRecord()){

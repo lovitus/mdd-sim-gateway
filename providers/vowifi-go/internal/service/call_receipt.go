@@ -71,7 +71,16 @@ func (store *BoltOperationStore) LookupCallReceipt(scope string, input vowifiipc
 	return result, found, err
 }
 func (backend *Backend) persistCallTerminalLocked(active *activeVoiceCall, source string) error {
-	return backend.operations.SaveCallReceipt(backend.messageScope, vowifiipc.CallReceipt{CallReceiptRequest: vowifiipc.CallReceiptRequest{CallID: active.request.CallID, OperationID: active.request.OperationID, SessionID: callMediaSessionID(active.request.MediaSessionID, active.request.CallID)}, LineID: backend.lineID, ProviderID: backend.providerID, ProcessGeneration: backend.generation, ConfirmedAt: time.Now().UTC(), Source: source})
+	if !active.terminationConfirmed {
+		return errors.New("call terminal has not been confirmed")
+	}
+	if active.terminalSource == "" {
+		active.terminalSource = source
+	}
+	if active.terminalAt.IsZero() {
+		active.terminalAt = time.Now().UTC()
+	}
+	return backend.operations.SaveCallReceipt(backend.messageScope, vowifiipc.CallReceipt{CallReceiptRequest: vowifiipc.CallReceiptRequest{CallID: active.request.CallID, OperationID: active.request.OperationID, SessionID: callMediaSessionID(active.request.MediaSessionID, active.request.CallID)}, LineID: backend.lineID, ProviderID: backend.providerID, ProcessGeneration: backend.generation, ConfirmedAt: active.terminalAt, Source: active.terminalSource})
 }
 func (backend *Backend) CallReceipt(_ context.Context, input vowifiipc.CallReceiptRequest) (vowifiipc.CallReceipt, error) {
 	if err := input.Validate(); err != nil {

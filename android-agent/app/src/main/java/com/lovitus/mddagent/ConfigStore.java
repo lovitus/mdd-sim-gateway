@@ -131,6 +131,36 @@ final class ConfigStore {
             } catch (Exception e) { throw new IllegalStateException("Saved settings unavailable; data preserved", e); }
         }
     }
+    /** Explicit destructive action only. Unreadable bytes are archived before
+     * publishing a fresh encrypted state; no exception path calls this method. */
+    File resetAfterConfirmation(boolean confirmed) {
+        if(!confirmed)throw new IllegalArgumentException("Explicit reset confirmation required");
+        synchronized(LOCK){
+            // A stale Activity must not reset a readable call that another
+            // owner journaled after the confirmation dialog was opened.
+            JSONObject readable=null;
+            try{readable=read();}catch(Exception unavailable){/* explicitly confirmed unreadable-state reset */}
+            if(readable!=null&&readable.has("pending_call"))throw new IllegalStateException("Resolve previous call before resetting");
+            try{
+                File parent=context.getNoBackupFilesDir();
+                File archive=new File(parent,"private-state-archive-"+Json.id());
+                if(!archive.mkdir())throw new IOException("Cannot create private recovery archive");
+                files.syncDirectory(parent);
+                File legacy=new File(context.getApplicationInfo().dataDir,"shared_prefs/private_config.xml");
+                File[] material={file.base,file.staged(),file.owned(),new File(file.base+".bak"),legacy,new File(legacy+".bak")};
+                for(int i=0;i<material.length;i++){
+                    if(!files.exists(material[i]))continue;
+                    byte[] bytes=files.read(material[i]);File copy=new File(archive,i+"-"+material[i].getName());
+                    files.writeSynced(copy,bytes);
+                    if(!java.util.Arrays.equals(bytes,files.read(copy)))throw new IOException("Recovery archive verification failed");
+                }
+                files.syncDirectory(archive);files.syncDirectory(parent);
+                // Do not delete the original Keystore key. Archived ciphertext
+                // remains available for a separately authorized investigation.
+                write(new JSONObject());writeFault=false;return archive;
+            }catch(Exception failure){writeFault=true;throw new IllegalStateException("Reset failed; recovery material preserved",failure);}
+        }
+    }
     void clear() {
         update(current -> {
             if (current.has("pending_call")) throw new IllegalStateException("Resolve previous call before signing out");

@@ -19,6 +19,8 @@ import (
 
 const defaultCallGuardTimeout = 10 * time.Second
 
+var errConfirmedCallRejection = errors.New("original INVITE definitively rejected")
+
 type VoiceCall interface {
 	browsermedia.Stream
 	End(context.Context) (voicehost.DialogInfoResult, error)
@@ -65,6 +67,8 @@ type activeVoiceCall struct {
 	startCancel          context.CancelFunc
 	startDone            chan struct{}
 	terminationConfirmed bool
+	terminalSource       string
+	terminalAt           time.Time
 	terminationErr       error
 	guardCancel          context.CancelFunc
 	guardAttempt         uint64
@@ -154,7 +158,11 @@ func (backend *Backend) recordCallTermination(active *activeVoiceCall, confirmed
 	}
 	backend.mu.Lock()
 	active.terminationConfirmed = active.terminationConfirmed || confirmed
-	active.terminationErr = errors.Join(active.terminationErr, err)
+	if confirmed {
+		active.terminationErr = nil
+	} else if !active.terminationConfirmed {
+		active.terminationErr = errors.Join(active.terminationErr, err)
+	}
 	backend.mu.Unlock()
 }
 
@@ -175,6 +183,12 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 		startErr = active.session.AttachStream(call)
 	}
 	if startErr != nil {
+		if errors.Is(startErr, errConfirmedCallRejection) {
+			backend.mu.Lock()
+			active.terminationConfirmed = true
+			active.terminalSource = "confirmed_rejected"
+			backend.mu.Unlock()
+		}
 		if errors.Is(startErr, voicehost.ErrIMSVoiceCancellationConfirmed) {
 			backend.recordCallTermination(active, true, nil)
 		}
@@ -182,6 +196,9 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 			backend.recordCallTermination(active, false, startErr)
 		}
 		if call != nil {
+			backend.mu.Lock()
+			active.call = call // needed even if End succeeds but receipt persistence fails
+			backend.mu.Unlock()
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			cleanupErr := confirmedCallEnd(cleanupContext, call)
 			cancel()
@@ -235,6 +252,8 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 			persistErr := backend.persistCallTerminalLocked(active, "confirmed_end")
 			if persistErr == nil {
 				backend.finishCallLocked(active)
+			} else if guard := backend.restartCallGuardLocked(active, true); guard != nil {
+				go backend.guardCall(guard, active)
 			}
 			cleanupErr = errors.Join(cleanupErr, persistErr)
 			backend.mu.Unlock()
@@ -407,6 +426,10 @@ func (backend *Backend) failCallStart(active *activeVoiceCall, operationID strin
 	}
 	if !active.cleanupPending && terminalErr == nil {
 		backend.finishCallLocked(active)
+	} else if terminalErr != nil {
+		if guard := backend.restartCallGuardLocked(active, true); guard != nil {
+			go backend.guardCall(guard, active)
+		}
 	}
 	storeErr := backend.operations.CompleteFailure(backend.generation, operationID, failure)
 	backend.mu.Unlock()
@@ -444,7 +467,7 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, conflict("operation_in_progress")
 	}
-	if active.call == nil {
+	if active.call == nil && !active.terminationConfirmed {
 		if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
 			backend.mu.Unlock()
 			return vowifiipc.CallResult{}, err

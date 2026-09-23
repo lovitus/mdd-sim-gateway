@@ -295,4 +295,10 @@
 <string name="layer_media">通话音频</string>
 <string name="layer_call">通话准入</string>
 <string name="layer_gateway">网关依赖</string>
+    <string name="call_confirmed_rejected">通話已被拒絕，未建立通話</string>
+    <string name="storage_reset">重置本地設定…</string>
+    <string name="storage_reset_warning">重置會移除本地憑據和恢復記錄，但不會結束伺服器通話，也不能證明短信未送出。請先在網關核對。原始密文會保存在本機私有恢復歸檔中，不保證可解密恢復。</string>
+    <string name="storage_reset_final">確定重置本地設定？之後需要重新登入及登記讀卡器。不會派發通話、短信或 SIM 變更。此操作不能作為未知遠端業務已結束的證據。</string>
+    <string name="storage_reset_busy">請先核對已知通話，或等待當前操作完成再重置。已授權的掛斷仍可使用。</string>
+    <string name="storage_reset_failed">重置未完成，恢復材料已保留。請重試讀取或尋求協助，不要卸載以繞過此警告。</string>
 </resources>

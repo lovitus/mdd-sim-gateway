@@ -801,29 +801,47 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 		if runtime.inbound != nil {
 			runtime.inbound.SetOutbound(agent)
 		}
-		return ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
+		call, result, err := ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
 			LocalRTP: net.JoinHostPort(runtime.localIP, "0"), LocalRTCP: net.JoinHostPort(runtime.localIP, "0"),
 			Codec: media.CodecAMR, BufferMS: request.MediaBufferMS,
 		}, voicehost.OutboundCallRequest{
 			DeviceID: runtime.deviceID, CallID: request.CallID, Callee: request.Callee,
 		})
+		// Normalize the concrete pointer before converting it to VoiceCall:
+		// a typed nil is not a retained cleanup owner.
+		if call == nil {
+			return nil, result, err
+		}
+		return call, result, err
 	})
-	if err != nil {
-		var stage *StageError
-		if errors.As(err, &stage) {
-			return nil, err
-		}
-		return nil, &StageError{Layer: "voice", Code: "call_start_failed", Err: err}
-	}
-	if !result.Accepted || call == nil {
-		failure := &vowifiipc.OperationError{
-			Kind: vowifiipc.ErrorRejected, Code: "call_rejected", Layer: "voice",
-			Detail: strings.TrimSpace(result.Reason), RetryAfter: result.RetryAfter,
-		}
+	return classifyMediaCallAttempt(call, result, err)
+}
+
+// Only the upstream's received final response can confirm a rejected start.
+// Preserve a non-nil cleanup owner on *every* error path.
+func classifyMediaCallAttempt(call VoiceCall, result voicehost.OutboundCallResult, err error) (VoiceCall, error) {
+	if call == nil && result.FinalRejected && !result.Accepted && result.StatusCode >= 300 && result.StatusCode <= 699 {
+		failure := &vowifiipc.OperationError{Kind: vowifiipc.ErrorRejected, Code: "call_rejected", Layer: "voice",
+			Detail: strings.TrimSpace(result.Reason), RetryAfter: result.RetryAfter}
 		if result.RetryAfter > 0 {
 			failure.RetryAfterMS = result.RetryAfter.Milliseconds()
 		}
-		return nil, failure
+		return nil, errors.Join(failure, errConfirmedCallRejection, err)
+	}
+	if err != nil {
+		var stage *StageError
+		if errors.As(err, &stage) {
+			return call, err
+		}
+		return call, &StageError{Layer: "voice", Code: "call_start_failed", Err: err}
+	}
+	if !result.Accepted || call == nil {
+		failure := &vowifiipc.OperationError{Kind: vowifiipc.ErrorRejected, Code: "call_rejected", Layer: "voice",
+			Detail: strings.TrimSpace(result.Reason), RetryAfter: result.RetryAfter}
+		if result.RetryAfter > 0 {
+			failure.RetryAfterMS = result.RetryAfter.Milliseconds()
+		}
+		return call, failure
 	}
 	return call, nil
 }
@@ -833,13 +851,13 @@ type mediaCallAttempt func(runtimehost.IMSRegistrationResult) (VoiceCall, voiceh
 func (runtime *upstreamRuntime) startMediaCallWithRecovery(ctx context.Context, attempt mediaCallAttempt) (VoiceCall, voicehost.OutboundCallResult, error) {
 	registration, revision := runtime.registrationSnapshot()
 	call, result, err := attempt(registration)
-	if ctx.Err() != nil || !result.RegistrationRecoveryNeeded {
+	if call != nil || ctx.Err() != nil || !result.RegistrationRecoveryNeeded {
 		return call, result, err
 	}
 
 	recovered, recoveryApplied, recoveryErr := runtime.recoverCallRegistration(ctx, revision, result.RetryAfter)
 	if recoveryErr != nil {
-		return nil, result, errors.Join(err, fmt.Errorf("IMS registration recovery: %w", recoveryErr))
+		return call, result, errors.Join(err, fmt.Errorf("IMS registration recovery: %w", recoveryErr))
 	}
 	// Match the upstream runtime boundary: a transport failure retries the same
 	// Call-ID once after recovery. A carrier response is returned to the caller

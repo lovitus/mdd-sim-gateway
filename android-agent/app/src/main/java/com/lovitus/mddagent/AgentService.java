@@ -75,7 +75,7 @@ public final class AgentService extends Service {
         healthTask=loop.scheduleWithFixedDelay(()->{
             if(!available||destroyed)return;
             if(observer!=null)observer.checkFreshness();
-            if(sharing){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}
+            main.post(()->{if(!available||destroyed||!sharing)return;publishReaderHealth();refreshReaders();});
         },1,10,TimeUnit.SECONDS);
     }
     void prepareLogin(){
@@ -106,28 +106,51 @@ public final class AgentService extends Service {
     private void startReaderLink(){
         if(agent!=null){agent.close();agent=null;}
         if(hub==null||hub.closed)hub=new ReaderHub(this);
-        lastReaders=recoveringReaders();lastReaderAt=0;
+        readerObservation=null;
         final long epoch=++readerEpoch;
         agent=new Link(api,loop,"/v1/agent/ws",config.optString("agent_id"),config.optString("agent_token"),process,new Link.Events(){
-            public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerStatus=UiText.of(label);changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}}
-            public void message(JSONObject message){if(epoch!=readerEpoch||!sharing)return;if(message.optString("kind").equals("aka_request")){
+            public void state(int label,boolean connected){main.post(()->{if(epoch!=readerEpoch||!sharing||destroyed)return;readerStatus=UiText.of(label);changed();if(connected){publishReaderHealth();refreshReaders();}});}
+            public void message(JSONObject message){main.post(()->{if(epoch!=readerEpoch||!sharing||destroyed)return;if(message.optString("kind").equals("aka_request")){
                 final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;final long generation=owner.generation();
-                readerIO.execute(()->{JSONObject answer=device.authenticate(Json.object(message,"aka_request"));owner.respond(generation,message.optString("request_id"),answer);});
-            }}
+                readerIO.execute(()->{if(epoch!=readerEpoch||device!=hub||!sharing)return;JSONObject answer=device.authenticate(Json.object(message,"aka_request"));owner.respond(generation,message.optString("request_id"),answer);});
+            }});}
         });agent.connect();refreshReaders();
     }
     void refreshReaders(){refreshReaders(false);}
     void refreshReaderMetadata(){refreshReaders(true);}
-    private void refreshReaders(boolean explicitMetadata){if(destroyed||!available||!sharing||hub==null||!scanOwner.compareAndSet(null,hub))return;ReaderHub owner=hub;
-        readerIO.execute(()->{try{owner.scan(explicitMetadata);if(owner==hub&&available&&sharing){JSONObject fresh=owner.topology();Link link=agent;if(link!=null)link.health(fresh);lastReaders=fresh;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();}}finally{scanOwner.compareAndSet(owner,null);}});
+    private void refreshReaders(boolean explicitMetadata){
+        if(Looper.myLooper()!=Looper.getMainLooper()){main.post(()->refreshReaders(explicitMetadata));return;}
+        final ReaderHub owner=hub;final long epoch=readerEpoch;
+        if(destroyed||!available||!sharing||owner==null||!scanOwner.compareAndSet(null,owner))return;
+        try{readerIO.execute(()->{
+            try{
+                owner.scan(explicitMetadata);
+                ReaderObservation observed=new ReaderObservation(owner,epoch,SystemClock.elapsedRealtime(),owner.topology());
+                UiText diagnostic=owner.diagnostic;
+                main.post(()->publishReaderObservation(observed,diagnostic));
+            }finally{main.post(()->scanOwner.compareAndSet(owner,null));}
+        });}catch(RejectedExecutionException stopped){scanOwner.compareAndSet(owner,null);}
     }
-    JSONObject readers(){ReaderHub h=hub;return h==null?Json.obj("readers",new JSONArray()):lastReaders;}
-    volatile long lastReaderAt;
+    // Sharing, connection replacement and publication all commit on the main owner.
+    // No hardware I/O or lock is held while publishing, and old callbacks cannot
+    // pass a check on one thread then publish onto a replacement Link on another.
+    void publishReaderObservation(ReaderObservation observed,UiText diagnostic){
+        if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("Reader publication outside owner");
+        if(destroyed||!available||!sharing||!observed.current(hub,readerEpoch,SystemClock.elapsedRealtime()))return;
+        readerObservation=observed;readerStatus=diagnostic;publishReaderHealth();changed();
+    }
+    private void publishReaderHealth(){
+        Link link=agent;if(link!=null)link.health(readers());
+    }
+    JSONObject readers(){
+        ReaderObservation observed=readerObservation;
+        return sharing&&observed!=null&&observed.current(hub,readerEpoch,SystemClock.elapsedRealtime())?observed.topology():recoveringReaders();
+    }
     private static JSONObject recoveringReaders(){return Json.obj("reader_condition","recovering","reader_detail","Fresh reader observation required","readers",new JSONArray(),"modem_condition","disabled");}
-    volatile JSONObject lastReaders=recoveringReaders();
+    private volatile ReaderObservation readerObservation;
     void shareReaders(boolean enabled){if(call!=null){notice=UiText.of(R.string.sharing_call_busy);changed();return;}
         if(!enabled){
-            final long expected=++sharingIntentEpoch;readerEpoch++;scanOwner.set(null);sharing=false;lastReaders=recoveringReaders();lastReaderAt=0;
+            final long expected=++sharingIntentEpoch;readerEpoch++;scanOwner.set(null);sharing=false;readerObservation=null;
             if(agent!=null)agent.close();agent=null;ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
             readerStatus=UiText.of(R.string.sharing_off);notice=UiText.EMPTY;if(available)promote(false);changed();
             ConfigStore.intent(()->{try{JSONObject saved=store.update(current->current.put("share",false));main.post(()->{if(destroyed||expected!=sharingIntentEpoch)return;config=saved;changed();});}
@@ -291,9 +314,7 @@ public final class AgentService extends Service {
             if(destroyed||!available)return;
             if(api!=owner){messageSyncFailures=0;messageSyncStopped=false;messageSyncTerminal=false;messageRetry.healthy();startMessageSync();return;}
             refreshPrivateState(owner);
-            if(error!=null){notice=UiText.of(R.string.message_sync_failed);changed();Throwable cause=error instanceof ExecutionException&&error.getCause()!=null?error.getCause():error;
-                boolean rejected=cause instanceof GatewayApi.Failure&&((GatewayApi.Failure)cause).status<500&&((GatewayApi.Failure)cause).status!=408&&((GatewayApi.Failure)cause).status!=429;
-                messageSyncTerminal=rejected||cause instanceof javax.net.ssl.SSLException||!(cause instanceof java.io.IOException||cause instanceof TimeoutException);
+            if(error!=null){notice=UiText.of(R.string.message_sync_failed);changed();messageSyncTerminal=TransportFailures.terminalRead(error);
                 if(!messageSyncTerminal&&++messageSyncFailures<=6)messageSyncTimer=loop.schedule(()->main.post(this::startMessageSync),messageRetry.next(),TimeUnit.MILLISECONDS);else messageSyncStopped=true;
             }else{messageSyncFailures=0;messageRetry.healthy();if(messageSyncRequested)startMessageSync();else if(next)messageSyncTimer=loop.schedule(()->main.post(this::startMessageSync),30,TimeUnit.SECONDS);}
         });}});
@@ -329,13 +350,13 @@ public final class AgentService extends Service {
         getSystemService(NotificationManager.class).notify(id,3,n);
     }
     private void networkChanged(){if(!available)return;Link o=observer,a=agent;if(o!=null)o.networkChanged();if(a!=null)a.networkChanged();RemoteCall c=call;if(c!=null&&c.audio!=null)c.audio.networkChanged();}
-    private void closeLinks(){if(observer!=null)observer.close();if(agent!=null)agent.close();observer=agent=null;online=false;}
+    private void closeLinks(){readerEpoch++;readerObservation=null;if(observer!=null)observer.close();if(agent!=null)agent.close();observer=agent=null;online=false;}
     private void stopConnections(){
         invalidateCall();
         available=false;configurationEpoch++;configurationLoaded=true;
         if(healthTask!=null)healthTask.cancel(false);
         if(messageSyncTimer!=null){messageSyncTimer.cancel(false);messageSyncTimer=null;}messageSyncRequested=false;
-        readerEpoch++;scanOwner.set(null);lastReaders=recoveringReaders();lastReaderAt=0;closeLinks();
+        readerEpoch++;scanOwner.set(null);readerObservation=null;closeLinks();
         ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
         if(api!=null){api.close();api=null;}
         readerStatus=UiText.of(sharing?R.string.sharing_paused:R.string.sharing_off);notice=UiText.EMPTY;
@@ -345,6 +366,13 @@ public final class AgentService extends Service {
         stopConnections();final long expected=configurationEpoch;intentSaving=true;connection=UiText.of(R.string.saving_pause);changed();
         ConfigStore.intent(()->{try{JSONObject saved=store.update(current->current.put("available",false));main.post(()->{if(destroyed||configurationEpoch!=expected)return;config=saved;intentSaving=false;connection=UiText.of(R.string.paused);stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();});}
             catch(Exception e){main.post(()->{if(destroyed||configurationEpoch!=expected)return;intentSaving=false;notice=UiText.of(R.string.pause_save_failed);changed();});}});
+    }
+    void prepareStorageReset(){
+        if(accountBusy()||call!=null)throw new IllegalStateException(getString(R.string.storage_reset_busy));
+        stopConnections();sharing=false;sharingIntentEpoch++;enrollmentPending.set(false);
+        stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();
+        config=new JSONObject();snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray());
+        getSystemService(NotificationManager.class).cancelAll();changed();
     }
     void logout(Runnable complete){
         if(accountBusy()){notice=UiText.of(R.string.account_busy);changed();return;}

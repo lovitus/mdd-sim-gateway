@@ -160,7 +160,7 @@ func (store *Store) ReadRecovery(line, transport, call, operation, key string) (
 // Generic history Status or the disappearance of an active call must never call it.
 func (store *Store) ConfirmRecovery(expected RecoveryRecord, at time.Time, source string) error {
 	if at.IsZero() || at.After(time.Now().Add(time.Minute)) ||
-		!(expected.Transport == "cellular" && source == "agent_terminal_receipt" || expected.Transport == "vowifi" && source == "provider_terminal_receipt") {
+		!(expected.Transport == "cellular" && source == "agent_terminal_receipt" || expected.Transport == "vowifi" && (source == "provider_terminal_receipt" || source == "provider_rejection_receipt")) {
 		return ErrRecoveryIdentity
 	}
 	return store.db.Update(func(tx *bolt.Tx) error {

@@ -100,7 +100,14 @@ func StartMediaCall(
 	request.RemoteSDP = localSDP
 	remoteEnded := agent.WatchRemoteEnd(request.CallID)
 	result, err := agent.StartOutboundCall(ctx, request)
+	call := &MediaCall{agent: agent, bridge: bridge, remoteEnded: remoteEnded,
+		dialog: voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID}}
 	if err != nil || !result.Accepted {
+		if errors.Is(err, voicehost.ErrIMSVoiceDialogCleanupRequired) {
+			// The upper owner must retain this handle even though media never
+			// became usable. The deferred close only stops the local bridge.
+			return call, result, err
+		}
 		return nil, result, err
 	}
 
@@ -110,14 +117,13 @@ func StartMediaCall(
 	}
 	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), mediaCleanupTimeout)
-		_, byeErr := agent.EndVoiceCallWithResult(cleanupCtx, voicehost.DialogInfo{
-			DeviceID: request.DeviceID, CallID: request.CallID,
-		})
+		_, byeErr := call.End(cleanupCtx)
 		cancel()
 		if byeErr != nil {
-			return nil, result, errors.Join(err, fmt.Errorf("end accepted call after media failure: %w", byeErr))
+			return call, result, errors.Join(err, fmt.Errorf("end accepted call after media failure: %w", byeErr))
 		}
-		return nil, result, err
+		// Preserve definitive cleanup evidence even without an active handle.
+		return nil, result, errors.Join(err, voicehost.ErrIMSVoiceCancellationConfirmed)
 	}
 
 	closeBridge = false
