@@ -131,6 +131,17 @@ final class ConfigStore {
             } catch (Exception e) { throw new IllegalStateException("Saved settings unavailable; data preserved", e); }
         }
     }
+    static final class ResetBlocked extends IllegalStateException {
+        ResetBlocked() { super("Resolve saved call and uncertain messages before resetting"); }
+    }
+    static void requireResettable(JSONObject readable) {
+        if (readable.has("pending_call") || readable.has("last_sms")) throw new ResetBlocked();
+        org.json.JSONArray messages = readable.optJSONArray("message_operations");
+        if (messages != null) for (int i = 0; i < messages.length(); i++) {
+            JSONObject row = messages.optJSONObject(i);
+            if (row == null || !MessageJournal.resolved(row)) throw new ResetBlocked();
+        }
+    }
     /** Explicit destructive action only. Unreadable bytes are archived before
      * publishing a fresh encrypted state; no exception path calls this method. */
     File resetAfterConfirmation(boolean confirmed) {
@@ -140,7 +151,7 @@ final class ConfigStore {
             // owner journaled after the confirmation dialog was opened.
             JSONObject readable=null;
             try{readable=read();}catch(Exception unavailable){/* explicitly confirmed unreadable-state reset */}
-            if(readable!=null&&readable.has("pending_call"))throw new IllegalStateException("Resolve previous call before resetting");
+            if(readable!=null)requireResettable(readable);
             try{
                 File parent=context.getNoBackupFilesDir();
                 File archive=new File(parent,"private-state-archive-"+Json.id());

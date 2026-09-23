@@ -39,6 +39,7 @@ public final class AgentService extends Service {
     private volatile long sharingIntentEpoch;
     private volatile boolean intentSaving;
     private volatile boolean configurationLoaded;
+    private boolean storageResetting;
     private final BroadcastReceiver usbReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){refreshReaders();changed();}};
     public IBinder onBind(Intent intent){return new LocalBinder();}
     @Override public void onCreate(){super.onCreate();store=new ConfigStore(this);config=new JSONObject();
@@ -53,6 +54,7 @@ public final class AgentService extends Service {
         if(Build.VERSION.SDK_INT>=33)registerReceiver(usbReceiver,f,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(usbReceiver,f);
     }
     @Override public int onStartCommand(Intent intent,int flags,int id){
+        if(storageResetting)return START_NOT_STICKY;
         if(intent!=null&&PAUSE.equals(intent.getAction())){pause();return START_NOT_STICKY;}
         if(intent==null||START.equals(intent.getAction())||RESTORE.equals(intent.getAction())){
             try{
@@ -369,11 +371,13 @@ public final class AgentService extends Service {
     }
     void prepareStorageReset(){
         if(accountBusy()||call!=null)throw new IllegalStateException(getString(R.string.storage_reset_busy));
-        stopConnections();sharing=false;sharingIntentEpoch++;enrollmentPending.set(false);
+        ConfigStore.requireResettable(config);
+        storageResetting=true;stopConnections();sharing=false;sharingIntentEpoch++;enrollmentPending.set(false);
         stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();
         config=new JSONObject();snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray());
         getSystemService(NotificationManager.class).cancelAll();changed();
     }
+    void finishStorageReset(){storageResetting=false;}
     void logout(Runnable complete){
         if(accountBusy()){notice=UiText.of(R.string.account_busy);changed();return;}
         stopConnections();call=null;sharing=false;sharingIntentEpoch++;final long expected=configurationEpoch;intentSaving=true;

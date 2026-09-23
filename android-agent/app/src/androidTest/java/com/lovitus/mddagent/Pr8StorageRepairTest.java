@@ -10,6 +10,9 @@ import java.io.File;
 import java.nio.file.Files;
 import java.security.KeyStore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -46,6 +49,52 @@ public class Pr8StorageRepairTest {
             boolean retained=false;File[] archives=c.getNoBackupFilesDir().listFiles((dir,name)->name.startsWith("private-state-archive-"));assertNotNull(archives);for(File dir:archives){File saved=new File(dir,"0-private-state-v1");if(saved.exists()&&java.util.Arrays.equals(bad,Files.readAllBytes(saved.toPath())))retained=true;}
             assertTrue("explicit reset discarded encrypted recovery material",retained);
         }finally{c.stopService(new Intent(c,AgentService.class));drain();Files.write(file.toPath(),good);store.retry();store.clear();}
+    }
+    @Test public void explicitResetCannotEraseReadableUnresolvedMessages()throws Exception{
+        Context c=context();ConfigStore store=new ConfigStore(c);store.clear();
+        for(String shape:new String[]{"call","sms","legacy"}){
+            store.update(current->{
+                if(shape.equals("call"))current.put("pending_call",Json.obj("call_id","exact-old-call"));
+                else if(shape.equals("legacy"))current.put("last_sms",Json.obj("operation_id","old-operation","state","unknown"));
+                else current.put("message_operations",new org.json.JSONArray().put(Json.obj("operation_id","original-operation","state","unknown")));
+            });
+            byte[] original=Files.readAllBytes(base(c).toPath());
+            try{
+                assertThrows(ConfigStore.ResetBlocked.class,()->store.resetAfterConfirmation(true));
+                assertArrayEquals("reset must preserve unresolved recovery bytes",original,Files.readAllBytes(base(c).toPath()));
+            }finally{store.update(current->{current.remove("pending_call");current.remove("last_sms");current.remove("message_operations");});store.clear();}
+        }
+        store.update(current->current.put("message_operations",new org.json.JSONArray().put(Json.obj("state","submitted"))));
+        assertTrue(store.resetAfterConfirmation(true).isDirectory());assertEquals(0,store.load().length());
+    }
+    @Test public void resetFencesAlreadyReadStateAndQueuedLoginDraft()throws Exception{
+        Context c=context();ConfigStore store=new ConfigStore(c);store.clear();
+        CountDownLatch held=new CountDownLatch(1),release=new CountDownLatch(1);
+        try(ActivityScenario<MainActivity> scene=ActivityScenario.launch(MainActivity.class)){
+            awaitNode(id(R.id.connect_gateway));drain();
+            // Main is intentionally held only by this test. The production read
+            // finishes, posts its callback, then the reset wins before it runs.
+            scene.onActivity(activity->{try{
+                store.update(current->current.put("stale_read_sentinel",true));
+                Method reload=MainActivity.class.getDeclaredMethod("reloadStorage");reload.setAccessible(true);reload.invoke(activity);
+                ConfigStore.intent(()->{}).get(5,TimeUnit.SECONDS);
+                ConfigStore.intent(()->{held.countDown();try{if(!release.await(8,TimeUnit.SECONDS))throw new AssertionError("reset barrier timeout");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new AssertionError(e);}});
+                assertTrue(held.await(5,TimeUnit.SECONDS));
+                Method save=MainActivity.class.getDeclaredMethod("persistLoginDraft");save.setAccessible(true);save.invoke(activity);
+                activity.resetConfirmedStorage();
+            }catch(Exception failure){throw new AssertionError(failure);}});
+            // The old callback has now run on main; disk reset is still held.
+            scene.onActivity(activity->{try{
+                Field state=MainActivity.class.getDeclaredField("savedConfig");state.setAccessible(true);
+                assertFalse("old read republished after reset intent",((JSONObject)state.get(activity)).has("stale_read_sentinel"));
+                Field serviceField=MainActivity.class.getDeclaredField("service");serviceField.setAccessible(true);AgentService service=(AgentService)serviceField.get(activity);assertNotNull(service);
+                long epoch=service.accountEpoch();
+                assertEquals(android.app.Service.START_NOT_STICKY,service.onStartCommand(new Intent(c,AgentService.class).setAction(AgentService.RESTORE),0,10));
+                assertEquals("stale restore changed reset owner",epoch,service.accountEpoch());assertFalse(service.available());
+            }catch(Exception failure){throw new AssertionError(failure);}});
+            release.countDown();awaitNode(id(R.id.connect_gateway));drain();
+            JSONObject current=store.load();assertFalse(current.has("stale_read_sentinel"));assertFalse(current.has("login_profile"));
+        }finally{release.countDown();c.stopService(new Intent(c,AgentService.class));drain();store.clear();}
     }
     private static UiAutomation automation(){UiAutomation a=InstrumentationRegistry.getInstrumentation().getUiAutomation();android.accessibilityservice.AccessibilityServiceInfo i=a.getServiceInfo();i.flags|=android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;a.setServiceInfo(i);return a;}
     private static String id(int value){return context().getPackageName()+":id/"+context().getResources().getResourceEntryName(value);}

@@ -30,3 +30,46 @@ Android regressions include real Service->Link publication, controlled TLS failu
 Explicit reset is last-resort user intent, never an exception handler. It disconnects local readers/observer and cancels old callbacks, archives ciphertext privately without exporting it, and replaces current configuration only after archival verification. Disk/Keystore failure can still prevent reset; retry then reports preservation, not success. A missing/inaccessible old key cannot magically decrypt archived data. No uninstall instruction or automatic destructive fallback is introduced. There is no remote-end action in reset.
 
 The previously documented certificate-rotation limitation for a pending call remains: do not silently release an old recovery capability to a replacement pin. Supporting that transition requires separately verified trust continuity. Earlier field evidence is retained within its original scope; this patch claims no new hardware acceptance.
+
+
+## Resumed review and incremental checks (2026-09-23)
+
+The existing PR #10 at `67e90b079932bdd91c573b65da5b226ee7fd6332` was
+recovered before publication. A parallel attempt to push a duplicate repair
+was correctly rejected as non-fast-forward; it did not overwrite this branch.
+Only incremental amendments follow it.
+
+Reset now fences already-completed reads whose UI callbacks have not run,
+cancels queued login-draft writes by reset generation, and prevents the bound
+Service from accepting an old restore intent while reset owns the transition.
+Both confirmation boundaries recheck busy ownership; a newly busy call cannot
+cause an uncaught UI exception. Readable unresolved message records (including
+legacy uncertainty) block reset just like readable pending calls; no archival
+copy is used as a reason to silently remove a still-queryable operation.
+The native tests hold the serial writer and queue main-looper callbacks to
+exercise the ordering, in addition to the actual two-confirmation UI test.
+
+The negative gate now executes the accepted-SDP loss counterexample in the
+actual nested upstream module as well, rather than merely copying its test.
+A separate positive test verifies a definitive carrier rejection remains so
+when the accompanying registration refresh fails, with one start attempt.
+
+The initial full-Go CI failed the existing browser recording fixture with
+`empty_recording`; the unchanged Core job passed on one inspected rerun. That
+does not establish the original failure's sole cause. The fixture previously
+used a 300 ms wall delay as a substitute for encoder progress, and a 150 ms
+integration recording limit despite the recorder's 1000 ms drain cadence.
+Manual-stop/call-close tests now await actual encoded bytes within a fixed
+failure bound and still decode and check both audio channels and mute. The
+independent native time-limit case uses two seconds and still requires a valid
+nonempty clip and automatic stop. Production timing and recording behavior do
+not change. The original failure is retained, not called a passed test.
+
+The original API35 external-control run lost exact QA focus while entering
+fixture login, before any synthetic business action. No focus guard is removed,
+no business action is repeated, and no production fault is inferred from it.
+Its failure and a bounded unchanged-source rerun are retained separately;
+final-head outcomes belong in the PR evidence, not in this static source note.
+
+All new test source requires final-head CI execution. No merge, deployment,
+physical acceptance or signed prerelease publication is implied.

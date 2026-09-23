@@ -41,3 +41,19 @@ func TestPR8RejectionEvidenceDoesNotIncludeTransportOrLocalErrors(t *testing.T) 
 		t.Fatal("real final response missing rejection evidence")
 	}
 }
+
+func TestPR8RejectionRemainsDefinitiveWhenRegistrationRefreshFails(t *testing.T) {
+	refreshErr := errors.New("registration temporarily unavailable")
+	run := &upstreamRuntime{registration: runtimehost.IMSRegistrationResult{Recover: func(context.Context) (runtimehost.IMSRegistrationResult, error) {
+		return runtimehost.IMSRegistrationResult{}, refreshErr
+	}}}
+	attempts := 0
+	call, result, attemptErr := run.startMediaCallWithRecovery(t.Context(), func(runtimehost.IMSRegistrationResult) (VoiceCall, voicehost.OutboundCallResult, error) {
+		attempts++
+		return nil, voicehost.OutboundCallResult{FinalRejected: true, StatusCode: 503, RegistrationRecoveryNeeded: true}, nil
+	})
+	call, err := classifyMediaCallAttempt(call, result, attemptErr)
+	if call != nil || attempts != 1 || !errors.Is(err, errConfirmedCallRejection) || !errors.Is(err, refreshErr) {
+		t.Fatalf("exact rejection lost or replayed: call=%T attempts=%d err=%v", call, attempts, err)
+	}
+}

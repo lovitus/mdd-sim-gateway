@@ -30,3 +30,4 @@ negative providers/vowifi-go ./internal/service TestPR8StopPersistsCallTerminalE
 negative providers/vowifi-go ./internal/service TestPR8StopRetainsReceiptRetryWithoutRepeatingConfirmedBye 'failed receipt write hidden' receipt-write
 negative providers/vowifi-go ./internal/service TestPR8StopRequiresAcceptedTerminalResult 'Stop accepted an unconfirmed terminal response' unaccepted-end
 negative providers/vowifi-go ./internal/ims TestPR8MediaFailureWithRejectedByeReturnsCleanupHandle 'media failure discarded unconfirmed dialog' ims-cleanup
+negative providers/vowifi-go/upstream/vowifi-go ./runtimehost/voicehost TestPR8AcceptedAckOrSDPFailureKeepsDialogForBye 'accepted dialog disappeared after local SDP failure' accepted-sdp
