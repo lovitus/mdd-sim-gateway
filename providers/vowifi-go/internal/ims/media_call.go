@@ -99,33 +99,37 @@ func StartMediaCall(
 	})
 	request.RemoteSDP = localSDP
 	remoteEnded := agent.WatchRemoteEnd(request.CallID)
-	result, err := agent.StartOutboundCall(ctx, request)
-	if err != nil || !result.Accepted {
-		return nil, result, err
+	result, startErr := agent.StartOutboundCall(ctx, request)
+	if !result.Accepted && !result.DialogEstablished {
+		return nil, result, startErr
 	}
-
-	remoteRTP, remoteRTCP, err := acceptedMediaEndpoints(result, config.Codec)
-	if err == nil {
-		err = bridge.SetRemote(remoteRTP, remoteRTCP)
+	call := &MediaCall{
+		agent: agent, bridge: bridge, remoteEnded: remoteEnded,
+		dialog: voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
 	}
-	if err != nil {
+	if startErr == nil && !result.Accepted {
+		startErr = fmt.Errorf("%w: established dialog has no usable media", ErrMediaNegotiation)
+	}
+	if startErr == nil {
+		var remoteRTP, remoteRTCP string
+		remoteRTP, remoteRTCP, startErr = acceptedMediaEndpoints(result, config.Codec)
+		if startErr == nil {
+			startErr = bridge.SetRemote(remoteRTP, remoteRTCP)
+		}
+	}
+	if startErr != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), mediaCleanupTimeout)
-		_, byeErr := agent.EndVoiceCallWithResult(cleanupCtx, voicehost.DialogInfo{
-			DeviceID: request.DeviceID, CallID: request.CallID,
-		})
+		_, byeErr := call.End(cleanupCtx)
 		cancel()
 		if byeErr != nil {
-			return nil, result, errors.Join(err, fmt.Errorf("end accepted call after media failure: %w", byeErr))
+			startErr = errors.Join(startErr, fmt.Errorf("end accepted call after media failure: %w", byeErr))
 		}
-		return nil, result, err
+		// Close local media through the existing defer, but preserve the original
+		// dialog handle. Its End result is idempotent after confirmed cleanup.
+		return call, result, startErr
 	}
-
 	closeBridge = false
-	return &MediaCall{
-		agent: agent, bridge: bridge,
-		remoteEnded: remoteEnded,
-		dialog:      voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
-	}, result, nil
+	return call, result, nil
 }
 
 func (call *MediaCall) RemoteEnded() <-chan struct{} {

@@ -22,6 +22,7 @@ final class CallGatewayFixture implements AutoCloseable {
     final ScheduledExecutorService clock=Executors.newSingleThreadScheduledExecutor();
     volatile JSONObject lease;
     volatile WebSocket observer,media;
+    volatile boolean rejectStart;volatile String terminalOutcome="ended";
     volatile boolean incomingVisible,terminal,confirmEnd=true,wrongIdentity,holdReady;
     volatile CountDownLatch deleteGate;
     final CountDownLatch deleteRequested=new CountDownLatch(1);
@@ -76,6 +77,7 @@ final class CallGatewayFixture implements AutoCloseable {
             else{assertEquals(lease.getString("call_id"),body.getString("call_id"));assertEquals(session,body.getString("media_session_id"));if(!inbound)assertEquals(card,body.getString("expected_card_id"));}
             if(!inbound)assertEquals("+15550100999",body.getString("callee"));else assertEquals(incoming.getString(mode.equals("cellular")?"incoming_event_id":"call_id"),lease.getString("call_id"));
             starts.incrementAndGet();incomingVisible=false;publish();started.countDown();
+            if(rejectStart){terminalOutcome="rejected";terminal=true;return new MockResponse().setResponseCode(422).setBody("{\"code\":\"call_rejected\"}");}
             if(mode.equals("cellular"))return json(inbound?Json.obj("code","cellular_incoming_answered","session_id",session,"incoming_event_id",incoming.getString("incoming_event_id")):Json.obj("code","cellular_call_started","session_id",session,"call_id",lease.getString("call_id"),"state","dialing"));
             return json(Json.obj("operation_id",body.getString("operation_id"),"accepted",true,"code","active","call_id",lease.getString("call_id")));
         }
@@ -83,7 +85,7 @@ final class CallGatewayFixture implements AutoCloseable {
             JSONObject body=new JSONObject(request.getBody().readUtf8());assertEquals(lease.getString("call_id"),body.getString("call_id"));assertEquals(lease.getString("operation_id"),body.getString("operation_id"));assertEquals(lease.getString("recovery_key"),body.getString("recovery_key"));
             if(body.getString("action").equals("end")){assertEquals(store.load().getJSONObject("pending_call").getString("end_operation_id"),body.getString("end_operation_id"));ends.incrementAndGet();if(confirmEnd)terminal=true;ended.countDown();}
             else{assertEquals("status",body.getString("action"));statuses.incrementAndGet();queried.countDown();}
-            if(terminal)return json(Json.obj("state","terminal","call_id",wrongIdentity?"another-call":lease.getString("call_id"),"operation_id",lease.getString("operation_id"),"session_id",session,"terminal_confirmed",true,"terminal_at","2026-09-22T00:01:00Z"));
+            if(terminal)return json(Json.obj("state","terminal","call_id",wrongIdentity?"another-call":lease.getString("call_id"),"operation_id",lease.getString("operation_id"),"session_id",session,"terminal_confirmed",true,"outcome",terminalOutcome,"terminal_at","2026-09-22T00:01:00Z"));
             return json(Json.obj("state","ending_unconfirmed","terminal_confirmed",false));
         }
         if(path.equals(prefix+"dtmf")){

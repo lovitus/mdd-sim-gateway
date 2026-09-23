@@ -801,50 +801,65 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 		if runtime.inbound != nil {
 			runtime.inbound.SetOutbound(agent)
 		}
-		return ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
+		mediaCall, result, err := ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
 			LocalRTP: net.JoinHostPort(runtime.localIP, "0"), LocalRTCP: net.JoinHostPort(runtime.localIP, "0"),
 			Codec: media.CodecAMR, BufferMS: request.MediaBufferMS,
 		}, voicehost.OutboundCallRequest{
 			DeviceID: runtime.deviceID, CallID: request.CallID, Callee: request.Callee,
 		})
-	})
-	if err != nil {
-		var stage *StageError
-		if errors.As(err, &stage) {
-			return nil, err
+		if mediaCall == nil {
+			return nil, result, err // avoid a typed-nil VoiceCall interface
 		}
-		return nil, &StageError{Layer: "voice", Code: "call_start_failed", Err: err}
-	}
-	if !result.Accepted || call == nil {
+		return mediaCall, result, err
+	})
+	return mediaCallOutcome(call, result, err)
+}
+
+// A private proof-carrying error, created only from the SIP owner's explicit
+// final response fact. Generic transport/HTTP failures cannot mint this proof.
+type confirmedCallRejection struct{ error }
+
+func mediaCallOutcome(call VoiceCall, result voicehost.OutboundCallResult, err error) (VoiceCall, error) {
+	if call == nil && result.RejectionConfirmed && !result.Accepted && !result.DialogEstablished {
 		failure := &vowifiipc.OperationError{
 			Kind: vowifiipc.ErrorRejected, Code: "call_rejected", Layer: "voice",
 			Detail: strings.TrimSpace(result.Reason), RetryAfter: result.RetryAfter,
+			RetryAfterMS: result.RetryAfter.Milliseconds(),
 		}
-		if result.RetryAfter > 0 {
-			failure.RetryAfterMS = result.RetryAfter.Milliseconds()
+		return nil, &confirmedCallRejection{errors.Join(failure, err)}
+	}
+	if err != nil {
+		var stage *StageError
+		if errors.As(err, &stage) {
+			return call, err
 		}
-		return nil, failure
+		return call, &StageError{Layer: "voice", Code: "call_start_failed", Err: err}
+	}
+	if !result.Accepted || call == nil {
+		return call, &vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "call_outcome_unknown", Layer: "voice"}
 	}
 	return call, nil
 }
+
+func (failure *confirmedCallRejection) Unwrap() error { return failure.error }
 
 type mediaCallAttempt func(runtimehost.IMSRegistrationResult) (VoiceCall, voicehost.OutboundCallResult, error)
 
 func (runtime *upstreamRuntime) startMediaCallWithRecovery(ctx context.Context, attempt mediaCallAttempt) (VoiceCall, voicehost.OutboundCallResult, error) {
 	registration, revision := runtime.registrationSnapshot()
 	call, result, err := attempt(registration)
-	if ctx.Err() != nil || !result.RegistrationRecoveryNeeded {
+	if call != nil || ctx.Err() != nil || !result.RegistrationRecoveryNeeded {
 		return call, result, err
 	}
 
 	recovered, recoveryApplied, recoveryErr := runtime.recoverCallRegistration(ctx, revision, result.RetryAfter)
 	if recoveryErr != nil {
-		return nil, result, errors.Join(err, fmt.Errorf("IMS registration recovery: %w", recoveryErr))
+		return call, result, errors.Join(err, fmt.Errorf("IMS registration recovery: %w", recoveryErr))
 	}
 	// Match the upstream runtime boundary: a transport failure retries the same
 	// Call-ID once after recovery. A carrier response is returned to the caller
 	// unchanged, even if it also prompted a registration refresh.
-	if err == nil || !recoveryApplied {
+	if err == nil || result.RejectionConfirmed || !recoveryApplied {
 		return call, result, err
 	}
 	return attempt(recovered)

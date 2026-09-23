@@ -85,6 +85,7 @@ type RecoveryRecord struct {
 	CreatedAt          time.Time             `json:"created_at"`
 	TerminalAt         time.Time             `json:"terminal_at,omitempty"`
 	TerminalSource     string                `json:"terminal_source,omitempty"`
+	TerminalOutcome    string                `json:"terminal_outcome,omitempty"`
 }
 
 func validRecoveryKey(key string) bool {
@@ -96,7 +97,7 @@ func recoveryKeyHash(key string) string {
 }
 
 func (store *Store) BindRecovery(record RecoveryRecord, key string) error {
-	if !validRecordIdentity(record.LineID, record.Transport, record.CallID, "out") || !validCardID(record.CardID) || record.OperationID == "" || len(record.OperationID) > 128 || record.SessionID == "" || record.Subject == "" || record.CreatedAt.IsZero() || !validRecoveryKey(key) || !record.TerminalAt.IsZero() || record.TerminalSource != "" {
+	if !validRecordIdentity(record.LineID, record.Transport, record.CallID, "out") || !validCardID(record.CardID) || record.OperationID == "" || len(record.OperationID) > 128 || record.SessionID == "" || record.Subject == "" || record.CreatedAt.IsZero() || !validRecoveryKey(key) || !record.TerminalAt.IsZero() || record.TerminalSource != "" || record.TerminalOutcome != "" {
 		return ErrRecoveryIdentity
 	}
 	if record.Transport == "cellular" && (record.Target.AgentID == "" || record.Target.AttachmentID == "" || record.Target.EquipmentID == "" || record.Target.CardID != record.CardID) {
@@ -159,6 +160,13 @@ func (store *Store) ReadRecovery(line, transport, call, operation, key string) (
 // ConfirmRecovery consumes proof from the existing hardware/protocol owner only.
 // Generic history Status or the disappearance of an active call must never call it.
 func (store *Store) ConfirmRecovery(expected RecoveryRecord, at time.Time, source string) error {
+	return store.ConfirmRecoveryOutcome(expected, at, source, "ended")
+}
+
+func (store *Store) ConfirmRecoveryOutcome(expected RecoveryRecord, at time.Time, source, outcome string) error {
+	if outcome != "ended" && !(expected.Transport == "vowifi" && outcome == "rejected") {
+		return ErrRecoveryIdentity
+	}
 	if at.IsZero() || at.After(time.Now().Add(time.Minute)) ||
 		!(expected.Transport == "cellular" && source == "agent_terminal_receipt" || expected.Transport == "vowifi" && source == "provider_terminal_receipt") {
 		return ErrRecoveryIdentity
@@ -180,7 +188,7 @@ func (store *Store) ConfirmRecovery(expected RecoveryRecord, at time.Time, sourc
 		if !current.TerminalAt.IsZero() {
 			return nil
 		}
-		current.TerminalAt, current.TerminalSource = at.UTC(), source
+		current.TerminalAt, current.TerminalSource, current.TerminalOutcome = at.UTC(), source, outcome
 		payload, err := json.Marshal(current)
 		if err != nil {
 			return err

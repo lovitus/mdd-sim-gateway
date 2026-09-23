@@ -65,6 +65,7 @@ type activeVoiceCall struct {
 	startCancel          context.CancelFunc
 	startDone            chan struct{}
 	terminationConfirmed bool
+	terminalSource       string
 	terminationErr       error
 	guardCancel          context.CancelFunc
 	guardAttempt         uint64
@@ -175,6 +176,13 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 		startErr = active.session.AttachStream(call)
 	}
 	if startErr != nil {
+		var rejected *confirmedCallRejection
+		if call == nil && errors.As(startErr, &rejected) {
+			backend.mu.Lock()
+			active.terminationConfirmed = true
+			active.terminalSource = "carrier_rejected"
+			backend.mu.Unlock()
+		}
 		if errors.Is(startErr, voicehost.ErrIMSVoiceCancellationConfirmed) {
 			backend.recordCallTermination(active, true, nil)
 		}

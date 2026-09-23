@@ -98,6 +98,11 @@ type OutboundCallRequest struct {
 }
 
 type OutboundCallResult struct {
+	// Protocol facts are not inferred from an error string or a synthetic status.
+	// DialogEstablished retains cleanup ownership after a final 2xx even when
+	// ACK/SDP/media setup fails. RejectionConfirmed is an observed final non-2xx.
+	DialogEstablished          bool
+	RejectionConfirmed         bool
 	Accepted                   bool
 	StatusCode                 int
 	Reason                     string

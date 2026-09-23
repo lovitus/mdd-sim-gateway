@@ -71,6 +71,10 @@ func (store *BoltOperationStore) LookupCallReceipt(scope string, input vowifiipc
 	return result, found, err
 }
 func (backend *Backend) persistCallTerminalLocked(active *activeVoiceCall, source string) error {
+	if active.terminalSource == "" {
+		active.terminalSource = source
+	}
+	source = active.terminalSource
 	return backend.operations.SaveCallReceipt(backend.messageScope, vowifiipc.CallReceipt{CallReceiptRequest: vowifiipc.CallReceiptRequest{CallID: active.request.CallID, OperationID: active.request.OperationID, SessionID: callMediaSessionID(active.request.MediaSessionID, active.request.CallID)}, LineID: backend.lineID, ProviderID: backend.providerID, ProcessGeneration: backend.generation, ConfirmedAt: time.Now().UTC(), Source: source})
 }
 func (backend *Backend) CallReceipt(_ context.Context, input vowifiipc.CallReceiptRequest) (vowifiipc.CallReceipt, error) {

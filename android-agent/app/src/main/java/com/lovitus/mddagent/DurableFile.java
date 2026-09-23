@@ -25,11 +25,20 @@ final class DurableFile {
     byte[] read() throws IOException { return io.read(base); }
     byte[] stagedBytes() throws IOException { return io.read(staged()); }
 
+    void validateOwner() throws IOException {
+        if (!Arrays.equals(new byte[]{1},io.read(owned()))) throw new IOException("Invalid private-state ownership marker");
+    }
+    // The caller must authenticate the complete base before repairing only missing metadata.
+    void repairMissingOwner() throws IOException {
+        if(!io.exists(owned())) { io.writeSynced(owned(),new byte[]{1});io.syncDirectory(base.getParentFile()); }
+        validateOwner();
+    }
     void write(byte[] encrypted) throws IOException {
         if (!io.exists(owned())) {
             io.writeSynced(owned(), new byte[]{1});
             io.syncDirectory(base.getParentFile());
         }
+        validateOwner();
         io.writeSynced(staged(), encrypted);
         io.syncDirectory(base.getParentFile());
         publish(encrypted);
@@ -37,7 +46,7 @@ final class DurableFile {
 
     // Also used only after the caller has authenticated a complete interrupted first write.
     void publish(byte[] expected) throws IOException {
-        if (!io.exists(owned())) throw new IOException("Missing private-state ownership marker");
+        validateOwner();
         io.replace(staged(), base);
         io.syncDirectory(base.getParentFile());
         if (!Arrays.equals(expected, io.read(base))) throw new IOException("Private-state commit verification failed");

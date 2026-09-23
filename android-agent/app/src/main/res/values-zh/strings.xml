@@ -295,4 +295,11 @@
 <string name="layer_media">通话音频</string>
 <string name="layer_call">通话准入</string>
 <string name="layer_gateway">网关依赖</string>
+    <string name="call_rejected_confirmed">原通话已明确被拒接，未建立通话。</string>
+    <string name="storage_reset">重置本地设置</string>
+    <string name="storage_reset_warning">重置会移除本地登录与恢复入口，不会挂断服务器通话，也不能证明短信未发送。请先在原网关核对未决业务。可读取的未决操作会阻止重置。不可读的密文和密钥将私有保留，但不保证可恢复。</string>
+    <string name="storage_reset_type">请输入 RESET 确认重置本地设置。这不是远端通话恢复。</string>
+    <string name="storage_reset_failed">重置未完成，原加密材料已保留。请先核对已知通话或短信，或在存储恢复可用后重试。</string>
+    <string name="storage_reset_completed">本地设置已重置，原加密恢复材料已私有保留；未改变任何远端业务。</string>
+    <string name="storage_resetting">正在保留恢复材料并重置本地设置…</string>
 </resources>

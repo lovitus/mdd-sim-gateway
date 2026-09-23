@@ -212,3 +212,14 @@ with an authenticated IKE peer and a synthetic SIP registrar. It covers both
 packet loss and IMS lease expiry with healthy DPD, without real SIM operations
 or paid traffic. These simulations do not identify the external cause of the
 original packet interruption or replace real-carrier acceptance testing.
+
+### 2026-09-23 review repair candidate
+
+The voicehost outbound result now distinguishes an established final-2xx dialog
+from media readiness and a protocol-confirmed final rejection. Final dialog tags
+are stored before fallible ACK/SDP handling; media/runtime wrappers retain exact
+cleanup handles through errors. This feeds the existing Provider cleanup owner
+and precise terminal receipts, not a second dialer or recovery watchdog. Added
+synthetic SIP/Backend regressions preserve one INVITE through rejected BYE cleanup
+and durable rejection lookup. Validation status is tracked in the repair PR;
+physical carrier acceptance is not inferred from these fixtures.

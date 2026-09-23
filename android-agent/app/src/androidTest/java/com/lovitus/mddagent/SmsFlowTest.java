@@ -19,6 +19,19 @@ import static org.junit.Assert.*;
 @RunWith(AndroidJUnit4.class)
 public class SmsFlowTest {
     private static final String EVIDENCE="/data/local/tmp/mdd-native-ui-sms-"+java.util.UUID.randomUUID();
+    @Test public void ordinaryTlsReadLossRetriesWithoutChangingTheSnapshotOrSendingSms()throws Exception{
+        run("vowifi",(fixture,scene)->{
+            AtomicReference<GatewayApi> client=new AtomicReference<>();scene.onActivity(a->{try{java.lang.reflect.Field field=AgentService.class.getDeclaredField("api");field.setAccessible(true);client.set((GatewayApi)field.get(service(a)));}catch(Exception e){throw new AssertionError(e);}});
+            GatewayApi api=client.get();okhttp3.OkHttpClient original=api.http;AtomicInteger failures=new AtomicInteger();
+            okhttp3.OkHttpClient injected=original.newBuilder().addInterceptor(chain->{
+                if(chain.request().url().encodedPath().equals("/v1/messages")&&"true".equals(chain.request().url().queryParameter("sync"))&&failures.getAndIncrement()==0)throw new javax.net.ssl.SSLException("synthetic TLS transport interruption, not certificate rejection");
+                return chain.proceed(chain.request());
+            }).build();
+            java.lang.reflect.Field transport=GatewayApi.class.getDeclaredField("http");transport.setAccessible(true);transport.set(api,injected);
+            try{fixture.appendReceived(1);await(fixture,()->synced(fixture,1)&&syncIdle(scene));assertTrue(failures.get()>=2);assertFalse(flag(scene,"messageSyncTerminal"));assertEquals(0,fixture.sends.get());assertEquals(1,summaries());}
+            finally{transport.set(api,original);}
+        });
+    }
     @Test public void unknownAAndSuccessfulBSurviveAndQueryOnlyTheOriginalPayload()throws Exception{
         for(String mode:new String[]{"cellular","vowifi"})run(mode,(fixture,scene)->{
             click(R.id.tab_messages);if(mode.equals("cellular"))click(R.id.route_cellular);await(fixture,()->view(scene,R.id.message_send,true));

@@ -45,6 +45,33 @@ public class ConnectionIntentTest {
             assertTrue(bound.service.notice.empty());
         }finally{context.stopService(new Intent(context,AgentService.class));drain();store.clear();}
     }
+    @Test public void lateScanPublicationCannotReplaceNewEpochOrClearItsPendingScan()throws Exception {
+        Context context=ApplicationProvider.getApplicationContext();ConfigStore store=new ConfigStore(context);store.clear();
+        ReaderHub oldHub=new ReaderHub(context),newHub=new ReaderHub(context);
+        try(Bound bound=new Bound(context)){
+            drain();AgentService service=bound.service;
+            AgentService.ReaderScan oldScan=new AgentService.ReaderScan(oldHub,100),newScan=new AgentService.ReaderScan(newHub,102);
+            ReaderObservation oldFacts=new ReaderObservation(oldHub,100,android.os.SystemClock.elapsedRealtime(),Json.obj("reader_condition","ready","readers",new org.json.JSONArray().put(Json.obj("card_id","old-card"))));
+            java.lang.reflect.Field scanField=AgentService.class.getDeclaredField("scanOwner");scanField.setAccessible(true);
+            @SuppressWarnings("unchecked") AtomicReference<AgentService.ReaderScan> pending=(AtomicReference<AgentService.ReaderScan>)scanField.get(service);
+            main(()->{
+                try{
+                    set(service,"hub",oldHub);set(service,"available",true);set(service,"sharing",true);set(service,"readerEpoch",100L);pending.set(oldScan);
+                    // Simulate completion already computed on readerIO, queued after lifecycle replacement.
+                    service.shareReaders(false);set(service,"hub",newHub);set(service,"sharing",true);set(service,"readerEpoch",102L);pending.set(newScan);
+                    service.completeReaderScan(oldScan,oldFacts,UiText.EMPTY);
+                    assertSame(newScan,pending.get());assertEquals("recovering",service.readers().optString("reader_condition"));
+                    ReaderObservation current=new ReaderObservation(newHub,102,android.os.SystemClock.elapsedRealtime(),Json.obj("reader_condition","ready","readers",new org.json.JSONArray().put(Json.obj("card_id","new-card"))));
+                    service.completeReaderScan(newScan,current,UiText.EMPTY);
+                    assertNull(pending.get());assertEquals("new-card",service.readers().getJSONArray("readers").getJSONObject(0).getString("card_id"));
+                    service.completeReaderScan(oldScan,oldFacts,UiText.EMPTY);
+                    assertEquals("new-card",service.readers().getJSONArray("readers").getJSONObject(0).getString("card_id"));
+                    set(service,"available",false);set(service,"sharing",false);set(service,"hub",null);
+                }catch(Exception e){throw new AssertionError(e);}
+            });drain();
+        }finally{context.stopService(new Intent(context,AgentService.class));drain();oldHub.close();newHub.close();store.clear();}
+    }
+    private static void set(AgentService service,String name,Object value)throws Exception{java.lang.reflect.Field field=AgentService.class.getDeclaredField(name);field.setAccessible(true);field.set(service,value);}
     private void exercise(java.util.function.Consumer<AgentService> actions,boolean expectedSharing)throws Exception{
         Context context=ApplicationProvider.getApplicationContext();ConfigStore store=new ConfigStore(context);store.clear();
         store.save(Json.obj("available",false,"share",true));
