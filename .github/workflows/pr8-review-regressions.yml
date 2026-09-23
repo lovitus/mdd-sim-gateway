@@ -21,8 +21,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version-file: candidate/go-runtime/go.mod
-          cache-dependency-path: candidate/go-runtime/go.sum
+          go-version-file: candidate/providers/vowifi-go/go.mod
+          cache-dependency-path: candidate/providers/vowifi-go/go.sum
       - name: Native dependencies
         shell: bash
         run: |
