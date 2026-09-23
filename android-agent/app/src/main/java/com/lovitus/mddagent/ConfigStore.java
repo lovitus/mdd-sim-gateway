@@ -179,6 +179,12 @@ final class ConfigStore {
             try{
                 JSONObject readable=null;try{readable=file.exists()?envelope(file.read()).getJSONObject("data"):read();}catch(Exception unreadable){/* raw materials are archived below */}
                 if(readable!=null)requireNoUnresolved(readable);
+                // A complete interrupted candidate is recovery material, not permission
+                // to discard an operation. Never replace it merely because the base
+                // is absent/corrupt or the ownership marker is incomplete.
+                JSONObject candidate=null;
+                if(readable==null&&files.exists(file.staged()))try{candidate=envelope(file.stagedBytes()).getJSONObject("data");}catch(Exception unreadable){/* preserve raw bytes below; no inferred outcome */}
+                if(candidate!=null)requireNoUnresolved(candidate);
                 archiveRecoveryMaterial();
                 // The original files and keys have been preserved. A fresh, independently
                 // named key also works when the original key is missing or invalidated.

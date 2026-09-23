@@ -58,3 +58,13 @@ The optional original-call recovery across an explicitly changed gateway
 certificate remains outside these six repairs. The existing pin fence is retained;
 do not remove it to make a changed server appear authorized. Existing field
 reports remain scoped to their original source/artifact/environment, not erased.
+
+## Additional pre-delivery review
+
+A final rejection's explicit proof now also prevents a retry when a transport
+error accompanies it and registration refresh is requested. This is a defensive
+combination test; it is not mislabeled as a new observed carrier incident.
+The explicit storage reset also refuses an authenticated complete staged record
+containing unresolved operations when the primary cannot be read. Such a record
+is preserved for recovery; missing ownership metadata does not permit bypassing
+its pending-operation gate. Native tests cover both call and SMS candidates.

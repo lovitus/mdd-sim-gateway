@@ -859,7 +859,7 @@ func (runtime *upstreamRuntime) startMediaCallWithRecovery(ctx context.Context, 
 	// Match the upstream runtime boundary: a transport failure retries the same
 	// Call-ID once after recovery. A carrier response is returned to the caller
 	// unchanged, even if it also prompted a registration refresh.
-	if err == nil || !recoveryApplied {
+	if err == nil || result.RejectionConfirmed || !recoveryApplied {
 		return call, result, err
 	}
 	return attempt(recovered)

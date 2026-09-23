@@ -81,6 +81,23 @@ public class RecoveryStorageTest {
             assertEquals("original-message",store.load().getJSONArray("message_operations").getJSONObject(0).getString("operation_id"));
         }finally{store.update(c->{c.remove("pending_call");c.remove("message_operations");});store.clear();}
     }
+    @Test public void resetCannotBypassAnAuthenticatedStagedUnresolvedRecord()throws Exception{
+        Context context=ApplicationProvider.getApplicationContext();ConfigStore store=new ConfigStore(context);store.retry();store.clear();
+        File base=new File(context.getNoBackupFilesDir(),"private-state-v1"),staged=new File(base+".new"),owned=new File(base+".owned");
+        for(boolean message:new boolean[]{false,true}){
+            store.update(c->{if(message)c.put("message_operations",new org.json.JSONArray().put(Json.obj("state","unknown","operation_id","staged-sms")));else c.put("pending_call",Json.obj("operation_id","staged-call"));});
+            byte[] bytes=Files.readAllBytes(base.toPath());java.util.Set<String> before=archives(context);
+            try{
+                Files.write(staged.toPath(),bytes);Files.delete(base.toPath());Files.delete(owned.toPath());
+                assertThrows(IllegalStateException.class,store::retry);
+                assertThrows(IllegalStateException.class,store::resetAfterConsent);
+                assertArrayEquals(bytes,Files.readAllBytes(staged.toPath()));assertFalse(base.exists());assertEquals(before,archives(context));
+            }finally{
+                Files.write(base.toPath(),bytes);Files.write(owned.toPath(),new byte[]{1});Files.deleteIfExists(staged.toPath());store.retry();
+                store.update(c->{c.remove("pending_call");c.remove("message_operations");});store.clear();
+            }
+        }
+    }
     static java.util.Set<String> keys()throws Exception{java.security.KeyStore store=java.security.KeyStore.getInstance("AndroidKeyStore");store.load(null);return new java.util.HashSet<>(java.util.Collections.list(store.aliases()));}
     static java.util.Set<String> archives(Context context){String[] names=new File(context.getNoBackupFilesDir(),"private-state-recovery").list();return names==null?new java.util.HashSet<>():new java.util.HashSet<>(java.util.Arrays.asList(names));}
     static void removeNewArchives(Context context,java.util.Set<String> before)throws Exception{
