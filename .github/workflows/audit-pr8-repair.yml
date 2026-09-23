@@ -65,8 +65,9 @@ jobs:
           echo "14b0577f97ed034c07a6d2389b3a60944aa9338c4f93b381ff5e230ec7d187a1  $RUNNER_TEMP/pr8.patch" | sha256sum --check
           git -C candidate apply --check "$RUNNER_TEMP/pr8.patch"
           git -C candidate apply "$RUNNER_TEMP/pr8.patch"
+          git -C candidate apply "$GITHUB_WORKSPACE/harness/audit/pr8/amend.patch"
           git -C candidate add -A
-          test "$(git -C candidate write-tree)" = ba1ea3708cc1c6498bdd6c9c40c0714a292b9b55
+          test "$(git -C candidate write-tree)" = b8e863e8a5999c57cb75d37235d759bcf439cb2e
           test "$(git -C candidate diff --cached --name-only | wc -l)" -eq 35
           git -C candidate diff --cached --check
           node candidate/tools/repository-check.mjs | tee evidence/ledger.log

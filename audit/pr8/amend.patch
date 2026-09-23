@@ -1,0 +1,12 @@
+diff --git a/go-runtime/providercontrol/pr8_rejection_test.go b/go-runtime/providercontrol/pr8_rejection_test.go
+index 1de41f4..02f14dd 100644
+--- a/go-runtime/providercontrol/pr8_rejection_test.go
++++ b/go-runtime/providercontrol/pr8_rejection_test.go
+@@ -6,7 +6,6 @@ import (
+ 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
+ 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
+ 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
+-	"net/http"
+ 	"net/http/httptest"
+ 	"path/filepath"
+ 	"strings"
