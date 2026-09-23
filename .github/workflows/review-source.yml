@@ -1,4 +1,4 @@
-name: Publish exact reviewed PR8 repair candidate
+name: Publish exact second-pass PR8 repair
 on:
   push:
     branches: [codex/pr8-repair-source]
@@ -17,44 +17,39 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
-          ref: ffb469798c047ba0bc2b7aa41b30348030b32801
+          ref: da701361c4b35562f51ee9f9457bdfba6233208a
           path: candidate
           persist-credentials: false
-      - name: Authenticate exact patch and complete candidate tree
+      - name: Verify second-pass patch and candidate tree
         shell: bash
         run: |
           set -euo pipefail
           mkdir evidence
-          cat harness/audit/pr8-repair/part-*.b64 | base64 --decode | xz --decompress > "$RUNNER_TEMP/repair.patch"
-          echo "01002aaba52ccec70316e75ac4486fc3b3cce8749b710986fd606905a6b5a04b  $RUNNER_TEMP/repair.patch" | sha256sum --check
-          git -C candidate apply --check "$RUNNER_TEMP/repair.patch"
-          git -C candidate apply "$RUNNER_TEMP/repair.patch"
+          base64 --decode harness/audit/pr8-repair/followup.b64 | xz --decompress > "$RUNNER_TEMP/followup.patch"
+          echo "d83d069d313c069a4109fb62b2b0adb118c4f0adcb5078e1860b197b51b99cfa  $RUNNER_TEMP/followup.patch" | sha256sum --check
+          git -C candidate apply --check "$RUNNER_TEMP/followup.patch"
+          git -C candidate apply "$RUNNER_TEMP/followup.patch"
           git -C candidate add -A
-          test "$(git -C candidate write-tree)" = c4fc81113a0d163d55fba1da1780a1de876c99a4
+          test "$(git -C candidate write-tree)" = be56fb7e78063a80b509212d362ca3c3368cdcaa
           git -C candidate diff --cached --check
-          cp "$RUNNER_TEMP/repair.patch" evidence/
-      - name: Publish source and preserve exact workflow blobs for connector commit
+          cp "$RUNNER_TEMP/followup.patch" evidence/
+      - name: Publish exact successor for full CI gates
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          for file in android-agent.yml go-runtime.yml pr8-review-regressions.yml; do
-            sha=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" -f encoding=utf-8 -F "content=@candidate/.github/workflows/$file" --jq .sha)
-            printf '%s %s\n' "$file" "$sha" >> evidence/workflow-blobs.txt
-          done
-          git -C candidate reset -- .github
-          test "$(git -C candidate write-tree)" = 8448be995355c191bcd65725722fd13cc0af2192
           git -C candidate config user.name 'github-actions[bot]'
           git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git -C candidate commit -m 'fix: preserve original call cleanup, final outcomes and Android recovery owners' -m 'Address PR8 review F1-F6 with exact terminal receipts, main-owner reader publication, retryable TLS message reads and explicitly consented encrypted storage recovery. Add deterministic protocol, Service and native UI regressions. Tests are pending CI, not yet claimed passed.'
+          git -C candidate commit -m 'fix: preserve confirmed rejection and staged recovery boundaries' -m 'A final rejection plus a transport error cannot redial during registration refresh. Explicit reset also respects a readable staged unresolved record. Add defensive tests without relaxing authorization, unknown-outcome or storage gates.'
           git -C candidate rev-parse HEAD HEAD^{tree} > evidence/source.txt
           git -C candidate ls-files -s > evidence/manifest.txt
+          git -C candidate archive --format=tar.gz HEAD > evidence/source.tar.gz
           authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/pr8-review-fixes
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/pr8-fix-amend
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: pr8-repair-publication
+          name: pr8-repair-second-pass
           path: evidence/
           retention-days: 14
