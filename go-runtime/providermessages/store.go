@@ -2,8 +2,10 @@ package providermessages
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +30,7 @@ var (
 	bucketCellularNotify = []byte("cellular_notification_source_outbox_v1")
 	bucketPurgedLines    = []byte("purged_lines_v1")
 	keySchema            = []byte("schema_version")
+	keySyncStream        = []byte("sync_stream_id_v1")
 	ErrConflict          = errors.New("message event ID conflict")
 	ErrWindowTooLarge    = errors.New("message receive window is too large")
 )
@@ -78,6 +81,15 @@ func (store *Store) initialize() error {
 			}
 		}
 		meta := tx.Bucket(bucketMeta)
+		if meta.Get(keySyncStream) == nil {
+			var stream [16]byte
+			if _, err := rand.Read(stream[:]); err != nil {
+				return err
+			}
+			if err := meta.Put(keySyncStream, []byte(hex.EncodeToString(stream[:]))); err != nil {
+				return err
+			}
+		}
 		stored := meta.Get(keySchema)
 		if stored == nil {
 			var wire [8]byte
@@ -142,7 +154,7 @@ func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotificatio
 				event.MessageID, event.Part = messageID, part
 			}
 		}
-		record = Record{Event: event, Transport: notificationTransport, ReceivedAt: receivedAt}
+		record = Record{Event: event, Transport: notificationTransport, ReceivedAt: receivedAt, Realtime: enqueueNotification && event.Kind == KindReceived}
 		wire, err := json.Marshal(record)
 		if err != nil {
 			return err

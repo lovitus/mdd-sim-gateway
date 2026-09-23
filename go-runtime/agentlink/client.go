@@ -21,6 +21,7 @@ type Client struct {
 	HTTPClient             *http.Client
 	Authenticator          Authenticator
 	Modems                 ModemExecutor
+	CallReceipts           bool
 	SMSSessionFencing      bool
 	PIN                    SIMPINExecutor
 	PINConfiguration       bool
@@ -77,6 +78,9 @@ func (client Client) Run(ctx context.Context) (result error) {
 	headers.Set("Authorization", "Bearer "+client.Token)
 	headers.Set("X-MDD-Agent-ID", client.Hello.AgentID)
 	capabilities := []string{}
+	if client.Modems != nil && client.CallReceipts {
+		capabilities = append(capabilities, ModemCallReceiptFeature)
+	}
 	if client.Events != nil {
 		capabilities = append(capabilities, modemEventsFeature)
 	}

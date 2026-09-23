@@ -737,16 +737,17 @@ type EUICCNotificationResponse struct {
 type ModemAction string
 
 const (
-	ModemCallStatus ModemAction = "call_status"
-	ModemCallHangup ModemAction = "call_hangup"
-	ModemCallDial   ModemAction = "call_dial"
-	ModemCallAnswer ModemAction = "call_answer"
-	ModemCallReject ModemAction = "call_reject"
-	ModemCallRenew  ModemAction = "call_renew"
-	ModemCallDTMF   ModemAction = "call_dtmf"
-	ModemSMSList    ModemAction = "sms_list"
-	ModemSMSSend    ModemAction = "sms_send"
-	ModemSMSReceipt ModemAction = "sms_receipt"
+	ModemCallStatus  ModemAction = "call_status"
+	ModemCallReceipt ModemAction = "call_receipt"
+	ModemCallHangup  ModemAction = "call_hangup"
+	ModemCallDial    ModemAction = "call_dial"
+	ModemCallAnswer  ModemAction = "call_answer"
+	ModemCallReject  ModemAction = "call_reject"
+	ModemCallRenew   ModemAction = "call_renew"
+	ModemCallDTMF    ModemAction = "call_dtmf"
+	ModemSMSList     ModemAction = "sms_list"
+	ModemSMSSend     ModemAction = "sms_send"
+	ModemSMSReceipt  ModemAction = "sms_receipt"
 )
 
 type ModemMediaAction string
@@ -2000,7 +2001,11 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 		result.ObservedAt.IsZero() || result.ObservedAt.After(time.Now().Add(time.Minute)) || !result.Authoritative {
 		return errors.New("invalid modem call result")
 	}
-	if action == ModemCallHangup || action == ModemCallReject {
+	if action == ModemCallReceipt {
+		if !result.TerminalConfirmed || result.State != "idle" || result.Strategy != "stored_terminal" {
+			return errors.New("invalid modem terminal receipt")
+		}
+	} else if action == ModemCallHangup || action == ModemCallReject {
 		if !result.TerminalConfirmed || result.State != "idle" ||
 			(action == ModemCallHangup && !oneOf(result.Strategy, "already_idle", "chup", "chup_ath") ||
 				action == ModemCallReject && result.Strategy != "incoming_chup") {
@@ -2023,7 +2028,7 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 }
 
 func validModemAction(value ModemAction) bool {
-	return value == ModemCallStatus || value == ModemCallHangup || value == ModemCallDial ||
+	return value == ModemCallStatus || value == ModemCallReceipt || value == ModemCallHangup || value == ModemCallDial ||
 		value == ModemCallAnswer || value == ModemCallReject || value == ModemCallRenew || value == ModemCallDTMF ||
 		value == ModemSMSList || value == ModemSMSSend || value == ModemSMSReceipt
 }
@@ -2082,9 +2087,17 @@ func validateModemDataFields(action ModemDataAction, streamID, streamToken, netw
 
 func validateModemActionFields(action ModemAction, leaseID, number, signal, body string) error {
 	switch action {
-	case ModemCallStatus, ModemCallHangup:
+	case ModemCallReceipt:
+		if !validIdentifier(leaseID) || number != "" || signal != "" || body != "" {
+			return errors.New("call receipt requires only the original lease identity")
+		}
+	case ModemCallStatus:
 		if leaseID != "" || number != "" || signal != "" || body != "" {
 			return errors.New("status and hangup do not accept lease or number fields")
+		}
+	case ModemCallHangup:
+		if leaseID != "" && !validIdentifier(leaseID) || number != "" || signal != "" || body != "" {
+			return errors.New("hangup accepts only an optional exact lease")
 		}
 	case ModemCallDial:
 		if !validIdentifier(leaseID) || !validTelephone(number) || signal != "" || body != "" {

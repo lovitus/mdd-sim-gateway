@@ -29,17 +29,18 @@ type Restarter interface {
 type OperationAction string
 
 const (
-	OperationCallStatus OperationAction = "call_status"
-	OperationCallHangup OperationAction = "call_hangup"
-	OperationCallDial   OperationAction = "call_dial"
-	OperationCallAnswer OperationAction = "call_answer"
-	OperationCallReject OperationAction = "call_reject"
-	OperationCallRenew  OperationAction = "call_renew"
-	OperationCallDTMF   OperationAction = "call_dtmf"
-	OperationSMSList    OperationAction = "sms_list"
-	OperationSMSSend    OperationAction = "sms_send"
-	OperationSMSReceipt OperationAction = "sms_receipt"
-	OperationSMSDelete  OperationAction = "sms_delete"
+	OperationCallStatus  OperationAction = "call_status"
+	OperationCallReceipt OperationAction = "call_receipt"
+	OperationCallHangup  OperationAction = "call_hangup"
+	OperationCallDial    OperationAction = "call_dial"
+	OperationCallAnswer  OperationAction = "call_answer"
+	OperationCallReject  OperationAction = "call_reject"
+	OperationCallRenew   OperationAction = "call_renew"
+	OperationCallDTMF    OperationAction = "call_dtmf"
+	OperationSMSList     OperationAction = "sms_list"
+	OperationSMSSend     OperationAction = "sms_send"
+	OperationSMSReceipt  OperationAction = "sms_receipt"
+	OperationSMSDelete   OperationAction = "sms_delete"
 )
 
 type Operation struct {

@@ -1,7 +1,7 @@
 name: Android native agent preview
 on:
   push:
-    branches: [codex/android-v2]
+    branches: [codex/android-v2, codex/android-recovery-remediation]
   workflow_dispatch:
 permissions:
   contents: read
@@ -33,13 +33,25 @@ jobs:
         run: gradle -p android-agent --no-daemon testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
       - name: Sign non-debuggable test APK and verify it
         shell: bash
+        env:
+          PREVIEW_KEYSTORE: ${{ secrets.MDD_ANDROID_PREVIEW_KEYSTORE_BASE64 }}
+          MDD_ANDROID_STORE_PASSWORD: ${{ secrets.MDD_ANDROID_PREVIEW_STORE_PASSWORD }}
+          MDD_ANDROID_KEY_PASSWORD: ${{ secrets.MDD_ANDROID_PREVIEW_STORE_PASSWORD }}
+          MDD_ANDROID_KEY_ALIAS: mdd-preview
+          MDD_ANDROID_STORE_TYPE: PKCS12
         run: |
           set -euo pipefail
+          umask 077
           mkdir -p android-evidence
-          keytool -genkeypair -keystore "$RUNNER_TEMP/android-preview.jks" -storepass android -keypass android -alias androiddebugkey -dname 'CN=MDD disposable preview test signing' -keyalg RSA -keysize 3072 -validity 365 -noprompt
-          MDD_ANDROID_KEYSTORE="$RUNNER_TEMP/android-preview.jks" gradle -p android-agent --no-daemon assembleRelease
+          test -n "$PREVIEW_KEYSTORE" && test -n "$MDD_ANDROID_STORE_PASSWORD"
+          export MDD_ANDROID_KEYSTORE="$RUNNER_TEMP/android-preview.p12"
+          trap 'rm -f "$MDD_ANDROID_KEYSTORE"' EXIT
+          printf '%s' "$PREVIEW_KEYSTORE" | base64 --decode > "$MDD_ANDROID_KEYSTORE"
+          unset PREVIEW_KEYSTORE
+          gradle -p android-agent --no-daemon assembleRelease
           cp android-agent/app/build/outputs/apk/release/app-release.apk android-evidence/mdd-agent-preview.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs android-evidence/mdd-agent-preview.apk > android-evidence/signature.txt
+          grep -Fq 'Signer #1 certificate SHA-256 digest: 8b5e818fccfa6f6738cd53658b2df9ab57a014f9a5269decc4104d91894dd5e2' android-evidence/signature.txt
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging android-evidence/mdd-agent-preview.apk > android-evidence/package.txt
           ! grep -q application-debuggable android-evidence/package.txt
           (cd android-evidence && sha256sum mdd-agent-preview.apk > SHA256SUMS)
@@ -53,11 +65,12 @@ jobs:
             android-evidence/
             android-agent/app/build/reports/
             android-agent/app/build/test-results/
+            android-agent/app/build/outputs/apk/
           retention-days: 14
   device:
-    needs: build
+    needs: [build, core]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +86,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Structured UI XML reader
+        run: |
+          source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$source"; then sudo mv "$source" "$source.disabled"; fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxml2-utils
       - name: KVM permission for disposable emulator
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -86,27 +108,83 @@ jobs:
         with:
           name: android-preview-build
           path: release-bundle
+      - uses: actions/download-artifact@v7
+        with:
+          name: android-process-fixture
+          path: process-fixture
       - uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api }}
           arch: x86_64
           profile: pixel_2
+          emulator-port: 5554
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: |
-            gradle -p android-agent --no-daemon connectedDebugAndroidTest
-            mkdir -p android-screens
-            adb install -r release-bundle/android-evidence/mdd-agent-preview.apk
-            adb shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity
-            adb exec-out screencap -p > android-screens/setup.png
+          script: bash android-agent/scripts/verify-emulator.sh 5037 emulator-5554
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: android-emulator-${{ matrix.api }}
           path: |
             android-screens/
+            android-process-evidence/
             android-agent/app/build/reports/androidTests/
             android-agent/app/build/outputs/androidTest-results/
+          retention-days: 14
+  recovery-control:
+    needs: [build, core]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [28, 35]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: XML and disposable emulator support
+        run: |
+          source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$source"; then sudo mv "$source" "$source.disabled"; fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxml2-utils
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: android-preview-build
+          path: release-bundle
+      - uses: actions/download-artifact@v7
+        with:
+          name: android-process-fixture
+          path: process-fixture
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          profile: pixel_2
+          emulator-port: 5554
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash android-agent/scripts/verify-emulator.sh 5037 emulator-5554 control
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android-control-${{ matrix.api }}
+          path: android-control-evidence/
           retention-days: 14
   core:
     runs-on: ubuntu-latest
@@ -131,10 +209,39 @@ jobs:
       - name: Mobile state and existing Agent boundaries
         run: |
           set -o pipefail
-          go -C go-runtime test -json -race -count=1 -timeout 3m ./internal/core ./agentlink | tee android-core.jsonl
-          go -C go-runtime vet ./internal/core ./agentlink
+          go -C go-runtime test -json -race -count=1 -timeout 5m ./internal/core ./agentlink ./internal/agentcall ./internal/agenthost ./internal/callhistory ./internal/cellularmedia ./mediaauth ./providercontrol ./providermessages ./vowifiipc ./tools/android-process-fixture | tee android-core.jsonl
+          go -C go-runtime vet ./internal/core ./agentlink ./internal/agentcall ./internal/cellularmedia ./providercontrol ./providermessages
           node tools/repository-check.mjs
           node tools/repository-check.test.mjs
+      - name: Build isolated hardware-validation Core for the desktop host
+        env:
+          CGO_ENABLED: '0'
+          GOOS: darwin
+          GOARCH: arm64
+        run: |
+          mkdir -p "$RUNNER_TEMP/android-hardware-core"
+          go -C go-runtime build -trimpath -o "$RUNNER_TEMP/android-hardware-core/mdd-core" ./cmd/mdd-core
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/android-hardware-core/source.txt"
+          (cd "$RUNNER_TEMP/android-hardware-core" && sha256sum mdd-core > SHA256SUMS)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-hardware-core-darwin-arm64
+          path: ${{ runner.temp }}/android-hardware-core/
+          retention-days: 14
+      - name: Build external QA peers (not release components)
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p "$RUNNER_TEMP/android-process-fixture"
+          GOOS=linux GOARCH=amd64 go -C go-runtime build -trimpath -o "$RUNNER_TEMP/android-process-fixture/fixture-linux-amd64" ./tools/android-process-fixture
+          GOOS=darwin GOARCH=arm64 go -C go-runtime build -trimpath -o "$RUNNER_TEMP/android-process-fixture/fixture-darwin-arm64" ./tools/android-process-fixture
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/android-process-fixture/source.txt"
+          (cd "$RUNNER_TEMP/android-process-fixture" && sha256sum fixture-* > SHA256SUMS)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-process-fixture
+          path: ${{ runner.temp }}/android-process-fixture/
+          retention-days: 14
       - name: Existing incoming call identity and embedded UI
         working-directory: webui
         run: |
@@ -148,9 +255,54 @@ jobs:
           name: android-core-contracts
           path: android-core.jsonl
           retention-days: 14
+  provider-recovery:
+    name: Race-test Android call recovery Provider boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            providers/vowifi-go/go.sum
+            providers/vowifi-go/upstream/vowifi-go/go.sum
+            agent/call-audio-helper/go.sum
+      - name: Install Provider test dependencies
+        run: |
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libopencore-amrnb-dev pkg-config
+      - name: Verify Provider modules
+        run: |
+          go -C providers/vowifi-go mod verify
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go mod verify
+      - name: Race-test Provider recovery and patched voicehost
+        run: |
+          set -o pipefail
+          go -C providers/vowifi-go test -json -race -count=1 -timeout 5m ./... 2>&1 | tee android-provider.jsonl
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go test -json -race -count=1 -timeout 5m ./runtimehost/voicehost/... 2>&1 | tee android-voicehost.jsonl
+      - name: Vet Provider recovery and patched voicehost
+        run: |
+          go -C providers/vowifi-go vet ./...
+          GOWORK=off go -C providers/vowifi-go/upstream/vowifi-go vet ./runtimehost/voicehost/...
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android-provider-contracts
+          path: |
+            android-provider.jsonl
+            android-voicehost.jsonl
+          retention-days: 14
   preview:
     if: github.ref == 'refs/heads/codex/android-v2'
-    needs: [build, device, core]
+    needs: [build, device, recovery-control, core]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -174,7 +326,7 @@ jobs:
 
           Android 9+; native setup, server calls/SMS, USB APDU-level CCID slot-0 / access-controlled OMAPI reader sharing, bounded network recovery and foreground availability.
           Requires the matching Core /v1/mobile/ws implementation in the draft PR. No production server is automatically updated.
-          APK is non-debuggable but signed with a disposable test key, NOT the owner's stable production certificate. Future preview updates may require uninstalling the previous preview.
+          The normal preview APK is non-debuggable and uses the repository's stable preview signing identity. Do not uninstall a differently signed existing app or reuse the QA package for normal use.
           API 28/35 emulators, unit tests and Core protocol tests gate this prerelease. Synthetic audio is not a real SIM/carrier or screen-off/OEM/battery acceptance.
           No paid calls/SMS or physical SIM operations were performed. See README and signature/checksum evidence.
           NOTES

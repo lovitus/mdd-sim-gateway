@@ -13,13 +13,17 @@ import (
 // A failed start has no usable owner, so cleanup must retry even while the
 // browser remains connected. Ordinary failed hangup preserves heartbeat policy.
 func (backend *Backend) restartCallGuardLocked(active *activeVoiceCall, cleanup bool) context.Context {
-	if backend.activeCall != active || active.call == nil {
+	if backend.activeCall != active || active.call == nil && !active.terminationConfirmed {
 		return nil
 	}
 	if active.guardCancel != nil {
 		active.guardCancel()
 	}
-	active.phase = callsafety.PhaseActive
+	if active.terminationConfirmed {
+		active.phase = callsafety.PhaseEnding
+	} else {
+		active.phase = callsafety.PhaseActive
+	}
 	active.cleanupPending = active.cleanupPending || cleanup
 	active.guardRetryAt = time.Now().Add(guardRetryDelay(active.guardAttempt, backend.callGuardTimeout))
 	ctx, cancel := context.WithCancel(context.Background())

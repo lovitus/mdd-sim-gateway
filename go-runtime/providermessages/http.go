@@ -167,6 +167,37 @@ func NewPublicHandler(store *Store) (*PublicHandler, error) {
 }
 
 func (handler *PublicHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodGet && request.URL.Path == "/v1/messages" && request.URL.Query().Get("sync") == "true" {
+		query := request.URL.Query()
+		for key, values := range query {
+			if (key != "sync" && key != "after" && key != "limit") || len(values) != 1 {
+				messageFailure(response, 400, "invalid_message_sync_query")
+				return
+			}
+		}
+		limit := 100
+		if raw := query.Get("limit"); raw != "" {
+			var err error
+			limit, err = strconv.Atoi(raw)
+			if err != nil {
+				messageFailure(response, 400, "invalid_message_sync_query")
+				return
+			}
+		}
+		page, err := handler.store.Sync(query.Get("after"), limit)
+		if err != nil {
+			if errors.Is(err, ErrHistoryQuery) {
+				messageFailure(response, 400, "invalid_message_sync_query")
+			} else {
+				messageFailure(response, 500, "message_read_failed")
+			}
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(response).Encode(page)
+		return
+	}
 	if request.Method == http.MethodGet && request.URL.Path == "/v1/messages/conversations" {
 		query := request.URL.Query()
 		if query.Get("all") == "true" {

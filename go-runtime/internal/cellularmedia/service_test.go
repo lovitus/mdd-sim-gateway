@@ -51,18 +51,21 @@ func (catalog fakeCatalog) Get(id string) (linecatalog.Line, error) {
 }
 
 type fakeAgentRuntime struct {
-	mu         sync.Mutex
-	mediaURL   string
-	client     *http.Client
-	socket     *websocket.Conn
-	dials      int
-	dtmfs      int
-	dtmfSignal string
-	dtmfLease  string
-	renewals   int
-	hangups    int
-	rejects    int
-	hungUp     chan struct{}
+	mu                sync.Mutex
+	mediaURL          string
+	client            *http.Client
+	socket            *websocket.Conn
+	dials             int
+	answers           int
+	answeredIndex     int
+	dtmfs             int
+	dtmfSignal        string
+	dtmfLease         string
+	renewals          int
+	hangups           int
+	rejects           int
+	hungUp            chan struct{}
+	receiptCapability bool
 }
 
 func (runtime *fakeAgentRuntime) ResolveModemTargetForCardAction(cardID string, _ agentlink.ModemAction) (agentlink.ModemTarget, error) {
@@ -79,12 +82,16 @@ func (runtime *fakeAgentRuntime) Status(agentID string) (agentlink.ConnectionSta
 	if agentID != "agent-1" {
 		return agentlink.ConnectionStatus{}, false
 	}
-	return agentlink.ConnectionStatus{AgentID: "agent-1", ProcessGeneration: "generation-1",
+	status := agentlink.ConnectionStatus{AgentID: "agent-1", ProcessGeneration: "generation-1",
 		Topology: &agentlink.TopologySnapshot{ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
 			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
 			AT:  agentlink.ModemATControlFact{State: "ready", CallSignalling: true},
 			SIM: agentlink.ModemSIMFact{State: "ready", ICCID: "8985200000000000001", SessionGeneration: "session-1"},
-		}}}}, true
+		}}}}
+	if runtime.receiptCapability {
+		status.Capabilities = []string{agentlink.ModemCallReceiptFeature}
+	}
+	return status, true
 }
 
 func (runtime *fakeAgentRuntime) ExecuteModemMedia(ctx context.Context, agentID, generation string, request agentlink.ModemMediaRequest) (agentlink.ModemMediaResponse, error) {
@@ -159,6 +166,11 @@ func (runtime *fakeAgentRuntime) ExecuteModem(_ context.Context, agentID, genera
 			ObservedAt: time.Now(), Authoritative: true,
 		}
 		response.Lease = &agentlink.ModemLeaseResult{LeaseID: request.LeaseID, ExpiresAt: time.Now().Add(10 * time.Second)}
+	case agentlink.ModemCallAnswer:
+		runtime.answers++
+		runtime.answeredIndex = request.NativeCallIndex
+		response.Call = &agentlink.ModemCallResult{State: "active", Direction: "in", Number: request.Number, NativeCallIndex: request.NativeCallIndex, VoiceCalls: 1, IncomingCalls: 0, ObservedAt: time.Now(), Authoritative: true}
+		response.Lease = &agentlink.ModemLeaseResult{LeaseID: request.LeaseID, ExpiresAt: time.Now().Add(10 * time.Second)}
 	case agentlink.ModemCallRenew:
 		runtime.renewals++
 		response.Lease = &agentlink.ModemLeaseResult{LeaseID: request.LeaseID, ExpiresAt: time.Now().Add(10 * time.Second)}
@@ -168,6 +180,10 @@ func (runtime *fakeAgentRuntime) ExecuteModem(_ context.Context, agentID, genera
 		response.Call = &agentlink.ModemCallResult{
 			State: "active", Direction: "out", Number: "+852123",
 			ObservedAt: time.Now(), Authoritative: true,
+		}
+		if runtime.answers > 0 {
+			response.Call.Direction = "in"
+			response.Call.NativeCallIndex, response.Call.VoiceCalls = runtime.answeredIndex, 1
 		}
 	case agentlink.ModemCallHangup:
 		runtime.hangups++
@@ -185,7 +201,7 @@ func (runtime *fakeAgentRuntime) ExecuteModem(_ context.Context, agentID, genera
 		response.Call = &agentlink.ModemCallResult{State: "idle", ObservedAt: time.Now(), Authoritative: true,
 			TerminalConfirmed: true, Strategy: "incoming_chup"}
 	}
-	return response, nil
+	return response, response.ValidateFor(request)
 }
 
 func TestCellularMediaCanaryDialAndTenSecondGuard(t *testing.T) {

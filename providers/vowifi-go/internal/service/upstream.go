@@ -798,6 +798,9 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 		if agentErr != nil {
 			return nil, voicehost.OutboundCallResult{}, &StageError{Layer: "voice", Code: "voice_transport_unavailable", Err: agentErr}
 		}
+		if runtime.inbound != nil {
+			runtime.inbound.SetOutbound(agent)
+		}
 		return ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
 			LocalRTP: net.JoinHostPort(runtime.localIP, "0"), LocalRTCP: net.JoinHostPort(runtime.localIP, "0"),
 			Codec: media.CodecAMR, BufferMS: request.MediaBufferMS,
@@ -806,11 +809,21 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 		})
 	})
 	if err != nil {
+		if result.DefinitiveRejection {
+			failure := &vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorRejected, Code: "call_rejected", Layer: "voice",
+				Detail: strings.TrimSpace(result.Reason), RetryAfter: result.RetryAfter,
+			}
+			if result.RetryAfter > 0 {
+				failure.RetryAfterMS = result.RetryAfter.Milliseconds()
+			}
+			return call, &definitiveCallRejection{failure: failure}
+		}
 		var stage *StageError
 		if errors.As(err, &stage) {
-			return nil, err
+			return call, err
 		}
-		return nil, &StageError{Layer: "voice", Code: "call_start_failed", Err: err}
+		return call, &StageError{Layer: "voice", Code: "call_start_failed", Err: err}
 	}
 	if !result.Accepted || call == nil {
 		failure := &vowifiipc.OperationError{
@@ -819,6 +832,9 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 		}
 		if result.RetryAfter > 0 {
 			failure.RetryAfterMS = result.RetryAfter.Milliseconds()
+		}
+		if result.DefinitiveRejection {
+			return nil, &definitiveCallRejection{failure: failure}
 		}
 		return nil, failure
 	}
@@ -830,7 +846,7 @@ type mediaCallAttempt func(runtimehost.IMSRegistrationResult) (VoiceCall, voiceh
 func (runtime *upstreamRuntime) startMediaCallWithRecovery(ctx context.Context, attempt mediaCallAttempt) (VoiceCall, voicehost.OutboundCallResult, error) {
 	registration, revision := runtime.registrationSnapshot()
 	call, result, err := attempt(registration)
-	if ctx.Err() != nil || !result.RegistrationRecoveryNeeded {
+	if ctx.Err() != nil || call != nil || result.Accepted || !result.RegistrationRecoveryNeeded {
 		return call, result, err
 	}
 

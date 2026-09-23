@@ -1,4 +1,21 @@
-<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
-<item name="android:fontFamily">sans</item><item name="android:colorAccent">#167D8D</item>
-<item name="android:windowLightStatusBar">true</item><item name="android:navigationBarColor">#F3F6F8</item>
-<item name="android:windowActionModeOverlay">true</item></style></resources>
+<resources>
+  <style name="AppTheme" parent="Theme.Material3.Light.NoActionBar">
+    <item name="android:fontFamily">sans</item>
+    <item name="android:letterSpacing">0</item>
+    <item name="colorPrimary">#0C6B64</item>
+    <item name="colorOnPrimary">#FFFFFF</item>
+    <item name="colorSecondary">#37618A</item>
+    <item name="colorSurface">#FFFFFF</item>
+    <item name="colorOnSurface">#172334</item>
+    <item name="android:colorBackground">#F5F7FA</item>
+    <item name="android:windowLightStatusBar">true</item>
+    <item name="android:statusBarColor">#F5F7FA</item>
+    <item name="android:navigationBarColor">#FFFFFF</item>
+    <item name="android:windowLightNavigationBar">true</item>
+    <item name="android:windowActionModeOverlay">true</item>
+  </style>
+  <style name="NavLabel" parent="TextAppearance.Material3.LabelSmall">
+    <item name="android:textSize">11sp</item>
+    <item name="android:letterSpacing">0</item>
+  </style>
+</resources>

@@ -31,6 +31,7 @@ type Server struct {
 	mobileMu           sync.Mutex
 	mobileAt           time.Time
 	mobileCached       mobileData
+	mobileCallFacts    mobileCallFacts
 	audit              *adminAudit
 	replay             *events.Replay
 	eventStore         *events.BoltStore
@@ -688,6 +689,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.HandleFunc("GET /ws", server.browserState)
 		server.mux.HandleFunc("GET /v1/browser/ws", server.browserState)
 		server.mux.HandleFunc("GET /v1/mobile/ws", server.mobileState)
+		server.mux.HandleFunc("GET /v1/mobile/lines", server.mobileLines)
+		server.mux.HandleFunc("GET /v1/mobile/lines/{lineID}", server.mobileLines)
+		server.mux.HandleFunc("GET /v1/mobile/incoming", server.mobileIncoming)
 	}
 	return server
 }

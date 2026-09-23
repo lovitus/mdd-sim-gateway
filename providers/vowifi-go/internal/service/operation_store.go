@@ -21,6 +21,7 @@ var messageOutboxBucket = []byte("message-outbox-v1")
 var maintenanceBucket = []byte("maintenance-v1")
 var drainLeaseKey = []byte("apply-drain-lease")
 var paidMessageBucket = []byte("paid-message-operations-v1")
+var callTerminalBucket = []byte("call-terminal-receipts-v1")
 
 type OperationRecord struct {
 	Kind    string                    `json:"kind"`
@@ -37,6 +38,8 @@ type MessageOperationRecord struct {
 }
 
 type OperationStore interface {
+	SaveCallReceipt(string, vowifiipc.CallReceipt) error
+	LookupCallReceipt(string, vowifiipc.CallReceiptRequest) (vowifiipc.CallReceipt, bool, error)
 	Lookup(generation, operationID string) (OperationRecord, bool, error)
 	Reserve(generation, operationID, kind string) error
 	Complete(generation, operationID string, result vowifiipc.OperationResult) error
@@ -62,6 +65,7 @@ type MemoryOperationStore struct {
 	messages   map[string]providermessages.Event
 	drainLease string
 	paid       map[string]MessageOperationRecord
+	terminals  map[string]vowifiipc.CallReceipt
 }
 
 func NewMemoryOperationStore() *MemoryOperationStore {
@@ -240,6 +244,9 @@ func OpenBoltOperationStore(path string) (*BoltOperationStore, error) {
 			return err
 		}
 		if _, err := tx.CreateBucketIfNotExists(maintenanceBucket); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists(callTerminalBucket); err != nil {
 			return err
 		}
 		paid, err := tx.CreateBucketIfNotExists(paidMessageBucket)

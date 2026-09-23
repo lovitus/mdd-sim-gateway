@@ -40,9 +40,10 @@ type MediaCallConfig struct {
 // It deliberately does not own registration recovery or browser heartbeat
 // policy. End always closes media, even when the peer does not accept BYE.
 type MediaCall struct {
-	agent  *voicehost.IMSOutboundAgent
-	bridge *media.Bridge
-	dialog voicehost.DialogInfo
+	agent       *voicehost.IMSOutboundAgent
+	bridge      *media.Bridge
+	dialog      voicehost.DialogInfo
+	remoteEnded <-chan struct{}
 
 	endMu     sync.Mutex
 	ended     bool
@@ -97,6 +98,7 @@ func StartMediaCall(
 		PTimeMS: 20, MaxPTimeMS: 20,
 	})
 	request.RemoteSDP = localSDP
+	remoteEnded := agent.WatchRemoteEnd(request.CallID)
 	result, err := agent.StartOutboundCall(ctx, request)
 	if err != nil || !result.Accepted {
 		return nil, result, err
@@ -108,21 +110,46 @@ func StartMediaCall(
 	}
 	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), mediaCleanupTimeout)
-		_, byeErr := agent.EndVoiceCallWithResult(cleanupCtx, voicehost.DialogInfo{
+		byeResult, byeErr := agent.EndVoiceCallWithResult(cleanupCtx, voicehost.DialogInfo{
 			DeviceID: request.DeviceID, CallID: request.CallID,
 		})
 		cancel()
-		if byeErr != nil {
-			return nil, result, errors.Join(err, fmt.Errorf("end accepted call after media failure: %w", byeErr))
+		if byeErr == nil && !byeResult.Accepted {
+			byeErr = errors.New("accepted call cleanup was not confirmed")
 		}
-		return nil, result, err
+		cleanupCall := &MediaCall{
+			agent: agent, remoteEnded: remoteEnded,
+			dialog: voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
+		}
+		if byeErr == nil {
+			cleanupCall.ended = true
+			cleanupCall.endResult = byeResult
+		}
+		if byeErr != nil {
+			return cleanupCall, result, errors.Join(err, fmt.Errorf("end accepted call after media failure: %w", byeErr))
+		}
+		return cleanupCall, result, err
 	}
 
 	closeBridge = false
 	return &MediaCall{
 		agent: agent, bridge: bridge,
-		dialog: voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
+		remoteEnded: remoteEnded,
+		dialog:      voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
 	}, result, nil
+}
+
+func (call *MediaCall) RemoteEnded() <-chan struct{} {
+	if call == nil {
+		return nil
+	}
+	return call.remoteEnded
+}
+func (call *MediaCall) CloseMedia() error {
+	if call == nil {
+		return nil
+	}
+	return closeMedia(call.bridge)
 }
 
 // End serializes BYE attempts and then stops RTP/RTCP regardless of the BYE
@@ -135,17 +162,24 @@ func (call *MediaCall) End(ctx context.Context) (voicehost.DialogInfoResult, err
 	call.endMu.Lock()
 	defer call.endMu.Unlock()
 	if call.ended {
-		return call.endResult, nil
+		return call.endResult, closeMedia(call.bridge)
+	}
+	select {
+	case <-call.remoteEnded:
+		call.ended = true
+		call.endResult = voicehost.DialogInfoResult{Accepted: true, StatusCode: 200, Reason: "carrier ended exact dialog"}
+		return call.endResult, closeMedia(call.bridge)
+	default:
 	}
 	result, err := call.agent.EndVoiceCallWithResult(ctx, call.dialog)
-	if closeErr := closeMedia(call.bridge); closeErr != nil {
-		err = errors.Join(err, closeErr)
-	}
 	if err == nil && result.Accepted {
 		call.ended = true
 		call.endResult = result
 	}
-	return result, err
+	if err == nil && !result.Accepted {
+		err = errors.New("IMS dialog termination is unconfirmed")
+	}
+	return result, errors.Join(err, closeMedia(call.bridge))
 }
 
 func (call *MediaCall) SendDTMF(ctx context.Context, signal string, durationMS int) (string, error) {

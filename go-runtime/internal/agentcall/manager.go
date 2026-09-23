@@ -19,6 +19,7 @@ const (
 )
 
 var ErrAuxiliaryDuringCall = errors.New("modem auxiliary operation is blocked by a paid-call lease")
+var ErrTerminalUnconfirmed = errors.New("original paid call has no terminal confirmation")
 
 // Manager is the only paid-call operator exposed by the Agent. The durable
 // record is committed before ATD/ATA and is removed only after fresh CLCC
@@ -63,6 +64,8 @@ func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operat
 	manager.operationMu.Lock()
 	defer manager.operationMu.Unlock()
 	switch operation.Action {
+	case agentmodem.OperationCallReceipt:
+		return manager.callReceipt(ctx, operation)
 	case agentmodem.OperationSMSList, agentmodem.OperationSMSSend:
 		if err := manager.auxiliaryAllowedLocked(operation.EquipmentID); err != nil {
 			return agentmodem.OperationResult{}, err
@@ -71,9 +74,25 @@ func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operat
 	case agentmodem.OperationCallStatus:
 		return manager.operator.Operate(ctx, operation)
 	case agentmodem.OperationCallHangup:
+		if operation.LeaseID != "" {
+			records, err := manager.store.Records()
+			if err != nil {
+				return agentmodem.OperationResult{}, err
+			}
+			matched := false
+			for _, record := range records {
+				if record.LeaseID == operation.LeaseID && record.AttachmentID == operation.AttachmentID && record.EquipmentID == operation.EquipmentID && record.CardID == operation.CardID {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return agentmodem.OperationResult{}, ErrLeaseNotFound
+			}
+		}
 		result, err := manager.operator.Operate(ctx, operation)
 		if err == nil && result.Call.TerminalConfirmed {
-			err = manager.store.ClearTarget(operation.AttachmentID, operation.EquipmentID, operation.CardID)
+			err = manager.store.ConfirmTarget(operation.AttachmentID, operation.EquipmentID, operation.CardID, result.Call.ObservedAt, "confirmed_hangup")
 			if errors.Is(err, ErrLeaseMismatch) {
 				return agentmodem.OperationResult{}, err
 			}
@@ -273,7 +292,7 @@ func (manager *Manager) sweep(ctx context.Context) error {
 			EquipmentID: record.EquipmentID, CardID: record.CardID, Action: agentmodem.OperationCallHangup,
 		})
 		if operationErr == nil && result.Call.TerminalConfirmed {
-			if clearErr := manager.store.ClearTarget(record.AttachmentID, record.EquipmentID, record.CardID); clearErr != nil {
+			if clearErr := manager.store.ConfirmTarget(record.AttachmentID, record.EquipmentID, record.CardID, result.Call.ObservedAt, "confirmed_hangup"); clearErr != nil {
 				manager.deferHangupAttempt(record.EquipmentID, now, attempt)
 				log.Printf("mdd-agent: paid-call terminal hangup was confirmed for modem %s but durable lease clear failed: %v; retrying in %s",
 					record.EquipmentID, clearErr, attempt.delay)
@@ -294,6 +313,75 @@ func (manager *Manager) sweep(ctx context.Context) error {
 }
 
 func (manager *Manager) Close() error { return manager.store.Close() }
+func (manager *Manager) SupportsCallReceipts() bool {
+	return manager != nil && manager.store != nil && manager.operator != nil
+}
+
+// callReceipt never sends ATH/ATA/ATD. A live lease can acquire terminal evidence only
+// through the same two fresh authoritative idle samples required by the AT hangup owner.
+func (manager *Manager) callReceipt(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
+	stored, found, err := manager.store.Terminal(operation.AttachmentID, operation.EquipmentID, operation.CardID, operation.LeaseID, operation.OperationID)
+	if err != nil {
+		return agentmodem.OperationResult{}, err
+	}
+	if !found {
+		records, err := manager.store.Records()
+		if err != nil {
+			return agentmodem.OperationResult{}, err
+		}
+		matched := false
+		for _, record := range records {
+			if record.LeaseID == operation.LeaseID && record.OperationID == operation.OperationID && record.AttachmentID == operation.AttachmentID && record.EquipmentID == operation.EquipmentID && record.CardID == operation.CardID {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return agentmodem.OperationResult{}, ErrLeaseNotFound
+		}
+		probe := operation
+		probe.Action = agentmodem.OperationCallStatus
+		probe.LeaseID = ""
+		var first time.Time
+		for sample := 0; sample < 2; sample++ {
+			if sample != 0 {
+				timer := time.NewTimer(400 * time.Millisecond)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return agentmodem.OperationResult{}, ctx.Err()
+				}
+			}
+			result, err := manager.operator.Operate(ctx, probe)
+			if err != nil {
+				return agentmodem.OperationResult{}, err
+			}
+			call := result.Call
+			if !call.Authoritative || call.State != "idle" || call.VoiceCalls != 0 || call.IncomingCalls != 0 || call.NativeIndex != 0 || call.ObservedAt.IsZero() || manager.now().Sub(call.ObservedAt) > time.Second || call.ObservedAt.After(manager.now().Add(time.Second)) {
+				return agentmodem.OperationResult{}, ErrTerminalUnconfirmed
+			}
+			if sample == 0 {
+				first = call.ObservedAt
+			} else if call.ObservedAt.Sub(first) < 400*time.Millisecond {
+				return agentmodem.OperationResult{}, ErrTerminalUnconfirmed
+			}
+			if sample == 1 {
+				if err := manager.store.ConfirmTarget(operation.AttachmentID, operation.EquipmentID, operation.CardID, call.ObservedAt, "physical_idle"); err != nil {
+					return agentmodem.OperationResult{}, err
+				}
+			}
+		}
+		stored, found, err = manager.store.Terminal(operation.AttachmentID, operation.EquipmentID, operation.CardID, operation.LeaseID, operation.OperationID)
+		if err != nil {
+			return agentmodem.OperationResult{}, err
+		}
+		if !found {
+			return agentmodem.OperationResult{}, ErrTerminalUnconfirmed
+		}
+	}
+	return agentmodem.OperationResult{Call: agentmodem.CallResult{State: "idle", ObservedAt: stored.ConfirmedAt, Authoritative: true, TerminalConfirmed: true, Strategy: "stored_terminal"}}, nil
+}
 
 type pendingHangupAttempt struct {
 	count uint32
