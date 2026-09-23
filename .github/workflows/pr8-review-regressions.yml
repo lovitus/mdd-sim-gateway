@@ -1,0 +1,64 @@
+name: PR8 repair counterexamples
+on:
+  push:
+    branches: [codex/pr8-review-fixes]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ffb469798c047ba0bc2b7aa41b30348030b32801
+          path: baseline
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: candidate/go-runtime/go.mod
+          cache-dependency-path: candidate/go-runtime/go.sum
+      - name: Native dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$source"; then sudo mv "$source" "$source.disabled"; fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpcsclite-dev libopencore-amrnb-dev libasound2-dev pkg-config
+      - name: Require behavioral failures on original source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          cp candidate/providers/vowifi-go/internal/service/review_recovery_outcomes_test.go baseline/providers/vowifi-go/internal/service/
+          set +e
+          go -C baseline/providers/vowifi-go test -json -count=1 -timeout 3m -run '^TestReviewFix' ./internal/service > evidence/baseline.jsonl
+          result=$?
+          set -e
+          test "$result" -ne 0
+          python3 - <<'CHECK'
+          import json
+          rows=[json.loads(line) for line in open('evidence/baseline.jsonl') if line.startswith('{')]
+          failed={row.get('Test','') for row in rows if row.get('Action')=='fail'}
+          required={'TestReviewFixEstablishedMediaFailureRetainsExactCleanupAcrossAllWrappers','TestReviewFixFinalCarrierRejectionIsDurableAndNotRedialed','TestReviewFixRejectedReceiptPersistenceCanRecoverWithoutAnotherCall','TestReviewFixStopPersistsExactTerminalBeforeRuntimeClose','TestReviewFixStopPersistenceFailureRetainsProofAndDoesNotRepeatBYE','TestReviewFixStopDoesNotTreatUnacceptedResultAsTerminal'}
+          assert required <= failed, {'missing_behavioral_failures':sorted(required-failed),'failures':sorted(failed)}
+          print('All six source-compatible test definitions failed behaviorally on ffb4697; compilation failures do not qualify.')
+          CHECK
+      - name: Require corrected behavior and race safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          go -C candidate/providers/vowifi-go test -json -race -count=3 -timeout 5m -run '^TestReviewFix' ./internal/service ./internal/ims > evidence/patched-provider.jsonl
+          go -C candidate/go-runtime test -json -race -count=3 -timeout 3m -run '^TestReviewFix' ./providercontrol > evidence/patched-core.jsonl
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr8-repair-counterexamples
+          path: evidence/
+          retention-days: 14

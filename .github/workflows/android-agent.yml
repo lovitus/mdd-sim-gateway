@@ -1,7 +1,7 @@
 name: Android native agent preview
 on:
   push:
-    branches: [codex/android-v2, codex/android-recovery-remediation]
+    branches: [codex/android-v2, codex/android-recovery-remediation, codex/pr8-review-fixes]
   workflow_dispatch:
 permissions:
   contents: read
