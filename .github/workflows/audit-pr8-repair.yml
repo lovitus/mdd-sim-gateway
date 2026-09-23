@@ -1,0 +1,123 @@
+name: Prove and prepare PR8 review repairs
+on:
+  push:
+    branches: [codex/audit-pr8-repairs]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ffb469798c047ba0bc2b7aa41b30348030b32801
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ffb469798c047ba0bc2b7aa41b30348030b32801
+          path: baseline
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: candidate/providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            candidate/go-runtime/go.sum
+            candidate/providers/vowifi-go/go.sum
+            candidate/providers/vowifi-go/upstream/vowifi-go/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
+      - name: Native dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$source"; then sudo mv "$source" "$source.disabled"; fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpcsclite-dev libopencore-amrnb-dev libasound2-dev pkg-config
+      - name: Verify exact reviewed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/baseline.txt
+          cat harness/audit/pr8/part-*.b64 | base64 -d | xz -d > "$RUNNER_TEMP/pr8.patch"
+          echo "14b0577f97ed034c07a6d2389b3a60944aa9338c4f93b381ff5e230ec7d187a1  $RUNNER_TEMP/pr8.patch" | sha256sum --check
+          git -C candidate apply --check "$RUNNER_TEMP/pr8.patch"
+          git -C candidate apply "$RUNNER_TEMP/pr8.patch"
+          git -C candidate add -A
+          test "$(git -C candidate write-tree)" = ba1ea3708cc1c6498bdd6c9c40c0714a292b9b55
+          test "$(git -C candidate diff --cached --name-only | wc -l)" -eq 35
+          git -C candidate diff --cached --check
+          node candidate/tools/repository-check.mjs | tee evidence/ledger.log
+          node candidate/tools/repository-check.test.mjs | tee evidence/ledger-tests.log
+      - name: Prove failures on unchanged pre-fix implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash candidate/go-runtime/scripts/pr8-counterexamples.sh "$GITHUB_WORKSPACE/baseline" | tee evidence/counterexamples.log
+      - name: Race-test exact cleanup and durable outcomes
+        shell: bash
+        run: |
+          set -euo pipefail
+          go -C candidate/providers/vowifi-go test -json -race -count=3 -timeout 3m -run '^TestPR8' ./internal/service ./internal/ims 2>&1 | tee evidence/provider-positive.jsonl
+          go -C candidate/go-runtime test -json -race -count=3 -timeout 3m ./providercontrol ./vowifiipc ./internal/callhistory 2>&1 | tee evidence/core-positive.jsonl
+          GOWORK=off go -C candidate/providers/vowifi-go/upstream/vowifi-go test -json -race -count=3 -timeout 3m -run '^TestPR8' ./runtimehost/voicehost 2>&1 | tee evidence/upstream-positive.jsonl
+          go -C candidate/providers/vowifi-go vet ./internal/service ./internal/ims
+      - name: Compile, lint and test Android recovery changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle -p candidate/android-agent --no-daemon testDebugUnitTest lintDebug assembleDebugAndroidTest 2>&1 | tee evidence/android-build.log
+      - name: Publish source only after preparation passes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for path in .github/workflows/android-agent.yml .github/workflows/go-runtime.yml .github/workflows/review-regressions.yml; do
+            blob=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" -f encoding=utf-8 -F content=@candidate/"$path" --jq .sha)
+            printf '%s %s\n' "$blob" "$path" >> evidence/workflow-blobs.txt
+            git -C candidate restore --source=HEAD --staged --worktree -- "$path"
+          done
+          git -C candidate diff --cached --check
+          git -C candidate diff --cached --name-only > evidence/files.txt
+          git -C candidate diff --cached --binary > evidence/tested-source.patch
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C candidate commit -m 'fix: retain exact call cleanup and repair Android recovery failure paths' -m 'Preserve accepted SIP dialogs and cleanup handles; persist rejected and stopped call outcomes; fence reader observation publication; share TLS identity classification; add explicit recoverable private-storage reset. Retain original paid identities, ownership guards, user scope and unknown outcomes.'
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/source.txt
+          git -C candidate ls-files -s > evidence/source-manifest.txt
+          git -C candidate archive --format=tar.gz HEAD > evidence/source.tar.gz
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/pr8-repair-prepared
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr8-repair-preparation
+          path: |
+            evidence/
+            candidate/pr8-evidence/
+            candidate/android-agent/app/build/reports/
+            candidate/android-agent/app/build/test-results/
+          retention-days: 7
