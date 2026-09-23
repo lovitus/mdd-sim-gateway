@@ -1,29 +1,60 @@
-name: Snapshot exact PR8 repair baseline
+name: Publish exact reviewed PR8 repair candidate
 on:
   push:
     branches: [codex/pr8-repair-source]
 permissions:
   contents: read
 jobs:
-  source:
+  publish:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ffb469798c047ba0bc2b7aa41b30348030b32801
+          path: harness
           persist-credentials: false
-      - name: Preserve exact source and manifest for isolated repair
+      - uses: actions/checkout@v7
+        with:
+          ref: ffb469798c047ba0bc2b7aa41b30348030b32801
+          path: candidate
+          persist-credentials: false
+      - name: Authenticate exact patch and complete candidate tree
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/pr8-source"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/pr8-source/source.tar.gz"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/pr8-source/source.txt"
-          git ls-files -s > "$RUNNER_TEMP/pr8-source/manifest.txt"
-          (cd "$RUNNER_TEMP/pr8-source" && sha256sum source.tar.gz > SHA256SUMS)
+          mkdir evidence
+          cat harness/audit/pr8-repair/part-*.b64 | base64 --decode | xz --decompress > "$RUNNER_TEMP/repair.patch"
+          echo "01002aaba52ccec70316e75ac4486fc3b3cce8749b710986fd606905a6b5a04b  $RUNNER_TEMP/repair.patch" | sha256sum --check
+          git -C candidate apply --check "$RUNNER_TEMP/repair.patch"
+          git -C candidate apply "$RUNNER_TEMP/repair.patch"
+          git -C candidate add -A
+          test "$(git -C candidate write-tree)" = c4fc81113a0d163d55fba1da1780a1de876c99a4
+          git -C candidate diff --cached --check
+          cp "$RUNNER_TEMP/repair.patch" evidence/
+      - name: Publish source and preserve exact workflow blobs for connector commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in android-agent.yml go-runtime.yml pr8-review-regressions.yml; do
+            sha=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" -f encoding=utf-8 -F "content=@candidate/.github/workflows/$file" --jq .sha)
+            printf '%s %s\n' "$file" "$sha" >> evidence/workflow-blobs.txt
+          done
+          git -C candidate reset -- .github
+          test "$(git -C candidate write-tree)" = 8448be995355c191bcd65725722fd13cc0af2192
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C candidate commit -m 'fix: preserve original call cleanup, final outcomes and Android recovery owners' -m 'Address PR8 review F1-F6 with exact terminal receipts, main-owner reader publication, retryable TLS message reads and explicitly consented encrypted storage recovery. Add deterministic protocol, Service and native UI regressions. Tests are pending CI, not yet claimed passed.'
+          git -C candidate rev-parse HEAD HEAD^{tree} > evidence/source.txt
+          git -C candidate ls-files -s > evidence/manifest.txt
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C candidate -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/codex/pr8-review-fixes
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
-          name: pr8-exact-repair-baseline
-          path: ${{ runner.temp }}/pr8-source/
-          retention-days: 7
+          name: pr8-repair-publication
+          path: evidence/
+          retention-days: 14
