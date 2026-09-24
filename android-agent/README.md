@@ -56,6 +56,8 @@ Submission receipts retain the original content and own-number snapshot in the
 existing encrypted, bounded store. Under its existing byte budget only resolved
 local previews are evicted; unresolved payloads remain intact. Older already-purged
 bodies are displayed only when an exact matching retained event supplies them.
+Numbered submitted parts retain their part labels when displayed in old receipts;
+missing parts are not silently reconstructed into an apparently complete message.
 Submitted is not displayed as delivered. State text keeps its meaning and adds
 green/amber/red distinctions across the existing native pages.
 
