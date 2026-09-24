@@ -19,9 +19,9 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ### ANDROID
 
-**State: partial; release relevance: current.** Client-focused candidate based on PR #7: reuse committed native UI and encrypted login, adapt to existing catalog/call/message APIs, and recover expired sessions and unstable networks in Android. Exclude PR #8 server pairing and durable call recovery. Candidate remains unbuilt and unverified; earlier recovery-branch results do not prove this candidate.
+**State: partial; release relevance: current.** Client-focused implementation based on PR #7, excluding PR #8 pairing and durable call recovery. Exact source f627204 passed Android build/lint/unit/API28/API35 and full Go Runtime CI. Android 13 native login/pages, remembered login, silent-connection recovery and automatic reauthentication after isolated Core restart were verified. The owner authorized minimal mainline integration after this validation; production is unchanged.
 
-Acceptance scope / remaining action: Require compilation, unit and emulator tests and signed preview artifact evidence. Real USB/card/OMAPI permissions, calls/carriers, background/OEM delivery and battery measurements remain unaccepted.
+Acceptance scope / remaining action: Signed release APK UI checks and same-source QA APK recovery against an empty isolated Core are scoped evidence, not carrier acceptance. Malformed-frame regression, elapsed session-expiry coverage, real USB/card/OMAPI operations, calls/SMS, background/OEM delivery and battery measurements remain unaccepted. Production still requires a separately authorized Core rollout for the mobile endpoint.
 
 ### INSTALLER_WAIT
 

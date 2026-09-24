@@ -37,7 +37,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 - **MACOS_RELEASE** (2026-09-20, project_owner): No notarization or .p8 this round. Preserve signing and track Universal packaging separately. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **EVIDENCE_CONTINUITY** (2026-09-20, project_owner): Reconcile scoped historical evidence before scheduling missing tests; not revalidated is not never accepted. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **ANDROID_NATIVE** (2026-09-21, project_owner): Android reprioritized: native reader/call/SMS app, safe recovery and battery-conscious UX; draft PR and test APK, not production or paid-operation acceptance. [Source](../../docs/decisions/2026-09-21-android-agent.md).
-- **ANDROID_CLIENT_SCOPE** (2026-09-24, project_owner): Keep PR #7 server baseline, reuse Android UI, recover network/session loss in the client, and use browser-equivalent call lifetime. Exclude server pairing and durable call recovery. Preserve the other workspaces; work without subagents. [Source](../../docs/decisions/2026-09-24-android-client-scope.md).
+- **ANDROID_CLIENT_SCOPE** (2026-09-24, project_owner): Keep PR #7 server baseline, reuse Android UI, recover network/session loss in the client, and use browser-equivalent call lifetime. Exclude server pairing and durable call recovery. Owner subsequently authorized isolated Core validation and minimal mainline integration after it passes, not production deployment. Preserve other workspaces; work without subagents. [Source](../../docs/decisions/2026-09-24-android-client-scope.md).
 
 ## Disposition counts
 
@@ -61,9 +61,9 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ### ANDROID
 
-**State: partial; release relevance: current.** Client-focused candidate based on PR #7: reuse committed native UI and encrypted login, adapt to existing catalog/call/message APIs, and recover expired sessions and unstable networks in Android. Exclude PR #8 server pairing and durable call recovery. Candidate remains unbuilt and unverified; earlier recovery-branch results do not prove this candidate.
+**State: partial; release relevance: current.** Client-focused implementation based on PR #7, excluding PR #8 pairing and durable call recovery. Exact source f627204 passed Android build/lint/unit/API28/API35 and full Go Runtime CI. Android 13 native login/pages, remembered login, silent-connection recovery and automatic reauthentication after isolated Core restart were verified. The owner authorized minimal mainline integration after this validation; production is unchanged.
 
-Acceptance scope / remaining action: Require compilation, unit and emulator tests and signed preview artifact evidence. Real USB/card/OMAPI permissions, calls/carriers, background/OEM delivery and battery measurements remain unaccepted.
+Acceptance scope / remaining action: Signed release APK UI checks and same-source QA APK recovery against an empty isolated Core are scoped evidence, not carrier acceptance. Malformed-frame regression, elapsed session-expiry coverage, real USB/card/OMAPI operations, calls/SMS, background/OEM delivery and battery measurements remain unaccepted. Production still requires a separately authorized Core rollout for the mobile endpoint.
 
 ### INSTALLER_WAIT
 

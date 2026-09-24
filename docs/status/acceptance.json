@@ -1398,8 +1398,8 @@
     {
       "id": "ANDROID",
       "state": "partial",
-      "summary": "Client-focused candidate based on PR #7: reuse committed native UI and encrypted login, adapt to existing catalog/call/message APIs, and recover expired sessions and unstable networks in Android. Exclude PR #8 server pairing and durable call recovery. Candidate remains unbuilt and unverified; earlier recovery-branch results do not prove this candidate.",
-      "acceptance": "Require compilation, unit and emulator tests and signed preview artifact evidence. Real USB/card/OMAPI permissions, calls/carriers, background/OEM delivery and battery measurements remain unaccepted.",
+      "summary": "Client-focused implementation based on PR #7, excluding PR #8 pairing and durable call recovery. Exact source f627204 passed Android build/lint/unit/API28/API35 and full Go Runtime CI. Android 13 native login/pages, remembered login, silent-connection recovery and automatic reauthentication after isolated Core restart were verified. The owner authorized minimal mainline integration after this validation; production is unchanged.",
+      "acceptance": "Signed release APK UI checks and same-source QA APK recovery against an empty isolated Core are scoped evidence, not carrier acceptance. Malformed-frame regression, elapsed session-expiry coverage, real USB/card/OMAPI operations, calls/SMS, background/OEM delivery and battery measurements remain unaccepted. Production still requires a separately authorized Core rollout for the mobile endpoint.",
       "evidence": [
         "android-agent/README.md",
         "android-agent/app/src/main/java/com/lovitus/mddagent/AgentService.java",
@@ -1597,7 +1597,7 @@
       "date": "2026-09-24",
       "authority": "project_owner",
       "sourcePath": "docs/decisions/2026-09-24-android-client-scope.md",
-      "summary": "Keep PR #7 server baseline, reuse Android UI, recover network/session loss in the client, and use browser-equivalent call lifetime. Exclude server pairing and durable call recovery. Preserve the other workspaces; work without subagents."
+      "summary": "Keep PR #7 server baseline, reuse Android UI, recover network/session loss in the client, and use browser-equivalent call lifetime. Exclude server pairing and durable call recovery. Owner subsequently authorized isolated Core validation and minimal mainline integration after it passes, not production deployment. Preserve other workspaces; work without subagents."
     }
   ],
   "releaseScope": [
