@@ -9,6 +9,10 @@ final class UsbCard implements SimProtocol.Card {
     final UsbDevice device; final UsbDeviceConnection connection; final UsbInterface intf;
     final UsbEndpoint input,output,interrupt; final AtomicLong insertion=new AtomicLong(1);
     volatile boolean closed; int sequence; byte[] atr;
+    static final class WriteFailure extends IOException {
+        final int transferred;
+        WriteFailure(int transferred){super("USB write failed ("+transferred+"); outcome unknown");this.transferred=transferred;}
+    }
     UsbCard(UsbManager manager,UsbDevice d)throws Exception{
         device=d;UsbInterface found=null;UsbEndpoint in=null,out=null,intr=null;
         for(int i=0;i<d.getInterfaceCount();i++){UsbInterface f=d.getInterface(i);if(f.getInterfaceClass()!=11)continue;in=null;out=null;intr=null;
@@ -23,7 +27,8 @@ final class UsbCard implements SimProtocol.Card {
     }
     synchronized byte[] exchange(int type,byte[] data,int expected)throws Exception{
         if(closed)throw new IOException("Reader closed");int seq=sequence++&255;byte[] q=Ccid.command(type,0,seq,data);
-        if(connection.bulkTransfer(output,q,q.length,2000)!=q.length)throw new IOException("USB write failed; outcome unknown");
+        int written=connection.bulkTransfer(output,q,q.length,2000);
+        if(written!=q.length)throw new WriteFailure(written);
         long deadline=SystemClock.elapsedRealtime()+5000;
         for(int extensions=0;extensions<8;extensions++){
             byte[] b=new byte[Ccid.MAX];int count=0,length=-1;

@@ -17,6 +17,25 @@ Optional `agent_id` and `agent_token` must both be present. Do not put account p
 
 **Core compatibility:** this PR adds authenticated `/v1/mobile/ws` to Core. Build/run the matching Core preview before expecting native background events. Older Core returns a visible update-required state, not a fabricated empty/healthy screen. This is not a production deployment action.
 
+### Production adaptation follow-up
+
+The minimal Core support was merged in `8d0c4c6` and deployed from successful
+workflow `36010202284`. The physical handset now receives real catalog lines and
+message history. This does not establish call, reader or carrier acceptance.
+
+The client fetches display numbers from the existing catalog on reconnect and
+opening Calls/Messages. Numbers are joined by both line and card identity; live
+readiness still comes from the snapshot, and mutations revalidate the exact line.
+Unavailable routes display the existing `blocked` layers and corresponding `facts`.
+USB scan failures stay visible independently of OMAPI failures, including on the
+affected reader row. No new Core routes, paid retries or user-intent changes are
+introduced.
+
+Physical pre-fix evidence reproduced missing numbers, omitted readiness reasons
+and a USB failure masked by an OMAPI error. Reconnecting the reader did not resolve
+its first power-on write failure. The presentation fixes must still pass GitHub
+and physical retesting; they do not claim to repair that USB transport failure.
+
 ## Implemented paths
 
 - Native Home/Calls/Messages/Readers/Settings screens, QR setup, exact line/route selection, generic private notifications, pause, safe diagnostic share and battery-settings guidance.

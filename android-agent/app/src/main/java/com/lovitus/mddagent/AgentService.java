@@ -33,6 +33,9 @@ public final class AgentService extends Service {
     private ConfigStore store;private volatile JSONObject config;private volatile GatewayApi api;private volatile Link observer,agent;private volatile ReaderHub hub;
     private volatile boolean destroyed,available,sharing,online;volatile boolean readerLinkOnline;private boolean foreground;
     volatile JSONObject snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());
+    private JSONArray catalogNumbers=new JSONArray();
+    private GatewayApi numbersRequest;
+    private long numbersAttempt;
     volatile UiText connection=UiText.of(R.string.paused),readerStatus=UiText.of(R.string.sharing_off),notice=UiText.EMPTY;volatile RemoteCall call;
     private final AtomicBoolean smsPending=new AtomicBoolean(),enrollmentPending=new AtomicBoolean();
     private final AtomicBoolean loginPending=new AtomicBoolean();
@@ -93,14 +96,19 @@ public final class AgentService extends Service {
     }
     private void configure()throws Exception{
         closeLinks();snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());if(api!=null){api.close();api=null;}
+        catalogNumbers=new JSONArray();numbersRequest=null;numbersAttempt=0;
         call=null;
         if(config.optString("token").isEmpty()){connection=UiText.of(R.string.login_required);changed();return;}
         api=new GatewayApi(new Endpoint(config.getString("server"),config.optString("pin")),config.getString("token"),config.getString("csrf"));
         final GatewayApi connectionOwner=api;
         observer=new Link(api,loop,"/v1/mobile/ws","","",process,new Link.Events(){
             public void authenticationRequired(){main.post(()->renewSession(connectionOwner));}
-            public void state(int label,boolean yes){if(api!=connectionOwner)return;boolean recovered=yes&&!online;connection=UiText.of(label);online=yes;if(recovered){main.post(()->{if(api!=connectionOwner)return;requestMessageSync(false);});RemoteCall c=call;if(c!=null&&(c.audio==null||c.audio.closed))c.reconcile();}changed();}
-            public void message(JSONObject message){if(api!=connectionOwner)return;if(message.optString("type").equals("mobile.snapshot")){snapshot=normalizeSnapshot(Json.object(message,"data"));notifyEvents();changed();}}
+            public void state(int label,boolean yes){if(api!=connectionOwner)return;boolean recovered=yes&&!online;connection=UiText.of(label);online=yes;if(recovered){main.post(()->{if(api!=connectionOwner)return;requestMessageSync(false);refreshLineNumbers(true);});RemoteCall c=call;if(c!=null&&(c.audio==null||c.audio.closed))c.reconcile();}changed();}
+            public void message(JSONObject message){if(message.optString("type").equals("mobile.snapshot"))main.post(()->{
+                if(api!=connectionOwner)return;snapshot=normalizeSnapshot(Json.object(message,"data"));notifyEvents();changed();
+                JSONArray rows=Json.array(snapshot,"lines");
+                for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&!row.has("number")){refreshLineNumbers(false);break;}}
+            });}
         });observer.connect();
         if(sharing&&!config.optString("agent_token").isEmpty())startReaderLink();
         else if(sharing){sharing=false;readerStatus=UiText.of(R.string.enroll_readers);}
@@ -110,6 +118,13 @@ public final class AgentService extends Service {
         JSONArray lines=Json.array(data,"lines"),calls=Json.array(data,"cellular_calls");
         for(int i=0;i<lines.length();i++){
             JSONObject line=lines.optJSONObject(i);if(line==null)continue;
+            line.remove("number");
+            for(int j=0;j<catalogNumbers.length();j++){
+                JSONObject saved=catalogNumbers.optJSONObject(j);
+                if(saved!=null&&!saved.optBoolean("deleted")&&line.optString("id").equals(saved.optString("id"))&&line.optString("card_id").equals(saved.optString("card_id"))){
+                    try{line.put("number",Json.object(saved,"sim").optString("msisdn"));}catch(JSONException ignored){}break;
+                }
+            }
             for(int j=0;j<calls.length();j++){
                 JSONObject event=calls.optJSONObject(j);
                 if(event!=null&&event.optBoolean("actionable")&&line.optString("id").equals(event.optString("line_id")))
@@ -117,6 +132,19 @@ public final class AgentService extends Service {
             }
         }
         return data;
+    }
+    void refreshLineNumbers(boolean explicit){
+        final GatewayApi owner=api;long now=SystemClock.elapsedRealtime();
+        if(owner==null||!online()||numbersRequest==owner||!explicit&&numbersAttempt!=0&&now-numbersAttempt<30000)return;
+        numbersRequest=owner;numbersAttempt=now;
+        io.execute(()->{try{
+            JSONArray rows=Json.array(owner.json("GET","/v1/catalog/lines",null),"lines");
+            main.post(()->{
+                if(api!=owner||numbersRequest!=owner)return;numbersRequest=null;catalogNumbers=rows;
+                try{snapshot=normalizeSnapshot(new JSONObject(snapshot.toString()));}catch(JSONException ignored){}
+                changed();
+            });
+        }catch(Exception failure){main.post(()->{if(api==owner&&numbersRequest==owner)numbersRequest=null;});}});
     }
     private void renewSession(GatewayApi owner){
         if(!available||destroyed||api!=owner||owner==null)return;
@@ -156,6 +184,7 @@ public final class AgentService extends Service {
         if(agent!=null){agent.close();agent=null;}
         if(hub==null||hub.closed)hub=new ReaderHub(this);
         lastReaders=recoveringReaders();lastReaderAt=0;
+        readerUSBFailures=Collections.emptyMap();
         final long epoch=++readerEpoch;scanOwner.set(null);readerLinkOnline=false;
         agent=new Link(api,loop,"/v1/agent/ws",config.optString("agent_id"),config.optString("agent_token"),process,new Link.Events(){
             public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerLinkOnline=connected;readerStatus=UiText.of(label);changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}}
@@ -175,12 +204,12 @@ public final class AgentService extends Service {
         if(!scanOwner.compareAndSet(null,ticket))return;
         try{readerIO.execute(()->{
             try{
-                owner.scan(explicitMetadata);JSONObject fresh=owner.topology();
+                owner.scan(explicitMetadata);JSONObject fresh=owner.topology();Map<String,UiText> failures=owner.usbFailures();
                 if(!main.post(()->{
                     if(scanOwner.get()!=ticket)return;
                     try{
                         if(ticket.epoch==readerEpoch&&ticket.hub==hub&&ticket.link==agent&&available&&sharing&&!owner.closed){
-                            if(link!=null)link.health(fresh);lastReaders=fresh;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();
+                            if(link!=null)link.health(fresh);lastReaders=fresh;readerUSBFailures=failures;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();
                         }
                     }finally{scanOwner.compareAndSet(ticket,null);}
                 }))scanOwner.compareAndSet(ticket,null);
@@ -201,8 +230,10 @@ public final class AgentService extends Service {
     volatile long lastReaderAt;
     private static JSONObject recoveringReaders(){return Json.obj("reader_condition","recovering","reader_detail","Fresh reader observation required","readers",new JSONArray(),"modem_condition","disabled");}
     volatile JSONObject lastReaders=recoveringReaders();
+    volatile Map<String,UiText> readerUSBFailures=Collections.emptyMap();
     void shareReaders(boolean enabled){if(call!=null){notice=UiText.of(R.string.sharing_call_busy);changed();return;}
         if(!enabled){
+            readerUSBFailures=Collections.emptyMap();
             final long expected=++sharingIntentEpoch;readerEpoch++;scanOwner.set(null);sharing=false;readerLinkOnline=false;lastReaders=recoveringReaders();lastReaderAt=0;
             if(agent!=null)agent.close();agent=null;ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
             readerStatus=UiText.of(R.string.sharing_off);notice=UiText.EMPTY;if(available)promote(false);changed();

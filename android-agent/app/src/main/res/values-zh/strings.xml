@@ -120,6 +120,8 @@
 <string name="sharing_save_failed">共享已停止，但变更未保存；重开前请核对。</string>
 <string name="reader_permission_missing">尚未授权读卡器</string>
 <string name="reader_usb_unavailable">USB 读卡器不可用，请检查权限、卡片和 APDU 能力</string>
+<string name="reader_usb_write_failed">USB 命令写入失败（%1$d），结果未知；尚未确认卡片身份。</string>
+<string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">设备或 SIM 访问规则拒绝了 OMAPI</string>
 <string name="reader_count">已识别读卡器：%1$d</string>
 <string name="reader_identity_ready">SIM 身份已读取</string>

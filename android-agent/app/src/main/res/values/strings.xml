@@ -120,6 +120,8 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="sharing_save_failed">Reader sharing stopped, but the change was not saved. Check before reopening.</string>
 <string name="reader_permission_missing">No reader permission granted</string>
 <string name="reader_usb_unavailable">USB reader unavailable: check access, card and APDU capability</string>
+<string name="reader_usb_write_failed">USB command write failed (%1$d); outcome unknown. Card identity has not been confirmed.</string>
+<string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">OMAPI access denied by the device or SIM</string>
 <string name="reader_count">Readers identified: %1$d</string>
 <string name="reader_identity_ready">SIM identity read</string>

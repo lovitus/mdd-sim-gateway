@@ -259,6 +259,7 @@ public final class MainActivity extends Activity {
     private String lineLabel(JSONObject line){return UiLabels.line(this,line);}
     private JSONArray lines(){return service==null?new JSONArray():Json.array(service.snapshot,"lines");}
     private void selectors(){
+        if(service!=null)service.refreshLineNumbers(true);
         selectionSnapshot=new JSONArray();LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER_VERTICAL);
         lineChoice=new Spinner(this);lineChoice.setDropDownWidth(ViewGroup.LayoutParams.MATCH_PARENT);lineChoice.setId(R.id.line_selector);row.addView(lineChoice,new LinearLayout.LayoutParams(0,-2,1));renderedLineLabels.clear();
         row.addView(tool(R.drawable.ic_mdd_search,getString(R.string.search_lines),this::directoryDialog),new LinearLayout.LayoutParams(dp(48),dp(48)));content.addView(row);
@@ -375,8 +376,12 @@ public final class MainActivity extends Activity {
         boolean connected=service!=null&&service.online(),ready=line!=null&&line.optBoolean("enabled")&&Json.object(Json.object(line,"operations"),route()+(tab==2?"_sms":"_call")).optBoolean("ready");
         capability.setText(!connected?R.string.connect_first:ready?(tab==2?R.string.transport_sms_ready:R.string.transport_call_ready):R.string.transport_unavailable);
         JSONObject readiness=Json.object(Json.object(line,"operations"),route()+(tab==2?"_sms":"_call"));
-        JSONArray reasons=Json.array(readiness,"reasons");
-        if(connected&&!ready)for(int i=0;i<Math.min(3,reasons.length());i++){JSONObject reason=reasons.optJSONObject(i);if(reason!=null)capability.append("\n"+UiLabels.readinessReason(this,reason));}
+        JSONArray blocked=Json.array(readiness,"blocked"),facts=Json.array(readiness,"facts");
+        if(connected&&!ready)for(int i=0;i<Math.min(3,blocked.length());i++){
+            String layer=blocked.optString(i);JSONObject reason=Json.obj("layer",layer);
+            for(int j=0;j<facts.length();j++){JSONObject fact=facts.optJSONObject(j);if(fact!=null&&layer.equals(fact.optString("layer"))){reason=fact;break;}}
+            capability.append("\n"+UiLabels.readinessReason(this,reason));
+        }
         View action=findViewById(tab==2?R.id.message_send:R.id.call_dial);
         if(action!=null)action.setEnabled(connected&&ready&&(tab==2?!service.messageBusy():service.call==null));
     }
@@ -458,6 +463,8 @@ public final class MainActivity extends Activity {
             for(UsbDevice device:devices){boolean ccid=false;for(int i=0;i<device.getInterfaceCount();i++)ccid|=device.getInterface(i).getInterfaceClass()==11;if(!ccid||usb.hasPermission(device))continue;button(usbPermissions,getString(R.string.usb_permission)+" · "+device.getVendorId()+":"+device.getProductId(),()->{Intent intent=new Intent(getPackageName()+".USB_PERMISSION").setPackage(getPackageName());int flags=PendingIntent.FLAG_UPDATE_CURRENT|(Build.VERSION.SDK_INT>=31?PendingIntent.FLAG_MUTABLE:0);usb.requestPermission(device,PendingIntent.getBroadcast(this,device.getDeviceId(),intent,flags));});}
         }
         JSONArray readers=Json.array(service.readers(),"readers");String itemState=key+"|"+service.sharing()+"|"+service.available()+"|"+service.readerLinkOnline+"|"+readers;
+        Map<String,UiText> failures=service.readerUSBFailures;
+        for(UsbDevice device:devices){UiText failure=failures.get(usbReaderName(device));if(failure!=null)itemState+="|"+device.getDeviceId()+":"+failure.render(this);}
         if(itemState.equals(readerItemsState))return;readerItemsState=itemState;readerItems.removeAllViews();Set<String> scanned=new HashSet<>();
         for(int i=0;i<readers.length();i++){JSONObject row=readers.optJSONObject(i);if(row!=null)scanned.add(row.optString("reader_name"));}
         for(UsbDevice device:devices){String name=usbReaderName(device);if(scanned.contains(name))continue;
@@ -465,7 +472,9 @@ public final class MainActivity extends Activity {
                 !service.available()?R.string.reader_usb_paused:
                 !service.sharing()?R.string.reader_usb_not_shared:
                 !service.readerLinkOnline?R.string.reader_usb_wait_link:R.string.reader_usb_wait_scan;
-            readerItems.addView(text(getString(R.string.reader_usb_detected,device.getVendorId(),device.getProductId())+"\n"+getString(stateText),15));
+            UiText failure=failures.get(name);
+            String description=stateText==R.string.reader_usb_wait_scan&&failure!=null?failure.render(this):getString(stateText);
+            readerItems.addView(text(getString(R.string.reader_usb_detected,device.getVendorId(),device.getProductId())+"\n"+description,15));
         }
         for(int i=0;i<readers.length();i++){
             JSONObject reader=readers.optJSONObject(i);if(reader==null)continue;String card=reader.optString("card_id");JSONObject sim=Json.object(reader,"sim");
