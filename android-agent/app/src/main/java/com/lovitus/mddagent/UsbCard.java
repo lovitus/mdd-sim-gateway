@@ -37,7 +37,7 @@ final class UsbCard implements SimProtocol.Card {
         }throw new IOException("CCID extension budget exhausted");
     }
     public byte[] transmit(byte[] q)throws Exception{return exchange(0x6f,q,0x80);}
-    public void select(String application)throws Exception{byte[] aid=Json.unhex(application.equals("isim")?"A0000000871004":"A0000000871002");byte[] q=new byte[5+aid.length];q[1]=(byte)0xa4;q[2]=4;q[3]=4;q[4]=(byte)aid.length;System.arraycopy(aid,0,q,5,aid.length);SimProtocol.success(SimProtocol.exchange(this,q));}
+    public void select(String application)throws Exception{SimProtocol.selectApplication(this,application);}
     void status()throws Exception{exchange(0x65,new byte[0],0x81);}
     private void watch(){
         UsbRequest request=new UsbRequest();

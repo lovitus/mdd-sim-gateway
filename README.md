@@ -1,6 +1,6 @@
 # MDD VoWiFi SIM Gateway (企业级多卡 VoWiFi / VoLTE 网关)
 
-[![Release](https://img.shields.io/github/v/release/lovitus/mdd-sim-gateway)](https://github.com/lovitus/mdd-sim-gateway/releases/latest)
+[Release history](https://github.com/lovitus/mdd-sim-gateway/releases)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](https://github.com/lovitus/mdd-sim-gateway)
 [![License](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
@@ -11,6 +11,10 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 
 仓库的发布与安装入口只包含 Go Core、Go Provider、统一 Agent 和明确列入 manifest 的原生能力边界；
 旧 Python/Docker 部署不再提供构建、安装或运行入口。
+
+> **当前发布状态（2026-09-24）：** GitHub Latest 仍指向旧版 v1.3.14，不包含当前 Go 运行时，
+> 也包含已退役客户端。请勿把它当作当前安装包。当前 Go 运行时尚无兼容的正式 tag Release；
+> Android 是草稿/预览项目，生产 Core 尚未部署其 mobile API。
 
 ---
 
@@ -26,12 +30,12 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
    - macOS 默认 **PC/SC-only**，Modem、音频和私有数据能力保留安全门禁；不为满足清单擅自开启。Windows、macOS、Linux 均为远程 Agent 的当前目标。
    - 三大平台开启 4G 时必须强制独占隔离；隔离失败不放行、不回落宿主网络、不覆盖用户开关。
    - 本轮不做 macOS 公证，不使用 `.p8`；现有签名检查保留，Universal 包装另行记录。
-   - **Android 统一协议客户端尚未实现，按用户决定延后，不阻塞本轮交付**；已退役的 VPCD APK 不能冒充该功能。跨平台实现与实机验收分别见 [版本化状态](docs/status/README.md)。
+   - **Android 原生客户端目前处于草稿/预览阶段**；生产 Core 路由和真实硬件/后台验收仍未完成。旧 VPCD APK 不能冒充新客户端。跨平台实现与实机验收分别见 [版本化状态](docs/status/README.md)。
 4. **证书固定与最小生命周期动作**：
    - Agent 使用保存的证书指纹；安装器的状态检查同时验证本地 CA 证书和服务端 SPKI pin，禁止 `-k`。
    - `install`、`start`、`restart` 分离；只有明确执行 `restart` 才会重启运行服务。
 5. **浏览器管理与通话**：
-   - 内置页面覆盖线路、设备、eSIM、短信、诊断和同源 WSS 语音；当前挂载页面只使用同一个会话级 Go 通话 owner；录音仍未实现，Android 延后；平台验收须保留既有报告并仅核对缺口，不以本轮未复验清零历史证据。
+   - 内置页面覆盖线路、设备、eSIM、短信、诊断和同源 WSS 语音；当前挂载页面只使用同一个会话级 Go 通话 owner；录音需用户明确启用；Android 仍是草稿/预览。平台验收须保留既有报告并仅核对缺口，不以本轮未复验清零历史证据。
 6. **eSIM 删除的最终方向**：
    - 标准物理删除＋删除通知留存＋多重确认手动重放；此前保留 profile 报删的软删除方案已放弃，不再列为定制待办。
 
@@ -41,9 +45,9 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 
 ### 1. 服务端部署（默认 Go artifact）
 
-从 [Releases 页面](https://github.com/lovitus/mdd-sim-gateway/releases/latest) 下载 Linux tar，并先按同一
-Release 的 `SHA256SUMS` 核对文件。普通 main push 的 workflow artifact 只用于 CI 内部验收；只有精确
-`v*` tag 在全部平台门禁通过后才发布可长期下载的 Release。Linux tar 外层只包含安装脚本和一个经过严格 manifest
+**当前没有可用于正式安装的 Go Release。** 不要从 [Latest Release](https://github.com/lovitus/mdd-sim-gateway/releases/latest)
+下载 v1.3.14 的旧客户端或 APK。普通 main push 的 workflow artifact 只用于 CI 内部验收；只有精确
+`v*` tag 在全部平台门禁通过后才发布可长期下载的 Release。正式发布时的 Linux tar 外层只包含安装脚本和一个经过严格 manifest
 描述的 `mdd-<revision>` release 目录；不要从源码目录现场构建或回退到 Docker。
 目标宿主需要 Linux systemd、`realpath`、`curl`、`openssl`、coreutils `timeout`，以及标准的
 `useradd`、`groupadd`、`nologin` 账户工具；不需要 Git checkout、Python 或 Docker。

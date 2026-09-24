@@ -99,6 +99,7 @@ type OutboundCallRequest struct {
 
 type OutboundCallResult struct {
 	Accepted                   bool
+	DefinitiveRejection        bool
 	StatusCode                 int
 	Reason                     string
 	RegistrationRecoveryNeeded bool

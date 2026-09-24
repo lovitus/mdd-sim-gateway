@@ -27,9 +27,10 @@ var (
 )
 
 var (
-	bucketMeta   = []byte("metadata")
-	bucketLeases = []byte("paid_call_leases")
-	keySchema    = []byte("schema_version")
+	bucketMeta      = []byte("metadata")
+	bucketLeases    = []byte("paid_call_leases")
+	bucketTerminals = []byte("paid_call_terminals_v1")
+	keySchema       = []byte("schema_version")
 )
 
 type Record struct {
@@ -47,6 +48,13 @@ type Store struct {
 	db        *bolt.DB
 	closeOnce sync.Once
 	closeErr  error
+}
+
+// Terminal evidence is separate from display history and survives process restarts.
+type TerminalRecord struct {
+	Record
+	ConfirmedAt time.Time `json:"confirmed_at"`
+	Source      string    `json:"source"`
 }
 
 func Open(path string, timeout time.Duration) (*Store, error) {
@@ -93,6 +101,9 @@ func (store *Store) initialize() error {
 		if _, err := tx.CreateBucketIfNotExists(bucketLeases); err != nil {
 			return err
 		}
+		if _, err := tx.CreateBucketIfNotExists(bucketTerminals); err != nil {
+			return err
+		}
 		stored := meta.Get(keySchema)
 		if stored == nil {
 			encoded := make([]byte, 8)
@@ -113,6 +124,9 @@ func (store *Store) Begin(record Record) (Record, bool, error) {
 	var result Record
 	created := false
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketTerminals).Get(terminalKey(record.AttachmentID, record.EquipmentID, record.CardID, record.LeaseID)) != nil {
+			return ErrLeaseConflict
+		}
 		bucket := tx.Bucket(bucketLeases)
 		current, err := decodeRecord(bucket.Get([]byte(record.EquipmentID)))
 		if err != nil && !errors.Is(err, ErrLeaseNotFound) {
@@ -192,6 +206,40 @@ func (store *Store) Require(attachmentID, equipmentID, cardID, leaseID string, n
 }
 
 func (store *Store) ClearTarget(attachmentID, equipmentID, cardID string) error {
+	return store.clearTarget(attachmentID, equipmentID, cardID, time.Time{}, "")
+}
+
+func (store *Store) ConfirmTarget(attachmentID, equipmentID, cardID string, at time.Time, source string) error {
+	if at.IsZero() || source != "physical_idle" && source != "confirmed_hangup" {
+		return errors.New("invalid terminal evidence")
+	}
+	return store.clearTarget(attachmentID, equipmentID, cardID, at, source)
+}
+
+func (store *Store) Terminal(attachmentID, equipmentID, cardID, leaseID, operationID string) (TerminalRecord, bool, error) {
+	var result TerminalRecord
+	found := false
+	err := store.db.View(func(tx *bolt.Tx) error {
+		payload := tx.Bucket(bucketTerminals).Get(terminalKey(attachmentID, equipmentID, cardID, leaseID))
+		if payload == nil {
+			return nil
+		}
+		if err := json.Unmarshal(payload, &result); err != nil {
+			return err
+		}
+		if validateRecord(result.Record) != nil || result.ConfirmedAt.IsZero() {
+			return errors.New("invalid stored terminal evidence")
+		}
+		if result.AttachmentID != attachmentID || result.EquipmentID != equipmentID || result.CardID != cardID || result.LeaseID != leaseID || result.OperationID != operationID {
+			return ErrLeaseMismatch
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
+}
+
+func (store *Store) clearTarget(attachmentID, equipmentID, cardID string, at time.Time, source string) error {
 	return store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketLeases)
 		current, err := decodeRecord(bucket.Get([]byte(equipmentID)))
@@ -203,6 +251,15 @@ func (store *Store) ClearTarget(attachmentID, equipmentID, cardID string) error 
 		}
 		if current.AttachmentID != attachmentID || current.CardID != cardID {
 			return ErrLeaseMismatch
+		}
+		if !at.IsZero() {
+			payload, err := json.Marshal(TerminalRecord{Record: current, ConfirmedAt: at.UTC(), Source: source})
+			if err != nil {
+				return err
+			}
+			if err := tx.Bucket(bucketTerminals).Put(terminalKey(current.AttachmentID, current.EquipmentID, current.CardID, current.LeaseID), payload); err != nil {
+				return err
+			}
 		}
 		return bucket.Delete([]byte(equipmentID))
 	})
@@ -260,4 +317,9 @@ func sameInvocation(left, right Record) bool {
 	return left.LeaseID == right.LeaseID && left.OperationID == right.OperationID &&
 		left.AttachmentID == right.AttachmentID && left.EquipmentID == right.EquipmentID &&
 		left.CardID == right.CardID && left.Direction == right.Direction
+}
+
+func terminalKey(attachment, equipment, card, lease string) []byte {
+	encoded, _ := json.Marshal([]string{attachment, equipment, card, lease})
+	return encoded
 }

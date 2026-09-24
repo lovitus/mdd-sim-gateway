@@ -236,6 +236,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	readerReadbackCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), readerReadbackFeature)
 	agentHostHealthCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), agentHostHealthFeature)
 	features := []string{}
+	if featureEnabled(request.Header.Get(agentCapabilitiesHeader), ModemCallReceiptFeature) {
+		features = append(features, ModemCallReceiptFeature)
+	}
 	server.mu.RLock()
 	defaultsAvailable := server.deviceDefaultsSource != nil
 	server.mu.RUnlock()
@@ -744,6 +747,12 @@ func (server *Server) ExecuteModem(ctx context.Context, agentID, processGenerati
 	}
 	if connection.hello.ProcessGeneration != processGeneration {
 		return ModemResponse{}, ErrGenerationMismatch
+	}
+	if request.Action == ModemCallReceipt && !featureEnabled(strings.Join(connection.capabilities, ","), ModemCallReceiptFeature) {
+		return ModemResponse{}, &RemoteError{Kind: "not_ready", Code: "modem_call_receipt_unsupported"}
+	}
+	if request.Action == ModemCallHangup && request.LeaseID != "" && !featureEnabled(strings.Join(connection.capabilities, ","), ModemCallReceiptFeature) {
+		return ModemResponse{}, &RemoteError{Kind: "not_ready", Code: "modem_scoped_hangup_unsupported"}
 	}
 	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindModemRequest, ModemRequest: &request})
 	if err != nil {

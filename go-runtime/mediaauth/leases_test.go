@@ -5,13 +5,46 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 )
 
 func leaseVerifier(subject string) SessionVerifier {
 	return SessionVerifierFunc(func(context.Context, *http.Request) (string, error) { return subject, nil })
+}
+
+func TestRecoveryLeaseRequiresProviderReceiptSupportBeforeAdmission(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			t.Error("unexpected provider operation", r.URL.Path)
+		}
+		w.WriteHeader(200)
+	}))
+	defer provider.Close()
+	providers := NewProviderDirectory()
+	if err := providers.Replace(Provider{LineID: "line-1", ProviderID: "provider-1", Generation: "generation-1", CardID: "8944100000000000001", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: strings.Repeat("t", 32)}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := callhistory.Open(filepath.Join(t.TempDir(), "calls.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	router, _ := NewRouter(leaseVerifier("admin-1"), providers, nil, 0)
+	handler, err := NewLeaseHandler(router, providers, leaseTestAuth{subject: "admin-1"}, time.Minute, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/v1/media/leases", strings.NewReader(`{"line_id":"line-1","call_id":"call-1","operation_id":"start-1","recovery_key":"`+strings.Repeat("a", 64)+`"}`))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "provider_recovery_upgrade_required") || len(router.leases) != 0 {
+		t.Fatalf("old provider admitted recovery lease: %d %s", w.Code, w.Body.String())
+	}
 }
 
 type leaseTestAuth struct {

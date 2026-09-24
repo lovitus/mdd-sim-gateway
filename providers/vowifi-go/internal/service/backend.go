@@ -327,15 +327,43 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 	callEnded := false
 	failureLayer, stopFailureCode := "runtime", "close_failed"
 	if active != nil {
-		_, err = active.call.End(ctx)
-		if err == nil {
+		endResult, endErr := active.call.End(ctx)
+		if endResult.Accepted {
 			callEnded = true
+			backend.recordCallTermination(active, true, endErr)
+			backend.mu.Lock()
+			active.terminalSource = "confirmed_end"
+			active.terminalOutcome = "ended"
+			persistErr := backend.persistCallTerminalLocked(active, active.terminalSource)
+			if persistErr != nil || endErr != nil {
+				code := "call_end_failed"
+				cause := endErr
+				if persistErr != nil {
+					code = "call_terminal_persist_failed"
+					cause = errors.Join(cause, persistErr)
+				}
+				backend.transitionLocked(vowifiipc.RuntimeFailed, code)
+				guard := backend.restartCallGuardLocked(active, true)
+				failure := publicFailure(&StageError{Layer: "call", Code: code, Err: cause})
+				storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
+				backend.mu.Unlock()
+				active.session.EndStream("call ended; local cleanup pending")
+				if guard != nil {
+					go backend.guardCall(guard, active)
+				}
+				return vowifiipc.OperationResult{}, errors.Join(failure, storeErr)
+			}
+			backend.mu.Unlock()
 			active.session.EndStream("runtime stopped")
 		} else {
+			err = endErr
+			if err == nil {
+				err = errors.New("call termination was not confirmed")
+			}
 			failureLayer, stopFailureCode = "call", "call_end_failed"
 		}
 	}
-	if err == nil {
+	if err == nil && (active == nil || callEnded) {
 		err = runtime.Close(ctx)
 	}
 
@@ -385,6 +413,20 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 type MessagingRuntime interface {
 	Runtime
 	SendMessage(context.Context, vowifiipc.SendMessageRequest) error
+}
+
+// Reuse the durable full-operation replay checks, without reserving or dispatching.
+func (backend *Backend) MessageReceipt(_ context.Context, request vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
+	if err := request.Validate(); err != nil {
+		return vowifiipc.MessageResult{}, err
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	result, err, found := backend.replayMessageLocked(request.OperationID, request.MessageID, operationKind("message_send", request.MessageID, request.Recipient, request.Body))
+	if !found && err == nil {
+		err = &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "message_receipt_not_found", Layer: "messaging"}
+	}
+	return result, err
 }
 
 func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {

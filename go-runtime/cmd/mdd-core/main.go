@@ -613,7 +613,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	cellularMedia, err := cellularmedia.New(cellularmedia.Config{
-		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia, Calls: calls, Incoming: calls,
+		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia, Calls: calls, Incoming: calls, Recovery: calls,
 	})
 	if err != nil {
 		return err
@@ -648,6 +648,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	control, err := providercontrol.NewHandler(providers, catalog, nil,
+		providercontrol.WithBrowserAuthorization(auth),
 		providercontrol.WithCallRecorder(calls), providercontrol.WithCardRouteResolver(agents),
 		providercontrol.WithOutboundCallTimeout(func() (time.Duration, error) {
 			snapshot, err := preferenceStore.Snapshot()
@@ -761,7 +762,7 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	leases, err := mediaauth.NewLeaseHandler(router, providers, auth, mediaLeaseTTL)
+	leases, err := mediaauth.NewLeaseHandler(router, providers, auth, mediaLeaseTTL, calls)
 	if err != nil {
 		return err
 	}
@@ -993,6 +994,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithVoWiFiControl(control),
 		core.WithMessages(messages, messageAPI),
 		core.WithCallHistory(callAPI),
+		core.WithMobileCallFacts(calls),
 		core.WithCellularMessages(cellularSMS),
 		core.WithAllowance(allowanceAPI),
 		core.WithEUICCProfiles(euiccProfiles),

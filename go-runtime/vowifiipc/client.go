@@ -204,10 +204,18 @@ func (client *Client) RejectIncomingCall(ctx context.Context, input RejectIncomi
 }
 
 func (client *Client) SendMessage(ctx context.Context, input SendMessageRequest) (MessageResult, error) {
+	return client.messageResult(ctx, "/v1/messages/send", input)
+}
+
+func (client *Client) MessageReceipt(ctx context.Context, input SendMessageRequest) (MessageResult, error) {
+	return client.messageResult(ctx, "/v1/messages/receipt", input)
+}
+
+func (client *Client) messageResult(ctx context.Context, path string, input SendMessageRequest) (MessageResult, error) {
 	if err := input.Validate(); err != nil {
 		return MessageResult{}, err
 	}
-	result, err := request[SendMessageRequest, MessageResult](ctx, client, http.MethodPost, "/v1/messages/send", &input)
+	result, err := request[SendMessageRequest, MessageResult](ctx, client, http.MethodPost, path, &input)
 	if err == nil {
 		err = result.Validate()
 		if err == nil && (result.OperationID != input.OperationID || result.MessageID != input.MessageID) {

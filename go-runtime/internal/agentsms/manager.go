@@ -53,6 +53,14 @@ type Manager struct {
 	now   func() time.Time
 }
 
+func (manager *Manager) SupportsCallReceipts() bool {
+	if manager == nil {
+		return false
+	}
+	supported, ok := manager.calls.(interface{ SupportsCallReceipts() bool })
+	return ok && supported.SupportsCallReceipts()
+}
+
 func NewManager(store *Store, calls agentmodem.ManagedOperator) (*Manager, error) {
 	if store == nil || calls == nil {
 		return nil, errors.New("invalid SMS manager configuration")

@@ -135,6 +135,22 @@ type inboundMessaging struct {
 	fault    error
 	serveErr error
 	started  bool
+	outbound *voicehost.IMSOutboundAgent
+}
+
+func (inbound *inboundMessaging) SetOutbound(agent *voicehost.IMSOutboundAgent) {
+	inbound.mu.Lock()
+	inbound.outbound = agent
+	inbound.mu.Unlock()
+}
+func (inbound *inboundMessaging) outboundBye(request voiceclient.SIPIncomingRequest) (voiceclient.SIPIncomingResponse, bool) {
+	inbound.mu.Lock()
+	agent := inbound.outbound
+	inbound.mu.Unlock()
+	if agent == nil {
+		return voiceclient.SIPIncomingResponse{}, false
+	}
+	return agent.HandleRemoteBye(request)
 }
 
 func (inbound *inboundMessaging) ConfigureVoice(stack *usernet.Stack, localIP, contactURI, localTag, userAgent string, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding, carrier voiceclient.SIPRequestTransport) error {
@@ -196,6 +212,9 @@ func (inbound *inboundMessaging) Start(flow inboundSIPFlow) error {
 }
 
 func (inbound *inboundMessaging) HandleSIPIncoming(ctx context.Context, request voiceclient.SIPIncomingRequest) []voiceclient.SIPIncomingResponse {
+	if response, handled := inbound.outboundBye(request); handled {
+		return []voiceclient.SIPIncomingResponse{response}
+	}
 	responses, err := inbound.server.HandleRequest(ctx, request)
 	if strings.EqualFold(strings.TrimSpace(request.Method), "MESSAGE") {
 		inbound.mu.Lock()
@@ -215,6 +234,9 @@ func (inbound *inboundMessaging) HandleSIPIncoming(ctx context.Context, request 
 func (inbound *inboundMessaging) HandleSIPIncomingStreaming(ctx context.Context, request voiceclient.SIPIncomingRequest, emit func(voiceclient.SIPIncomingResponse) error) error {
 	if inbound == nil || emit == nil {
 		return errors.New("inbound SIP streaming handler is unavailable")
+	}
+	if response, handled := inbound.outboundBye(request); handled {
+		return emit(response)
 	}
 	err := inbound.server.HandleRequestStreaming(ctx, request, func(response voicehost.IMSInboundWireResponse) error {
 		return emit(voiceclient.SIPIncomingResponse{

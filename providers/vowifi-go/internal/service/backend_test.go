@@ -1185,6 +1185,19 @@ func TestBackendIncomingCallFirstAnswerWinsAndRemoteByeClearsExactCall(t *testin
 	if !runtime.incomingCallAvailable() {
 		t.Fatal("incoming calls should become available after the exact active call ends")
 	}
+	proofs := 0
+	for index := range 2 {
+		proof, err := backend.CallReceipt(t.Context(), vowifiipc.CallReceiptRequest{CallID: "call-1", OperationID: fmt.Sprintf("answer-%d", index), SessionID: "call-1"})
+		if err == nil {
+			proofs++
+			if proof.Source != "carrier_bye" {
+				t.Fatalf("wrong natural terminal source: %+v", proof)
+			}
+		}
+	}
+	if proofs != 1 {
+		t.Fatalf("natural end must retain only the winning answer identity: %d", proofs)
+	}
 }
 
 func TestBackendRejectIncomingCallIsIdempotentAndDoesNotCreateMedia(t *testing.T) {

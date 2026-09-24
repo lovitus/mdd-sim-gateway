@@ -17,7 +17,7 @@ All 59 original general criteria and four macOS criteria remain preserved. Curre
 
 | Criterion | Implementation | Acceptance / evidence | Current requirement (original preserved in detail) |
 |---|---|---|---|
-| [M01](docs/status/README.md#m01) | partial | evidence_review_pending | Current Windows/macOS/Linux delivery and native qualification: preserve prior deployment/installer reports, then verify only unresolved privilege, backend and failure-matrix cases. Android is deferred. |
+| [M01](docs/status/README.md#m01) | partial | evidence_review_pending | Current execution order follows ANDROID_FIRST_SEQUENCE: finish Android core usability, authentication/recovery and preview acceptance first; Windows/macOS/Linux delivery, 4G isolation and existing incident work remain required and are sequenced afterward, not cancelled. Preserve prior deployment/installer reports and verify only unresolved privilege, backend and failure-matrix cases. |
 | [M02](docs/status/README.md#m02) | policy | not_applicable | 不建立独立的远程 Modem 产品、页面或数据库体系。 |
 | [M03](docs/status/README.md#m03) | implemented | covered_by_tests | 不让浏览器或未来网络电话应用直接连接 Agent。 |
 | [M04](docs/status/README.md#m04) | policy | not_applicable | 不在 Agent 内实现另一套软电话、用户权限、历史记录或路由策略。 |

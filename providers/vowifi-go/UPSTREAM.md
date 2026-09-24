@@ -1,5 +1,16 @@
 # Upstream source and MDD patch
 
+The September 22 Android recovery batch adds an identity-checked outbound
+carrier-BYE observation. It reuses the existing upstream SIP header/dialog
+parsers and requires the exact Call-ID, local tag, remote tag and BYE CSeq.
+The final dialog is published before ACK is externally observable and is not
+reinserted afterward; a deterministic ACK callback test injects the racing BYE.
+The MDD wrapper consumes that signal to close media and retain a scoped terminal
+receipt in its existing operation store. Media EOF and a missing active-call
+snapshot remain insufficient termination evidence. Confirmed startup cleanup
+uses the same receipt boundary; an unaccepted cleanup is not marked terminal.
+`git ls-remote` on 2026-09-22 still returned upstream HEAD `1e9c6e6adbfc`.
+
 IKE diagnostic datagrams include late, duplicate and rejected candidates.
 They are not mutually exclusive successful outcomes of the sent requests.
 The IPC contract preserves them unchanged and only bounds timed-out exchanges

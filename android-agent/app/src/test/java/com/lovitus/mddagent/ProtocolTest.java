@@ -18,7 +18,7 @@ public class ProtocolTest {
         assertThrows(IllegalArgumentException.class,()->new Setup("{\"version\":1,\"type\":\"mdd-agent-setup\",\"server\":\"https://gateway.test\",\"password\":\"secret\"}"));
         assertThrows(IllegalArgumentException.class,()->new Setup("{\"version\":2}"));
     }
-    @Test public void reconnectIsBoundedWithJitterAndReset(){Retry r=new Retry(new Random(42));Set<Long> values=new HashSet<>();for(int i=0;i<100;i++){long n=r.next();assertTrue(n>=500&&n<120500);values.add(n);}assertTrue(values.size()>20);r.healthy();assertTrue(r.next()<1500);}
+    @Test public void reconnectIsBoundedWithJitterAndReset(){Retry r=new Retry(new Random(42));Set<Long> values=new HashSet<>();for(int i=0;i<100;i++){long n=r.next();assertTrue(n>=500&&n<30500);values.add(n);}assertTrue(values.size()>20);r.healthy();assertTrue(r.next()<1500);}
     @Test public void incomingUsesProviderCallIdentity()throws Exception{
         JSONObject line=Json.obj("id","line-a","card_id","89012345678901234567","enabled",true),in=Json.obj("call_id","provider-incoming","caller","+12345678900");
         CallPlan p=new CallPlan(line,"vowifi","",in);assertEquals("provider-incoming",p.id);assertEquals("provider-incoming",p.lease().getString("call_id"));assertEquals("provider-incoming",p.start("lease").getString("call_id"));assertTrue(p.startPath().endsWith("/incoming/answer"));
@@ -29,6 +29,13 @@ public class ProtocolTest {
         JSONObject line=Json.obj("id","a/b","card_id","89012345678901234567","enabled",true),in=Json.obj("incoming_event_id","incoming-1","actionable",true,"sim_session_generation","sim-2","native_call_index",3,"occurrence",4L);
         CallPlan p=new CallPlan(line,"cellular","",in);assertEquals("/v1/lines/a%2Fb/cellular/calls/answer",p.startPath());assertEquals(4,p.start("lease").getLong("call_occurrence"));assertEquals("sim-2",p.lease().getString("sim_session_generation"));
         in.put("actionable",false);assertThrows(IllegalArgumentException.class,()->new CallPlan(line,"cellular","",in));
+    }
+    @Test public void callDisplayIdentitySurvivesWithoutEnteringAnyCommand()throws Exception{
+        JSONObject line=Json.obj("id","line-original","card_id","8944100000000000001","enabled",true,"name","Original display name","number","+441234567890123");
+        CallPlan plan=new CallPlan(line,"cellular","+15550100999",null);JSONObject saved=plan.record();
+        CallPlan restored=new CallPlan(new JSONObject(saved.toString()));assertEquals("Original display name",restored.lineName);assertEquals("+441234567890123",restored.lineNumber);assertEquals("+15550100999",restored.number);
+        for(JSONObject command:new JSONObject[]{restored.lease(),restored.start("lease"),restored.end("lease"),restored.recovery("end")}){assertFalse(command.has("line_name"));assertFalse(command.has("line_number"));assertFalse(command.toString().contains("Original display name"));}
+        saved.remove("line_name");saved.remove("line_number");CallPlan legacy=new CallPlan(saved);assertEquals(plan.line,legacy.lineName);assertEquals("",legacy.lineNumber);assertEquals(plan.operation,legacy.operation);assertEquals(plan.card,legacy.card);
     }
     @Test public void ccidRejectsStaleTruncatedOversizedAndRemoved()throws Exception{
         byte[] reply=Ccid.command(0x80,0,7,new byte[]{1,2});assertArrayEquals(new byte[]{1,2},Ccid.result(reply,0,7,0x80));
@@ -46,5 +53,17 @@ public class ProtocolTest {
     @Test public void identitiesAreDecodedNotGuessed()throws Exception{
         assertEquals("89012345678901234567",SimProtocol.bcd(Json.unhex("98103254769810325476"),false));assertEquals("001010123456789",SimProtocol.bcd(Json.unhex("080910101032547698"),true));
         assertThrows(IOException.class,()->SimProtocol.bcd(Json.unhex("080A"),true));
+    }
+    @Test public void selectUsimUsesFullDirectoryAidAndAlternateResponseMode()throws Exception{
+        Card card=new Card();
+        for(String reply:new String[]{"9000","9000","610B4F09A0000000871002FF019000","6A83","6A86","9000"})card.replies.add(Json.unhex(reply));
+        SimProtocol.selectApplication(card,"usim");
+        assertArrayEquals(Json.unhex("00A4040409A0000000871002FF01"),card.sent.get(4));
+        assertArrayEquals(Json.unhex("00A4040009A0000000871002FF01"),card.sent.get(5));
+        for(byte[] command:card.sent)assertTrue((command[1]&255)==0xa4||(command[1]&255)==0xb2);
+    }
+    @Test public void missingDirectoryFallsBackWithoutPinCommands()throws Exception{
+        Card card=new Card();for(String reply:new String[]{"9000","6A82","6283"})card.replies.add(Json.unhex(reply));
+        SimProtocol.selectApplication(card,"usim");assertArrayEquals(Json.unhex("00A4040407A0000000871002"),card.sent.get(2));
     }
 }
