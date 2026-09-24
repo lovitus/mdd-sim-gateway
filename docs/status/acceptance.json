@@ -1397,24 +1397,17 @@
   "workstreams": [
     {
       "id": "ANDROID",
-      "state": "deferred",
-      "summary": "Android unified-protocol reader support is not delivered and is explicitly deferred; it does not block current Windows/macOS/Linux delivery.",
-      "acceptance": "Future implementation requires a new prioritized work item and authorized device/permission tests. Deferral is neither implementation nor cancellation.",
+      "state": "partial",
+      "summary": "Client-focused implementation based on PR #7, excluding PR #8 pairing and durable call recovery. Exact source f627204 passed Android build/lint/unit/API28/API35 and full Go Runtime CI. Android 13 native login/pages, remembered login, silent-connection recovery and automatic reauthentication after isolated Core restart were verified. The owner authorized minimal mainline integration after this validation; production is unchanged.",
+      "acceptance": "Signed release APK UI checks and same-source QA APK recovery against an empty isolated Core are scoped evidence, not carrier acceptance. Malformed-frame regression, elapsed session-expiry coverage, real USB/card/OMAPI operations, calls/SMS, background/OEM delivery and battery measurements remain unaccepted. Production still requires a separately authorized Core rollout for the mobile endpoint.",
       "evidence": [
-        "README.md",
-        "go-runtime/agentlink/types.go"
+        "android-agent/README.md",
+        "android-agent/app/src/main/java/com/lovitus/mddagent/AgentService.java",
+        "android-agent/app/src/androidTest/java/com/lovitus/mddagent/DeviceTest.java",
+        "docs/decisions/2026-09-21-android-agent.md",
+        "docs/decisions/2026-09-24-android-client-scope.md"
       ],
-      "releaseRelevance": "deferred",
-      "resolution": {
-        "basis": "user_decision",
-        "reason": "Owner deferred Android in favor of the three primary desktop/server Agents.",
-        "decisionRefs": [
-          "PRIMARY_AGENTS"
-        ],
-        "evidence": [
-          "docs/decisions/2026-09-20-current-scope.md"
-        ]
-      }
+      "releaseRelevance": "current"
     },
     {
       "id": "ESIM_DELETE",
@@ -1591,6 +1584,20 @@
       "authority": "project_owner",
       "sourcePath": "docs/decisions/2026-09-20-current-scope.md",
       "summary": "Reconcile scoped historical evidence before scheduling missing tests; not revalidated is not never accepted."
+    },
+    {
+      "id": "ANDROID_NATIVE",
+      "date": "2026-09-21",
+      "authority": "project_owner",
+      "sourcePath": "docs/decisions/2026-09-21-android-agent.md",
+      "summary": "Android reprioritized: native reader/call/SMS app, safe recovery and battery-conscious UX; draft PR and test APK, not production or paid-operation acceptance."
+    },
+    {
+      "id": "ANDROID_CLIENT_SCOPE",
+      "date": "2026-09-24",
+      "authority": "project_owner",
+      "sourcePath": "docs/decisions/2026-09-24-android-client-scope.md",
+      "summary": "Keep PR #7 server baseline, reuse Android UI, recover network/session loss in the client, and use browser-equivalent call lifetime. Exclude server pairing and durable call recovery. Owner subsequently authorized isolated Core validation and minimal mainline integration after it passes, not production deployment. Preserve other workspaces; work without subagents."
     }
   ],
   "releaseScope": [
@@ -1614,9 +1621,9 @@
     },
     {
       "id": "ANDROID",
-      "disposition": "deferred",
-      "decision": "PRIMARY_AGENTS",
-      "summary": "Unified reader client deferred; not a current delivery blocker and not a completed feature."
+      "disposition": "required",
+      "decision": "ANDROID_CLIENT_SCOPE",
+      "summary": "Client-focused native Android draft/preview with existing server APIs; no pairing or durable server call recovery. Hardware and screen-off qualification remain separate."
     },
     {
       "id": "MACOS_NOTARIZATION",

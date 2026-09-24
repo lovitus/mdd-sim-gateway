@@ -26,7 +26,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 | ESIM | accepted | Physical deletion + retained deletion notifications + multiple-confirmation manual replay. No soft-delete implementation backlog. |
 | REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. |
 | ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. |
-| ANDROID | deferred | Unified reader client deferred; not a current delivery blocker and not a completed feature. |
+| ANDROID | required | Client-focused native Android draft/preview with existing server APIs; no pairing or durable server call recovery. Hardware and screen-off qualification remain separate. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
 | MACOS_UNIVERSAL | needs_decision | Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build. |
 
@@ -36,6 +36,8 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 - **PRIMARY_AGENTS** (2026-09-20, project_owner): Windows/macOS/Linux remote Agents are the current priority; Android is deferred. Enabled 4G must be isolated and fail closed without overriding user intent. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **MACOS_RELEASE** (2026-09-20, project_owner): No notarization or .p8 this round. Preserve signing and track Universal packaging separately. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **EVIDENCE_CONTINUITY** (2026-09-20, project_owner): Reconcile scoped historical evidence before scheduling missing tests; not revalidated is not never accepted. [Source](../../docs/decisions/2026-09-20-current-scope.md).
+- **ANDROID_NATIVE** (2026-09-21, project_owner): Android reprioritized: native reader/call/SMS app, safe recovery and battery-conscious UX; draft PR and test APK, not production or paid-operation acceptance. [Source](../../docs/decisions/2026-09-21-android-agent.md).
+- **ANDROID_CLIENT_SCOPE** (2026-09-24, project_owner): Keep PR #7 server baseline, reuse Android UI, recover network/session loss in the client, and use browser-equivalent call lifetime. Exclude server pairing and durable call recovery. Owner subsequently authorized isolated Core validation and minimal mainline integration after it passes, not production deployment. Preserve other workspaces; work without subagents. [Source](../../docs/decisions/2026-09-24-android-client-scope.md).
 
 ## Disposition counts
 
@@ -56,6 +58,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 - pending_product: 2
 
 ## Current open work
+
+### ANDROID
+
+**State: partial; release relevance: current.** Client-focused implementation based on PR #7, excluding PR #8 pairing and durable call recovery. Exact source f627204 passed Android build/lint/unit/API28/API35 and full Go Runtime CI. Android 13 native login/pages, remembered login, silent-connection recovery and automatic reauthentication after isolated Core restart were verified. The owner authorized minimal mainline integration after this validation; production is unchanged.
+
+Acceptance scope / remaining action: Signed release APK UI checks and same-source QA APK recovery against an empty isolated Core are scoped evidence, not carrier acceptance. Malformed-frame regression, elapsed session-expiry coverage, real USB/card/OMAPI operations, calls/SMS, background/OEM delivery and battery measurements remain unaccepted. Production still requires a separately authorized Core rollout for the mobile endpoint.
 
 ### INSTALLER_WAIT
 
@@ -82,14 +90,6 @@ Acceptance scope / remaining action: Collect bounded redacted evidence at the re
 Acceptance scope / remaining action: Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.
 
 ## Accepted, deferred, excluded and separately prioritized work
-
-### ANDROID
-
-**State: deferred; release relevance: deferred.** Android unified-protocol reader support is not delivered and is explicitly deferred; it does not block current Windows/macOS/Linux delivery.
-
-Acceptance scope / remaining action: Future implementation requires a new prioritized work item and authorized device/permission tests. Deferral is neither implementation nor cancellation.
-
-Resolution (user_decision): Owner deferred Android in favor of the three primary desktop/server Agents.
 
 ### ESIM_DELETE
 

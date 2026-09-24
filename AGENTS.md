@@ -1,11 +1,20 @@
 # Repository work, current decisions and acceptance
 
+Current Android work must follow docs/decisions/2026-09-24-android-client-scope.md.
+Keep server changes at the PR #7 baseline; recover networking and authentication
+in the Android client. Do not add pairing or durable server call recovery here.
+Work alone without subagents. Preserve the separate recovery branch and dirty tree.
+The owner subsequently authorized a temporary isolated Core and minimal mainline
+integration after successful validation. This does not authorize production
+deployment or the excluded PR #8 server expansion.
+
 Read docs/decisions/2026-09-20-current-scope.md, docs/status/README.md and acceptance.json before changing scope.
 Latest explicit owner decisions govern requirements; a stale ledger or historical checklist must be corrected,
 not used to override those decisions. Root TODO summaries are generated; original plans remain historical.
 
 Final eSIM direction is physical deletion + retained deletion notifications + multiply-confirmed manual replay.
-Do not reopen abandoned soft deletion/customization. Android is deferred and does not block this delivery.
+Do not reopen abandoned soft deletion/customization. Android is reprioritized by the owner as a draft native app / preview APK;
+read docs/decisions/2026-09-21-android-agent.md. Do not merge its draft or claim physical acceptance from emulator tests.
 Windows/macOS/Linux remote Agents are the current priority. Enabled 4G must be isolated and fail closed on all
 three: no host sharing or default-network fallback, no override of stored user intent, no automatic enabling.
 Notarization and .p8 credentials are excluded this round; preserve signing and track Universal work separately.

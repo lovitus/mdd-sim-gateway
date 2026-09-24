@@ -11,7 +11,7 @@ All 59 original general criteria and four macOS criteria remain preserved. Curre
 | ESIM | accepted | Physical deletion + retained deletion notifications + multiple-confirmation manual replay. No soft-delete implementation backlog. |
 | REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. |
 | ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. |
-| ANDROID | deferred | Unified reader client deferred; not a current delivery blocker and not a completed feature. |
+| ANDROID | required | Client-focused native Android draft/preview with existing server APIs; no pairing or durable server call recovery. Hardware and screen-off qualification remain separate. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
 | MACOS_UNIVERSAL | needs_decision | Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build. |
 

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { getCallAudioBufferMS } from './browserPreferences.js'
-import { CallMedia, normalizeDialTarget } from './goCallMedia.js'
+import { CallMedia, normalizeDialTarget, selectCallID } from './goCallMedia.js'
 import { operationID } from './goV1Adapter.js'
 import { useI18n } from './mdd/i18n.jsx'
 import { dialogs } from './dialogs.js'
@@ -257,7 +257,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     const call = {
       mode, line_id: String(line.id), expected_card_id: String(line.iccid || line.card_id || ''),
       callee: value || 'Incoming call', buffer_ms: Number(bufferMS),
-      call_id: mode === 'cellular' && incoming ? incoming.incoming_event_id : operationID('browser-call'),
+      call_id: selectCallID(mode, incoming, () => operationID('browser-call')),
       start_operation_id: operationID(incoming ? 'react-call-answer' : 'react-call-start'),
       end_operation_id: '', lease: null, phase: 'preparing', media_state: 'opening',
       message: 'Requesting microphone and bidirectional audio evidence',
