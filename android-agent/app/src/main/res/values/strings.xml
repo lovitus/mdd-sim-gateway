@@ -240,12 +240,12 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="audio_focus_resumed">Call audio resumed</string>
 <string name="audio_focus_pause_failed">Could not safely pause call audio</string>
 <string name="audio_focus_restore_failed">Could not restore call audio</string>
-<string name="audio_check_timeout">Audio check timed out; no automatic dial</string>
+<string name="audio_check_timeout">Microphone / playback verification timed out. Check microphone access, speak during the audio check, and retry manually. No call was placed.</string>
 <string name="audio_capture_stopped">Microphone stopped</string>
 <string name="audio_playback_stopped">Playback stopped</string>
 <string name="audio_invalid_frame">Invalid audio frame</string>
 <string name="audio_reconnected">Call audio reconnected</string>
-<string name="audio_checking">Checking audio</string>
+<string name="audio_checking">Checking microphone and playback. Say a few words into the phone before dialing.</string>
 <string name="audio_invalid_handshake">Invalid media handshake</string>
 <string name="audio_reconnecting">Reconnecting the same call audio</string>
 <string name="audio_lost">Media unavailable; no redial</string>
@@ -265,7 +265,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="line_history">Selected line history</string>
 <string name="sync_messages">Sync messages</string>
 <string name="recent_messages">Recent gateway messages</string>
-<string name="message_submitted">Submitted</string>
+<string name="message_submitted">Submitted · delivery not confirmed</string>
 <string name="message_not_sent">Not sent</string>
 <string name="message_partial">Partial submission observed; full result unconfirmed</string>
 <string name="message_unknown">Submission unconfirmed</string>
@@ -355,4 +355,14 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="layer_gateway">Gateway dependency</string>
 <string name="call_history">Call history</string>
 <string name="no_call_history">No call history</string>
+<string name="call_preflight_failed">Call not placed · %1$s\n%2$s</string>
+<string name="message_from">From: %1$s</string>
+<string name="message_to">To: %1$s</string>
+<string name="message_line">SIM / line: %1$s</string>
+<string name="message_reply">Reply</string>
+<string name="message_reply_unavailable">Original SIM or reply number unavailable. Select the correct line and recipient manually.</string>
+<string name="message_reply_replace">Replace the current message draft and reply using this message’s SIM and number?</string>
+<string name="call_keypad">Keypad</string>
+<string name="call_send_tone">Send tone %1$s</string>
+<string name="message_body_unavailable">Content is not retained in this local receipt; check message history.</string>
 </resources>

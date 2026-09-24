@@ -38,6 +38,34 @@ and physical retesting; they do not claim to repair that USB transport failure.
 
 ## Implemented paths
 
+### Native call and message feedback
+
+Preparation failures retain their stage and actual API/audio error after cleanup,
+rather than replacing every failure with "No call was started". The existing
+audio canary still requires microphone signal; its in-call preparation view now
+explicitly asks for speech. Carrier dispatch, unknown outcomes and no-redial guards
+are unchanged. The in-call keypad opens without sending anything; only an explicit
+digit press sends DTMF for the still-active original call.
+
+Recent/history messages show peer, line name, own number when known, card suffix,
+transport, time and body. Reply revalidates the original line/card and fills that
+SIM, transport and peer into the existing composer; it does not send automatically.
+An existing draft needs confirmation before replacement. Alphanumeric senders,
+missing identities and changed cards are not guessed into another recipient/SIM.
+Submission receipts retain the original content and own-number snapshot in the
+existing encrypted, bounded store. Under its existing byte budget only resolved
+local previews are evicted; unresolved payloads remain intact. Older already-purged
+bodies are displayed only when an exact matching retained event supplies them.
+Submitted is not displayed as delivered. State text keeps its meaning and adds
+green/amber/red distinctions across the existing native pages.
+
+Pre-fix physical evidence: a subsequent call cleared to a generic no-call notice
+without a new carrier history entry; message records omitted own-SIM information
+and reply actions, and successful local receipts discarded their body. These are
+observed UI/receipt defects, not proof of the unavailable original audio failure
+cause. This follow-up changes no Core or Provider code. Existing CI and physical
+UI checks must qualify the candidate; no extra paid call/SMS is implied by them.
+
 - Native Home/Calls/Messages/Readers/Settings screens, QR setup, exact line/route selection, generic private notifications, pause, safe diagnostic share and battery-settings guidance.
 - USB host CCID **APDU-level, slot 0** readers (up to eight). Active-profile ICCID/IMSI/EF-AD reading and fixed USIM/ISIM AKA; no general APDU tunnel, PIN guessing, profile download, arbitrary card mutation or eSIM deletion. Interrupt changes invalidate the session generation; identity is re-read before AKA. TPDU-only readers and inaccessible/locked cards are not advertised as ready.
 - OMAPI uses Android's standard access-controlled logical channel. Many devices/cards do not authorize ordinary applications; these are clearly unavailable. No root, hidden APIs, carrier-privilege bypass or misleading embedded-eSIM promise.

@@ -240,12 +240,12 @@
 <string name="audio_focus_resumed">通话音频已恢复</string>
 <string name="audio_focus_pause_failed">无法安全暂停通话音频</string>
 <string name="audio_focus_restore_failed">无法恢复通话音频</string>
-<string name="audio_check_timeout">音频检查超时，不会自动拨号</string>
+<string name="audio_check_timeout">麦克风或播放验证超时。请检查麦克风权限，在音频检查期间说几句话后手动重试。本次未拨出。</string>
 <string name="audio_capture_stopped">麦克风已停止</string>
 <string name="audio_playback_stopped">播放已停止</string>
 <string name="audio_invalid_frame">音频帧无效</string>
 <string name="audio_reconnected">通话音频已重连</string>
-<string name="audio_checking">正在检查音频</string>
+<string name="audio_checking">正在检查麦克风和播放。请先对手机说几句话以完成拨号前检查。</string>
 <string name="audio_invalid_handshake">媒体握手无效</string>
 <string name="audio_reconnecting">正在恢复原通话音频</string>
 <string name="audio_lost">媒体不可用，不会重拨</string>
@@ -265,7 +265,7 @@
 <string name="line_history">所选线路历史</string>
 <string name="sync_messages">同步短信</string>
 <string name="recent_messages">最近网关短信</string>
-<string name="message_submitted">已提交</string>
+<string name="message_submitted">已提交 · 尚未确认送达</string>
 <string name="message_not_sent">未发出</string>
 <string name="message_partial">已观察到分段提交，整条结果未确认</string>
 <string name="message_unknown">提交结果未确认</string>
@@ -355,4 +355,14 @@
 <string name="layer_gateway">网关依赖</string>
 <string name="call_history">通话历史</string>
 <string name="no_call_history">暂无通话记录</string>
+<string name="call_preflight_failed">未拨出 · %1$s\n%2$s</string>
+<string name="message_from">来自：%1$s</string>
+<string name="message_to">发往：%1$s</string>
+<string name="message_line">SIM / 线路：%1$s</string>
+<string name="message_reply">回复</string>
+<string name="message_reply_unavailable">原接收卡或回复号码不可用，请手动确认线路和收件人。</string>
+<string name="message_reply_replace">替换当前短信草稿，使用这条消息的卡和号码回复？</string>
+<string name="call_keypad">数字键盘</string>
+<string name="call_send_tone">发送按键 %1$s</string>
+<string name="message_body_unavailable">此本地记录未保留正文，请查看短信历史。</string>
 </resources>

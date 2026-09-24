@@ -297,7 +297,7 @@ public final class AgentService extends Service {
         if(Build.VERSION.SDK_INT>=29)startForeground(1,notification(),type);else startForeground(1,notification());foreground=true;}
     void begin(CallPlan plan)throws Exception{if(!online()||api==null)throw new IllegalStateException(getString(R.string.connect_first));if(call!=null)throw new IllegalStateException(getString(R.string.account_busy));
         // The IO owner performs authoritative exact-line validation, including paged lines.
-        promote(true);RemoteCall next=new RemoteCall(this,api,plan,io);call=next;
+        promote(true);RemoteCall next=new RemoteCall(this,api,plan,io);call=next;notice=UiText.EMPTY;
         try{next.wake=getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"mdd:active-call");next.wake.acquire(2*60*60*1000L);next.start();}
         catch(RuntimeException failure){next.invalidate();releaseWake(next);if(call==next)call=null;if(!destroyed&&available)promote(false);changed();throw failure;}
         changed();}
@@ -327,8 +327,8 @@ public final class AgentService extends Service {
         notice=UiText.of(R.string.message_saving);changed();io.execute(()->{
             String scope="";boolean recorded=false,dispatch=false;
             try{
-                scope=owner.authenticatedScope();GatewayApi.requireReady(owner.exactLine(line.getString("id"),line.getString("card_id")),mode+"_sms");final String account=scope;
-                store.update(current->{if(!owner.token.equals(current.optString("token")))throw new IllegalStateException("Account changed");MessageJournal.begin(current,account,id,line,mode,payload.getString("recipient"),payload.getString("body"));current.put("account_scope",account);});
+                scope=owner.authenticatedScope();final JSONObject exact=owner.exactLine(line.getString("id"),line.getString("card_id"));GatewayApi.requireReady(exact,mode+"_sms");final String account=scope;
+                store.update(current->{if(!owner.token.equals(current.optString("token")))throw new IllegalStateException("Account changed");MessageJournal.begin(current,account,id,exact,mode,payload.getString("recipient"),payload.getString("body"));current.put("account_scope",account);});
                 recorded=true;
                 refreshPrivateState(owner);
                 if(api!=owner||!available)throw new IllegalStateException("Connection owner changed");
@@ -376,6 +376,20 @@ public final class AgentService extends Service {
         messagePageRequest("/v1/calls?limit=100",expectedEpoch,success,failure);
     }
     void messageConversations(long expectedEpoch,java.util.function.Consumer<JSONObject> success,java.util.function.Consumer<String> failure){messagePageRequest("/v1/messages/conversations?all=true",expectedEpoch,success,failure);}
+    JSONObject messageLine(String id){
+        JSONArray current=Json.array(snapshot,"lines");
+        for(int i=0;i<current.length();i++){JSONObject line=current.optJSONObject(i);if(line!=null&&id.equals(line.optString("id")))return line;}
+        for(int i=0;i<catalogNumbers.length();i++){
+            JSONObject line=catalogNumbers.optJSONObject(i);
+            if(line!=null&&id.equals(line.optString("id"))&&!line.optBoolean("deleted"))return Json.obj("id",id,"card_id",line.optString("card_id"),"name",line.optString("name"),"number",Json.object(line,"sim").optString("msisdn"),"enabled",line.optBoolean("enabled"));
+        }
+        return Json.obj("id",id,"name",id,"enabled",false);
+    }
+    void messageReplyLine(String id,String card,long epoch,java.util.function.Consumer<JSONObject> success,java.util.function.Consumer<String> failure){
+        GatewayApi owner=api;if(owner==null||!online()||epoch!=configurationEpoch){failure.accept(getString(R.string.connect_first));return;}
+        io.execute(()->{try{JSONObject line=owner.exactLine(id,card);main.post(()->{if(api==owner&&epoch==configurationEpoch)success.accept(line);else failure.accept(getString(R.string.history_account_changed));});}
+            catch(Exception e){main.post(()->failure.accept(getString(R.string.message_reply_unavailable)+"\n"+RemoteCall.safe(e)));}});
+    }
     private void messagePageRequest(String path,long expectedEpoch,java.util.function.Consumer<JSONObject> success,java.util.function.Consumer<String> failure){
         final GatewayApi owner=api;if(owner==null||configurationEpoch!=expectedEpoch){failure.accept(getString(R.string.history_account_changed));return;}
         io.execute(()->{try{JSONObject page=owner.json("GET",path,null);main.post(()->{if(api==owner&&configurationEpoch==expectedEpoch)success.accept(page);else failure.accept(getString(R.string.history_account_changed));});}catch(Exception e){main.post(()->failure.accept(getString(api==owner&&configurationEpoch==expectedEpoch?R.string.history_failed:R.string.history_account_changed)));}});

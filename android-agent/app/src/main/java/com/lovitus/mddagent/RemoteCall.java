@@ -16,6 +16,8 @@ final class RemoteCall {
     android.os.PowerManager.WakeLock wake;
     volatile NativeAudio audio;
     volatile UiText state=UiText.of(R.string.call_preparing);
+    private volatile UiText preparationFailure=UiText.EMPTY;
+    private volatile int preparationStage=R.string.layer_card;
     volatile String session="",phase="PREPARING";
     private volatile String releasedSession="";
     volatile boolean submitted,ended;
@@ -37,9 +39,10 @@ final class RemoteCall {
         if(ended){finishPreparation();return;}
         JSONObject fresh=api.exactLine(plan.line,plan.card);if(plan.incoming==null)GatewayApi.requireReady(fresh,plan.mode+"_call");
         requireOwner();if(ended){finishPreparation();return;}
+        preparationStage=R.string.layer_media;
         audio=new NativeAudio(service,api,service.loop,new NativeAudio.Events(){
             public void state(int label){if(!ended&&ownsRecord())service.changed();}
-            public void ended(int reason){if(!ownsRecord())return;synchronized(RemoteCall.this){ended=true;}api.cancel(RemoteCall.this);state=UiText.of(R.string.call_audio_stopped);service.callAudioEnded(RemoteCall.this);}
+            public void ended(int reason){if(!ownsRecord())return;synchronized(RemoteCall.this){if(!submitted&&!ended)preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(R.string.layer_media),UiText.of(reason));ended=true;}api.cancel(RemoteCall.this);state=submitted?UiText.of(R.string.call_reason,UiText.of(R.string.call_audio_stopped),UiText.of(reason)):preparationFailure;service.callAudioEnded(RemoteCall.this);}
         });
         if(ended){audio.close();finishPreparation();return;}
         requireOwner();
@@ -53,12 +56,13 @@ final class RemoteCall {
         boolean activate;synchronized(this){activate=ownsRecord()&&!ended&&!retired;if(activate){phase="ACTIVE";state=UiText.of(R.string.call_request_accepted);}}
         if(activate)audio.markActive();
     }catch(Exception e){
+        synchronized(this){if(!submitted&&preparationFailure.empty()&&!ended){UiText reason=audio!=null&&audio.closed&&audio.closedReason!=R.string.audio_off?UiText.of(audio.closedReason):null;preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(preparationStage),reason==null?safe(e):reason);}}
         if(audio!=null)audio.close();service.microphoneFinished(this);
         if(!submitted)finishPreparation();else if(ownsRecord()&&!ending.get()){state=UiText.of(R.string.call_result_unknown);service.reconcileSoon(this);}
     }finally{starting=false;service.changed();}});}
     private void finishPreparationAsync(){io.execute(this::finishPreparation);}
     private void finishPreparation(){
-        retire(UiText.of(R.string.call_not_started));
+        retire(preparationFailure.empty()?UiText.of(R.string.call_not_started):preparationFailure);
     }
     private boolean authorized(){return service.ownsCall(this)&&origin.equals(api.endpoint.origin)&&pin.equals(api.endpoint.fingerprint);}
     void reconcile(){reconcile(true);}
@@ -111,7 +115,7 @@ final class RemoteCall {
         if(!ownsRecord())return;
         synchronized(this){if(retired||retiring)return;retiring=true;ended=true;}
         if(audio!=null)audio.close();service.microphoneFinished(this);
-        if(!release()&&!phase.equals("TERMINAL")){state=UiText.of(R.string.call_prepare_cleanup_unknown);retiring=false;service.changed();return;}
+        if(!release()&&!phase.equals("TERMINAL")){state=preparationFailure.empty()?UiText.of(R.string.call_prepare_cleanup_unknown):UiText.of(R.string.call_reason,UiText.of(R.string.call_prepare_cleanup_unknown),preparationFailure);retiring=false;service.changed();return;}
         synchronized(this){retired=true;retiring=false;phase="TERMINAL";if(reconcileTimer!=null)reconcileTimer.cancel(false);}
         state=message;service.clearCall(this,message);
     }

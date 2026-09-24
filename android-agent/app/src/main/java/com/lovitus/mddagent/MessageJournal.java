@@ -2,7 +2,7 @@ package com.lovitus.mddagent;
 
 import org.json.*;
 
-/** Durable unresolved submissions, not an automatic send queue. */
+/** Bounded encrypted submission receipts and unresolved work, never an automatic send queue. */
 final class MessageJournal {
     static final int CAPACITY = 128;
     static final int BODY_BUDGET = 256 * 1024;
@@ -30,9 +30,13 @@ final class MessageJournal {
         if(kept.length()>=CAPACITY)throw new IllegalStateException("未决短信记录已满，请先核对原提交");
         String body=recipient.length>1?recipient[1]:"";int bytes=body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         for(int i=0;i<kept.length();i++)bytes+=kept.getJSONObject(i).optString("body").getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        // Evict only resolved local previews; never discard an unresolved payload.
+        for(int i=0;i<kept.length()&&bytes>BODY_BUDGET;i++){
+            JSONObject old=kept.getJSONObject(i);if(resolved(old)){bytes-=old.optString("body").getBytes(java.nio.charset.StandardCharsets.UTF_8).length;old.remove("body");}
+        }
         if(bytes>BODY_BUDGET)throw new IllegalStateException("未决短信内容已达安全容量，请先核对原提交");
         JSONObject record=Json.obj("scope",scope,"operation_id",id,"message_id",id,"line_id",line.getString("id"),
-            "card_id",line.getString("card_id"),"line_name",line.optString("name"),"gateway_origin",config.optString("server"),"gateway_pin",config.optString("pin"),
+            "card_id",line.getString("card_id"),"line_name",line.optString("name"),"line_number",line.optString("number"),"gateway_origin",config.optString("server"),"gateway_pin",config.optString("pin"),
             "recipient",recipient.length==0?"":recipient[0],"transport",transport,"state","unknown","created_at",System.currentTimeMillis());
         if(!body.isEmpty())record.put("body",body);kept.put(record);
         config.put("message_operations",kept);
@@ -43,14 +47,14 @@ final class MessageJournal {
             JSONObject row=records.getJSONObject(i);
             if(!id.equals(row.optString("operation_id"))||!scope.equals(row.optString("scope")))continue;
             boolean accepted=confirmed(row,result);
-            if(accepted){row.put("state","submitted");row.remove("body");}
+            if(accepted)row.put("state","submitted");
             return;
         }
         throw new IllegalStateException("Message record owner changed");
     }
     static void notDispatched(JSONObject config,String scope,String id)throws JSONException {
         JSONArray records=rows(config);
-        for(int i=0;i<records.length();i++){JSONObject row=records.getJSONObject(i);if(id.equals(row.optString("operation_id"))&&scope.equals(row.optString("scope"))){row.put("state","not_dispatched");row.remove("body");}}
+        for(int i=0;i<records.length();i++){JSONObject row=records.getJSONObject(i);if(id.equals(row.optString("operation_id"))&&scope.equals(row.optString("scope")))row.put("state","not_dispatched");}
     }
     static void observe(JSONObject config,String scope,JSONArray events)throws JSONException {
         JSONArray records=rows(config);
