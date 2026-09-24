@@ -4,7 +4,7 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Setup
 
-1. Install the preview APK, open it, and enter the gateway **HTTPS origin**, account name and password. Passwords are not stored. For self-signed servers, verify the **leaf certificate SHA-256** via an independent trusted server console and paste it. Certificate changes fail closed; there is no trust-all toggle or credential-bearing redirect.
+1. Install the preview APK, open it, and enter the gateway **HTTPS origin**, account name and password. Remembered login is encrypted using Android Keystore; disable Remember or use Forget login to remove the saved password. For self-signed servers, independently verify the displayed **leaf certificate SHA-256** before accepting it. Certificate changes require explicit confirmation; there is no trust-all toggle or credential-bearing redirect.
 2. Alternatively scan/paste the setup JSON below; inspect and explicitly confirm the origin/pin. The account still requires sign-in. Reader enrollment may be included only in a QR kept private.
 3. Choose **Stay available** and grant notifications. Choose **Readers → Share attached readers**, then grant access to the particular OTG USB device. The gateway account must permit issuing the scoped Agent credential. Existing lines/SIM routing remain configured in gateway management.
 4. Choose the exact line and **VoWiFi** or **Cellular modem** in Calls/Messages. A paid mutation requires a confirmation. Uncertain submissions are not retried. Resolve the existing call with Hang up; check SMS history before any deliberate new send.
@@ -28,13 +28,13 @@ Optional `agent_id` and `agent_token` must both be present. Do not put account p
 
 ## Sessions, power and recovery
 
-Cookie/CSRF sessions slide through existing Core validation; passwords are never retained. Revocation, TLS failure and server restart/expiry stop reconnection until sign-in. Reader enrollment is distinct from the administrator session. NetworkCallback changes replace sockets; epoch guards reject stale callbacks. Reconnect uses capped jittered backoff and never redials/resubmits messages.
+Cookie/CSRF sessions slide through existing Core validation. Expired administrator sessions can renew using remembered encrypted login, without enabling availability or reader sharing. Rejected passwords, certificate identity failures and revoked reader credentials require user action. Reader enrollment is distinct from the administrator session. NetworkCallback changes replace sockets; epoch guards reject stale callbacks. Reconnect uses capped jittered backoff without an attempt limit and never redials/resubmits messages.
 
 Observer-only mode receives changed snapshots plus a 30-second heartbeat rather than polling the whole desktop page. Core shares a one-second read cache, limits Provider concurrency to eight and a two-second deadline, and caps mobile presentation at 128 lines / 50 messages with an explicit incomplete flag. Existing routes remain available through gateway management for larger installations.
 
 Reader mode must satisfy the current Core 10-second health interval; unchanged topology is omitted. No idle wake lock, exact alarm, heartbeat restart watchdog or automatic boot activation. A bounded partial wake lock is used only during a call. Pause stops links and sharing. After force-stop or reboot, open the app to resume. Android Doze/OEM power management may still delay inbound delivery despite a visible foreground notification. This is **not** a claim of guaranteed 24/7 reachability or measured battery life; screen-off/cellular handover tests are required on actual devices.
 
-Call transport recovery resumes the same lease/ticket within a bounded window. It never acquires another paid call after failure. If media cannot recover, close audio and rely on existing server guards; keep the unknown call visible for explicit reconciliation/hangup.
+Call transport recovery resumes the same lease/ticket within a bounded window. It never acquires another paid call after failure. If media cannot recover, close audio and rely on existing server guards; keep the unknown call visible for explicit status checks/hangup. Process death follows browser-equivalent semantics: no persistent call owner is restored. After reopening, use Call history. This client does not require PR #8 pairing, call recovery, receipt or message-sync endpoints.
 
 ## Build, tests and release
 
@@ -48,4 +48,4 @@ gradle -p android-agent connectedDebugAndroidTest
 
 The workflow also runs Core tests and builds an installable, **non-debuggable test-signed** preview APK, verifies its signature/manifest and retains checksums and test reports. Unit tests exercise TLS pin mismatch/redirect refusal, same-origin paths, QR validation, call/SMS identities, CCID framing/bounds, fixed APDUs and jitter. Instrumentation exercises native setup, Keystore and real Android audio callbacks/canary/reconnect on a local TLS fixture, not a carrier.
 
-No stable owner signing key is supplied. Preview signing is ephemeral/test-only and is not a production upgrade chain. Do not install with real administrator credentials on untrusted devices. A later independently signed preview may require uninstalling the old preview; export no secrets to work around this. Production APK signing, field compatibility, notification delivery and battery acceptance are still open.
+Authorized workflow dispatches use the existing stable preview signing identity; pull-request builds do not receive its secrets. Never uninstall a differently signed installed app to bypass verification. Do not install with real administrator credentials on untrusted devices. Field compatibility, notification delivery and battery acceptance remain separate from the build.

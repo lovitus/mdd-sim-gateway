@@ -4,9 +4,12 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 /** All mutations are exact-identity and single-attempt; reconnect is media-only. */
 final class CallPlan {
-    final String line,card,mode,number,id,operation=Json.id(),endOperation=Json.id();final JSONObject incoming;
+    final String line,card,mode,number,id,operation,endOperation;final JSONObject incoming;
+    final String lineName,lineNumber;
     CallPlan(JSONObject line,String mode,String number,JSONObject incoming)throws Exception{
+        operation=Json.id();endOperation=Json.id();
         this.line=line.getString("id");this.card=line.getString("card_id");this.mode=mode;this.incoming=incoming;
+        lineName=line.optString("name",this.line);lineNumber=line.optString("number");
         if(!line.optBoolean("enabled")||card.isEmpty()||!(mode.equals("vowifi")||mode.equals("cellular")))throw new IllegalArgumentException("Line/transport unavailable");
         this.number=incoming==null?dialTarget(number):incoming.optString(mode.equals("cellular")?"number":"caller","");
         this.id=incoming==null?Json.id():incoming.getString(mode.equals("cellular")?"incoming_event_id":"call_id");
@@ -16,7 +19,7 @@ final class CallPlan {
     static String dialTarget(String value){String v=value.trim().replaceAll("[\\s().-]","");if(v.startsWith("00"))v="+"+v.substring(2);if(!v.matches("\\+[1-9][0-9]{5,14}|[0-9]{2,6}"))throw new IllegalArgumentException("Use an international +number or service code");return v;}
     String prefix(){return "/v1/lines/"+encode(line)+(mode.equals("cellular")?"/cellular/calls/":"/vowifi/calls/");}
     String leases(){return mode.equals("cellular")?"/v1/cellular/media/leases":"/v1/media/leases";}
-    JSONObject lease(){JSONObject b=Json.obj("line_id",line,"call_id",id);if(mode.equals("cellular")){try{b.put("expected_card_id",card);if(incoming!=null)addIncoming(b);}catch(Exception e){throw new IllegalArgumentException(e);}}return b;}
+    JSONObject lease(){JSONObject b=Json.obj("line_id",line,"call_id",id);try{if(mode.equals("cellular")){b.put("expected_card_id",card);if(incoming!=null)addIncoming(b);}}catch(Exception e){throw new IllegalArgumentException(e);}return b;}
     void addIncoming(JSONObject b)throws Exception{b.put("operation_id",operation).put("incoming_event_id",incoming.getString("incoming_event_id")).put("sim_session_generation",incoming.getString("sim_session_generation")).put("native_call_index",incoming.getInt("native_call_index")).put("call_occurrence",incoming.getLong("occurrence"));}
     JSONObject start(String session)throws Exception{
         JSONObject b=Json.obj("operation_id",operation);

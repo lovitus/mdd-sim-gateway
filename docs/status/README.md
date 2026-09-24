@@ -26,7 +26,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 | ESIM | accepted | Physical deletion + retained deletion notifications + multiple-confirmation manual replay. No soft-delete implementation backlog. |
 | REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. |
 | ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. |
-| ANDROID | required | Native Android agent is now requested as a draft/preview workstream; hardware and screen-off qualification remain separate. |
+| ANDROID | required | Client-focused native Android draft/preview with existing server APIs; no pairing or durable server call recovery. Hardware and screen-off qualification remain separate. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
 | MACOS_UNIVERSAL | needs_decision | Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build. |
 
@@ -37,6 +37,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 - **MACOS_RELEASE** (2026-09-20, project_owner): No notarization or .p8 this round. Preserve signing and track Universal packaging separately. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **EVIDENCE_CONTINUITY** (2026-09-20, project_owner): Reconcile scoped historical evidence before scheduling missing tests; not revalidated is not never accepted. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **ANDROID_NATIVE** (2026-09-21, project_owner): Android reprioritized: native reader/call/SMS app, safe recovery and battery-conscious UX; draft PR and test APK, not production or paid-operation acceptance. [Source](../../docs/decisions/2026-09-21-android-agent.md).
+- **ANDROID_CLIENT_SCOPE** (2026-09-24, project_owner): Keep PR #7 server baseline, reuse Android UI, recover network/session loss in the client, and use browser-equivalent call lifetime. Exclude server pairing and durable call recovery. Preserve the other workspaces; work without subagents. [Source](../../docs/decisions/2026-09-24-android-client-scope.md).
 
 ## Disposition counts
 
@@ -60,7 +61,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ### ANDROID
 
-**State: partial; release relevance: current.** Native Android preview implementation: guided HTTPS login/QR, USB CCID/OMAPI reader authentication, native remote calls/SMS and network recovery. Not yet physically qualified.
+**State: partial; release relevance: current.** Client-focused candidate based on PR #7: reuse committed native UI and encrypted login, adapt to existing catalog/call/message APIs, and recover expired sessions and unstable networks in Android. Exclude PR #8 server pairing and durable call recovery. Candidate remains unbuilt and unverified; earlier recovery-branch results do not prove this candidate.
 
 Acceptance scope / remaining action: Require compilation, unit and emulator tests and signed preview artifact evidence. Real USB/card/OMAPI permissions, calls/carriers, background/OEM delivery and battery measurements remain unaccepted.
 

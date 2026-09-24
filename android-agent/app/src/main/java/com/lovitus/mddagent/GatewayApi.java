@@ -9,7 +9,11 @@ import java.util.concurrent.TimeUnit;
 final class GatewayApi {
     private final java.util.Map<Object,Boolean> cancelled=java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
     private final java.util.Map<Object,java.util.Set<Call>> active=new java.util.HashMap<>();
+    private final java.util.Set<Call> allRequests=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private volatile boolean closed;
     final Endpoint endpoint; final OkHttpClient http; volatile String token, csrf;
+    private volatile String accountScope="";
+    private volatile String accountName="";
     static final MediaType JSON=MediaType.get("application/json; charset=utf-8");
     GatewayApi(Endpoint e,String token,String csrf) throws Exception {
         this.endpoint=e;this.token=token;this.csrf=csrf;
@@ -24,22 +28,68 @@ final class GatewayApi {
         }
         http=b.build();
     }
-    Request.Builder request(String path){Request.Builder b=new Request.Builder().url(endpoint.path(path)).header("Origin",endpoint.origin).header("Cache-Control","no-store");if(!token.isEmpty())b.header("X-MDD-Session",token).header("Authorization","Bearer "+token).header("Cookie","mdd_session="+token);return b;}
+    Request.Builder request(String path){if(closed)throw new IllegalStateException("Gateway connection was closed");Request.Builder b=new Request.Builder().url(endpoint.path(path)).header("Origin",endpoint.origin).header("Cache-Control","no-store");if(!token.isEmpty())b.header("X-MDD-Session",token).header("Authorization","Bearer "+token).header("Cookie","mdd_session="+token);return b;}
     JSONObject json(String method,String path,JSONObject input)throws Exception{return json(method,path,input,null);}
     JSONObject json(String method,String path,JSONObject input,Object tag)throws Exception{
         Request.Builder b=request(path).tag(tag);if(!method.equals("GET")){b.header("X-MDD-CSRF-Token",csrf);b.method(method,RequestBody.create(input==null?"{}":input.toString(),JSON));}
         Call request=http.newCall(b.build());request.timeout().timeout(tag==null?30:215,TimeUnit.SECONDS);
-        if(tag!=null)synchronized(active){if(cancelled.containsKey(tag))throw new IOException("Operation cancelled");active.computeIfAbsent(tag,key->new java.util.HashSet<>()).add(request);}
+        synchronized(active){if(closed||tag!=null&&cancelled.containsKey(tag))throw new IOException("Operation cancelled");allRequests.add(request);if(tag!=null)active.computeIfAbsent(tag,key->new java.util.HashSet<>()).add(request);}
         try(Response r=request.execute()){
             if(r.body()==null)throw new IOException("Empty gateway response");
             okio.BufferedSource source=r.body().source(); if(source.request(2*1024*1024+1L))throw new IOException("Gateway response too large");
             String raw=source.readUtf8();JSONObject v=raw.isEmpty()?new JSONObject():new JSONObject(raw);
             if(!r.isSuccessful())throw new Failure(r.code(),v.optString("code",v.optString("detail","Request rejected")));
             return v;
-        }finally{if(tag!=null)synchronized(active){java.util.Set<Call> owned=active.get(tag);if(owned!=null){owned.remove(request);if(owned.isEmpty())active.remove(tag);}}}
+        }finally{synchronized(active){allRequests.remove(request);if(tag!=null){java.util.Set<Call> owned=active.get(tag);if(owned!=null){owned.remove(request);if(owned.isEmpty())active.remove(tag);}}}}
     }
     void login(String username,String password)throws Exception{JSONObject v=json("POST","/api/auth/login",Json.obj("username",username,"password",password));token=v.getString("token");csrf=v.getString("csrf");}
+    String authenticatedScope()throws Exception{
+        if(token.isEmpty())throw new IOException("Sign in required");
+        if(!accountScope.isEmpty())return accountScope;
+        JSONObject status=json("GET","/api/auth/status",null);
+        if(!status.optBoolean("authenticated")||!token.equals(status.optString("token"))||status.optString("username").isEmpty())throw new IOException("Authenticated account unavailable");
+        // A cache namespace only, never permission to adopt a previous session's call.
+        accountName=status.getString("username");accountScope=scope(endpoint.origin,endpoint.fingerprint,accountName);
+        return accountScope;
+    }
+    String authenticatedName()throws Exception{authenticatedScope();return accountName;}
+    static String scope(String origin,String pin,String username){return Json.sha((origin+"\n"+pin+"\n"+username).getBytes(java.nio.charset.StandardCharsets.UTF_8));}
+    JSONObject exactLine(String id,String expectedCard)throws Exception{
+        JSONObject line=json("GET","/v1/catalog/lines/"+CallPlan.encode(id),null);
+        if(!id.equals(line.optString("id"))||!expectedCard.equals(line.optString("card_id"))||!line.optBoolean("enabled"))throw new IOException("线路身份已变化或不可用，请重新选择");
+        JSONObject status=json("GET","/v1/lines/"+CallPlan.encode(id),null);
+        if(!id.equals(status.optString("line_id")))throw new IOException("Line status identity changed");
+        line.put("operations",Json.object(status,"operations"));
+        line.put("number",Json.object(line,"sim").optString("msisdn"));
+        return line;
+    }
+    JSONObject directory(String query)throws Exception{
+        JSONArray catalog=Json.array(json("GET","/v1/catalog/lines",null),"lines");
+        JSONArray states=Json.array(json("GET","/v1/lines",null),"lines");
+        java.util.Map<String,JSONObject> byID=new java.util.HashMap<>();
+        for(int i=0;i<states.length();i++){JSONObject row=states.optJSONObject(i);if(row!=null)byID.put(row.optString("line_id"),row);}
+        JSONArray result=new JSONArray();String needle=query.toLowerCase(java.util.Locale.ROOT);
+        for(int i=0;i<catalog.length();i++){
+            JSONObject row=catalog.optJSONObject(i);if(row==null||row.optBoolean("deleted"))continue;
+            String number=Json.object(row,"sim").optString("msisdn");
+            if(!(row.optString("name")+" "+number+" "+row.optString("id")).toLowerCase(java.util.Locale.ROOT).contains(needle))continue;
+            JSONObject line=Json.obj("id",row.optString("id"),"card_id",row.optString("card_id"),"enabled",row.optBoolean("enabled"),"name",row.optString("name"),"number",number);
+            JSONObject state=byID.get(row.optString("id"));
+            line.put("operations",state==null?new JSONObject():Json.object(state,"operations"));result.put(line);
+        }
+        return Json.obj("lines",result,"next_after","");
+    }
+    static void requireReady(JSONObject line,String operation)throws IOException{
+        // Same machine keys as Go internal/operations/catalog.go; never parse IMS display text.
+        JSONObject readiness=Json.object(Json.object(line,"operations"),operation);
+        if(!readiness.optBoolean("ready"))throw new IOException("所选通道尚未就绪，请检查网关设备状态");
+    }
     void cancel(Object tag){synchronized(active){cancelled.put(tag,true);java.util.Set<Call> owned=active.get(tag);if(owned!=null)for(Call c:owned)c.cancel();}}
-    void close(){http.dispatcher().cancelAll();http.connectionPool().evictAll();http.dispatcher().executorService().shutdown();}
+    void close(){
+        final java.util.List<Call> pending;
+        synchronized(active){if(closed)return;closed=true;pending=new java.util.ArrayList<>(allRequests);token="";csrf="";accountScope="";accountName="";}
+        java.util.concurrent.ExecutorService cleanup=http.dispatcher().executorService();
+        cleanup.execute(()->{try{for(Call request:pending)request.cancel();http.dispatcher().cancelAll();http.connectionPool().evictAll();}finally{cleanup.shutdown();}});
+    }
     static final class Failure extends IOException {final int status;Failure(int status,String message){super("HTTP "+status+": "+message);this.status=status;}}
 }

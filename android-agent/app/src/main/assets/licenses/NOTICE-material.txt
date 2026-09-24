@@ -1,0 +1,13 @@
+Material Components for Android 1.14.0
+https://github.com/material-components/material-components-android/tree/1.14.0
+Copyright Google LLC. Licensed under Apache License 2.0.
+
+Material Design Icons
+https://github.com/google/material-design-icons/tree/27e9ef1dbeedc13d682fece4a58e1eda4cb0961a
+Copyright Google LLC. Licensed under Apache License 2.0.
+Outlined home, call, message, sim_card, settings, search, add, backspace, mic,
+mic_off, volume_up, hearing and dialpad Android
+vectors are copied unchanged from android/<category>/<icon>/materialiconsoutlined/
+black/res/drawable/, with filenames prefixed ic_mdd_. Runtime tint is applied by UI.
+
+The Apache License 2.0 is included in material-apache-2.0.txt.

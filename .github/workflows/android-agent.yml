@@ -2,6 +2,8 @@ name: Android native agent preview
 on:
   push:
     branches: [codex/android-v2]
+  pull_request:
+    branches: [main, codex/android-v2]
   workflow_dispatch:
 permissions:
   contents: read
@@ -32,14 +34,31 @@ jobs:
       - name: Compile, lint and unit-test native app
         run: gradle -p android-agent --no-daemon testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
       - name: Sign non-debuggable test APK and verify it
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/codex/android-v2') ||
+          (github.event_name == 'workflow_dispatch' &&
+          (github.ref == 'refs/heads/codex/android-v2' ||
+          github.ref == 'refs/heads/codex/android-client-focused'))
         shell: bash
+        env:
+          PREVIEW_KEYSTORE: ${{ secrets.MDD_ANDROID_PREVIEW_KEYSTORE_BASE64 }}
+          MDD_ANDROID_STORE_PASSWORD: ${{ secrets.MDD_ANDROID_PREVIEW_STORE_PASSWORD }}
+          MDD_ANDROID_KEY_PASSWORD: ${{ secrets.MDD_ANDROID_PREVIEW_STORE_PASSWORD }}
+          MDD_ANDROID_KEY_ALIAS: mdd-preview
+          MDD_ANDROID_STORE_TYPE: PKCS12
         run: |
           set -euo pipefail
+          umask 077
           mkdir -p android-evidence
-          keytool -genkeypair -keystore "$RUNNER_TEMP/android-preview.jks" -storepass android -keypass android -alias androiddebugkey -dname 'CN=MDD disposable preview test signing' -keyalg RSA -keysize 3072 -validity 365 -noprompt
-          MDD_ANDROID_KEYSTORE="$RUNNER_TEMP/android-preview.jks" gradle -p android-agent --no-daemon assembleRelease
+          test -n "$PREVIEW_KEYSTORE" && test -n "$MDD_ANDROID_STORE_PASSWORD"
+          export MDD_ANDROID_KEYSTORE="$RUNNER_TEMP/android-preview.p12"
+          trap 'rm -f "$MDD_ANDROID_KEYSTORE"' EXIT
+          printf '%s' "$PREVIEW_KEYSTORE" | base64 --decode > "$MDD_ANDROID_KEYSTORE"
+          unset PREVIEW_KEYSTORE
+          gradle -p android-agent --no-daemon assembleRelease
           cp android-agent/app/build/outputs/apk/release/app-release.apk android-evidence/mdd-agent-preview.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs android-evidence/mdd-agent-preview.apk > android-evidence/signature.txt
+          grep -Fq 'Signer #1 certificate SHA-256 digest: 8b5e818fccfa6f6738cd53658b2df9ab57a014f9a5269decc4104d91894dd5e2' android-evidence/signature.txt
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging android-evidence/mdd-agent-preview.apk > android-evidence/package.txt
           ! grep -q application-debuggable android-evidence/package.txt
           (cd android-evidence && sha256sum mdd-agent-preview.apk > SHA256SUMS)
@@ -53,6 +72,7 @@ jobs:
             android-evidence/
             android-agent/app/build/reports/
             android-agent/app/build/test-results/
+            android-agent/app/build/outputs/apk/
           retention-days: 14
   device:
     needs: build
@@ -91,14 +111,13 @@ jobs:
           api-level: ${{ matrix.api }}
           arch: x86_64
           profile: pixel_2
+          emulator-port: 5554
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           script: |
             gradle -p android-agent --no-daemon connectedDebugAndroidTest
             mkdir -p android-screens
-            adb install -r release-bundle/android-evidence/mdd-agent-preview.apk
-            adb shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity
-            adb exec-out screencap -p > android-screens/setup.png
+            if [ -f release-bundle/android-evidence/mdd-agent-preview.apk ]; then adb -P 5037 -s emulator-5554 install -r release-bundle/android-evidence/mdd-agent-preview.apk; adb -P 5037 -s emulator-5554 shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity; adb -P 5037 -s emulator-5554 exec-out screencap -p > android-screens/setup.png; fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:

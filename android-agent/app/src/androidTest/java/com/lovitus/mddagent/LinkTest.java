@@ -13,6 +13,7 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class LinkTest {
+
     @Test public void observerReconnectRetainsSessionAndRevocationIsTerminal() throws Exception {
         ScheduledExecutorService loop=Executors.newSingleThreadScheduledExecutor();
         HeldCertificate cert=new HeldCertificate.Builder().addSubjectAlternativeName("localhost").build();
@@ -26,7 +27,7 @@ public class LinkTest {
             server.start();
             GatewayApi api=new GatewayApi(new Endpoint(server.url("/").toString(),Json.sha(cert.certificate().getEncoded())),"same-session","same-csrf");
             Link link=new Link(api,loop,"/v1/mobile/ws","","","process",new Link.Events(){
-                public void state(String s,boolean online){if(s.contains("required"))revoked.countDown();}
+                public void state(int s,boolean online){if(s==R.string.link_auth_required)revoked.countDown();}
                 public void message(JSONObject o){if(first.getCount()>0)first.countDown();else second.countDown();}
             });
             try {
@@ -48,7 +49,7 @@ public class LinkTest {
                 @Override public void onMessage(WebSocket ws,String text){try{JSONObject q=new JSONObject(text);frames.add(q);if(q.optString("kind").equals("hello"))ws.send("{\"kind\":\"hello_ack\"}");}catch(Exception e){throw new AssertionError(e);}}
             }));server.start();
             GatewayApi api=new GatewayApi(new Endpoint(server.url("/").toString(),Json.sha(cert.certificate().getEncoded())),"admin-session","csrf");
-            Link link=new Link(api,loop,"/v1/agent/ws","reader-agent","scoped-reader-token","process",new Link.Events(){public void message(JSONObject o){}public void state(String s,boolean online){if(online)admitted.countDown();}});
+            Link link=new Link(api,loop,"/v1/agent/ws","reader-agent","scoped-reader-token","process",new Link.Events(){public void message(JSONObject o){}public void state(int s,boolean online){if(online)admitted.countDown();}});
             try {
                 link.connect();assertTrue(admitted.await(5,TimeUnit.SECONDS));assertEquals("hello",frames.poll(1,TimeUnit.SECONDS).getString("kind"));
                 JSONObject facts=Json.obj("reader_condition","ready","readers",new org.json.JSONArray(),"modem_condition","disabled");

@@ -1,5 +1,10 @@
 # Repository work, current decisions and acceptance
 
+Current Android work must follow docs/decisions/2026-09-24-android-client-scope.md.
+Keep server changes at the PR #7 baseline; recover networking and authentication
+in the Android client. Do not add pairing or durable server call recovery here.
+Work alone without subagents. Preserve the separate recovery branch and dirty tree.
+
 Read docs/decisions/2026-09-20-current-scope.md, docs/status/README.md and acceptance.json before changing scope.
 Latest explicit owner decisions govern requirements; a stale ledger or historical checklist must be corrected,
 not used to override those decisions. Root TODO summaries are generated; original plans remain historical.
