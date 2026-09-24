@@ -50,6 +50,7 @@ for mode in cellular vowifi; do
     --output "$PWD/$evidence/$mode"
 done
 if [[ "$suite" != process ]]; then exit 0; fi
+if [[ "${MDD_SKIP_PREVIEW_INSTALL:-false}" == true ]]; then exit 0; fi
 device_adb install -r release-bundle/android-evidence/mdd-agent-preview.apk
 device_adb shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity
 device_adb shell uiautomator dump /data/local/tmp/mdd-preview-layout.xml

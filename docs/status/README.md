@@ -37,6 +37,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 - **MACOS_RELEASE** (2026-09-20, project_owner): No notarization or .p8 this round. Preserve signing and track Universal packaging separately. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **EVIDENCE_CONTINUITY** (2026-09-20, project_owner): Reconcile scoped historical evidence before scheduling missing tests; not revalidated is not never accepted. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **ANDROID_NATIVE** (2026-09-21, project_owner): Android reprioritized: native reader/call/SMS app, safe recovery and battery-conscious UX; draft PR and test APK, not production or paid-operation acceptance. [Source](../../docs/decisions/2026-09-21-android-agent.md).
+- **ANDROID_FIRST_SEQUENCE** (2026-09-24, project_owner): Android usability, authentication/recovery and preview acceptance are the current first priority. Windows/macOS/Linux Agent, enabled-4G isolation and incident work remain required but are sequenced afterward; this changes order, not scope or release authorization. [Source](../../docs/decisions/2026-09-22-android-recovery-remediation.md).
 
 ## Disposition counts
 
@@ -214,7 +215,7 @@ Linked criteria: [M01](#m01), [M35](#m35).
 
 **Implementation: partial; acceptance/evidence: evidence_review_pending.**
 
-**Current requirement:** Current Windows/macOS/Linux delivery and native qualification: preserve prior deployment/installer reports, then verify only unresolved privilege, backend and failure-matrix cases. Android is deferred.
+**Current requirement:** Current execution order follows ANDROID_FIRST_SEQUENCE: finish Android core usability, authentication/recovery and preview acceptance first; Windows/macOS/Linux delivery, 4G isolation and existing incident work remain required and are sequenced afterward, not cancelled. Preserve prior deployment/installer reports and verify only unresolved privilege, backend and failure-matrix cases.
 
 Preserved original ([TODO.md:49](../../docs/archive/2026-09-20/TODO.md#L49)): 仍未达到“所有平台可直接交付”：Windows 一次提权安装器/低权限守卫服务、持久 URC companion、       飞行模式最终状态验收、短信页视觉验收、Linux/macOS Provider 和拔插/崩溃/换卡矩阵仍待完成。
 

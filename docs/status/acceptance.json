@@ -60,10 +60,11 @@
         "H-USER-HANDOFF"
       ],
       "remainingAcceptance": "Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.",
-      "currentRequirement": "Current Windows/macOS/Linux delivery and native qualification: preserve prior deployment/installer reports, then verify only unresolved privilege, backend and failure-matrix cases. Android is deferred.",
+      "currentRequirement": "Current execution order follows ANDROID_FIRST_SEQUENCE: finish Android core usability, authentication/recovery and preview acceptance first; Windows/macOS/Linux delivery, 4G isolation and existing incident work remain required and are sequenced afterward, not cancelled. Preserve prior deployment/installer reports and verify only unresolved privilege, backend and failure-matrix cases.",
       "decisionRefs": [
         "PRIMARY_AGENTS",
-        "EVIDENCE_CONTINUITY"
+        "EVIDENCE_CONTINUITY",
+        "ANDROID_FIRST_SEQUENCE"
       ]
     },
     {
@@ -1418,6 +1419,7 @@
         "go-runtime/providercontrol/recovery.go",
         "providers/vowifi-go/internal/service/call_receipt.go",
         "docs/decisions/2026-09-21-android-agent.md",
+        "docs/decisions/2026-09-22-android-recovery-remediation.md",
         "android-agent/scripts/verify-process-recovery.mjs",
         "android-agent/app/src/androidTest/java/com/lovitus/mddagent/LoginFlowTest.java",
         "android-agent/app/src/androidTest/java/com/lovitus/mddagent/NativeFlowTest.java",
@@ -1607,6 +1609,13 @@
       "authority": "project_owner",
       "sourcePath": "docs/decisions/2026-09-21-android-agent.md",
       "summary": "Android reprioritized: native reader/call/SMS app, safe recovery and battery-conscious UX; draft PR and test APK, not production or paid-operation acceptance."
+    },
+    {
+      "id": "ANDROID_FIRST_SEQUENCE",
+      "date": "2026-09-24",
+      "authority": "project_owner",
+      "sourcePath": "docs/decisions/2026-09-22-android-recovery-remediation.md",
+      "summary": "Android usability, authentication/recovery and preview acceptance are the current first priority. Windows/macOS/Linux Agent, enabled-4G isolation and incident work remain required but are sequenced afterward; this changes order, not scope or release authorization."
     }
   ],
   "releaseScope": [

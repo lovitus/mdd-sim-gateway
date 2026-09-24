@@ -234,6 +234,10 @@
 <string name="audio_in_use">音频正在被另一通话使用</string>
 <string name="audio_unavailable">8 kHz 通话音频不可用</string>
 <string name="audio_focus_lost">音频焦点已丢失</string>
+<string name="audio_focus_suspended">其他应用占用音频，通话音频已暂停</string>
+<string name="audio_focus_resumed">通话音频已恢复</string>
+<string name="audio_focus_pause_failed">无法安全暂停通话音频</string>
+<string name="audio_focus_restore_failed">无法恢复通话音频</string>
 <string name="audio_check_timeout">音频检查超时，不会自动拨号</string>
 <string name="audio_capture_stopped">麦克风已停止</string>
 <string name="audio_playback_stopped">播放已停止</string>

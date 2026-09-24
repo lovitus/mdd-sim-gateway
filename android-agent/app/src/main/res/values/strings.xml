@@ -234,6 +234,10 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="audio_in_use">Audio is in use by another call</string>
 <string name="audio_unavailable">8 kHz call audio unavailable</string>
 <string name="audio_focus_lost">Audio focus lost</string>
+<string name="audio_focus_suspended">Audio paused while another app uses audio</string>
+<string name="audio_focus_resumed">Call audio resumed</string>
+<string name="audio_focus_pause_failed">Could not safely pause call audio</string>
+<string name="audio_focus_restore_failed">Could not restore call audio</string>
 <string name="audio_check_timeout">Audio check timed out; no automatic dial</string>
 <string name="audio_capture_stopped">Microphone stopped</string>
 <string name="audio_playback_stopped">Playback stopped</string>

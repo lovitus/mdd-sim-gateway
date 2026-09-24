@@ -3,6 +3,7 @@ package com.lovitus.mddagent;
 import android.app.*;
 import android.content.*;
 import android.os.*;
+import android.media.AudioManager;
 import android.service.notification.StatusBarNotification;
 import android.view.*;
 import android.view.accessibility.*;
@@ -34,6 +35,39 @@ public class CallFlowTest {
             assertTrue(fixture.toneReceived.await(10,TimeUnit.SECONDS));assertEquals(1,fixture.dtmf.get());
             click(R.id.call_hangup);await(scene,fixture,a->a.findViewById(R.id.call_dial)!=null);
             assertFalse(fixture.store.load().has("pending_call"));assertEquals(1,fixture.starts.get());assertEquals(1,fixture.ends.get());assertEquals(1,fixture.leases.get());assertEquals(1,fixture.deletes.get());assertTrue(fixture.pcm.get()>1);
+        });
+    }
+    @Test public void transientAudioFocusLossPausesAndResumesTheExistingCall()throws Exception{
+        for(String mode:new String[]{"vowifi","cellular"})run(mode,false,(fixture,scene)->{
+            outgoing(fixture,scene,false);
+            AtomicReference<NativeAudio> audio=new AtomicReference<>();scene.onActivity(a->audio.set(service(a).call.audio));
+            NativeAudio current=audio.get();assertNotNull(current);
+            for(int loss:new int[]{AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK}){
+                current.audioFocusChanged(loss);
+                assertTrue(current.focusSuspended());assertEquals(R.string.audio_focus_suspended,current.description().resource);
+                await(scene,fixture,a->context().getString(R.string.audio_focus_suspended).contentEquals(((TextView)a.findViewById(R.id.call_audio_state)).getText()));
+                SystemClock.sleep(100);int sent=fixture.pcm.get(),played=current.played.get();
+                SystemClock.sleep(300);
+                assertEquals("Transient focus loss must stop uplink frames",sent,fixture.pcm.get());
+                assertEquals("Transient focus loss must discard downlink frames",played,current.played.get());
+                assertFalse(current.closed);assertEquals(1,fixture.leases.get());assertEquals(1,fixture.starts.get());assertEquals(1,fixture.mediaConnections.get());assertEquals(0,fixture.ends.get());
+                current.audioFocusChanged(AudioManager.AUDIOFOCUS_GAIN);assertFalse(current.focusSuspended());
+                long resumedUntil=SystemClock.elapsedRealtime()+3000;
+                while(fixture.pcm.get()==sent&&SystemClock.elapsedRealtime()<resumedUntil)SystemClock.sleep(50);
+                assertTrue("Uplink resumes on focus gain",fixture.pcm.get()>sent);assertFalse(current.closed);
+                await(scene,fixture,a->!context().getString(R.string.audio_focus_suspended).contentEquals(((TextView)a.findViewById(R.id.call_audio_state)).getText()));
+                assertEquals(1,fixture.leases.get());assertEquals(1,fixture.starts.get());assertEquals(1,fixture.mediaConnections.get());assertEquals(0,fixture.ends.get());
+            }
+            int beforeRapidResume=fixture.pcm.get();current.audioFocusChanged(AudioManager.AUDIOFOCUS_LOSS_TRANSIENT);current.audioFocusChanged(AudioManager.AUDIOFOCUS_GAIN);
+            long rapidUntil=SystemClock.elapsedRealtime()+3000;while(fixture.pcm.get()==beforeRapidResume&&SystemClock.elapsedRealtime()<rapidUntil)SystemClock.sleep(50);
+            assertTrue("Rapid focus loss/gain must restart the same audio workers",fixture.pcm.get()>beforeRapidResume);assertFalse(current.closed);
+            current.audioFocusChanged(AudioManager.AUDIOFOCUS_LOSS);
+            long closedUntil=SystemClock.elapsedRealtime()+3000;while(!current.closed&&SystemClock.elapsedRealtime()<closedUntil)SystemClock.sleep(50);
+            assertTrue("Permanent loss closes local audio",current.closed);assertEquals(0,fixture.ends.get());
+            assertTrue("Remote call identity remains pending for explicit hangup",fixture.store.load().has("pending_call"));
+            click(R.id.call_hangup);await(scene,fixture,a->a.findViewById(R.id.call_dial)!=null);
+            assertEquals(1,fixture.starts.get());assertEquals(1,fixture.ends.get());assertEquals(1,fixture.leases.get());assertEquals(1,fixture.mediaConnections.get());
+            assertFalse(fixture.store.load().has("pending_call"));
         });
     }
     @Test public void pagedOutIncomingNotificationAnswersTheOriginalCall()throws Exception{
