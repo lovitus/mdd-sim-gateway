@@ -50,7 +50,7 @@ final class NativeAudio implements AutoCloseable {
         while(!closed){
             if(focusSuspended){SystemClock.sleep(20);continue;}
             long ownerEpoch=focusEpoch;
-            try{if(record.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING)record.startRecording();byte[] frame=new byte[320];int n=0;while(n<320&&!closed){int read=record.read(frame,n,320-n,AudioRecord.READ_BLOCKING);if(read<=0){if(focusSuspended||focusEpoch!=ownerEpoch)break;throw new IOException();}n+=read;captured.incrementAndGet();}
+            try{synchronized(this){if(closed)return;if(focusSuspended||focusEpoch!=ownerEpoch)continue;if(record.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING)record.startRecording();}byte[] frame=new byte[320];int n=0;while(n<320&&!closed){int read=record.read(frame,n,320-n,AudioRecord.READ_BLOCKING);if(read<=0){if(focusSuspended||focusEpoch!=ownerEpoch)break;throw new IOException();}n+=read;captured.incrementAndGet();}
                 synchronized(this){WebSocket ws=socket;if(!closed&&!focusSuspended&&started&&n==320&&ws!=null&&ws.queueSize()<=8000)ws.send(ByteString.of(muted?new byte[320]:frame));}
             }catch(Exception error){if(closed)return;if(focusSuspended||focusEpoch!=ownerEpoch)continue;fail(R.string.audio_capture_stopped);return;}
         }
@@ -59,7 +59,7 @@ final class NativeAudio implements AutoCloseable {
         while(!closed){
             if(focusSuspended){SystemClock.sleep(20);continue;}
             long ownerEpoch=focusEpoch;
-            try{if(track.getPlayState()!=AudioTrack.PLAYSTATE_PLAYING)track.play();byte[] frame=receive.poll(20,TimeUnit.MILLISECONDS);if(focusSuspended)continue;boolean real=frame!=null;if(!real)frame=new byte[320];int n=track.write(frame,0,320,AudioTrack.WRITE_BLOCKING);if(n!=320){if(focusSuspended||focusEpoch!=ownerEpoch)continue;throw new IOException();}callbacks.incrementAndGet();if(real)played.incrementAndGet();
+            try{synchronized(this){if(closed)return;if(focusSuspended||focusEpoch!=ownerEpoch)continue;if(track.getPlayState()!=AudioTrack.PLAYSTATE_PLAYING)track.play();}byte[] frame=receive.poll(20,TimeUnit.MILLISECONDS);if(focusSuspended||focusEpoch!=ownerEpoch)continue;boolean real=frame!=null;if(!real)frame=new byte[320];int n=track.write(frame,0,320,AudioTrack.WRITE_BLOCKING);if(n!=320){if(focusSuspended||focusEpoch!=ownerEpoch)continue;throw new IOException();}callbacks.incrementAndGet();if(real)played.incrementAndGet();
             }catch(Exception error){if(closed)return;if(focusSuspended||focusEpoch!=ownerEpoch)continue;fail(R.string.audio_playback_stopped);return;}
         }
     }

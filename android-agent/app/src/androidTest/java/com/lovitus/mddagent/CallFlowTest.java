@@ -46,15 +46,21 @@ public class CallFlowTest {
                 current.audioFocusChanged(loss);
                 assertTrue(current.focusSuspended());assertEquals(R.string.audio_focus_suspended,current.description().resource);
                 await(scene,fixture,a->context().getString(R.string.audio_focus_suspended).contentEquals(((TextView)a.findViewById(R.id.call_audio_state)).getText()));
-                SystemClock.sleep(100);int sent=fixture.pcm.get(),played=current.played.get();
+                assertNotEquals("Transient focus loss must stop local microphone capture",android.media.AudioRecord.RECORDSTATE_RECORDING,recordingState(current));
+                assertNotEquals("Transient focus loss must pause local playback",android.media.AudioTrack.PLAYSTATE_PLAYING,playbackState(current));
+                SystemClock.sleep(100);int sent=fixture.pcm.get();long played=playedFrames(current);
                 SystemClock.sleep(300);
+                assertNotEquals("Worker restart must not reactivate the microphone during focus loss",android.media.AudioRecord.RECORDSTATE_RECORDING,recordingState(current));
+                assertNotEquals("Worker restart must not reactivate playback during focus loss",android.media.AudioTrack.PLAYSTATE_PLAYING,playbackState(current));
                 assertEquals("Transient focus loss must stop uplink frames",sent,fixture.pcm.get());
-                assertEquals("Transient focus loss must discard downlink frames",played,current.played.get());
+                assertEquals("Transient focus loss must discard downlink frames",played,playedFrames(current));
                 assertFalse(current.closed);assertEquals(1,fixture.leases.get());assertEquals(1,fixture.starts.get());assertEquals(1,fixture.mediaConnections.get());assertEquals(0,fixture.ends.get());
                 current.audioFocusChanged(AudioManager.AUDIOFOCUS_GAIN);assertFalse(current.focusSuspended());
                 long resumedUntil=SystemClock.elapsedRealtime()+3000;
-                while(fixture.pcm.get()==sent&&SystemClock.elapsedRealtime()<resumedUntil)SystemClock.sleep(50);
+                while((fixture.pcm.get()==sent||playbackState(current)!=android.media.AudioTrack.PLAYSTATE_PLAYING)&&SystemClock.elapsedRealtime()<resumedUntil)SystemClock.sleep(50);
                 assertTrue("Uplink resumes on focus gain",fixture.pcm.get()>sent);assertFalse(current.closed);
+                assertEquals("Focus gain resumes local microphone capture",android.media.AudioRecord.RECORDSTATE_RECORDING,recordingState(current));
+                assertEquals("Focus gain resumes local playback",android.media.AudioTrack.PLAYSTATE_PLAYING,playbackState(current));
                 await(scene,fixture,a->!context().getString(R.string.audio_focus_suspended).contentEquals(((TextView)a.findViewById(R.id.call_audio_state)).getText()));
                 assertEquals(1,fixture.leases.get());assertEquals(1,fixture.starts.get());assertEquals(1,fixture.mediaConnections.get());assertEquals(0,fixture.ends.get());
             }
@@ -282,6 +288,9 @@ public class CallFlowTest {
         }
     }
     private static Context context(){return ApplicationProvider.getApplicationContext();}
+    private static long playedFrames(NativeAudio audio)throws Exception{java.lang.reflect.Field field=NativeAudio.class.getDeclaredField("played");field.setAccessible(true);return ((AtomicLong)field.get(audio)).get();}
+    private static int recordingState(NativeAudio audio)throws Exception{java.lang.reflect.Field field=NativeAudio.class.getDeclaredField("record");field.setAccessible(true);return ((android.media.AudioRecord)field.get(audio)).getRecordingState();}
+    private static int playbackState(NativeAudio audio)throws Exception{java.lang.reflect.Field field=NativeAudio.class.getDeclaredField("track");field.setAccessible(true);return ((android.media.AudioTrack)field.get(audio)).getPlayState();}
     private static void capture(String name)throws Exception{for(String command:new String[]{"mkdir -p "+EVIDENCE,"screencap -p "+EVIDENCE+"/"+name+".png"}){android.os.ParcelFileDescriptor fd=automation().executeShellCommand(command);try(java.io.InputStream input=new android.os.ParcelFileDescriptor.AutoCloseInputStream(fd)){byte[] bytes=new byte[1024];while(input.read(bytes)!=-1){}}}}
     private static void permission(String permission)throws Exception{android.os.ParcelFileDescriptor fd=automation().executeShellCommand("pm grant "+context().getPackageName()+" "+permission);try(java.io.InputStream input=new android.os.ParcelFileDescriptor.AutoCloseInputStream(fd)){byte[] bytes=new byte[512];while(input.read(bytes)!=-1){}}}
     private static android.app.UiAutomation automation(){android.app.UiAutomation automation=InstrumentationRegistry.getInstrumentation().getUiAutomation();android.accessibilityservice.AccessibilityServiceInfo info=automation.getServiceInfo();info.flags|=android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;automation.setServiceInfo(info);return automation;}

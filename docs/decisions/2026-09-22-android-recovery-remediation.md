@@ -803,12 +803,12 @@ R8-R11并落实到相关实现/验收章节。该修订尚未由原agent再审�
 | A1 发布/生产落后 | 基本属实。Latest 仍指向旧 v1.3.14 资产，README 原先引导到该下载页；当日生产 Core 的 mobile 路由为 404，Android 通话/短信不能在生产使用。 | P0 发布风险；README 已改为警告旧资产并说明当前没有兼容 Go Release。先解决路由与 Core/Provider 兼容版本，再安排经批准的生产部署；此草稿任务不改 Release、不部署。 |
 | A2 管理员权限 | 核心问题属实，但 App 持久保存的是经 Keystore 加密的真实管理员 token/CSRF；默认开启“记住密码”时管理员密码也加密保存，均非明文，也不是凭空伪造权限。Cookie/Origin 只是浏览器式请求头。当前无按设备吊销的 mobile 身份，管理员路由未按 Android 做权限隔离。 | P0 安全设计项：在产品交付前改为可逐设备撤销、仅限话机/短信所需权限的凭据，并移除 Android 对管理员 session 和浏览器式认证头的依赖。不能把加密存储说成最小权限。 |
 | A3 常驻认证恢复 | 属实。Core 管理会话为内存态、滑动 12 小时；4401/1008 当前被 Android Link 当成终态，不会重新认证。Doze/OEM 长连接可靠性尚未验证。 | P1。先设计安全的会话恢复，受撤销/暂停约束；Doze/推送是另一个实测项，不宣称 WebSocket 保证后台唤醒。 |
-| A4 通话/媒体 | 短暂音频焦点丢失直接关闭本机媒体，属实且可复现修复；缺少 Telecom、完整蓝牙通信路由、PCM/TCP 弱网适应也是现状，但其移动网络影响需另行测量。 | 当前候选已修复可恢复的短暂焦点丢失并增加 VoWiFi/蜂窝通话流程 instrumentation，结果待 GitHub CI 与授权设备复核。Telecom、蓝牙完整验收、压缩/抖动缓冲留作正式产品前独立工作，不扩成本批门槛。 |
-| A5 读卡器 | 部分属实。USB CCID 明确只接受 APDU 级、slot 0；OMAPI 取决于运营商/OEM privilege，不能绝对说所有普通设备都不可能；`getDeviceId()` 不稳定；time-extension 计数未延长固定 5 秒 deadline。 | P1。对读卡器的 TPDU/协议协商范围保持明确限制；后续实现稳定身份和有界 extension 时必须按 CCID 规范与真实传输契约验证，不能猜协议时间。产品文案说明 OMAPI 权限条件及手机读卡器对服务器 VoWiFi 在线的依赖。 |
+| A4 通话/媒体 | 短暂音频焦点丢失直接关闭本机媒体，属实且可复现修复；缺少 Telecom、完整蓝牙通信路由、PCM/TCP 弱网适应也是现状，但其移动网络影响需另行测量。 | 当前候选已修复可恢复的短暂焦点丢失并增加 VoWiFi/蜂窝通话流程 instrumentation。首轮 CI `35950130097` 在 instrumentation 编译阶段失败：测试直接访问 `NativeAudio.played` 私有字段并将 `long` 赋给 `int`；同一 build 的生产代码、单测与 lint 已完成。跟进修正仅调整测试观测为反射读取且保留 `long`。复审另发现 worker 与焦点回调之间的启动竞态；采集/播放的设备启动现已与焦点状态转换串行化，E2E 检查暂停期间 AudioRecord 非录制、AudioTrack 非播放，并在焦点恢复后检查二者恢复。修正候选仍待 GitHub CI 与授权设备复核；此前 CI 和设备结果不能视为本修复验收。Telecom、蓝牙完整验收、压缩/抖动缓冲留作正式产品前独立工作，不扩成本批门槛。 |
+| A5 读卡器 | 部分属实。USB CCID 明确只接受 APDU 级、slot 0；OMAPI 取决于运营商/OEM privilege，不能绝对说所有普通设备都不可能；`getDeviceId()` 不稳定。延时响应本身不会使固定 5 秒本地总超时违反 CCID，但当前实现忽略 `bError` 中的 BWT/WWT 倍数，Bulk-IN 单次最多等 2 秒，因此可能在有效延时期间提前失败。 | P1。CCID Rev. 1.1 §3.1.3/表 6.2-3 要求延时响应后保留同一命令与 `bSeq` 并等待最终响应；`bError` 是 T=1 BWT 或 T=0 WWT 倍数。实现延长期前须确认基准 BWT/WWT 可得，否则明确采用本地有界策略，不把臆造的时间称作规范值。[USB-IF CCID Rev. 1.1](https://www.usb.org/sites/default/files/DWG_Smart-Card_CCID_Rev110.pdf)。本次仅记录评审结论，不改 A5 代码；仍要保持 APDU/TPDU 能力边界和 OMAPI 权限说明。 |
 | A6 电量 | 10 秒 Reader/health 周期和 30 秒 WebSocket ping 存在；耗电结论没有测量。 | P2；保留电量/流量实测任务，不根据定时器频率直接断言耗电量。 |
 | A7 可维护性 | 长行、超大 Activity/Service、空 catch 的统计基本属实；这是审阅风险，不足以证明功能错误。 | P2；先让主流程/端到端故障测试稳定，再按真实所有权边界拆分。禁止纯格式化或大规模重写抢占当前可用性工作。 |
 | A8 PR/分支堆叠 | 报告所列基点与重复历史在其时间点属实；#9/#10 复用旧 PR8 历史，存在大量重复差异。 | P1 流程风险；当前 PR8 继续作为唯一 Android 交付线。先审查分支独有差异；不自动关闭、rebase、合并或删除任何 PR/分支。 |
-| A9 CI/构建 | Android workflow 原先仅 push/dispatch，没有 pull_request；仓库没有 Gradle wrapper。 | P2；当前候选添加无签名 PR instrumentation 入口，并把预览签名限制在受信任 push/dispatch；Gradle wrapper 仍待处理。 |
+| A9 CI/构建 | Android workflow 原先仅 push/dispatch，没有 pull_request；仓库没有 Gradle wrapper。新增 PR 入口排除了 PR 签名，但复审发现手动 dispatch 仍可从任意 ref 将构建代码暴露给签名密钥。 | P2；当前候选添加无签名 PR instrumentation 入口。签名只允许 `codex/android-v2` 的 push，以及 `codex/android-v2` 和 `codex/android-recovery-remediation` 的手动 dispatch；其他 ref 在当前 workflow 中不会执行签名步骤。此 allowlist 是防止误触的条件，不防止有权限的协作者修改 workflow；仓库写权限和 secrets policy 仍是信任边界。Gradle wrapper 仍待处理。 |
 | A10 文档 | Android README 混有较长的开发/证据流水；信息过载属实。 | P2；补清晰用户安装/配置/权限与支持矩阵，再把历史证据移到现有状态/证据账本；不删除失败和哈希溯源。 |
 | A11 优先级 | 报告基于旧的桌面优先级文本；未体现用户在 2026-09-24 明确的 Android 优先决定。 | 已由本文件顶部更新：Android 先，桌面工作顺延但不取消；同步版本化台账。 |
 
@@ -821,5 +821,6 @@ R8-R11并落实到相关实现/验收章节。该修订尚未由原agent再审�
 4. 音频已经关闭后迟到的焦点回调不能重连或恢复麦克风；暂停期间不得把新采集帧发送到服务器，也不得播放缓存语音。
 5. 暂停/恢复本机 AudioRecord 或 AudioTrack 失败时，只报告本机媒体失败并保留原远端通话身份；不能因设备 API 异常而自动发送 end 或清掉 pending call。
 6. 快速 loss→gain 交错时，停止设备导致的迟到 read/write 错误不得杀死已恢复的音频线程；每种方向都应在原 call owner 下恢复，不能创建第二个 lease/start。
+7. loss 与采集/播放线程恢复并发时，焦点回调返回后 AudioRecord 必须保持停止、AudioTrack 不得重新启动；只有后续 gain 才能在原 call owner 下恢复两者，暂停期间不采集、不上传、不播放。
 
-验证优先复用 `CallFlowTest` 的真实 UI、音频设备回调和合成网关；不触发运营商通话、SMS 或 SIM/APDU 操作。
+验证优先复用 `CallFlowTest` 的真实 UI、`NativeAudio` 焦点处理和合成网关；测试直接注入 AudioFocus change 常量，不证明 Android `AudioManager` 对其他应用抢占焦点的系统分发路径。不触发运营商通话、SMS 或 SIM/APDU 操作。
