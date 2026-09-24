@@ -42,7 +42,7 @@ final class RemoteCall {
         preparationStage=R.string.layer_media;
         audio=new NativeAudio(service,api,service.loop,new NativeAudio.Events(){
             public void state(int label){if(!ended&&ownsRecord())service.changed();}
-            public void ended(int reason){if(!ownsRecord())return;synchronized(RemoteCall.this){if(!submitted&&!ended)preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(R.string.layer_media),UiText.of(reason));ended=true;}api.cancel(RemoteCall.this);state=submitted?UiText.of(R.string.call_reason,UiText.of(R.string.call_audio_stopped),UiText.of(reason)):preparationFailure;service.callAudioEnded(RemoteCall.this);}
+            public void ended(int reason){if(!ownsRecord())return;synchronized(RemoteCall.this){if(!submitted&&!ended)preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(R.string.layer_media),audio==null?UiText.of(reason):audio.failureDescription());ended=true;}api.cancel(RemoteCall.this);state=submitted?UiText.of(R.string.call_reason,UiText.of(R.string.call_audio_stopped),UiText.of(reason)):preparationFailure;service.callAudioEnded(RemoteCall.this);}
         });
         if(ended){audio.close();finishPreparation();return;}
         requireOwner();
@@ -56,7 +56,7 @@ final class RemoteCall {
         boolean activate;synchronized(this){activate=ownsRecord()&&!ended&&!retired;if(activate){phase="ACTIVE";state=UiText.of(R.string.call_request_accepted);}}
         if(activate)audio.markActive();
     }catch(Exception e){
-        synchronized(this){if(!submitted&&preparationFailure.empty()&&!ended){UiText reason=audio!=null&&audio.closed&&audio.closedReason!=R.string.audio_off?UiText.of(audio.closedReason):null;preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(preparationStage),reason==null?safe(e):reason);}}
+        synchronized(this){if(!submitted&&preparationFailure.empty()&&!ended){UiText reason=audio!=null&&audio.closedReason!=R.string.audio_off?audio.failureDescription():null;preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(preparationStage),reason==null?safe(e):reason);}}
         if(audio!=null)audio.close();service.microphoneFinished(this);
         if(!submitted)finishPreparation();else if(ownsRecord()&&!ending.get()){state=UiText.of(R.string.call_result_unknown);service.reconcileSoon(this);}
     }finally{starting=false;service.changed();}});}

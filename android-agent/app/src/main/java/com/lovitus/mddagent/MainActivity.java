@@ -212,9 +212,9 @@ public final class MainActivity extends Activity {
         homeAvailability.setTextColor(service.available()?UiLabels.OK:UiLabels.NEUTRAL);
         int attached=attachedCcidReaders().size(),pending=pendingReaderCount();
         String readerState=!service.available()?(service.sharing()?getString(R.string.sharing_paused):getString(R.string.sharing_off)):
-            service.sharing()?(service.readerLinkOnline?service.readerStatus.render(this):getString(R.string.reader_link_pending)):getString(R.string.sharing_off);
+            service.sharing()?(service.readerLinkOnline?service.readerStatus.render(this):service.readerConnection.render(this)):getString(R.string.sharing_off);
         homeReaders.setText(getString(R.string.home_reader_status,readerState,attached,pending));
-        homeReaders.setTextColor(pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
+        homeReaders.setTextColor(service.sharing()&&!service.readerLinkOnline?UiLabels.statusColor(service.readerConnection):pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
         JSONArray lines=Json.array(service.snapshot,"lines");int enabled=0;
         for(int i=0;i<lines.length();i++){JSONObject line=lines.optJSONObject(i);if(line!=null&&line.optBoolean("enabled"))enabled++;}
         homeLines.setText(getString(R.string.home_line_status,lines.length(),enabled));
@@ -506,9 +506,10 @@ public final class MainActivity extends Activity {
         if(service==null){readerSummary.setText(R.string.local_service_connecting);sharingButton.setEnabled(false);return;}
         ArrayList<UsbDevice> devices=attachedCcidReaders();UsbManager usb=getSystemService(UsbManager.class);int pending=pendingReaderCount();
         String readerStateText=!service.available()?(service.sharing()?getString(R.string.sharing_paused):getString(R.string.sharing_off)):
-            service.sharing()&&!service.readerLinkOnline?getString(R.string.reader_usb_wait_link):
+            service.sharing()&&!service.readerLinkOnline?service.readerConnection.render(this):
             service.sharing()?service.readerStatus.render(this):getString(devices.isEmpty()?R.string.sharing_off:R.string.reader_usb_not_shared);
-        readerSummary.setText(getString(R.string.reader_status_summary,readerStateText,devices.size(),pending));readerSummary.setTextColor(!service.readerUSBFailures.isEmpty()?UiLabels.ERROR:pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
+        if(service.sharing()&&!service.readerLinkOnline&&!service.readerLinkDiagnostic().isEmpty())readerStateText+="\n"+service.readerLinkDiagnostic();
+        readerSummary.setText(getString(R.string.reader_status_summary,readerStateText,devices.size(),pending));readerSummary.setTextColor(!service.readerUSBFailures.isEmpty()?UiLabels.ERROR:service.sharing()&&!service.readerLinkOnline?UiLabels.statusColor(service.readerConnection):pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
         sharingButton.setText(service.sharing()?getString(R.string.stop_sharing):getString(R.string.share));sharingButton.setEnabled(!service.intentSaving()&&(service.available()||service.sharing()));
         StringBuilder key=new StringBuilder();
         for(UsbDevice device:devices)key.append(device.getDeviceId()).append(':').append(device.getVendorId()).append(':').append(device.getProductId()).append(':').append(usb.hasPermission(device)).append(';');

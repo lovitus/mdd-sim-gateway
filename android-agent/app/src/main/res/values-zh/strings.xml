@@ -241,6 +241,7 @@
 <string name="audio_focus_pause_failed">无法安全暂停通话音频</string>
 <string name="audio_focus_restore_failed">无法恢复通话音频</string>
 <string name="audio_check_timeout">麦克风或播放验证超时。请检查麦克风权限，在音频检查期间说几句话后手动重试。本次未拨出。</string>
+<string name="audio_timeout_evidence">%1$s\n采集回调：%2$d；入队帧：%3$d（有信号：%4$d）；回传：%5$d（有信号：%6$d）；已播放：%7$d；收发 PCM 峰值（发/收）：%8$d/%9$d。入队不代表服务端已接收。</string>
 <string name="audio_capture_stopped">麦克风已停止</string>
 <string name="audio_playback_stopped">播放已停止</string>
 <string name="audio_invalid_frame">音频帧无效</string>
@@ -311,6 +312,7 @@
 <string name="diagnostics_gateway">网关连接</string>
 <string name="diagnostics_sharing">读卡器共享意图</string>
 <string name="diagnostics_reader_link">读卡器 Agent 已连接</string>
+<string name="diagnostics_reader_failure">最近一次读卡器连接故障码</string>
 <string name="diagnostics_readers">已上报读卡器</string>
 <string name="diagnostics_network">观察到的网络类型</string>
 <string name="diagnostics_microphone">麦克风权限</string>

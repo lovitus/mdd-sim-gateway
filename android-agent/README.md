@@ -47,6 +47,14 @@ explicitly asks for speech. Carrier dispatch, unknown outcomes and no-redial gua
 are unchanged. The in-call keypad opens without sending anything; only an explicit
 digit press sends DTMF for the still-active original call.
 
+Audio timeout details preserve capture callbacks, locally queued frames, returned
+frames, playback counts and PCM signal/peak measurements without retaining audio.
+Queue acceptance is not server receipt, and these counters do not establish voice
+quality. The existing Core signal threshold and carrier-dispatch gate are unchanged.
+Reader transport state is retained separately from local card-scan state so a scan
+cannot hide a failed connection. Home/Readers show that state; diagnostic sharing
+contains only bounded failure codes, never raw response bodies, URLs or credentials.
+
 Recent/history messages show peer, line name, own number when known, card suffix,
 transport, time and body. Reply revalidates the original line/card and fills that
 SIM, transport and peer into the existing composer; it does not send automatically.

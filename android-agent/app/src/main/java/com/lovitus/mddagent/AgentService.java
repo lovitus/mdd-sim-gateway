@@ -37,6 +37,7 @@ public final class AgentService extends Service {
     private GatewayApi numbersRequest;
     private long numbersAttempt;
     volatile UiText connection=UiText.of(R.string.paused),readerStatus=UiText.of(R.string.sharing_off),notice=UiText.EMPTY;volatile RemoteCall call;
+    volatile UiText readerConnection=UiText.of(R.string.reader_link_pending);
     private final AtomicBoolean smsPending=new AtomicBoolean(),enrollmentPending=new AtomicBoolean();
     private final AtomicBoolean loginPending=new AtomicBoolean();
     private final Retry loginRetry=new Retry();
@@ -186,8 +187,9 @@ public final class AgentService extends Service {
         lastReaders=recoveringReaders();lastReaderAt=0;
         readerUSBFailures=Collections.emptyMap();
         final long epoch=++readerEpoch;scanOwner.set(null);readerLinkOnline=false;
+        readerConnection=UiText.of(R.string.link_connecting);
         agent=new Link(api,loop,"/v1/agent/ws",config.optString("agent_id"),config.optString("agent_token"),process,new Link.Events(){
-            public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerLinkOnline=connected;readerStatus=UiText.of(label);changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}}
+            public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerLinkOnline=connected;readerConnection=UiText.of(label);readerStatus=readerConnection;changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}}
             public void message(JSONObject message){if(epoch!=readerEpoch||!sharing)return;if(message.optString("kind").equals("aka_request")){
                 final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;final long generation=owner.generation();
                 readerIO.execute(()->{JSONObject answer=device.authenticate(Json.object(message,"aka_request"));owner.respond(generation,message.optString("request_id"),answer);});
@@ -259,6 +261,7 @@ public final class AgentService extends Service {
     boolean available(){return available;}
     boolean hasLoadedConfiguration(){return configurationLoaded;}
     boolean sharing(){return sharing;}
+    String readerLinkDiagnostic(){Link current=agent;return current==null?"":current.diagnostic();}
     boolean intentSaving(){return intentSaving||enrollmentPending.get();}
     boolean messageBusy(){return smsPending.get();}
     boolean accountBusy(){return call!=null&&call.busy()||smsPending.get()||enrollmentPending.get();}
