@@ -31,12 +31,21 @@ type Worker interface {
 }
 
 type Snapshot struct {
-	RuntimeConfig *RuntimeConfig `json:"runtime_config,omitempty"`
-	State         State          `json:"state"`
-	Generation    uint64         `json:"generation"`
-	ChangedAt     time.Time      `json:"changed_at"`
-	Code          string         `json:"code,omitempty"`
-	Detail        string         `json:"detail,omitempty"`
+	RuntimeConfig  *RuntimeConfig  `json:"runtime_config,omitempty"`
+	CoreConnection *CoreConnection `json:"core_connection,omitempty"`
+	State          State           `json:"state"`
+	Generation     uint64          `json:"generation"`
+	ChangedAt      time.Time       `json:"changed_at"`
+	Code           string          `json:"code,omitempty"`
+	Detail         string          `json:"detail,omitempty"`
+}
+
+// CoreConnection describes the control link, not SIM or call readiness. Raw
+// transport errors remain in the local log rather than this display contract.
+type CoreConnection struct {
+	State     string    `json:"state"`
+	ChangedAt time.Time `json:"changed_at"`
+	RetryAt   time.Time `json:"retry_at,omitzero"`
 }
 
 type Controller struct {
@@ -73,6 +82,14 @@ func (controller *Controller) Status() Snapshot {
 	if controller.runtimeConfig != nil {
 		copy := *controller.runtimeConfig
 		snapshot.RuntimeConfig = &copy
+	}
+	if provider, ok := controller.worker.(interface{ CoreConnection() CoreConnection }); ok {
+		connection := provider.CoreConnection()
+		// A retained link snapshot must not outlive its runtime owner.
+		if snapshot.State != StateRunning && snapshot.State != StateStarting {
+			connection = CoreConnection{State: "stopped", ChangedAt: snapshot.ChangedAt}
+		}
+		snapshot.CoreConnection = &connection
 	}
 	return snapshot
 }

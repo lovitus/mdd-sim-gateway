@@ -841,7 +841,7 @@ Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-ru
 
 Preserved original ([TODO.md:334](../../docs/archive/2026-09-20/TODO.md#L334)): 验证在线、正在连接、离线、不可用和冲突状态，以及离线 SIM 可配置、删除依赖警告和       跨页面状态一致性。
 
-The September 17 Chrome report covers real pages/selectors/diagnostics and is retained. Reconcile exact transition coverage before adding missing offline/conflict/dependency-prompt scenarios.
+The September 17 Chrome report covers real pages/selectors/diagnostics and is retained. The separately reported desktop Agent warning gap now has a local control-link status and GUI warning candidate; runtime running is not treated as connected. This does not resolve the field transport fault or change the historical WebUI acceptance.
 
 Existing reports: [H-BROWSER-PAGES](#h-browser-pages).
 
