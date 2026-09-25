@@ -342,7 +342,8 @@ public final class AgentService extends Service {
                 if(api==owner)notice=UiText.of(R.string.message_result_returned);
             }catch(Exception e){
                 if(recorded&&!dispatch){final String account=scope;try{store.update(current->MessageJournal.notDispatched(current,account,id));}catch(Exception ignored){}}
-                if(api==owner)notice=dispatch?UiText.of(R.string.message_unknown_id,id):UiText.of(R.string.message_not_dispatched);
+                if(recorded){final String account=scope;try{store.update(current->MessageJournal.failure(current,account,id,e));}catch(Exception ignored){}}
+                if(api==owner)notice=dispatch?UiText.of(R.string.message_request_failed,id,RemoteCall.safe(e)):UiText.of(R.string.message_not_dispatched);
             }finally{smsPending.set(false);refreshPrivateState(owner);}
         });
     }
@@ -359,7 +360,8 @@ public final class AgentService extends Service {
             JSONObject original=MessageJournal.find(store.load(),scope,operation);
             JSONObject page=owner.json("GET","/v1/messages?line_id="+CallPlan.encode(original.getString("line_id"))+"&transport="+original.getString("transport")+"&limit=100",null);
             store.update(current->{requireMessageOwner(current,owner);MessageJournal.observe(current,scope,Json.array(page,"messages"));});
-            notice=UiText.of(R.string.message_retained_unknown);
+            JSONObject retained=MessageJournal.find(store.load(),scope,operation);
+            if(api==owner)notice=UiText.of(retained.optString("state").equals("failure_observed")?R.string.message_failure_observed:R.string.message_retained_unknown);
         }catch(Exception failure){notice=UiText.of(R.string.history_failed);}
         finally{messageChecks.remove(key);refreshPrivateState(owner);}});
     }

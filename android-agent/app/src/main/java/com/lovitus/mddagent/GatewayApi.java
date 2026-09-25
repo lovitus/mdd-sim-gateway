@@ -38,7 +38,7 @@ final class GatewayApi {
             if(r.body()==null)throw new IOException("Empty gateway response");
             okio.BufferedSource source=r.body().source(); if(source.request(2*1024*1024+1L))throw new IOException("Gateway response too large");
             String raw=source.readUtf8();JSONObject v=raw.isEmpty()?new JSONObject():new JSONObject(raw);
-            if(!r.isSuccessful())throw new Failure(r.code(),v.optString("code",v.optString("detail","Request rejected")));
+            if(!r.isSuccessful())throw new Failure(r.code(),v);
             return v;
         }finally{synchronized(active){allRequests.remove(request);if(tag!=null){java.util.Set<Call> owned=active.get(tag);if(owned!=null){owned.remove(request);if(owned.isEmpty())active.remove(tag);}}}}
     }
@@ -95,5 +95,13 @@ final class GatewayApi {
         java.util.concurrent.ExecutorService cleanup=http.dispatcher().executorService();
         cleanup.execute(()->{try{for(Call request:pending)request.cancel();http.dispatcher().cancelAll();http.connectionPool().evictAll();}finally{cleanup.shutdown();}});
     }
-    static final class Failure extends IOException {final int status;Failure(int status,String message){super("HTTP "+status+": "+message);this.status=status;}}
+    static final class Failure extends IOException {
+        final int status;
+        Failure(int status,JSONObject error){
+            super("HTTP "+status+": "+error.optString("code","Request rejected")+
+                (error.optString("layer").isEmpty()?"":" ["+error.optString("layer")+"]")+
+                (error.optString("detail").isEmpty()?"":" · "+error.optString("detail")));
+            this.status=status;
+        }
+    }
 }

@@ -86,6 +86,18 @@ missing parts are not silently reconstructed into an apparently complete message
 Submitted is not displayed as delivered. State text keeps its meaning and adds
 green/amber/red distinctions across the existing native pages.
 
+Failed SMS events retain their machine `state`, even when their event `kind` is
+`submitted`. They display as red failures rather than successful submissions.
+Checking the original local receipt records an observed failure without inferring
+that no multipart segment was delivered; the payload remains unresolved and no
+automatic resend is introduced. Dispatch errors retain bounded gateway code,
+layer and detail in the existing encrypted receipt and native notice. Previously
+discarded error details cannot be reconstructed from history that lacks them.
+Field evidence reproduced `kind=submitted, state=failed` and an omitted gateway
+reason. The existing CI suite and read-only physical history inspection qualify
+this presentation fix; no new automated red/green test is claimed. This change
+does not repair carrier registration, location rejection or incoming-call routing.
+
 Pre-fix physical evidence: a subsequent call cleared to a generic no-call notice
 without a new carrier history entry; message records omitted own-SIM information
 and reply actions, and successful local receipts discarded their body. These are

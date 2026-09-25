@@ -302,6 +302,8 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="message_received">Received</string>
 <string name="message_delivered">Delivered</string>
 <string name="message_failed">Failed</string>
+<string name="message_failure_observed">Gateway reports a send failure; full delivery is unconfirmed. Nothing resent.</string>
+<string name="message_request_failed">Submission unconfirmed (%1$s). No automatic resend.\n%2$s</string>
 <string name="tls_pinned">Pinned server certificate</string>
 <string name="tls_system">System certificate trust</string>
 <string name="connection_section">Connection</string>

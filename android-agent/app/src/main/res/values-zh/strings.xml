@@ -302,6 +302,8 @@
 <string name="message_received">已收到</string>
 <string name="message_delivered">已送达</string>
 <string name="message_failed">失败</string>
+<string name="message_failure_observed">网关报告发送失败；整条送达结果未确认，没有重发。</string>
+<string name="message_request_failed">提交结果未确认（%1$s），不会自动重发。\n%2$s</string>
 <string name="tls_pinned">已固定服务器证书</string>
 <string name="tls_system">系统证书信任</string>
 <string name="connection_section">连接</string>

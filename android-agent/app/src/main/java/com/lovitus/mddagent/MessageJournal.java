@@ -56,6 +56,17 @@ final class MessageJournal {
         JSONArray records=rows(config);
         for(int i=0;i<records.length();i++){JSONObject row=records.getJSONObject(i);if(id.equals(row.optString("operation_id"))&&scope.equals(row.optString("scope")))row.put("state","not_dispatched");}
     }
+    static void failure(JSONObject config,String scope,String id,Exception failure)throws JSONException {
+        JSONArray records=rows(config);
+        for(int i=0;i<records.length();i++){
+            JSONObject row=records.getJSONObject(i);
+            if(id.equals(row.optString("operation_id"))&&scope.equals(row.optString("scope"))){
+                // A failed response does not prove that no SMS part was delivered.
+                row.put("failure_detail",RemoteCall.safe(failure));
+                return;
+            }
+        }
+    }
     static void observe(JSONObject config,String scope,JSONArray events)throws JSONException {
         JSONArray records=rows(config);
         for(int i=0;i<records.length();i++){
@@ -64,7 +75,10 @@ final class MessageJournal {
             for(int j=0;j<events.length();j++){
                 JSONObject event=events.getJSONObject(j);
                 if(row.optString("message_id").equals(event.optString("message_id"))&&row.optString("line_id").equals(event.optString("line_id"))
-                    &&row.optString("transport").equals(event.optString("transport"))&&event.optString("kind").equals("submitted"))row.put("state","submission_observed");
+                    &&row.optString("transport").equals(event.optString("transport"))&&event.optString("kind").equals("submitted")){
+                    if(event.optString("state").equals("failed"))row.put("state","failure_observed");
+                    else if(!row.optString("state").equals("failure_observed"))row.put("state","submission_observed");
+                }
             }
         }
     }

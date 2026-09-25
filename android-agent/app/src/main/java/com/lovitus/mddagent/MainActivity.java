@@ -382,6 +382,9 @@ public final class MainActivity extends Activity {
             }
             TextView detail=text(label+" · "+UiLabels.transport(this,record.optString("transport")),14);detail.setTextColor(UiLabels.messageColor(Json.obj("kind",state)));detail.setContentDescription("sms-operation:"+operation+":"+state);messageOperations.addView(detail);
             TextView receipt=text(getString(R.string.message_from,from.isEmpty()?getString(R.string.number_unavailable):from)+"\n"+getString(R.string.message_to,record.optString("recipient"))+"\n"+getString(R.string.message_line,name+" · "+UiLabels.cardSuffix(this,card))+"\n"+(body.isEmpty()?getString(R.string.message_body_unavailable):body),15);receipt.setTextIsSelectable(true);messageOperations.addView(receipt);
+            if(!record.optString("failure_detail").isEmpty()){
+                TextView failure=text(record.optString("failure_detail"),13);failure.setTextColor(UiLabels.ERROR);failure.setTextIsSelectable(true);messageOperations.addView(failure);
+            }
             if(!MessageJournal.resolved(record)){Button check=button(messageOperations,getString(R.string.check_original_message),()->service.reconcileMessage(scope,operation));check.setId(R.id.message_reconcile);check.setContentDescription("reconcile:"+operation);check.setEnabled(service.canQueryMessages()&&!record.optString("body").isEmpty()&&!service.messageChecking(scope,operation));if(record.optString("body").isEmpty())messageOperations.addView(text(getString(R.string.message_legacy_payload_missing),12));}
         }
         if(other>0)messageOperations.addView(text(getString(R.string.other_message_records,other),12));
