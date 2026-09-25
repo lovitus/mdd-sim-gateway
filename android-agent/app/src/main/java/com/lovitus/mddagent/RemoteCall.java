@@ -16,6 +16,8 @@ final class RemoteCall {
     android.os.PowerManager.WakeLock wake;
     volatile NativeAudio audio;
     volatile UiText state=UiText.of(R.string.call_preparing);
+    volatile UiText toneState=UiText.EMPTY;
+    private final AtomicBoolean sendingTone=new AtomicBoolean();
     private volatile UiText preparationFailure=UiText.EMPTY;
     private volatile int preparationStage=R.string.layer_card;
     volatile String session="",phase="PREPARING";
@@ -121,5 +123,29 @@ final class RemoteCall {
     }
     boolean release(){String current=session;if(current.isEmpty()||current.equals(releasedSession))return true;try{api.json("DELETE",plan.leases(),Json.obj("session_id",current));releasedSession=current;return true;}catch(Exception e){return false;}}
     static String safe(Exception e){Throwable c=e instanceof ExecutionException?e.getCause():e;String s=c==null?"Unavailable":c.getMessage();return s==null?"Unavailable":s.substring(0,Math.min(180,s.length()));}
-    void dtmf(String signal){if(!ownsRecord()||ended||audio==null||!audio.active||!signal.matches("[0-9*#A-D]"))return;io.execute(()->{try{if(!ownsRecord()||ended||audio==null||audio.closed)return;JSONObject b=Json.obj("operation_id",Json.id(),"signal",signal);if(plan.mode.equals("cellular"))b.put("session_id",session);else b.put("call_id",plan.id).put("duration_ms",160);api.json("POST",plan.prefix()+"dtmf",b);}catch(Exception e){state=UiText.of(R.string.dtmf_unconfirmed);service.changed();}});}
+    boolean canSendTone(){NativeAudio current=audio;return ownsRecord()&&!ended&&phase.equals("ACTIVE")&&current!=null&&current.active&&!current.closed;}
+    boolean toneBusy(){return sendingTone.get();}
+    void dtmf(String signal){
+        if(sendingTone.get())return;
+        if(!canSendTone()||signal==null||!signal.matches("[0-9*#A-D]")){
+            toneState=UiText.of(R.string.dtmf_unavailable);service.changed();return;
+        }
+        // Only the currently displayed request may run; never queue or retry tones.
+        if(!sendingTone.compareAndSet(false,true))return;
+        toneState=UiText.of(R.string.dtmf_sending,signal);service.changed();
+        try{io.execute(()->{
+            try{
+                if(!canSendTone()){toneState=UiText.of(R.string.dtmf_unavailable);return;}
+                String operation=Json.id();JSONObject body=Json.obj("operation_id",operation,"signal",signal);
+                if(plan.mode.equals("cellular"))body.put("session_id",session);
+                else body.put("call_id",plan.id).put("duration_ms",160);
+                JSONObject result=api.json("POST",plan.prefix()+"dtmf",body);
+                boolean confirmed=plan.mode.equals("cellular")
+                    ?session.equals(result.optString("session_id"))&&signal.equals(result.optString("signal"))&&"cellular_dtmf_sent".equals(result.optString("code"))
+                    :operation.equals(result.optString("operation_id"))&&plan.id.equals(result.optString("call_id"))&&result.optBoolean("accepted");
+                toneState=confirmed?UiText.of(R.string.dtmf_accepted,signal):UiText.of(R.string.dtmf_unconfirmed);
+            }catch(Exception e){toneState=UiText.of(R.string.dtmf_failed,signal,safe(e));}
+            finally{sendingTone.set(false);service.changed();}
+        });}catch(RejectedExecutionException e){sendingTone.set(false);toneState=UiText.of(R.string.dtmf_unavailable);service.changed();}
+    }
 }

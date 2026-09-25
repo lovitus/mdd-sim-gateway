@@ -36,6 +36,7 @@ public final class MainActivity extends Activity {
     private boolean selectionFromState,selectionInitialized;
     private final ArrayList<String> renderedLineLabels=new ArrayList<>();
     private TextView callAudioDetails;
+    private AlertDialog toneDialog;private RemoteCall toneOwner;private TextView toneStatus;private GridLayout toneKeys;
     private ScrollView contentScroll;private int renderedTab=-1;
     private final Handler draftHandler=new Handler(Looper.getMainLooper());private final Runnable saveDraft=this::persistLoginDraft;
     private String selectedLine="",selectedCard="",draftNumber="",draftMessage="";private int selectedRoute;private JSONArray selectionSnapshot=new JSONArray();private final ExecutorService io=Executors.newSingleThreadExecutor();private final Runnable update=this::updateState;
@@ -54,7 +55,7 @@ public final class MainActivity extends Activity {
         if(line.isEmpty()||card.isEmpty()||(!mode.equals("cellular")&&!mode.equals("vowifi")))return;
         selectedLine=line;selectedCard=card;selectedRoute=mode.equals("cellular")?1:0;
     }
-    @Override protected void onStop(){captureLoginDraft();persistLoginDraft();closeHistory();if(service!=null)service.removeListener(update);if(bound){unbindService(binding);bound=false;}service=null;super.onStop();}
+    @Override protected void onStop(){captureLoginDraft();persistLoginDraft();closeHistory();if(toneDialog!=null)toneDialog.dismiss();if(service!=null)service.removeListener(update);if(bound){unbindService(binding);bound=false;}service=null;super.onStop();}
     @Override protected void onDestroy(){cancelLogin();draftHandler.removeCallbacks(saveDraft);io.shutdown();super.onDestroy();}
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
     private void build(){
@@ -90,13 +91,14 @@ public final class MainActivity extends Activity {
         button.setCornerRadius(dp(8));button.setElevation(0);button.setStateListAnimator(null);
         button.setBackgroundTintList(ColorStateList.valueOf(0x00000000));button.setStrokeWidth(dp(1));button.setStrokeColor(ColorStateList.valueOf(0xffc6d5da));
         button.setTextColor(new ColorStateList(new int[][]{new int[]{android.R.attr.state_enabled},new int[]{}},new int[]{0xff244e63,0xff7b898f}));
+        button.setIconTint(button.getTextColors());
         return button;
     }
     private Button button(LinearLayout parent,String name,Runnable action){MaterialButton button=command(name);button.setOnClickListener(v->{try{action.run();}catch(Exception e){error(e.getMessage());}});parent.addView(button,parent.getOrientation()==LinearLayout.HORIZONTAL?new LinearLayout.LayoutParams(0,-2,1):new LinearLayout.LayoutParams(-1,-2));return button;}
     private Button button(int name,Runnable action){
         boolean primary=name==R.string.dial||name==R.string.send||name==R.string.connect||name==R.string.hangup;
         MaterialButton b=(MaterialButton)button(primary?primaryBar:content,getString(name),action);
-        if(primary){primaryBar.setVisibility(View.VISIBLE);b.setStrokeWidth(0);b.setTextColor(new ColorStateList(new int[][]{new int[]{android.R.attr.state_enabled},new int[]{}},new int[]{0xffffffff,0xff667a80}));b.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{android.R.attr.state_enabled},new int[]{}},new int[]{0xff0c6b64,0xffdce5e8}));}
+        if(primary){primaryBar.setVisibility(View.VISIBLE);b.setStrokeWidth(0);b.setTextColor(new ColorStateList(new int[][]{new int[]{android.R.attr.state_enabled},new int[]{}},new int[]{0xffffffff,0xff667a80}));b.setIconTint(b.getTextColors());b.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{android.R.attr.state_enabled},new int[]{}},new int[]{0xff0c6b64,0xffdce5e8}));}
         if(name==R.string.dial){b.setId(R.id.call_dial);b.setIconResource(R.drawable.ic_mdd_call);b.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);}
         if(name==R.string.send){b.setId(R.id.message_send);b.setIconResource(R.drawable.ic_mdd_message);b.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);}
         if(name==R.string.hangup){b.setId(R.id.call_hangup);b.setBackgroundTintList(ColorStateList.valueOf(0xffb3261e));}
@@ -334,14 +336,28 @@ public final class MainActivity extends Activity {
         }content.addView(grid);
     }
     private void callKeypad(RemoteCall owner){
+        if(toneDialog!=null)toneDialog.dismiss();
+        LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(dp(12),dp(8),dp(12),dp(8));
+        toneStatus=text("",14);toneStatus.setId(R.id.dtmf_signal);toneStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);box.addView(toneStatus);
         GridLayout keys=new GridLayout(this);keys.setColumnCount(3);keys.setPadding(dp(12),dp(8),dp(12),dp(8));
-        AlertDialog dialog=new AlertDialog.Builder(this).setTitle(R.string.call_keypad).setView(keys).setNegativeButton(R.string.close,null).create();
+        box.addView(keys);toneKeys=keys;toneOwner=owner;
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle(R.string.call_keypad).setView(box).setNegativeButton(R.string.close,null).create();toneDialog=dialog;
         for(String digit:new String[]{"1","2","3","4","5","6","7","8","9","*","0","#"}){
             MaterialButton key=command(digit);key.setTextSize(22);key.setContentDescription(getString(R.string.call_send_tone,digit));
             GridLayout.LayoutParams size=new GridLayout.LayoutParams();size.width=0;size.height=dp(56);size.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);keys.addView(key,size);
-            key.setOnClickListener(v->{if(service==null||service.call!=owner||owner.ended||owner.audio==null||!owner.audio.active||owner.audio.closed){dialog.dismiss();error(getString(R.string.call_ended));return;}owner.dtmf(digit);});
+            key.setOnClickListener(v->{owner.dtmf(digit);updateToneDialog();});
         }
-        dialog.show();
+        dialog.setOnDismissListener(d->{if(toneDialog==dialog){toneDialog=null;toneOwner=null;toneStatus=null;toneKeys=null;}});
+        dialog.show();updateToneDialog();
+    }
+    private void updateToneDialog(){
+        if(toneDialog==null||toneOwner==null)return;
+        boolean available=service!=null&&service.call==toneOwner&&toneOwner.canSendTone();
+        UiText state=toneOwner.toneState;
+        if(!available&&state.empty())state=UiText.of(R.string.dtmf_unavailable);
+        toneStatus.setText(state.render(this));toneStatus.setTextColor(UiLabels.statusColor(state));
+        toneStatus.setVisibility(state.empty()?View.GONE:View.VISIBLE);
+        for(int i=0;i<toneKeys.getChildCount();i++)toneKeys.getChildAt(i).setEnabled(available&&!toneOwner.toneBusy());
     }
     private void startCall(JSONObject l,String mode,String number,JSONObject incoming){if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},22);error(getString(R.string.microphone_permission_needed));return;}try{if(service==null)throw new IllegalStateException(getString(R.string.connect_first));service.begin(new CallPlan(l,mode,number,incoming));}catch(Exception e){error(e.getMessage());}}
     private void messagePage(){selectors();number=input(R.string.number,false);number.setInputType(InputType.TYPE_CLASS_PHONE);number.setText(draftNumber);message=input(R.string.sms_body,false);message.setSingleLine(false);message.setMinLines(3);message.setText(draftMessage);button(R.string.send,()->{JSONObject l=selected();String mode=route(),target=number.getText().toString(),body=message.getText().toString();confirm(getString(R.string.sms_confirm)+"\n\n"+lineLabel(l)+" · "+UiLabels.transport(this,mode)+"\n"+target,()->{try{if(service==null)throw new IllegalStateException(getString(R.string.connect_first));service.sendSMS(l,mode,target,body);}catch(Exception e){error(e.getMessage());}});});
@@ -475,7 +491,9 @@ public final class MainActivity extends Activity {
     }
     private void styleAudioToggle(MaterialButton button,int icon){
         button.setText("");button.setIconResource(icon);button.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);button.setIconPadding(0);button.setIconSize(dp(24));button.setMinimumHeight(dp(48));
-        button.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{0xffdfefed,0xffffffff}));
+        int[][] states={new int[]{-android.R.attr.state_enabled},new int[]{android.R.attr.state_checked},new int[]{}};
+        button.setIconTint(new ColorStateList(states,new int[]{0xff7b898f,0xff0c6b64,0xff244e63}));
+        button.setBackgroundTintList(new ColorStateList(states,new int[]{0xffedf0f2,0xffdfefed,0xffffffff}));
     }
     private String callLineIdentity(RemoteCall call){return call.plan.lineName+"\n"+(call.plan.lineNumber.isEmpty()?getString(R.string.number_unavailable):call.plan.lineNumber)+" · "+UiLabels.cardSuffix(this,call.plan.card);}
     private void directoryDialog(){
@@ -567,6 +585,7 @@ public final class MainActivity extends Activity {
         }
         if(lastData!=service.snapshot){lastData=service.snapshot;if(tab==0){updateHomePage();}else{updateSelection();updateMessages();}}
         RemoteCall current=service.call;
+        updateToneDialog();
         boolean hasAudio=current!=null&&current.audio!=null&&!current.audio.closed;
         if(current!=renderedCall||hasAudio!=renderedAudioControls){callSurfaceKey="";if(current==null&&renderedCall!=null&&renderedCall.plan.incoming!=null)consumeIncoming(renderedCall.plan.mode,renderedCall.plan.incoming);renderedCall=current;renderedAudioControls=hasAudio;if(tab==1){render();return;}}
         if(hasAudio){MaterialButton mute=findViewById(R.id.call_mute),speaker=findViewById(R.id.call_speaker);View dtmf=findViewById(R.id.call_dtmf);

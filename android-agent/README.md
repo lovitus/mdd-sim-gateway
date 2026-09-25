@@ -47,6 +47,13 @@ explicitly asks for speech. Carrier dispatch, unknown outcomes and no-redial gua
 are unchanged. The in-call keypad opens without sending anything; only an explicit
 digit press sends DTMF for the still-active original call.
 
+Call controls explicitly color their icons in enabled, checked and disabled states,
+independently of the Material theme's filled-button defaults. The in-call keypad
+shows the pending digit and the gateway acknowledgement or original failure in
+the dialog. Only one tone request is in flight; no tone is queued or retried.
+Acknowledgement is checked against the existing call/session response, not treated
+as proof that the carrier played a tone. DTMF feedback does not replace call state.
+
 Audio timeout details preserve capture callbacks, locally queued frames, returned
 frames, playback counts and PCM signal/peak measurements without retaining audio.
 Queue acceptance is not server receipt, and these counters do not establish voice

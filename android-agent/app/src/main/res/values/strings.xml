@@ -233,6 +233,10 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="call_prepare_cleanup_unknown">No call started; preparation cleanup is unconfirmed</string>
 <string name="call_save_failed">%1$s. Local save failed; record retained.</string>
 <string name="dtmf_unconfirmed">DTMF unconfirmed; not repeated</string>
+<string name="dtmf_sending">Sending tone %1$s…</string>
+<string name="dtmf_accepted">Tone %1$s: gateway acknowledged the request</string>
+<string name="dtmf_failed">Tone %1$s unconfirmed; not repeated.\n%2$s</string>
+<string name="dtmf_unavailable">Call audio is not active. No tone sent.</string>
 <string name="audio_in_use">Audio is in use by another call</string>
 <string name="audio_unavailable">8 kHz call audio unavailable</string>
 <string name="audio_focus_lost">Audio focus lost</string>

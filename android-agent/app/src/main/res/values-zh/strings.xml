@@ -233,6 +233,10 @@
 <string name="call_prepare_cleanup_unknown">未发起通话，准备资源清理尚未确认</string>
 <string name="call_save_failed">%1$s。本机保存失败，记录已保留。</string>
 <string name="dtmf_unconfirmed">DTMF 未确认，没有重复发送</string>
+<string name="dtmf_sending">正在发送按键 %1$s…</string>
+<string name="dtmf_accepted">按键 %1$s：网关已确认请求</string>
+<string name="dtmf_failed">按键 %1$s 未确认，没有重复发送。\n%2$s</string>
+<string name="dtmf_unavailable">通话音频尚未就绪，没有发送按键。</string>
 <string name="audio_in_use">音频正在被另一通话使用</string>
 <string name="audio_unavailable">8 kHz 通话音频不可用</string>
 <string name="audio_focus_lost">音频焦点已丢失</string>
