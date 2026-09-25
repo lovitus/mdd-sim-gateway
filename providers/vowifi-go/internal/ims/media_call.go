@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,9 +41,10 @@ type MediaCallConfig struct {
 // It deliberately does not own registration recovery or browser heartbeat
 // policy. End always closes media, even when the peer does not accept BYE.
 type MediaCall struct {
-	agent  *voicehost.IMSOutboundAgent
-	bridge *media.Bridge
-	dialog voicehost.DialogInfo
+	agent      *voicehost.IMSOutboundAgent
+	bridge     *media.Bridge
+	dialog     voicehost.DialogInfo
+	dtmfEvents uint16
 
 	endMu     sync.Mutex
 	ended     bool
@@ -92,8 +94,9 @@ func StartMediaCall(
 	if err != nil {
 		return nil, voicehost.OutboundCallResult{}, err
 	}
+	localSDP.Payloads = append(localSDP.Payloads, voicehost.DefaultRTPDTMFPayloadType)
 	request.RawSDP = voicehost.BuildSDPAnswerWithOptions(localSDP, voicehost.SDPAnswerOptions{
-		Codecs:  []voicehost.SDPCodec{sdpCodec(config.Codec)},
+		Codecs:  []voicehost.SDPCodec{sdpCodec(config.Codec), voicehost.NewSDPTelephoneEventCodec(voicehost.DefaultRTPDTMFPayloadType, media.SampleRate)},
 		PTimeMS: 20, MaxPTimeMS: 20,
 	})
 	request.RemoteSDP = localSDP
@@ -121,7 +124,8 @@ func StartMediaCall(
 	closeBridge = false
 	return &MediaCall{
 		agent: agent, bridge: bridge,
-		dialog: voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
+		dialog:     voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
+		dtmfEvents: acceptedDTMFEvents(result.RawSDP),
 	}, result, nil
 }
 
@@ -151,6 +155,18 @@ func (call *MediaCall) End(ctx context.Context) (voicehost.DialogInfoResult, err
 func (call *MediaCall) SendDTMF(ctx context.Context, signal string, durationMS int) (string, error) {
 	if call == nil || call.agent == nil {
 		return "", errors.New("IMS call is unavailable")
+	}
+	event, err := voicehost.RTPDTMFEventCode(signal)
+	if err != nil {
+		return "", err
+	}
+	if call.dtmfEvents&(uint16(1)<<event) != 0 {
+		// A failed/partial RTP send is unknown, never a reason to send the same
+		// digit again through INFO. Only an unnegotiated event takes the fallback.
+		if err := call.bridge.SendDTMF(ctx, signal, durationMS, voicehost.DefaultRTPDTMFPayloadType); err != nil {
+			return "", err
+		}
+		return voicehost.DialogDTMFRouteRTP, nil
 	}
 	request := voicehost.DialogRTPDTMFRequest{
 		DeviceID: call.dialog.DeviceID, CallID: call.dialog.CallID,
@@ -229,6 +245,54 @@ func mediaOffer(bridge *media.Bridge, codec media.Codec) (voicehost.SDPInfo, err
 		Payloads: []int{int(codec.PayloadType())}, Direction: "sendrecv",
 		PTimeMS: 20, MaxPTimeMS: 20,
 	}, nil
+}
+
+// The offer uses one 8 kHz event payload. Never infer negotiation from a bare
+// rtpmap line or send event codes outside the peer's accepted fmtp set.
+func acceptedDTMFEvents(rawSDP []byte) uint16 {
+	description, err := voicehost.ParseSDPMediaDescription(rawSDP)
+	if err != nil {
+		return 0
+	}
+	offered := false
+	for _, payload := range description.Info.Payloads {
+		offered = offered || payload == voicehost.DefaultRTPDTMFPayloadType
+	}
+	if !offered {
+		return 0
+	}
+	for _, codec := range description.Codecs {
+		if codec.Payload != voicehost.DefaultRTPDTMFPayloadType || codec.ClockRate != media.SampleRate || codec.Channels > 1 ||
+			!strings.EqualFold(codec.EncodingName, voicehost.SDPCodecTelephoneEvent) {
+			continue
+		}
+		if strings.TrimSpace(codec.FMTP) == "" {
+			return 0xffff
+		}
+		var events uint16
+		for _, part := range strings.Split(codec.FMTP, ",") {
+			bounds := strings.Split(strings.TrimSpace(part), "-")
+			if len(bounds) > 2 {
+				return 0
+			}
+			first, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
+			if err != nil || first < 0 || first > 255 {
+				return 0
+			}
+			last := first
+			if len(bounds) == 2 {
+				last, err = strconv.Atoi(strings.TrimSpace(bounds[1]))
+				if err != nil || last < first || last > 255 {
+					return 0
+				}
+			}
+			for event := first; event <= min(last, 15); event++ {
+				events |= uint16(1) << event
+			}
+		}
+		return events
+	}
+	return 0
 }
 
 func acceptedMediaEndpoints(result voicehost.OutboundCallResult, codec media.Codec) (string, string, error) {

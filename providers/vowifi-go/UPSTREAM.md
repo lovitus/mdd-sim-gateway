@@ -1,5 +1,29 @@
 # Upstream source and MDD patch
 
+## Outbound DTMF media ownership
+
+An actual native outbound call reached `SendDTMF`, but the carrier rejected the
+SIP INFO fallback with 405. The MDD PCM bridge owns that call's RTP socket; the
+upstream dialog relay is absent, so querying its RTP sender cannot send an event.
+
+The outbound wrapper now offers 8 kHz telephone-event alongside its existing
+audio codec and honors the answer's payload and event set. It reuses the pinned
+upstream `BuildRTPDTMFSequence`, including terminal event repetitions, on the
+existing userspace media socket. Packet writes share the audio SSRC and sequence
+space; the event timestamp stays fixed while microphone audio continues. No new
+SIP stack, host-network fallback, audio synthesizer or dependency is introduced.
+The wire contract is [RFC 4733](https://www.rfc-editor.org/rfc/rfc4733.html).
+
+Failure boundaries: no accepted event payload means the existing fallback stays;
+a failed or partially sent RTP event must not fall back to INFO and duplicate a
+digit. Cancellation and bridge shutdown stop pending event packets. This change
+does not modify inbound B2BUA DTMF, call ownership, Core authentication or recovery.
+CI covers the existing media/IMS/protocol suites. The pre-fix physical error is
+retained separately; new carrier RTP-DTMF acceptance is still required before a
+production success claim. No new automated red/green result is claimed here.
+
+## Existing Transport Patches
+
 IKE diagnostic datagrams include late, duplicate and rejected candidates.
 They are not mutually exclusive successful outcomes of the sent requests.
 The IPC contract preserves them unchanged and only bounds timed-out exchanges
