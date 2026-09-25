@@ -32,6 +32,7 @@ type guiController struct {
 	configPath string
 	window     fyne.Window
 	summary    *widget.Label
+	connection *widget.Label
 	details    *widget.Entry
 	ctx        context.Context
 	refresh    chan struct{}
@@ -57,17 +58,20 @@ func runGUI(settings config, configPath string) error {
 	window.Resize(fyne.NewSize(760, 520))
 	summary := widget.NewLabel("正在读取 Agent 状态…")
 	summary.TextStyle = fyne.TextStyle{Bold: true}
+	connection := widget.NewLabel("Core 控制连接：状态未知")
+	connection.Wrapping = fyne.TextWrapWord
+	connection.Importance = widget.WarningImportance
 	details := widget.NewMultiLineEntry()
 	details.Disable()
 	details.Wrapping = fyne.TextWrapOff
 	controller := &guiController{
 		settings: settings, configPath: configPath, window: window,
-		summary: summary, details: details, ctx: ctx, refresh: make(chan struct{}, 1),
+		summary: summary, connection: connection, details: details, ctx: ctx, refresh: make(chan struct{}, 1),
 	}
 
 	buttons := controller.buttons()
 	window.SetContent(container.NewBorder(
-		container.NewVBox(summary, buttons), nil, nil, nil, details,
+		container.NewVBox(summary, connection, buttons), nil, nil, nil, details,
 	))
 	window.SetCloseIntercept(window.Hide)
 	quit := func() {
@@ -243,6 +247,33 @@ func (controller *guiController) loadSnapshot() {
 	}
 	fyne.Do(func() {
 		controller.summary.SetText(summary)
+		text := "Core 控制连接：状态未知（本机运行状态不代表已连接）"
+		importance := widget.WarningImportance
+		if snapshot, ok := value["runtime"].(agentcontrol.Snapshot); ok {
+			if snapshot.State != agentcontrol.StateRunning && snapshot.State != agentcontrol.StateStarting {
+				text = "Core 控制连接：运行时未运行"
+			} else if link := snapshot.CoreConnection; link != nil {
+				switch link.State {
+				case "connected":
+					text = "Core 控制连接：已连接（不代表通话已就绪）"
+					importance = widget.SuccessImportance
+				case "connecting":
+					text = "Core 控制连接：正在连接，远程设备操作尚不可用"
+				case "retrying":
+					text = "Core 控制连接：已断开，正在自动重连"
+					if !link.RetryAt.IsZero() {
+						text += "；下次尝试 " + link.RetryAt.Local().Format("15:04:05")
+					}
+				case "disconnected", "stopped":
+					text = "Core 控制连接：已断开，远程设备操作不可用"
+				}
+			}
+		} else {
+			text = "Core 控制连接：无法读取本机 Agent 状态"
+		}
+		controller.connection.Importance = importance
+		controller.connection.SetText(text)
+		controller.connection.Refresh()
 		controller.details.SetText(string(payload))
 	})
 }

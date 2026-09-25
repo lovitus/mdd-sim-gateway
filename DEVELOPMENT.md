@@ -72,6 +72,28 @@ contract tests importing them. Literal worklet/dynamic imports are included; uns
 Use `node tools/repository-check.mjs --write` to regenerate TODO summaries after editing the acceptance ledger;
 CI checks the generated files, original-criterion preservation and evidence-path integrity.
 
+## Agent control-link status
+
+The owner's missing-connection-warning report is independent of Android and of
+the underlying transport fault. The Agent's authenticated local `/v1/status`
+includes `core_connection` from its existing WSS worker. `running` still means
+local hardware ownership; `connected` means Core acknowledged the Agent hello,
+not that any SIM, voice path or data session is healthy. CLI readers and the desktop
+GUI can distinguish connecting, connected, disconnected, retrying and stopped.
+Older services without this optional field display unknown, never connected.
+
+Failure boundaries: an offline Core must not stop local isolation; stopping the
+runtime must not leave a retained connected indication; a pending reconnect must
+show its existing retry deadline; status must not disclose tokens or raw transport
+errors. The GUI displays a persistent colored warning, not repeated modal dialogs.
+This change does not alter reconnect timing, TLS, Core endpoints, notifications,
+user switches or hardware policy. Original failure details remain in local logs.
+
+Validation is pending the unchanged GitHub workflow and real packaged Agent checks.
+Existing runtime/connection and GUI tests remain unchanged; no new automated
+red/green coverage or physical acceptance is claimed. In particular, green CI
+alone cannot establish that the field transport fault has recovered.
+
 ## Source, artifact and running-instance identity
 
 Prefer verified immutable releases when a source rebuild is unnecessary. For a rebuild, record the reviewed commit,
