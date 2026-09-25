@@ -1,5 +1,26 @@
 # Upstream source and MDD patch
 
+## SMS registered network context
+
+A real single-part SMS returned `Forbidden - Service not allowed in this location`.
+That response is retained as failed, not successful submission. Source inspection
+found that REGISTER carries the configured profile's access/visited network
+headers, while `IMSSMSTransport` constructed MESSAGE dialogs without them. The
+shared dialog builder consequently used its bare `IEEE-802.11` fallback. It does
+not inherit these fields automatically from `DialogRequestConfig.Profile`.
+
+The local adaptation copies those two existing profile fields into the SMS dialog.
+It uses the same registered context, not a fabricated country or a new location
+policy. Empty values retain the existing builder defaults. Authentication, route
+sets, transport ownership, redirect handling, paid-operation identity and retry
+policy are unchanged. No registration, SIM, Core or user configuration is changed.
+
+This is a concrete propagation correction, not proof that the carrier's rejection
+was caused by this omission. It also does not explain or repair the separately
+reported incoming-call failure. Existing messaging/IMS suites cover the wire path;
+no new red/green regression result or post-fix carrier acceptance is claimed.
+The one authorized self-SMS must not be repeated automatically for validation.
+
 ## Outbound DTMF media ownership
 
 An actual native outbound call reached `SendDTMF`, but the carrier rejected the
