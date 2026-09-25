@@ -58,6 +58,16 @@ Audio timeout details preserve capture callbacks, locally queued frames, returne
 frames, playback counts and PCM signal/peak measurements without retaining audio.
 Queue acceptance is not server receipt, and these counters do not establish voice
 quality. The existing Core signal threshold and carrier-dispatch gate are unchanged.
+After an already-submitted call loses audio, a matching terminal history record
+must not erase the observed media-close reason. Known media failures remain red;
+a normal remote WebSocket close retains neutral audio detail without pretending
+that it identifies the carrier or hardware cause. Once the call end is confirmed,
+the detail no longer incorrectly says remote termination still needs confirmation.
+An explicit user hangup does not acquire a failure from a late audio callback.
+The pre-fix field UI reduced an unexpectedly ended call to only `Call ended`.
+This presentation correction changes no call lifetime, API, reader or recovery
+policy. It does not repair the separately observed USB write failure. Existing CI
+must qualify the candidate; no new automated red/green coverage is claimed.
 Reader transport state is retained separately from local card-scan state so a scan
 cannot hide a failed connection. Home/Readers show that state; diagnostic sharing
 contains only bounded failure codes, never raw response bodies, URLs or credentials.

@@ -217,6 +217,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="call_rejected">Call was rejected and not established</string>
 <string name="call_remote_state">Original call: %1$s</string>
 <string name="call_reason">%1$s\nReason: %2$s</string>
+<string name="call_ended_audio_detail">%1$s\nAudio: %2$s</string>
 <string name="call_no_evidence">Original session evidence is unavailable; call end is not confirmed</string>
 <string name="call_still_active">Original call is active</string>
 <string name="call_no_active_evidence">Original call not found; gateway confirmation is required</string>
@@ -341,6 +342,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="setup_confirm">Connect to %1$s?\n\n%2$s</string>
 <string name="audio_off">Local audio is off</string>
 <string name="audio_transport_closed">Media connection closed; remote call end needs confirmation</string>
+<string name="audio_transport_closed_confirmed">Media connection closed</string>
 <string name="audio_live_description">Audio connected · %1$s · %2$s</string>
 <string name="message_delivery_pending">Delivery pending</string>
 <string name="message_delivery_unknown">Delivery status unconfirmed</string>

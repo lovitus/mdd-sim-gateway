@@ -19,6 +19,7 @@ final class RemoteCall {
     volatile UiText toneState=UiText.EMPTY;
     private final AtomicBoolean sendingTone=new AtomicBoolean();
     private volatile UiText preparationFailure=UiText.EMPTY;
+    private volatile int mediaEndReason;
     private volatile int preparationStage=R.string.layer_card;
     volatile String session="",phase="PREPARING";
     private volatile String releasedSession="";
@@ -44,7 +45,19 @@ final class RemoteCall {
         preparationStage=R.string.layer_media;
         audio=new NativeAudio(service,api,service.loop,new NativeAudio.Events(){
             public void state(int label){if(!ended&&ownsRecord())service.changed();}
-            public void ended(int reason){if(!ownsRecord())return;synchronized(RemoteCall.this){if(!submitted&&!ended)preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(R.string.layer_media),audio==null?UiText.of(reason):audio.failureDescription());ended=true;}api.cancel(RemoteCall.this);state=submitted?UiText.of(R.string.call_reason,UiText.of(R.string.call_audio_stopped),UiText.of(reason)):preparationFailure;service.callAudioEnded(RemoteCall.this);}
+            public void ended(int reason){
+                if(!ownsRecord())return;
+                synchronized(RemoteCall.this){
+                    if(!ended){
+                        if(submitted)mediaEndReason=reason;
+                        else preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(R.string.layer_media),audio==null?UiText.of(reason):audio.failureDescription());
+                    }
+                    ended=true;
+                }
+                api.cancel(RemoteCall.this);
+                state=submitted?UiText.of(R.string.call_reason,UiText.of(R.string.call_audio_stopped),UiText.of(reason)):preparationFailure;
+                service.callAudioEnded(RemoteCall.this);
+            }
         });
         if(ended){audio.close();finishPreparation();return;}
         requireOwner();
@@ -119,6 +132,12 @@ final class RemoteCall {
         if(audio!=null)audio.close();service.microphoneFinished(this);
         if(!release()&&!phase.equals("TERMINAL")){state=preparationFailure.empty()?UiText.of(R.string.call_prepare_cleanup_unknown):UiText.of(R.string.call_reason,UiText.of(R.string.call_prepare_cleanup_unknown),preparationFailure);retiring=false;service.changed();return;}
         synchronized(this){retired=true;retiring=false;phase="TERMINAL";if(reconcileTimer!=null)reconcileTimer.cancel(false);}
+        // A terminal history record confirms the end, not the absence of a media failure.
+        if(submitted&&mediaEndReason!=0){
+            boolean closedNormally=mediaEndReason==R.string.audio_transport_closed;
+            message=UiText.of(closedNormally?R.string.call_ended_audio_detail:R.string.call_reason,message,
+                UiText.of(closedNormally?R.string.audio_transport_closed_confirmed:mediaEndReason));
+        }
         state=message;service.clearCall(this,message);
     }
     boolean release(){String current=session;if(current.isEmpty()||current.equals(releasedSession))return true;try{api.json("DELETE",plan.leases(),Json.obj("session_id",current));releasedSession=current;return true;}catch(Exception e){return false;}}

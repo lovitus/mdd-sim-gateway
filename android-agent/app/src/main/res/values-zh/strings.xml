@@ -217,6 +217,7 @@
 <string name="call_rejected">通话被拒接，未建立</string>
 <string name="call_remote_state">原通话：%1$s</string>
 <string name="call_reason">%1$s\n原因：%2$s</string>
+<string name="call_ended_audio_detail">%1$s\n音频：%2$s</string>
 <string name="call_no_evidence">原会话证据不可用，不能确认通话已结束</string>
 <string name="call_still_active">原通话仍活动</string>
 <string name="call_no_active_evidence">未找到原活动通话，需要网关确认</string>
@@ -341,6 +342,7 @@
 <string name="setup_confirm">连接到 %1$s？\n\n%2$s</string>
 <string name="audio_off">本地音频已关闭</string>
 <string name="audio_transport_closed">媒体连接已关闭，远端通话结束仍待确认</string>
+<string name="audio_transport_closed_confirmed">媒体连接已关闭</string>
 <string name="audio_live_description">音频已连接 · %1$s · %2$s</string>
 <string name="message_delivery_pending">等待送达</string>
 <string name="message_delivery_unknown">送达状态未确认</string>
