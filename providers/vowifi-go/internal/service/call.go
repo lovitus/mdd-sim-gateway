@@ -158,6 +158,14 @@ func (backend *Backend) recordCallTermination(active *activeVoiceCall, confirmed
 	backend.mu.Unlock()
 }
 
+func confirmedCallEnd(ctx context.Context, call VoiceCall) error {
+	result, err := call.End(ctx)
+	if err == nil && !result.Accepted {
+		return fmt.Errorf("call cleanup is not confirmed: %d %s", result.StatusCode, result.Reason)
+	}
+	return err
+}
+
 func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoiceCall, runtime Runtime, operationID string, start func(context.Context) (VoiceCall, error)) (vowifiipc.CallResult, error) {
 	call, startErr := start(ctx)
 	if startErr == nil && call == nil {
@@ -175,7 +183,7 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 		}
 		if call != nil {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_, cleanupErr := call.End(cleanupContext)
+			cleanupErr := confirmedCallEnd(cleanupContext, call)
 			cancel()
 			backend.recordCallTermination(active, cleanupErr == nil, cleanupErr)
 			if cleanupErr != nil {
@@ -191,7 +199,7 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 		backend.runtime != runtime || backend.condition != vowifiipc.RuntimeRunning {
 		backend.mu.Unlock()
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, cleanupErr := call.End(cleanupContext)
+		cleanupErr := confirmedCallEnd(cleanupContext, call)
 		cancel()
 		backend.recordCallTermination(active, cleanupErr == nil, cleanupErr)
 		if cleanupErr != nil {
@@ -216,7 +224,7 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 		backend.mu.Unlock()
 		guardCancel()
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, cleanupErr := call.End(cleanupContext)
+		cleanupErr := confirmedCallEnd(cleanupContext, call)
 		cancel()
 		backend.recordCallTermination(active, cleanupErr == nil, cleanupErr)
 		active.session.EndStream("call state could not be persisted")
@@ -451,7 +459,7 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 	backend.sequence++
 	backend.mu.Unlock()
 
-	_, endErr := active.call.End(ctx)
+	endErr := confirmedCallEnd(ctx, active.call)
 	backend.mu.Lock()
 	if endErr != nil {
 		failure := publicFailure(&StageError{Layer: "call", Code: "call_end_failed", Err: endErr})

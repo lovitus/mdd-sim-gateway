@@ -633,9 +633,9 @@ Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-ru
 
 Preserved original ([TODO.md:288](../../docs/archive/2026-09-20/TODO.md#L288)): 通话中 Agent 断线：服务端结束或标记失败的通话、关闭 RTP、通知所有客户端并保留记录。
 
-Exact-call guards retain cleanup ownership and terminate or report uncertain outcomes after media/Agent loss. Hardware carrier terminal-state acceptance is not implied.
+Exact-call guards retain cleanup ownership and terminate or report uncertain outcomes after media/Agent loss. The September 26 PR reconciliation ports established-dialog cleanup from old PR #9/#10: final-2xx ACK/SDP/media failures preserve the original handle, new calls remain blocked until cleanup, and End requires a positive result before runtime release. Six real SIP/media/wrapper/Backend regression cases failed before the port and passed with race detection; existing media confirmation remains idempotent. No Core durable-call recovery or hardware carrier terminal-state acceptance is implied.
 
-Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-runtime/internal/agentmedia/broker.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`providers/vowifi-go/internal/service/call.go`](../../providers/vowifi-go/internal/service/call.go), [`webui/src/goCallCoordinator.jsx`](../../webui/src/goCallCoordinator.jsx).
+Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-runtime/internal/agentmedia/broker.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`providers/vowifi-go/internal/service/call.go`](../../providers/vowifi-go/internal/service/call.go), [`providers/vowifi-go/internal/service/call_cleanup_test.go`](../../providers/vowifi-go/internal/service/call_cleanup_test.go), [`providers/vowifi-go/internal/ims/media_call.go`](../../providers/vowifi-go/internal/ims/media_call.go), [`providers/vowifi-go/UPSTREAM.md`](../../providers/vowifi-go/UPSTREAM.md), [`webui/src/goCallCoordinator.jsx`](../../webui/src/goCallCoordinator.jsx).
 
 ### M38
 

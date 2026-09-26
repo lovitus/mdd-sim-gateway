@@ -1,5 +1,32 @@
 # Upstream source and MDD patch
 
+## Established-call cleanup ownership
+
+Reconciliation of old PR #9/#10 found missing F1/F3 safety fixes in the current
+Provider. This batch adapts the existing implementation from PR #9 at `274983d`
+(including `d005080`), without its separate Core durable-call receipts or pairing
+changes. Existing source licenses, paid-operation identity, guard/backoff, DTMF
+and inbound handling are retained.
+
+The final 2xx dialog is now stored before ACK/SDP work. A media-start error returns
+the original cleanup handle through both wrappers; it cannot trigger registration
+recovery/redial while that handle exists. Media closes locally, but the Backend
+keeps the call busy until cleanup is positively confirmed. Runtime stop, explicit
+hangup and failed start all check the actual End result, not only a nil error.
+Existing confirmed BYE idempotency and the original-call cleanup guard are reused.
+
+The failure checklist is final-2xx/unusable media, invalid SDP, lost ACK write,
+rejected cleanup, new-call admission during cleanup, and runtime shutdown before
+confirmed termination. The real SIP/media/wrapper/Backend regression failed on
+unmodified `4ca9315` in all six scenarios and passed with the scoped port under
+`-race`. The synthetic SIP peer rejects two BYEs and accepts the original call's
+third; only one INVITE is allowed. It never contacts a carrier. The existing media
+test's nil-handle expectation was corrected because even already-confirmed cleanup
+now returns an idempotent handle; its wire trace still requires exactly one BYE.
+The focused one-time check used the same isolated opencore-amr 0.1.6 static library
+as the SMS counterexample. Full build/race qualification remains GitHub-only.
+This is not production deployment, incoming audio acceptance or Core restart recovery.
+
 ## SMS request-local failure containment
 
 The deployed receive-path trial recorded two parsed incoming INVITEs and locally
@@ -35,9 +62,12 @@ any response expectations. This one-time local red/green used the hash-verified
 Homebrew opencore-amr 0.1.6 static library in an isolated task directory, without
 a system installation. Full build/race remains the unchanged GitHub workflow.
 
-The owner authorized one new self-SMS after the earlier paid rejection. It has
-not yet been sent because the actual UI is blocked. This patch is not carrier
-SMS acceptance and does not authorize an automatic resend or PR merge.
+The owner-authorized self-SMS was subsequently submitted once after the `4ca9315`
+trial deployment. SIP accepted it, followed by delivery failure with RP cause 38
+(network out of order); there was no received self-message. This differs from the
+earlier SIP 403 and does not establish the carrier's root cause. The authorization
+is consumed. This patch is not carrier SMS acceptance and does not authorize an
+automatic resend or PR merge.
 
 ## Peer-initiated incoming TCP
 

@@ -100,33 +100,38 @@ func StartMediaCall(
 		PTimeMS: 20, MaxPTimeMS: 20,
 	})
 	request.RemoteSDP = localSDP
-	result, err := agent.StartOutboundCall(ctx, request)
-	if err != nil || !result.Accepted {
-		return nil, result, err
+	result, startErr := agent.StartOutboundCall(ctx, request)
+	if !result.Accepted && !result.DialogEstablished {
+		return nil, result, startErr
 	}
-
-	remoteRTP, remoteRTCP, err := acceptedMediaEndpoints(result, config.Codec)
-	if err == nil {
-		err = bridge.SetRemote(remoteRTP, remoteRTCP)
-	}
-	if err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), mediaCleanupTimeout)
-		_, byeErr := agent.EndVoiceCallWithResult(cleanupCtx, voicehost.DialogInfo{
-			DeviceID: request.DeviceID, CallID: request.CallID,
-		})
-		cancel()
-		if byeErr != nil {
-			return nil, result, errors.Join(err, fmt.Errorf("end accepted call after media failure: %w", byeErr))
-		}
-		return nil, result, err
-	}
-
-	closeBridge = false
-	return &MediaCall{
+	call := &MediaCall{
 		agent: agent, bridge: bridge,
 		dialog:     voicehost.DialogInfo{DeviceID: request.DeviceID, CallID: request.CallID},
 		dtmfEvents: acceptedDTMFEvents(result.RawSDP),
-	}, result, nil
+	}
+	if startErr == nil && !result.Accepted {
+		startErr = fmt.Errorf("%w: established dialog has no usable media", ErrMediaNegotiation)
+	}
+	if startErr == nil {
+		var remoteRTP, remoteRTCP string
+		remoteRTP, remoteRTCP, startErr = acceptedMediaEndpoints(result, config.Codec)
+		if startErr == nil {
+			startErr = bridge.SetRemote(remoteRTP, remoteRTCP)
+		}
+	}
+	if startErr != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), mediaCleanupTimeout)
+		_, byeErr := call.End(cleanupCtx)
+		cancel()
+		if byeErr != nil {
+			startErr = errors.Join(startErr, fmt.Errorf("end accepted call after media failure: %w", byeErr))
+		}
+		// Local media closes even when BYE fails. The original handle remains
+		// retryable, or idempotently ended if the first cleanup was confirmed.
+		return call, result, startErr
+	}
+	closeBridge = false
+	return call, result, nil
 }
 
 // End serializes BYE attempts and then stops RTP/RTCP regardless of the BYE

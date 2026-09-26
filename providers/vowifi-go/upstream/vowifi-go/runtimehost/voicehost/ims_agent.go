@@ -294,12 +294,17 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 	applyNegotiatedSessionInterval(&cfg, resp.Headers)
 	cfg.InviteHeaders = nil
 	cfg.InitialInvite = false
+	// Preserve the final dialog before fallible ACK/SDP work. A peer can send
+	// BYE after observing ACK, so never reinsert this dialog afterwards.
+	byeCfg := cfg
+	byeCfg.CSeq = nextCSeq
+	a.storeDialog(strings.TrimSpace(req.CallID), imsDialogState{cfg: byeCfg, relay: relay, localSDPBody: localSDPBody})
 	ack, err := voiceclient.BuildAckRequest(cfg)
 	if err != nil {
-		return OutboundCallResult{Accepted: false, Reason: "build IMS ACK failed"}, err
+		return OutboundCallResult{DialogEstablished: true, Reason: "build IMS ACK failed"}, err
 	}
 	if err := a.Transport.WriteRequest(ctx, ack); err != nil {
-		return OutboundCallResult{Accepted: false, Reason: "IMS ACK failed"}, err
+		return OutboundCallResult{DialogEstablished: true, Reason: "IMS ACK failed"}, err
 	}
 	answerBody := append([]byte(nil), resp.Body...)
 	localSDP := provisionalSDP
@@ -309,51 +314,44 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 	if len(resp.Body) > 0 {
 		parsed, err := ParseSDP(resp.Body)
 		if err != nil {
-			a.deleteDialog(strings.TrimSpace(req.CallID))
-			return OutboundCallResult{Accepted: false, Reason: "invalid IMS SDP answer"}, err
+			return OutboundCallResult{DialogEstablished: true, Reason: "invalid IMS SDP answer"}, err
 		}
 		localSDP = parsed
 	}
 	if relay != nil && len(resp.Body) > 0 {
 		if err := relay.SetIMSRemote(localSDP); err != nil {
-			a.deleteDialog(strings.TrimSpace(req.CallID))
-			return OutboundCallResult{Accepted: false, Reason: "RTP relay remote setup failed"}, err
+			return OutboundCallResult{DialogEstablished: true, Reason: "RTP relay remote setup failed"}, err
 		}
 		if srtpNegotiation != nil {
 			answerBody, localSDP, err = srtpNegotiation.RewriteClientAnswer(relay, resp.Body, localSDP)
 			if err != nil {
-				a.deleteDialog(strings.TrimSpace(req.CallID))
-				return OutboundCallResult{Accepted: false, Reason: "invalid RTP relay SRTP SDP answer"}, err
+				return OutboundCallResult{DialogEstablished: true, Reason: "invalid RTP relay SRTP SDP answer"}, err
 			}
 		} else {
 			answerBody = RewriteSDPMediaEndpoint(resp.Body, relay.ClientEndpoint())
 			localSDP, err = ParseSDP(answerBody)
 			if err != nil {
-				a.deleteDialog(strings.TrimSpace(req.CallID))
-				return OutboundCallResult{Accepted: false, Reason: "invalid RTP relay SDP answer"}, err
+				return OutboundCallResult{DialogEstablished: true, Reason: "invalid RTP relay SDP answer"}, err
 			}
 		}
 	}
 	if localSDP.MediaPort <= 0 || strings.TrimSpace(localSDP.ConnectionIP) == "" {
 		parsed, err := ParseSDP(answerBody)
 		if err != nil {
-			a.deleteDialog(strings.TrimSpace(req.CallID))
-			return OutboundCallResult{Accepted: false, Reason: "invalid IMS SDP answer"}, err
+			return OutboundCallResult{DialogEstablished: true, Reason: "invalid IMS SDP answer"}, err
 		}
 		localSDP = parsed
 	}
-	byeCfg := cfg
-	byeCfg.CSeq = nextCSeq
-	a.storeDialog(strings.TrimSpace(req.CallID), imsDialogState{cfg: byeCfg, relay: relay, localSDPBody: localSDPBody})
 	a.scheduleDialogSessionRefresh(strings.TrimSpace(req.CallID))
 	closeRelayOnError = false
 	return OutboundCallResult{
-		Accepted:   true,
-		StatusCode: outboundStatusCode(resp.StatusCode, 200),
-		Reason:     firstVoiceNonEmpty(resp.Reason, "OK"),
-		LocalSDP:   localSDP,
-		RawSDP:     answerBody,
-		Headers:    firstValueSIPHeaders(resp.Headers),
+		Accepted:          true,
+		DialogEstablished: true,
+		StatusCode:        outboundStatusCode(resp.StatusCode, 200),
+		Reason:            firstVoiceNonEmpty(resp.Reason, "OK"),
+		LocalSDP:          localSDP,
+		RawSDP:            answerBody,
+		Headers:           firstValueSIPHeaders(resp.Headers),
 	}, nil
 }
 
