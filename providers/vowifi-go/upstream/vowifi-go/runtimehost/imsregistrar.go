@@ -1300,6 +1300,7 @@ func (r WireIMSRegistrar) smsTransport(cfg IMSRegistrationConfig, profile voicec
 		Registration: binding,
 		Domain:       profile.Domain,
 		UserAgent:    firstRuntimeNonEmpty(r.UserAgent, profile.UserAgent),
+		SMSC:         strings.TrimSpace(cfg.Profile.SMSC),
 	}
 }
 

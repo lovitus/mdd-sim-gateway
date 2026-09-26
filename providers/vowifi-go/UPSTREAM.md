@@ -1,5 +1,31 @@
 # Upstream source and MDD patch
 
+## Configured SMS service centre
+
+The follow-up to the retained RP cause 38 failure found a separate, reproducible
+configuration loss: Core rendering, Provider settings and prepared identity retain
+the configured SMSC, but `WireIMSRegistrar.smsTransport` omitted it when constructing
+the existing `IMSSMSTransport`. The resulting RP-DATA destination was empty even
+with a configured service centre. The inspected [upstream registrar](https://github.com/boa-z/vowifi-go/blob/main/runtimehost/imsregistrar.go)
+has the same omission. This is not proof that it caused the carrier's RP error.
+
+The adaptation passes the effective registration profile's SMSC to the existing
+encoder. Recipient routing, TPDU construction, transport ownership, unknown-outcome
+handling and retry policy are unchanged. An unset SMSC remains unset; no carrier
+number is guessed. There is no Core, Android, configuration-schema or API change.
+
+Failure checklist: a configured SMSC disappearing on transport creation, an
+international/national address being changed, and an unconfigured address being
+invented. `TestWireIMSRegistrarSMSUsesConfiguredServiceCentre` failed on unmodified
+`bc7dd36` for both configured forms, with the unset control already passing.
+The existing real-loopback REGISTER/MESSAGE test also failed after decoding an
+empty RP destination from the actual UDP message. Both pass with the adaptation
+under `-race`; related prepared-identity and recovery-binding checks also pass.
+The one-time focused red/green uses the same isolated native dependency described
+below. Full build/race remains the existing GitHub workflow, not a local suite.
+No further carrier SMS was sent; the prior single-use authorization is consumed.
+Carrier delivery, deployment and exact historical cause remain unverified.
+
 ## Established-call cleanup ownership
 
 Reconciliation of old PR #9/#10 found missing F1/F3 safety fixes in the current
