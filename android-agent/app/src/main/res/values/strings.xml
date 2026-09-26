@@ -123,6 +123,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="reader_usb_write_failed">USB command write failed (%1$d); outcome unknown. Card identity has not been confirmed.</string>
 <string name="reader_usb_recovering">USB port reset completed; waiting to identify the card again.</string>
 <string name="reader_usb_recovery_failed">USB recovery failed at %2$s (%1$d). Automatic reset has stopped for this failure.</string>
+<string name="reader_usb_recovery_retrying">USB recovery failed at %2$s (%1$d). One delayed retry is available if command writes still fail.</string>
 <string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">OMAPI access denied by the device or SIM</string>
 <string name="reader_count">Readers identified: %1$d</string>

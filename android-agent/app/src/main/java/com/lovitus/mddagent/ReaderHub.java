@@ -30,7 +30,7 @@ final class ReaderHub implements AutoCloseable {
                 if(e!=null)recovery.healthy(android.os.SystemClock.elapsedRealtime());
             }catch(Exception failure){remove(name);
                 UiText detail=failure instanceof UsbCard.WriteFailure?UiText.of(R.string.reader_usb_write_failed,((UsbCard.WriteFailure)failure).transferred):UiText.of(R.string.reader_usb_unavailable);
-                if(recovery.failed(failure instanceof UsbCard.WriteFailure)){
+                if(recovery.failed(failure instanceof UsbCard.WriteFailure,android.os.SystemClock.elapsedRealtime())){
                     try{
                         UsbCard card=UsbRecovery.reset(usb,d);Entry restored=new Entry(name,card);entries.put(name,restored);
                         discover(restored);restored.insertion=card.insertion.get();
@@ -40,10 +40,14 @@ final class ReaderHub implements AutoCloseable {
                     }catch(Exception recoveryFailure){
                         remove(name);UsbRecovery.Failure reason=UsbRecovery.Failure.at("identity",recoveryFailure);
                         recovery.resetResult=reason.code;recovery.resetStage=reason.stage;
-                        android.util.Log.i("MDDUSB","USB port recovery result="+reason.code+" stage="+reason.stage+" failure="+recoveryFailure.getClass().getSimpleName());
-                        detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult,recovery.resetStage));
+                        Throwable cause=reason.getCause()==null?reason:reason.getCause();
+                        android.util.Log.i("MDDUSB","USB port recovery result="+reason.code+" stage="+reason.stage+" failure="+cause.getClass().getSimpleName()+" retry_pending="+recovery.retryPending());
                     }
-                }else if(recovery.resetResult!=0)detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult,recovery.resetStage));
+                }
+                if(recovery.resetResult!=0){
+                    int message=recovery.retryPending()?R.string.reader_usb_recovery_retrying:R.string.reader_usb_recovery_failed;
+                    detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(message,recovery.resetResult,recovery.resetStage));
+                }
                 failures.put(name,detail);
             }
         }

@@ -4,27 +4,35 @@ import android.hardware.usb.*;
 import android.system.OsConstants;
 import java.io.IOException;
 
-/** One reset per transport failure episode, rearmed only after sustained health. */
+/** One recovery plus a bounded slot-handshake followup; sustained health rearms it. */
 final class UsbRecovery {
     private int failures;
-    private boolean attempted;
+    private int attempts;
+    private long retryAt;
     private long healthySince = -1;
     int resetResult;
     String resetStage = "";
 
-    boolean failed(boolean writeFailure) {
+    boolean failed(boolean writeFailure, long now) {
         healthySince = -1;
         failures = writeFailure ? Math.min(2, failures + 1) : 0;
-        if (failures < 2 || attempted) return false;
-        attempted = true;
+        if (failures < 2 || attempts >= 2) return false;
+        if (attempts == 1 && (!retryPending() || now < retryAt)) return false;
+        attempts++;
+        retryAt = now + 30000;
         return true;
+    }
+
+    boolean retryPending() {
+        return attempts == 1 && resetResult != 0 && "slot_status".equals(resetStage);
     }
 
     void healthy(long now) {
         failures = 0;
         if (healthySince < 0) healthySince = now;
         if (now - healthySince >= 60000) {
-            attempted = false;
+            attempts = 0;
+            retryAt = 0;
             resetResult = 0;
             resetStage = "";
         }

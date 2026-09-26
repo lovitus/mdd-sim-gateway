@@ -86,7 +86,7 @@ response; the original signed client then reidentified the card and Core became
 ready. This proves a software recovery path, not the origin of the sleep fault.
 
 The client now cancels the old interrupt request before releasing its connection.
-Two consecutive failed USB writes permit one port reset for that failure episode,
+Two consecutive failed USB writes permit a port reset for that failure episode,
 only on a single-configuration, single-interface APDU-level CCID reader with
 existing USB permission. Composite devices and interfaces owned elsewhere are
 not reset. Reset, reclaim, CCID slot-status handshake and power-on retain the same
@@ -96,8 +96,12 @@ scan: it reproduced a successful reset return followed by failed card reads.
 That native return alone is not recovery. The corrected path follows the working
 field comparison without the intervening close/idle gap;
 PIN/AKA, SMS and call requests are never replayed. Sixty seconds of successful
-scans rearm recovery for a later fault; continuing failure does not cause a reset
-loop. Home/Readers retain recovery failure details and the
+scans rearm recovery for a later fault. If that reset fails specifically during
+the read-only slot-status handshake and fresh command writes still fail, one
+additional reset is permitted at least 30 seconds after the first attempt.
+There is no third reset, and permission, shape, claim, native reset, power-on and
+identity failures do not gain a retry. Continuing failure does not cause a reset
+loop. Home/Readers distinguish the pending followup from exhausted recovery and retain the
 unplug/OTG advice. No wake lock, root, hidden Java API, server change, permission
 grant or availability/share intent change is added.
 
@@ -118,15 +122,24 @@ short sample. Permission and attachment survived, but bulk writes failed again.
 A bounded, exclusive diagnostic reset again recovered slot status, power-on and
 the original card without replugging; the production client subsequently became
 ready. That controlled diagnostic is not automatic-recovery acceptance.
-The current correction retains the same reset budget and descriptor, but permits
+The first correction retained the same reset budget and descriptor, but permitted
 at most three GetSlotStatus write attempts after reset, with 250/500 ms backoff.
 Only zero/negative writes of this read-only command are eligible. Partial writes,
 response/framing failures, power-on, identity, PIN and AKA are never retried there.
 This addresses a possible firmware-resume gap, not an established cause of sleep
 failure. Recovery now reports its exact stage rather than attributing every -5
 to the reset ioctl. Claimed-interface ownership is retained through cleanup.
-The candidate still requires exact-head CI and renewed physical sleep acceptance;
-no new automated test or successful hardware result is claimed in this paragraph.
+Signed v77 passed exact-head workflow `36238994751`, but a later real screen-off
+failure reached `slot_status` and remained unavailable after waking. The one-reset
+budget stayed exhausted. A diagnostic driver failed before issuing its reset;
+after cleanup/reopening, the same v77 software recovered the exact card with a
+new reset budget. That is not proof that an App restart is a product solution.
+The bounded followup above addresses this observed recovery dead end without an
+App restart, permanent wake lock or paid-operation retry. A focused policy test
+compiled and failed with the old one-reset behavior (only its timestamp parameter
+was added), then all three policy tests passed after the change. This counterexample
+uses real UsbRecovery policy, not USB hardware; Android CI and actual automatic
+followup acceptance are still pending. The physical sleep-fault cause is unknown.
 
 Call history now displays direction, peer, line name/number/card when present,
 localized colored status and local time. Missing catalog details remain unknown;
