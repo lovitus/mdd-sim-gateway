@@ -113,6 +113,21 @@ powered-handset 180-second screen-off/wake check retained the same process and
 card; Android device-idle was not entered. Long deep-idle/battery acceptance is
 still open. No automated red/green test is claimed for this hardware-specific path.
 
+A later real failure on v75/v76 supersedes any durability inference from that
+short sample. Permission and attachment survived, but bulk writes failed again.
+A bounded, exclusive diagnostic reset again recovered slot status, power-on and
+the original card without replugging; the production client subsequently became
+ready. That controlled diagnostic is not automatic-recovery acceptance.
+The current correction retains the same reset budget and descriptor, but permits
+at most three GetSlotStatus write attempts after reset, with 250/500 ms backoff.
+Only zero/negative writes of this read-only command are eligible. Partial writes,
+response/framing failures, power-on, identity, PIN and AKA are never retried there.
+This addresses a possible firmware-resume gap, not an established cause of sleep
+failure. Recovery now reports its exact stage rather than attributing every -5
+to the reset ioctl. Claimed-interface ownership is retained through cleanup.
+The candidate still requires exact-head CI and renewed physical sleep acceptance;
+no new automated test or successful hardware result is claimed in this paragraph.
+
 Call history now displays direction, peer, line name/number/card when present,
 localized colored status and local time. Missing catalog details remain unknown;
 the UI does not invent an immutable historical SIM snapshot.

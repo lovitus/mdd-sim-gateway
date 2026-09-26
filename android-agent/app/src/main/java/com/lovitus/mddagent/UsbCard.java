@@ -13,6 +13,7 @@ final class UsbCard implements SimProtocol.Card {
     private final Object eventLock=new Object();
     private UsbRequest eventRequest;
     private Thread eventThread;
+    private boolean claimed;
     static final class WriteFailure extends IOException {
         final int transferred;
         WriteFailure(int transferred){super("USB write failed ("+transferred+"); outcome unknown");this.transferred=transferred;}
@@ -27,19 +28,37 @@ final class UsbCard implements SimProtocol.Card {
             if(in!=null&&out!=null){found=f;break;}}
         if(found==null)throw new IOException("USB device has no CCID bulk interface");
         intf=found;input=in;output=out;interrupt=intr;connection=manager.openDevice(d);
-        if(connection==null)throw new IOException("USB permission required");
-        if(!Ccid.apduLevel(connection.getRawDescriptors(),intf.getId())||!connection.claimInterface(intf,!reset)){connection.close();throw new IOException("Reader must support APDU-level CCID (TPDU readers are not advertised)");}
+        if(connection==null){if(reset)throw new UsbRecovery.Failure("open",-OsConstants.EACCES);throw new IOException("USB permission required");}
+        String stage="capability";
         try{
+            if(!Ccid.apduLevel(connection.getRawDescriptors(),intf.getId()))throw new IOException("Reader must support APDU-level CCID (TPDU readers are not advertised)");
+            stage="claim";
+            if(!connection.claimInterface(intf,!reset))throw new IOException("USB interface is unavailable");
+            claimed=true;
             if(reset){
-                if(!connection.releaseInterface(intf))throw new UsbRecovery.Failure(-OsConstants.EIO);
+                stage="release";
+                if(!connection.releaseInterface(intf))throw new UsbRecovery.Failure(stage,-OsConstants.EIO);
+                claimed=false;
+                stage="reset";
                 int result=UsbPortReset.reset(connection.getFileDescriptor());
-                if(result!=0)throw new UsbRecovery.Failure(result);
-                if(!connection.claimInterface(intf,false))throw new UsbRecovery.Failure(-OsConstants.EBUSY);
+                if(result!=0)throw new UsbRecovery.Failure(stage,result);
+                stage="reclaim";
+                if(!connection.claimInterface(intf,false))throw new UsbRecovery.Failure(stage,-OsConstants.EBUSY);
+                claimed=true;
                 // Keep the recovered descriptor alive through CCID handshake and power-on.
-                status();
+                stage="slot_status";
+                for(int attempt=0;;attempt++){
+                    try{status();break;}
+                    catch(WriteFailure notReady){
+                        // Only GetSlotStatus is safe to repeat while firmware resumes.
+                        if(attempt>=2||notReady.transferred>0)throw notReady;
+                        Thread.sleep(250L<<attempt);
+                    }
+                }
             }
+            stage="power_on";
             atr=exchange(0x62,new byte[0],0x80);
-        }catch(Exception|LinkageError e){close();throw e;}
+        }catch(Exception|LinkageError e){close();if(e instanceof InterruptedException)Thread.currentThread().interrupt();if(reset)throw UsbRecovery.Failure.at(stage,e);throw e;}
         if(interrupt!=null){eventThread=new Thread(this::watch,"mdd-ccid-events");eventThread.setDaemon(true);eventThread.start();}
     }
     synchronized byte[] exchange(int type,byte[] data,int expected)throws Exception{
@@ -76,6 +95,6 @@ final class UsbCard implements SimProtocol.Card {
     public void close(){
         synchronized(eventLock){if(closed)return;closed=true;insertion.incrementAndGet();if(eventRequest!=null)eventRequest.cancel();}
         if(eventThread!=null&&eventThread!=Thread.currentThread())try{eventThread.join(2000);}catch(InterruptedException interrupted){Thread.currentThread().interrupt();}
-        connection.releaseInterface(intf);connection.close();
+        if(claimed){connection.releaseInterface(intf);claimed=false;}connection.close();
     }
 }

@@ -10,6 +10,7 @@ final class UsbRecovery {
     private boolean attempted;
     private long healthySince = -1;
     int resetResult;
+    String resetStage = "";
 
     boolean failed(boolean writeFailure) {
         healthySince = -1;
@@ -25,28 +26,42 @@ final class UsbRecovery {
         if (now - healthySince >= 60000) {
             attempted = false;
             resetResult = 0;
+            resetStage = "";
         }
     }
 
     static final class Failure extends IOException {
         final int code;
-        Failure(int code) { super("USB recovery failed (" + code + ")"); this.code = code; }
+        final String stage;
+        Failure(String stage, int code) {
+            super("USB recovery failed at " + stage + " (" + code + ")");
+            this.stage = stage;
+            this.code = code;
+        }
+        static Failure at(String stage, Throwable cause) {
+            if (cause instanceof Failure) return (Failure) cause;
+            int code = cause instanceof SecurityException ? -OsConstants.EACCES
+                    : cause instanceof LinkageError ? -OsConstants.ENOSYS : -OsConstants.EIO;
+            Failure failure = new Failure(stage, code);
+            failure.initCause(cause);
+            return failure;
+        }
     }
 
     static UsbCard reset(UsbManager manager, UsbDevice device) throws Exception {
         try {
-            if (!manager.hasPermission(device)) throw new Failure(-OsConstants.EACCES);
+            if (!manager.hasPermission(device)) throw new Failure("permission", -OsConstants.EACCES);
             // A device reset must never affect another interface of a composite device.
-            if (device.getConfigurationCount() != 1) throw new Failure(-OsConstants.ENOTSUP);
+            if (device.getConfigurationCount() != 1) throw new Failure("device_shape", -OsConstants.ENOTSUP);
             UsbConfiguration config = device.getConfiguration(0);
-            if (config.getInterfaceCount() != 1) throw new Failure(-OsConstants.ENOTSUP);
+            if (config.getInterfaceCount() != 1) throw new Failure("device_shape", -OsConstants.ENOTSUP);
             UsbInterface intf = config.getInterface(0);
-            if (intf.getInterfaceClass() != 11) throw new Failure(-OsConstants.ENOTSUP);
+            if (intf.getInterfaceClass() != 11) throw new Failure("device_shape", -OsConstants.ENOTSUP);
             return new UsbCard(manager, device, true);
         } catch (SecurityException denied) {
-            throw new Failure(-OsConstants.EACCES);
+            throw Failure.at("permission", denied);
         } catch (LinkageError unavailable) {
-            throw new Failure(-OsConstants.ENOSYS);
+            throw Failure.at("native_library", unavailable);
         }
     }
 }

@@ -34,15 +34,16 @@ final class ReaderHub implements AutoCloseable {
                     try{
                         UsbCard card=UsbRecovery.reset(usb,d);Entry restored=new Entry(name,card);entries.put(name,restored);
                         discover(restored);restored.insertion=card.insertion.get();
-                        recovery.resetResult=0;recovery.healthy(android.os.SystemClock.elapsedRealtime());
+                        recovery.resetResult=0;recovery.resetStage="";recovery.healthy(android.os.SystemClock.elapsedRealtime());
                         android.util.Log.i("MDDUSB","USB port recovery result=0 stage=identified");
                         continue;
                     }catch(Exception recoveryFailure){
-                        remove(name);recovery.resetResult=recoveryFailure instanceof UsbRecovery.Failure?((UsbRecovery.Failure)recoveryFailure).code:-android.system.OsConstants.EIO;
-                        android.util.Log.i("MDDUSB","USB port recovery result="+recovery.resetResult+" stage=failed");
-                        detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult));
+                        remove(name);UsbRecovery.Failure reason=UsbRecovery.Failure.at("identity",recoveryFailure);
+                        recovery.resetResult=reason.code;recovery.resetStage=reason.stage;
+                        android.util.Log.i("MDDUSB","USB port recovery result="+reason.code+" stage="+reason.stage+" failure="+recoveryFailure.getClass().getSimpleName());
+                        detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult,recovery.resetStage));
                     }
-                }else if(recovery.resetResult!=0)detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult));
+                }else if(recovery.resetResult!=0)detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult,recovery.resetStage));
                 failures.put(name,detail);
             }
         }
