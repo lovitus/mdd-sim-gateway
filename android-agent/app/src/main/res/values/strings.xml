@@ -120,6 +120,13 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="sharing_save_failed">Reader sharing stopped, but the change was not saved. Check before reopening.</string>
 <string name="reader_permission_missing">No reader permission granted</string>
 <string name="reader_usb_unavailable">USB reader unavailable: check access, card and APDU capability</string>
+<string name="reader_usb_write_failed">USB command write failed (%1$d); outcome unknown. Card identity has not been confirmed.</string>
+<string name="reader_usb_recovering">USB port reset completed; waiting to identify the card again.</string>
+<string name="reader_usb_recovery_failed">USB recovery failed at %2$s (%1$d). Automatic reset has stopped for this failure.</string>
+<string name="reader_usb_recovery_retrying">USB recovery failed at %2$s (%1$d). One delayed retry is available if command writes still fail.</string>
+<string name="reader_usb_recovery_unstable_retrying">USB became unavailable again after recovery. One delayed retry is available if command writes still fail.</string>
+<string name="reader_usb_recovery_unstable_stopped">USB became unavailable again after recovery. Automatic resets have stopped for this failure.</string>
+<string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">OMAPI access denied by the device or SIM</string>
 <string name="reader_count">Readers identified: %1$d</string>
 <string name="reader_identity_ready">SIM identity read</string>
@@ -135,6 +142,8 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="reader_usb_not_shared">Start reader sharing to register this device with Core.</string>
 <string name="reader_usb_wait_link">Sharing is on; waiting for the Agent connection.</string>
 <string name="reader_usb_wait_scan">Connected; waiting for the next reader scan.</string>
+<string name="reader_usb_none">No USB CCID reader detected. If one is attached, check the reader and OTG connection.</string>
+<string name="reader_usb_reconnect_hint">USB communication failed. When no call or SIM operation is active, try unplugging and reconnecting the reader and OTG adapter. Power, system sleep or software may be involved; the cause is not confirmed.</string>
 <string name="reader_identity_local_only">SIM identity is read locally; it does not confirm Core received the latest reader state.</string>
 <string name="home_gateway_section">Gateway</string>
 <string name="home_readers_section">Readers</string>
@@ -215,6 +224,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="call_rejected">Call was rejected and not established</string>
 <string name="call_remote_state">Original call: %1$s</string>
 <string name="call_reason">%1$s\nReason: %2$s</string>
+<string name="call_ended_audio_detail">%1$s\nAudio: %2$s</string>
 <string name="call_no_evidence">Original session evidence is unavailable; call end is not confirmed</string>
 <string name="call_still_active">Original call is active</string>
 <string name="call_no_active_evidence">Original call not found; gateway confirmation is required</string>
@@ -231,6 +241,10 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="call_prepare_cleanup_unknown">No call started; preparation cleanup is unconfirmed</string>
 <string name="call_save_failed">%1$s. Local save failed; record retained.</string>
 <string name="dtmf_unconfirmed">DTMF unconfirmed; not repeated</string>
+<string name="dtmf_sending">Sending tone %1$s…</string>
+<string name="dtmf_accepted">Tone %1$s: gateway acknowledged the request</string>
+<string name="dtmf_failed">Tone %1$s unconfirmed; not repeated.\n%2$s</string>
+<string name="dtmf_unavailable">Call audio is not active. No tone sent.</string>
 <string name="audio_in_use">Audio is in use by another call</string>
 <string name="audio_unavailable">8 kHz call audio unavailable</string>
 <string name="audio_focus_lost">Audio focus lost</string>
@@ -238,12 +252,13 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="audio_focus_resumed">Call audio resumed</string>
 <string name="audio_focus_pause_failed">Could not safely pause call audio</string>
 <string name="audio_focus_restore_failed">Could not restore call audio</string>
-<string name="audio_check_timeout">Audio check timed out; no automatic dial</string>
+<string name="audio_check_timeout">Microphone / playback verification timed out. Check microphone access, speak during the audio check, and retry manually. No call was placed.</string>
+<string name="audio_timeout_evidence">%1$s\nCapture callbacks: %2$d; queued frames: %3$d (signal: %4$d); received: %5$d (signal: %6$d); played: %7$d; PCM peaks out/in: %8$d/%9$d. Queued frames do not prove server receipt.</string>
 <string name="audio_capture_stopped">Microphone stopped</string>
 <string name="audio_playback_stopped">Playback stopped</string>
 <string name="audio_invalid_frame">Invalid audio frame</string>
 <string name="audio_reconnected">Call audio reconnected</string>
-<string name="audio_checking">Checking audio</string>
+<string name="audio_checking">Checking microphone and playback. Say a few words into the phone before dialing.</string>
 <string name="audio_invalid_handshake">Invalid media handshake</string>
 <string name="audio_reconnecting">Reconnecting the same call audio</string>
 <string name="audio_lost">Media unavailable; no redial</string>
@@ -263,7 +278,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="line_history">Selected line history</string>
 <string name="sync_messages">Sync messages</string>
 <string name="recent_messages">Recent gateway messages</string>
-<string name="message_submitted">Submitted</string>
+<string name="message_submitted">Submitted · delivery not confirmed</string>
 <string name="message_not_sent">Not sent</string>
 <string name="message_partial">Partial submission observed; full result unconfirmed</string>
 <string name="message_unknown">Submission unconfirmed</string>
@@ -294,6 +309,8 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="message_received">Received</string>
 <string name="message_delivered">Delivered</string>
 <string name="message_failed">Failed</string>
+<string name="message_failure_observed">Gateway reports a send failure; full delivery is unconfirmed. Nothing resent.</string>
+<string name="message_request_failed">Submission unconfirmed (%1$s). No automatic resend.\n%2$s</string>
 <string name="tls_pinned">Pinned server certificate</string>
 <string name="tls_system">System certificate trust</string>
 <string name="connection_section">Connection</string>
@@ -309,6 +326,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="diagnostics_gateway">Gateway connected</string>
 <string name="diagnostics_sharing">Reader sharing intent</string>
 <string name="diagnostics_reader_link">Reader Agent connected</string>
+<string name="diagnostics_reader_failure">Last reader-link failure code</string>
 <string name="diagnostics_readers">Reported readers</string>
 <string name="diagnostics_network">Observed network transport</string>
 <string name="diagnostics_microphone">Microphone permission</string>
@@ -333,6 +351,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="setup_confirm">Connect to %1$s?\n\n%2$s</string>
 <string name="audio_off">Local audio is off</string>
 <string name="audio_transport_closed">Media connection closed; remote call end needs confirmation</string>
+<string name="audio_transport_closed_confirmed">Media connection closed</string>
 <string name="audio_live_description">Audio connected · %1$s · %2$s</string>
 <string name="message_delivery_pending">Delivery pending</string>
 <string name="message_delivery_unknown">Delivery status unconfirmed</string>
@@ -353,4 +372,25 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="layer_gateway">Gateway dependency</string>
 <string name="call_history">Call history</string>
 <string name="no_call_history">No call history</string>
+<string name="call_direction_in">Incoming</string>
+<string name="call_direction_out">Outgoing</string>
+<string name="call_history_dialing">Dialing</string>
+<string name="call_history_ringing">Ringing</string>
+<string name="call_history_answered">Answered</string>
+<string name="call_history_ended">Ended</string>
+<string name="call_history_failed">Failed</string>
+<string name="call_history_missed">Missed</string>
+<string name="call_history_rejected">Rejected</string>
+<string name="call_history_interrupted">Interrupted</string>
+<string name="call_history_line_unavailable">Line: %1$s · Details unavailable</string>
+<string name="call_preflight_failed">Call not placed · %1$s\n%2$s</string>
+<string name="message_from">From: %1$s</string>
+<string name="message_to">To: %1$s</string>
+<string name="message_line">SIM / line: %1$s</string>
+<string name="message_reply">Reply</string>
+<string name="message_reply_unavailable">Original SIM or reply number unavailable. Select the correct line and recipient manually.</string>
+<string name="message_reply_replace">Replace the current message draft and reply using this message’s SIM and number?</string>
+<string name="call_keypad">Keypad</string>
+<string name="call_send_tone">Send tone %1$s</string>
+<string name="message_body_unavailable">Content is not retained in this local receipt; check message history.</string>
 </resources>

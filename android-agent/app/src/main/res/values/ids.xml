@@ -36,4 +36,8 @@
   <item type="id" name="gateway_manage" /><item type="id" name="availability_toggle" />
   <item type="id" name="route_vowifi" /><item type="id" name="route_cellular" />
   <item type="id" name="dial_plus" /><item type="id" name="dial_backspace" />
+    <item name="message_reply" type="id" />
+    <item name="operation_notice" type="id" />
+    <item name="home_usb_state" type="id" />
+    <item name="reader_usb_state" type="id" />
 </resources>

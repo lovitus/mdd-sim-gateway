@@ -5,7 +5,53 @@ import org.json.JSONObject;
 
 /** Presentation of existing machine fields; never permission or routing logic. */
 final class UiLabels {
+    static final int OK=0xff0c6b64, WARNING=0xff8a5100, ERROR=0xffb3261e, NEUTRAL=0xff52616b;
     private UiLabels(){}
+    static int statusColor(UiText text){
+        if(text.resource==R.string.reader_usb_recovering)return WARNING;
+        if(text.resource==R.string.reader_usb_recovery_failed)return ERROR;
+        int id=text.resource;
+        if(id==R.string.message_request_failed||id==R.string.message_failure_observed)return ERROR;
+        if(id==R.string.dtmf_accepted)return OK;
+        if(id==R.string.dtmf_failed||id==R.string.dtmf_unavailable)return ERROR;
+        if(id==R.string.dtmf_sending||id==R.string.dtmf_unconfirmed)return WARNING;
+        if(id==R.string.link_online||id==R.string.link_reader_online||id==R.string.availability_on||id==R.string.reader_count||id==R.string.reader_identity_ready||id==R.string.call_request_accepted||id==R.string.call_ended||id==R.string.call_remote_ended||id==R.string.call_original_ended||id==R.string.call_still_active||id==R.string.audio_connected||id==R.string.audio_live_description||id==R.string.audio_reconnected||id==R.string.audio_focus_resumed||id==R.string.message_received||id==R.string.message_submitted||id==R.string.message_delivered||id==R.string.activity_reader_connected||id==R.string.activity_call_active)return OK;
+        if(id==R.string.call_preflight_failed||id==R.string.call_reason||id==R.string.call_rejected||id==R.string.call_check_failed||id==R.string.call_end_unknown||id==R.string.call_prepare_cleanup_unknown||id==R.string.link_schema||id==R.string.link_auth_required||id==R.string.link_upgrade||id==R.string.link_auth_tls||id==R.string.reader_usb_unavailable||id==R.string.reader_usb_write_failed||id==R.string.reader_identity_unavailable||id==R.string.reader_omapi_blocked||id==R.string.settings_unavailable||id==R.string.settings_save_failed||id==R.string.availability_failed||id==R.string.audio_check_timeout||id==R.string.audio_capture_stopped||id==R.string.audio_playback_stopped||id==R.string.audio_invalid_frame||id==R.string.audio_invalid_handshake||id==R.string.audio_lost||id==R.string.audio_focus_lost||id==R.string.audio_focus_pause_failed||id==R.string.audio_reconnect_expired||id==R.string.history_failed||id==R.string.message_failed||id==R.string.message_not_dispatched||id==R.string.enrollment_failed)return ERROR;
+        if(id==R.string.link_connecting||id==R.string.link_interrupted||id==R.string.link_wait_network||id==R.string.link_handshake_timeout||id==R.string.link_network_changed||id==R.string.link_heartbeat_missed||id==R.string.link_backpressure||id==R.string.call_preparing||id==R.string.call_result_unknown||id==R.string.call_dispatching||id==R.string.call_end_unconfirmed||id==R.string.call_no_evidence||id==R.string.call_no_active_evidence||id==R.string.audio_checking||id==R.string.audio_reconnecting||id==R.string.audio_focus_suspended||id==R.string.reader_scan_details||id==R.string.reader_identity_pin||id==R.string.reader_identity_partial||id==R.string.reader_link_pending||id==R.string.message_unknown_id||id==R.string.message_saving||id==R.string.activity_reader_disconnected)return WARNING;
+        return NEUTRAL;
+    }
+    static int messageColor(JSONObject message){
+        if(message.optString("state").equals("failed"))return ERROR;
+        String code=message.optString("kind").equals("delivery")||message.has("delivery_state")?message.optString("state"):message.optString("kind");
+        return code.equals("failed")||code.equals("failure_observed")||code.equals("not_dispatched")?ERROR:code.equals("received")||code.equals("delivered")||code.equals("sent")||code.equals("submitted")?OK:WARNING;
+    }
+    static String messagePeer(JSONObject message){
+        for(String key:new String[]{"sender","recipient","peer"}){String value=message.optString(key).trim();if(!value.isEmpty())return value;}
+        return "";
+    }
+    static String callState(Context context,String code){
+        int label;
+        switch(code){
+            case "dialing":label=R.string.call_history_dialing;break;
+            case "ringing":label=R.string.call_history_ringing;break;
+            case "answered":label=R.string.call_history_answered;break;
+            case "ended":label=R.string.call_history_ended;break;
+            case "failed":label=R.string.call_history_failed;break;
+            case "missed":label=R.string.call_history_missed;break;
+            case "rejected":label=R.string.call_history_rejected;break;
+            case "interrupted":label=R.string.call_history_interrupted;break;
+            default:return code.isEmpty()?context.getString(R.string.unknown):context.getString(R.string.unknown)+" ("+code+")";
+        }
+        return context.getString(label);
+    }
+    static int callColor(String code){
+        switch(code){
+            case "answered":case "ended":return OK;
+            case "missed":case "failed":case "interrupted":return ERROR;
+            case "rejected":return NEUTRAL;
+            default:return WARNING;
+        }
+    }
     static String transport(Context context,String mode){return mode.equals("cellular")?context.getString(R.string.cellular):mode.equals("vowifi")?"VoWiFi":context.getString(R.string.unknown);}
     static String cardSuffix(Context context,String card){return context.getString(R.string.card_suffix,card.substring(Math.max(0,card.length()-4)));}
     static String line(Context context,JSONObject line){
@@ -32,6 +78,7 @@ final class UiLabels {
             case "submitted":case "sent":label=R.string.message_submitted;break;
             case "not_dispatched":label=R.string.message_not_sent;break;
             case "submission_observed":label=R.string.message_partial;break;
+            case "failure_observed":label=R.string.message_failure_observed;break;
             case "received":label=R.string.message_received;break;
             case "delivered":label=R.string.message_delivered;break;
             case "failed":label=R.string.message_failed;break;
@@ -41,7 +88,8 @@ final class UiLabels {
     }
     static String messageEvent(Context context,JSONObject event){
         String kind=event.optString("kind"),state=event.optString("state"),label;
-        if(kind.equals("delivery"))label=context.getString(state.equals("delivered")?R.string.message_delivered:state.equals("failed")?R.string.message_failed:state.equals("pending")?R.string.message_delivery_pending:R.string.message_delivery_unknown);
+        if(state.equals("failed"))label=context.getString(R.string.message_failed);
+        else if(kind.equals("delivery")||event.has("delivery_state"))label=context.getString(state.equals("delivered")?R.string.message_delivered:state.equals("pending")?R.string.message_delivery_pending:R.string.message_delivery_unknown);
         else label=messageState(context,kind);
         return event.optInt("part")>0?context.getString(R.string.message_part,event.optInt("part"),label):label;
     }

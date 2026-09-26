@@ -9,6 +9,7 @@ final class Link implements AutoCloseable {
     private final GatewayApi api;private final ScheduledExecutorService loop;private final Events events;private final String path,agentID,agentToken,process;
     private final Retry retry=new Retry();private volatile WebSocket socket;private volatile long epoch,opened,lastMessage;private volatile boolean stopped,terminal,acknowledged;private int retryState;
     private ScheduledFuture<?> pending,deadline;private long sequence;private String revision="";
+    private volatile String diagnostic="";
     Link(GatewayApi api,ScheduledExecutorService loop,String path,String agentID,String agentToken,String process,Events events){this.api=api;this.loop=loop;this.path=path;this.agentID=agentID;this.agentToken=agentToken;this.process=process;this.events=events;}
     void connect(){loop.execute(this::open);}
     private void open(){
@@ -23,10 +24,10 @@ final class Link implements AutoCloseable {
                 if(!agentID.isEmpty()&&!acknowledged){if(!o.optString("kind").equals("hello_ack"))throw new IllegalArgumentException();acknowledged=true;retryState=0;events.state(R.string.link_reader_online,true);}
                 else if(agentID.isEmpty()){String type=o.optString("type");if(!type.equals("mobile.snapshot")&&!type.equals("mobile.heartbeat"))throw new IllegalArgumentException();if(o.optInt("schema_version")!=1)throw new IllegalArgumentException();if(!acknowledged&& !type.equals("mobile.snapshot"))throw new IllegalArgumentException();acknowledged=true;retryState=0;events.state(R.string.link_online,true);}
                 if(lastMessage-opened>30000)retry.healthy();events.message(o);
-            }catch(Exception invalid){failed(mine,R.string.link_schema,true);}});}
+            }catch(Exception invalid){diagnostic="invalid_protocol_message";failed(mine,R.string.link_schema,true);}});}
             public void onClosing(WebSocket ws,int code,String reason){ws.close(code,null);}
-            public void onClosed(WebSocket ws,int code,String reason){post(()->{if(!current(mine,ws))return;if(code==4401||code==1008)terminal=true;failed(mine,terminal?R.string.link_auth_required:R.string.link_interrupted,!terminal);if(code==4401&&agentID.isEmpty())events.authenticationRequired();});}
-            public void onFailure(WebSocket ws,Throwable error,Response response){post(()->{if(!current(mine,ws))return;int code=response==null?0:response.code();boolean identityFailure=identityFailure(error);terminal=code==401||code==403||identityFailure;failed(mine,code==404?R.string.link_upgrade:terminal?R.string.link_auth_tls:R.string.link_wait_network,!terminal);if(code==401&&agentID.isEmpty())events.authenticationRequired();});}
+            public void onClosed(WebSocket ws,int code,String reason){post(()->{if(!current(mine,ws))return;diagnostic="ws_close_"+code;switch(reason){case "invalid hello":case "invalid health":case "invalid response":case "Agent admission changed":diagnostic+="_"+reason.replace(' ','_');break;default:break;}if(code==4401||code==1008)terminal=true;failed(mine,terminal?R.string.link_auth_required:R.string.link_interrupted,!terminal);if(code==4401&&agentID.isEmpty())events.authenticationRequired();});}
+            public void onFailure(WebSocket ws,Throwable error,Response response){post(()->{if(!current(mine,ws))return;int code=response==null?0:response.code();boolean identityFailure=identityFailure(error);diagnostic="http_"+code+"_"+error.getClass().getSimpleName();terminal=code==401||code==403||identityFailure;failed(mine,code==404?R.string.link_upgrade:terminal?R.string.link_auth_tls:R.string.link_wait_network,!terminal);if(code==401&&agentID.isEmpty())events.authenticationRequired();});}
         });
         if(stopped){socket.cancel();socket=null;return;}
         if(deadline!=null)deadline.cancel(false);
@@ -56,6 +57,7 @@ final class Link implements AutoCloseable {
         if(socket.queueSize()>65536||!socket.send(Json.obj("kind","health","health",health).toString()))failed(epoch,R.string.link_backpressure,true);
     });}
     long generation(){return epoch;}
+    String diagnostic(){return diagnostic;}
     void sessionRenewed(){post(()->{if(stopped)return;terminal=false;retryState=0;open();});}
     void respond(long expected,String requestID,JSONObject result){post(()->{if(epoch==expected&&acknowledged&&socket!=null)socket.send(Json.obj("kind","aka_response","request_id",requestID,"aka_response",result).toString());});}
     void checkFreshness(){post(()->{if(agentID.isEmpty()&&acknowledged&&SystemClock.elapsedRealtime()-lastMessage>65000)failed(epoch,R.string.link_heartbeat_missed,true);});}

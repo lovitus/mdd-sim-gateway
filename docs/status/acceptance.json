@@ -1398,12 +1398,16 @@
     {
       "id": "ANDROID",
       "state": "partial",
-      "summary": "Client-focused implementation based on PR #7, excluding PR #8 pairing and durable call recovery. Exact source f627204 passed Android build/lint/unit/API28/API35 and full Go Runtime CI. Android 13 native login/pages, remembered login, silent-connection recovery and automatic reauthentication after isolated Core restart were verified. The owner authorized minimal mainline integration after this validation; production is unchanged.",
-      "acceptance": "Signed release APK UI checks and same-source QA APK recovery against an empty isolated Core are scoped evidence, not carrier acceptance. Malformed-frame regression, elapsed session-expiry coverage, real USB/card/OMAPI operations, calls/SMS, background/OEM delivery and battery measurements remain unaccepted. Production still requires a separately authorized Core rollout for the mobile endpoint.",
+      "summary": "Client-focused native preview, excluding PR #8 pairing and durable server call recovery. Minimal Core 8d0c4c6 remains deployed. Signed v80 / aeb0004 passed exact-head CI 36249215118, but real USB failures recurred after a successful reset and needed manual App recovery. The client-only correction allows one delayed followup after renewed write failures before sustained health rearms the budget; Home/Readers distinguish pending and exhausted recovery. Its regression compiled and failed on v80, then all four focused policy tests passed. Unsafe failure-stage exclusions and the two-reset limit remain. Full signed CI and physical acceptance of this correction are pending. Earlier failed-handshake evidence and receipt/history fixes remain preserved.",
+      "acceptance": "Preserve earlier isolated-Core login, silent-connection recovery, reauthentication, native pages/reply, call-history and scoped outgoing voice evidence. A real call exercised RTP DTMF after the separate Provider fix; IVR digit recognition is not claimed. One separately authorized self-SMS was actually received, but duplicate Telegram ingress followed. Provider PR #13 correction 524bd33 passed CI 36260170582 and replaced only the affected trial Provider; the temporary pause was released. No carrier retry occurred in the bounded observation, so real RP report acceptance remains unverified. The one-shot SMS permission is consumed. Durable USB recovery and native incoming answer/audio remain open; short Dozing is not deep-idle/battery acceptance. UK incoming and shared-network root causes remain owner-deferred. PRs remain subject to owner review; this client batch adds no Core change or paid retry. Malformed-frame, elapsed-session-expiry and OMAPI qualification remain unaccepted.",
       "evidence": [
         "android-agent/README.md",
         "android-agent/app/src/main/java/com/lovitus/mddagent/AgentService.java",
         "android-agent/app/src/androidTest/java/com/lovitus/mddagent/DeviceTest.java",
+        "android-agent/app/src/main/java/com/lovitus/mddagent/UsbRecovery.java",
+        "android-agent/app/src/test/java/com/lovitus/mddagent/UsbRecoveryTest.java",
+        "android-agent/app/src/main/java/com/lovitus/mddagent/MessageJournal.java",
+        "android-agent/app/src/test/java/com/lovitus/mddagent/MessageJournalTest.java",
         "docs/decisions/2026-09-21-android-agent.md",
         "docs/decisions/2026-09-24-android-client-scope.md"
       ],

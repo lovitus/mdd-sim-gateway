@@ -120,6 +120,13 @@
 <string name="sharing_save_failed">共享已停止，但变更未保存；重开前请核对。</string>
 <string name="reader_permission_missing">尚未授权读卡器</string>
 <string name="reader_usb_unavailable">USB 读卡器不可用，请检查权限、卡片和 APDU 能力</string>
+<string name="reader_usb_write_failed">USB 命令写入失败（%1$d），结果未知；尚未确认卡片身份。</string>
+<string name="reader_usb_recovering">USB 端口已重置，正在等待重新识别卡片。</string>
+<string name="reader_usb_recovery_failed">USB 恢复失败：%2$s（%1$d），已停止本次故障的自动重置。</string>
+<string name="reader_usb_recovery_retrying">USB 恢复失败：%2$s（%1$d）。若命令写入仍失败，将延迟再尝试一次。</string>
+<string name="reader_usb_recovery_unstable_retrying">USB 恢复后再次不可用。若命令写入仍失败，将延迟再尝试一次。</string>
+<string name="reader_usb_recovery_unstable_stopped">USB 恢复后再次不可用，已停止本次故障的自动重置。</string>
+<string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">设备或 SIM 访问规则拒绝了 OMAPI</string>
 <string name="reader_count">已识别读卡器：%1$d</string>
 <string name="reader_identity_ready">SIM 身份已读取</string>
@@ -135,6 +142,8 @@
 <string name="reader_usb_not_shared">请启动读卡器共享，将此设备登记到 Core。</string>
 <string name="reader_usb_wait_link">共享已开启，正在等待 Agent 连接。</string>
 <string name="reader_usb_wait_scan">连接已建立，正在等待读卡器扫描。</string>
+<string name="reader_usb_none">未检测到 USB CCID 读卡器。如果已插入，请检查读卡器和 OTG 连接。</string>
+<string name="reader_usb_reconnect_hint">USB 通信失败。确认没有通话或 SIM 操作后，可尝试重新插拔读卡器和 OTG 转接头。供电、系统休眠或软件均可能有关，原因尚未确认。</string>
 <string name="reader_identity_local_only">SIM 身份仅是本机读取结果，不代表 Core 已收到最新读卡器状态。</string>
 <string name="home_gateway_section">网关</string>
 <string name="home_readers_section">读卡器</string>
@@ -215,6 +224,7 @@
 <string name="call_rejected">通话被拒接，未建立</string>
 <string name="call_remote_state">原通话：%1$s</string>
 <string name="call_reason">%1$s\n原因：%2$s</string>
+<string name="call_ended_audio_detail">%1$s\n音频：%2$s</string>
 <string name="call_no_evidence">原会话证据不可用，不能确认通话已结束</string>
 <string name="call_still_active">原通话仍活动</string>
 <string name="call_no_active_evidence">未找到原活动通话，需要网关确认</string>
@@ -231,6 +241,10 @@
 <string name="call_prepare_cleanup_unknown">未发起通话，准备资源清理尚未确认</string>
 <string name="call_save_failed">%1$s。本机保存失败，记录已保留。</string>
 <string name="dtmf_unconfirmed">DTMF 未确认，没有重复发送</string>
+<string name="dtmf_sending">正在发送按键 %1$s…</string>
+<string name="dtmf_accepted">按键 %1$s：网关已确认请求</string>
+<string name="dtmf_failed">按键 %1$s 未确认，没有重复发送。\n%2$s</string>
+<string name="dtmf_unavailable">通话音频尚未就绪，没有发送按键。</string>
 <string name="audio_in_use">音频正在被另一通话使用</string>
 <string name="audio_unavailable">8 kHz 通话音频不可用</string>
 <string name="audio_focus_lost">音频焦点已丢失</string>
@@ -238,12 +252,13 @@
 <string name="audio_focus_resumed">通话音频已恢复</string>
 <string name="audio_focus_pause_failed">无法安全暂停通话音频</string>
 <string name="audio_focus_restore_failed">无法恢复通话音频</string>
-<string name="audio_check_timeout">音频检查超时，不会自动拨号</string>
+<string name="audio_check_timeout">麦克风或播放验证超时。请检查麦克风权限，在音频检查期间说几句话后手动重试。本次未拨出。</string>
+<string name="audio_timeout_evidence">%1$s\n采集回调：%2$d；入队帧：%3$d（有信号：%4$d）；回传：%5$d（有信号：%6$d）；已播放：%7$d；收发 PCM 峰值（发/收）：%8$d/%9$d。入队不代表服务端已接收。</string>
 <string name="audio_capture_stopped">麦克风已停止</string>
 <string name="audio_playback_stopped">播放已停止</string>
 <string name="audio_invalid_frame">音频帧无效</string>
 <string name="audio_reconnected">通话音频已重连</string>
-<string name="audio_checking">正在检查音频</string>
+<string name="audio_checking">正在检查麦克风和播放。请先对手机说几句话以完成拨号前检查。</string>
 <string name="audio_invalid_handshake">媒体握手无效</string>
 <string name="audio_reconnecting">正在恢复原通话音频</string>
 <string name="audio_lost">媒体不可用，不会重拨</string>
@@ -263,7 +278,7 @@
 <string name="line_history">所选线路历史</string>
 <string name="sync_messages">同步短信</string>
 <string name="recent_messages">最近网关短信</string>
-<string name="message_submitted">已提交</string>
+<string name="message_submitted">已提交 · 尚未确认送达</string>
 <string name="message_not_sent">未发出</string>
 <string name="message_partial">已观察到分段提交，整条结果未确认</string>
 <string name="message_unknown">提交结果未确认</string>
@@ -294,6 +309,8 @@
 <string name="message_received">已收到</string>
 <string name="message_delivered">已送达</string>
 <string name="message_failed">失败</string>
+<string name="message_failure_observed">网关报告发送失败；整条送达结果未确认，没有重发。</string>
+<string name="message_request_failed">提交结果未确认（%1$s），不会自动重发。\n%2$s</string>
 <string name="tls_pinned">已固定服务器证书</string>
 <string name="tls_system">系统证书信任</string>
 <string name="connection_section">连接</string>
@@ -309,6 +326,7 @@
 <string name="diagnostics_gateway">网关连接</string>
 <string name="diagnostics_sharing">读卡器共享意图</string>
 <string name="diagnostics_reader_link">读卡器 Agent 已连接</string>
+<string name="diagnostics_reader_failure">最近一次读卡器连接故障码</string>
 <string name="diagnostics_readers">已上报读卡器</string>
 <string name="diagnostics_network">观察到的网络类型</string>
 <string name="diagnostics_microphone">麦克风权限</string>
@@ -333,6 +351,7 @@
 <string name="setup_confirm">连接到 %1$s？\n\n%2$s</string>
 <string name="audio_off">本地音频已关闭</string>
 <string name="audio_transport_closed">媒体连接已关闭，远端通话结束仍待确认</string>
+<string name="audio_transport_closed_confirmed">媒体连接已关闭</string>
 <string name="audio_live_description">音频已连接 · %1$s · %2$s</string>
 <string name="message_delivery_pending">等待送达</string>
 <string name="message_delivery_unknown">送达状态未确认</string>
@@ -353,4 +372,25 @@
 <string name="layer_gateway">网关依赖</string>
 <string name="call_history">通话历史</string>
 <string name="no_call_history">暂无通话记录</string>
+<string name="call_preflight_failed">未拨出 · %1$s\n%2$s</string>
+<string name="message_from">来自：%1$s</string>
+<string name="message_to">发往：%1$s</string>
+<string name="message_line">SIM / 线路：%1$s</string>
+<string name="message_reply">回复</string>
+<string name="message_reply_unavailable">原接收卡或回复号码不可用，请手动确认线路和收件人。</string>
+<string name="message_reply_replace">替换当前短信草稿，使用这条消息的卡和号码回复？</string>
+<string name="call_keypad">数字键盘</string>
+<string name="call_send_tone">发送按键 %1$s</string>
+<string name="message_body_unavailable">此本地记录未保留正文，请查看短信历史。</string>
+<string name="call_direction_in">来电</string>
+<string name="call_direction_out">去电</string>
+<string name="call_history_dialing">拨号中</string>
+<string name="call_history_ringing">响铃中</string>
+<string name="call_history_answered">已接听</string>
+<string name="call_history_ended">已结束</string>
+<string name="call_history_failed">失败</string>
+<string name="call_history_missed">未接</string>
+<string name="call_history_rejected">已拒接</string>
+<string name="call_history_interrupted">已中断</string>
+<string name="call_history_line_unavailable">线路：%1$s · 详情不可用</string>
 </resources>
