@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -205,6 +206,14 @@ func (inbound *inboundMessaging) HandleSIPIncoming(ctx context.Context, request 
 	logInviteDiagnostic(invite, "handler_complete", 0, err)
 	out := make([]voiceclient.SIPIncomingResponse, 0, len(responses))
 	for _, response := range responses {
+		if isSMSReport(request, response) {
+			// Reports require a post-write callback. WireSIPFlow uses the
+			// streaming interface; buffered callers must not silently lose them.
+			response = withoutSMSReport(response)
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				response.StatusCode, response.Reason = 503, "SMS report requires streaming transport"
+			}
+		}
 		if !response.NoResponse {
 			logInviteDiagnostic(invite, "response_prepared", response.StatusCode, nil)
 		}
@@ -221,7 +230,19 @@ func (inbound *inboundMessaging) HandleSIPIncomingStreaming(ctx context.Context,
 		return errors.New("inbound SIP streaming handler is unavailable")
 	}
 	invite := beginInviteDiagnostic(request)
+	var report *voiceclient.SIPRequestMessage
 	err := inbound.server.HandleRequestStreaming(ctx, request, func(response voicehost.IMSInboundWireResponse) error {
+		var reportErr error
+		if isSMSReport(request, response) {
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				report, reportErr = inbound.buildSMSReport(request, response)
+			}
+			response = withoutSMSReport(response)
+			if reportErr != nil {
+				response.StatusCode, response.Reason = 500, "SMS report unavailable"
+				log.Printf("ims_inbound_sms_report phase=prepare status=500 failed=true")
+			}
+		}
 		err := emit(voiceclient.SIPIncomingResponse{
 			StatusCode: response.StatusCode, Reason: response.Reason, Headers: response.Headers,
 			Body: append([]byte(nil), response.Body...), NoResponse: response.NoResponse,
@@ -229,10 +250,33 @@ func (inbound *inboundMessaging) HandleSIPIncomingStreaming(ctx context.Context,
 		if !response.NoResponse {
 			logInviteDiagnostic(invite, "response_write", response.StatusCode, err)
 		}
-		return err
+		return errors.Join(err, reportErr)
 	})
 	logInviteDiagnostic(invite, "handler_complete", 0, err)
+	if err == nil && report != nil {
+		// TS 24.341 section 5.3.2.4: RP-ACK is a separate MESSAGE to
+		// the asserted IP-SM-GW, sent only after the SIP response is written.
+		reportCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		response, sendErr := voiceclient.RoundTripRequestWithDigestAuth(reportCtx, inbound.server.CarrierTransport, *report)
+		err = sendErr
+		if err == nil && (response.StatusCode < 200 || response.StatusCode >= 300) {
+			err = fmt.Errorf("SMS report rejected: SIP %d", response.StatusCode)
+		}
+		log.Printf("ims_inbound_sms_report status=%d failed=%t", response.StatusCode, err != nil)
+	}
 	return err
+}
+
+func withoutSMSReport(response voicehost.IMSInboundWireResponse) voicehost.IMSInboundWireResponse {
+	response.Body = nil
+	response.Headers = maps.Clone(response.Headers)
+	for name := range response.Headers {
+		if strings.EqualFold(name, "Content-Type") || strings.EqualFold(name, "Content-Length") {
+			delete(response.Headers, name)
+		}
+	}
+	return response
 }
 
 func beginInviteDiagnostic(request voiceclient.SIPIncomingRequest) uint64 {
@@ -312,6 +356,15 @@ func (inbound *inboundMessaging) handle(ctx context.Context, request voicehost.I
 	if err == nil && result.Incoming != nil {
 		event := inbound.tracker.identity(fmt.Sprintf("received:%s:%d", request.CallID, request.CSeq), providermessages.KindReceived)
 		event.MessageID = fmt.Sprintf("ims:%s:%d", request.CallID, request.CSeq)
+		if result.RPDU.Kind == messaging.SMSRPDUKindData && !result.Incoming.Timestamp.IsZero() {
+			id, identityErr := incomingSMSIdentity(result.Incoming)
+			if identityErr != nil {
+				return voicehost.IMSMessageResult{StatusCode: 500, Reason: "SMS identity unavailable"}, identityErr
+			}
+			// Carrier retries may change Call-ID, RP-MR and process generation.
+			// Core's existing durable identity/notification store deduplicates this key.
+			event.EventID, event.MessageID = id, id
+		}
 		event.Sender, event.Recipient, event.Body = result.Incoming.Sender, result.Incoming.Recipient, result.Incoming.Content
 		if !result.Incoming.Timestamp.IsZero() {
 			event.ObservedAt = result.Incoming.Timestamp
