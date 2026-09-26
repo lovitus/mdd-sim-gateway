@@ -12,6 +12,7 @@ final class ReaderHub implements AutoCloseable {
     private final UsbManager usb;private SEService se;private final TreeMap<String,Entry> entries=new TreeMap<>();
     volatile boolean closed;volatile UiText diagnostic=UiText.of(R.string.reader_permission_missing);
     private Map<String,UiText> usbFailures=Collections.emptyMap();
+    private final Map<String,UsbRecovery> usbRecovery=new HashMap<>();
     synchronized Map<String,UiText> usbFailures(){return new HashMap<>(usbFailures);}
     private final LinkedHashMap<String,Receipt> receipts=new LinkedHashMap<>();
     private static final class Entry{String name,generation=Json.id(),id="";JSONObject sim;SimProtocol.Card card;long insertion,metadataNext;int metadataAttempts;Entry(String name,SimProtocol.Card card){this.name=name;this.card=card;}}
@@ -23,11 +24,22 @@ final class ReaderHub implements AutoCloseable {
         for(UsbDevice d:usb.getDeviceList().values()){
             if(!usb.hasPermission(d))continue;boolean ccid=false;for(int i=0;i<d.getInterfaceCount();i++)ccid|=d.getInterface(i).getInterfaceClass()==11;if(!ccid)continue;
             String name="USB-"+d.getVendorId()+"-"+d.getProductId()+"-"+d.getDeviceId()+"-slot0";seen.add(name);
+            UsbRecovery recovery=usbRecovery.computeIfAbsent(name,ignored->new UsbRecovery());
             try{Entry e=entries.get(name);if(e!=null){UsbCard c=(UsbCard)e.card;c.status();if(c.insertion.get()!=e.insertion){remove(name);e=null;}else repairMetadata(e,explicitMetadata);}
                 if(e==null&&entries.size()<8){UsbCard card=new UsbCard(usb,d);e=new Entry(name,card);entries.put(name,e);discover(e);e.insertion=card.insertion.get();}
-            }catch(Exception failure){remove(name);failures.put(name,failure instanceof UsbCard.WriteFailure?
-                UiText.of(R.string.reader_usb_write_failed,((UsbCard.WriteFailure)failure).transferred):UiText.of(R.string.reader_usb_unavailable));}
+                if(e!=null)recovery.healthy(android.os.SystemClock.elapsedRealtime());
+            }catch(Exception failure){remove(name);
+                UiText detail=failure instanceof UsbCard.WriteFailure?UiText.of(R.string.reader_usb_write_failed,((UsbCard.WriteFailure)failure).transferred):UiText.of(R.string.reader_usb_unavailable);
+                if(recovery.failed(failure instanceof UsbCard.WriteFailure)){
+                    recovery.resetResult=UsbRecovery.reset(usb,d);
+                    android.util.Log.i("MDDUSB","USB port recovery result="+recovery.resetResult);
+                    // Publish unavailable first; only a subsequent identity read can advertise a new generation.
+                    detail=recovery.resetResult==0?UiText.of(R.string.reader_usb_recovering):UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult);
+                }else if(recovery.resetResult!=0)detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult));
+                failures.put(name,detail);
+            }
         }
+        usbRecovery.keySet().retainAll(seen);
         if(se!=null&&se.isConnected())for(Reader reader:se.getReaders()){
             String name="OMAPI-"+reader.getName();seen.add(name);
             try{Entry e=entries.get(name);if(!reader.isSecureElementPresent()){remove(name);continue;}

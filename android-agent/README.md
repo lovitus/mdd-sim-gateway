@@ -78,9 +78,36 @@ distinct. USB transfer failures stay visible alongside a link failure and sugges
 reconnecting the reader/OTG adapter only when no call or SIM operation is active.
 The advice does not diagnose a power, OS-sleep or software cause. An unrelated
 OMAPI denial does not color this USB-specific status as a failed USB reader.
-No device reset, permission change, PIN attempt, wake lock or automatic activation
-is added. Ordinary app launch after the owner's unlock recovered the real reader
-without replugging; this does not explain the prior intermittent USB write failure.
+USB permissions are requested only when missing, never treated as proof that the
+transport works. The sleep-related failure recurred with permission still granted:
+reopening, selecting the interface and resetting its configuration did not repair
+bulk writes. A single owned-device port reset restored a valid CCID slot-status
+response; the original signed client then reidentified the card and Core became
+ready. This proves a software recovery path, not the origin of the sleep fault.
+
+The client now cancels the old interrupt request before releasing its connection.
+Two consecutive failed USB writes permit one port reset for that failure episode,
+only on a single-configuration, single-interface APDU-level CCID reader with
+existing USB permission. Composite devices and interfaces owned elsewhere are
+not reset. A subsequent fresh card read creates the new attachment generation;
+PIN/AKA, SMS and call requests are never replayed. Sixty seconds of successful
+scans rearm recovery for a later fault; continuing failure does not cause a reset
+loop. Home/Readers distinguish recovery pending from failure and retain the
+unplug/OTG advice. No wake lock, root, hidden Java API, server change, permission
+grant or availability/share intent change is added.
+
+The small JNI boundary uses the Linux `USBDEVFS_RESET` operation on the descriptor
+returned by Android's public `UsbDeviceConnection.getFileDescriptor()`, following
+[AOSP USB host](https://android.googlesource.com/platform/system/core/+/refs/heads/android13-release/libusbhost/usbhost.c)
+and the [libusb unrooted Android model](https://github.com/libusb/libusb/blob/master/android/examples/unrooted_android.c).
+No USB discovery or device-path opening occurs in native code. The field
+comparison is pre-integration evidence; the new APK still requires exact-head
+GitHub CI and actual automatic-recovery/screen-off verification. No new automated
+red/green test is claimed for this hardware-specific path.
+
+Call history now displays direction, peer, line name/number/card when present,
+localized colored status and local time. Missing catalog details remain unknown;
+the UI does not invent an immutable historical SIM snapshot.
 
 Recent/history messages show peer, line name, own number when known, card suffix,
 transport, time and body. Reply revalidates the original line/card and fills that
@@ -134,7 +161,8 @@ Call transport recovery resumes the same lease/ticket within a bounded window. I
 
 ## Build, tests and release
 
-Pinned build: JDK 17, Gradle 8.13, Android Gradle Plugin 8.11.1, compile/target SDK 36. From repo root:
+Pinned build: JDK 17, Gradle 8.13, Android Gradle Plugin 8.11.1, compile/target SDK 36,
+NDK r30 (`30.0.16248370`). From repo root:
 
 ```sh
 gradle -p android-agent testDebugUnitTest lintDebug assembleDebug

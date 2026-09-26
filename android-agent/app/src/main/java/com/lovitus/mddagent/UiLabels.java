@@ -8,6 +8,8 @@ final class UiLabels {
     static final int OK=0xff0c6b64, WARNING=0xff8a5100, ERROR=0xffb3261e, NEUTRAL=0xff52616b;
     private UiLabels(){}
     static int statusColor(UiText text){
+        if(text.resource==R.string.reader_usb_recovering)return WARNING;
+        if(text.resource==R.string.reader_usb_recovery_failed)return ERROR;
         int id=text.resource;
         if(id==R.string.message_request_failed||id==R.string.message_failure_observed)return ERROR;
         if(id==R.string.dtmf_accepted)return OK;
@@ -26,6 +28,29 @@ final class UiLabels {
     static String messagePeer(JSONObject message){
         for(String key:new String[]{"sender","recipient","peer"}){String value=message.optString(key).trim();if(!value.isEmpty())return value;}
         return "";
+    }
+    static String callState(Context context,String code){
+        int label;
+        switch(code){
+            case "dialing":label=R.string.call_history_dialing;break;
+            case "ringing":label=R.string.call_history_ringing;break;
+            case "answered":label=R.string.call_history_answered;break;
+            case "ended":label=R.string.call_history_ended;break;
+            case "failed":label=R.string.call_history_failed;break;
+            case "missed":label=R.string.call_history_missed;break;
+            case "rejected":label=R.string.call_history_rejected;break;
+            case "interrupted":label=R.string.call_history_interrupted;break;
+            default:return code.isEmpty()?context.getString(R.string.unknown):context.getString(R.string.unknown)+" ("+code+")";
+        }
+        return context.getString(label);
+    }
+    static int callColor(String code){
+        switch(code){
+            case "answered":case "ended":return OK;
+            case "missed":case "failed":case "interrupted":return ERROR;
+            case "rejected":return NEUTRAL;
+            default:return WARNING;
+        }
     }
     static String transport(Context context,String mode){return mode.equals("cellular")?context.getString(R.string.cellular):mode.equals("vowifi")?"VoWiFi":context.getString(R.string.unknown);}
     static String cardSuffix(Context context,String card){return context.getString(R.string.card_suffix,card.substring(Math.max(0,card.length()-4)));}

@@ -121,6 +121,8 @@
 <string name="reader_permission_missing">尚未授权读卡器</string>
 <string name="reader_usb_unavailable">USB 读卡器不可用，请检查权限、卡片和 APDU 能力</string>
 <string name="reader_usb_write_failed">USB 命令写入失败（%1$d），结果未知；尚未确认卡片身份。</string>
+<string name="reader_usb_recovering">USB 端口已重置，正在等待重新识别卡片。</string>
+<string name="reader_usb_recovery_failed">USB 端口恢复失败（%1$d），已停止本次故障的自动重置。</string>
 <string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">设备或 SIM 访问规则拒绝了 OMAPI</string>
 <string name="reader_count">已识别读卡器：%1$d</string>
@@ -377,4 +379,15 @@
 <string name="call_keypad">数字键盘</string>
 <string name="call_send_tone">发送按键 %1$s</string>
 <string name="message_body_unavailable">此本地记录未保留正文，请查看短信历史。</string>
+<string name="call_direction_in">来电</string>
+<string name="call_direction_out">去电</string>
+<string name="call_history_dialing">拨号中</string>
+<string name="call_history_ringing">响铃中</string>
+<string name="call_history_answered">已接听</string>
+<string name="call_history_ended">已结束</string>
+<string name="call_history_failed">失败</string>
+<string name="call_history_missed">未接</string>
+<string name="call_history_rejected">已拒接</string>
+<string name="call_history_interrupted">已中断</string>
+<string name="call_history_line_unavailable">线路：%1$s · 详情不可用</string>
 </resources>

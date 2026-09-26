@@ -324,9 +324,19 @@ public final class MainActivity extends Activity {
             if(calls.length()==0)rows.addView(text(getString(R.string.no_call_history),14));
             for(int i=0;i<calls.length();i++){
                 JSONObject call=calls.optJSONObject(i);if(call==null)continue;
-                rows.addView(text(call.optString("peer")+" · "+UiLabels.transport(this,call.optString("transport"))+"\n"+call.optString("status")+" · "+call.optString("started_at")+"\n"+call.optString("line_id"),14));
+                LinearLayout row=new LinearLayout(this);row.setOrientation(LinearLayout.VERTICAL);row.setPadding(0,dp(8),0,dp(12));
+                String direction=call.optString("direction"),state=call.optString("status"),peer=call.optString("peer");
+                String label=getString(direction.equals("in")?R.string.call_direction_in:direction.equals("out")?R.string.call_direction_out:R.string.unknown);
+                TextView heading=text(label+" · "+(peer.isEmpty()?getString(R.string.number_unavailable):peer),16);heading.setTextIsSelectable(true);row.addView(heading);
+                TextView outcome=text(UiLabels.callState(this,state)+" · "+UiLabels.transport(this,call.optString("transport")),14);outcome.setTextColor(UiLabels.callColor(state));row.addView(outcome);
+                JSONObject line=owner.messageLine(call.optString("line_id"));
+                String identity=line.optString("card_id").isEmpty()?getString(R.string.call_history_line_unavailable,call.optString("line_id")):getString(R.string.message_line,lineLabel(line));
+                TextView ownLine=text(identity,13);ownLine.setTextIsSelectable(true);row.addView(ownLine);
+                String at=call.optString("started_at");
+                try{at=android.text.format.DateUtils.formatDateTime(this,java.time.Instant.parse(at).toEpochMilli(),android.text.format.DateUtils.FORMAT_SHOW_DATE|android.text.format.DateUtils.FORMAT_SHOW_TIME|android.text.format.DateUtils.FORMAT_SHOW_YEAR);}catch(java.time.format.DateTimeParseException ignored){}
+                TextView time=text(at,12);time.setTextColor(UiLabels.NEUTRAL);row.addView(time);rows.addView(row);
             }
-        },failure->{if(dialog.isShowing())loading.setText(failure);});
+        },failure->{if(dialog.isShowing()){loading.setText(failure);loading.setTextColor(UiLabels.ERROR);}});
     }
     private void dialPad(){
         GridLayout grid=new GridLayout(this);grid.setColumnCount(3);
@@ -535,7 +545,8 @@ public final class MainActivity extends Activity {
             service.sharing()&&!service.readerLinkOnline?service.readerConnection.render(this):
             service.sharing()?service.readerStatus.render(this):getString(devices.isEmpty()?R.string.sharing_off:R.string.reader_usb_not_shared);
         if(service.sharing()&&!service.readerLinkOnline&&!service.readerLinkDiagnostic().isEmpty())readerStateText+="\n"+service.readerLinkDiagnostic();
-        readerSummary.setText(getString(R.string.reader_status_summary,readerStateText,devices.size(),pending));readerSummary.setTextColor(!service.readerUSBFailures.isEmpty()?UiLabels.ERROR:service.sharing()&&!service.readerLinkOnline?UiLabels.statusColor(service.readerConnection):pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
+        boolean usbFault=service.readerUSBFailures.values().stream().anyMatch(failure->failure.resource!=R.string.reader_usb_recovering);
+        readerSummary.setText(getString(R.string.reader_status_summary,readerStateText,devices.size(),pending));readerSummary.setTextColor(usbFault?UiLabels.ERROR:!service.readerUSBFailures.isEmpty()?UiLabels.WARNING:service.sharing()&&!service.readerLinkOnline?UiLabels.statusColor(service.readerConnection):pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
         sharingButton.setText(service.sharing()?getString(R.string.stop_sharing):getString(R.string.share));sharingButton.setEnabled(!service.intentSaving()&&(service.available()||service.sharing()));
         StringBuilder key=new StringBuilder();
         for(UsbDevice device:devices)key.append(device.getDeviceId()).append(':').append(device.getVendorId()).append(':').append(device.getProductId()).append(':').append(usb.hasPermission(device)).append(';');
@@ -555,7 +566,7 @@ public final class MainActivity extends Activity {
                 !service.readerLinkOnline?R.string.reader_usb_wait_link:R.string.reader_usb_wait_scan;
             UiText failure=failures.get(name);
             String description=failure!=null&&usb.hasPermission(device)&&service.available()&&service.sharing()?failure.render(this):getString(stateText);
-            TextView pendingRow=text(getString(R.string.reader_usb_detected,device.getVendorId(),device.getProductId())+"\n"+description,15);pendingRow.setTextColor(failure!=null?UiLabels.ERROR:UiLabels.WARNING);readerItems.addView(pendingRow);
+            TextView pendingRow=text(getString(R.string.reader_usb_detected,device.getVendorId(),device.getProductId())+"\n"+description,15);pendingRow.setTextColor(failure!=null&&failure.resource!=R.string.reader_usb_recovering?UiLabels.ERROR:UiLabels.WARNING);readerItems.addView(pendingRow);
         }
         for(int i=0;i<readers.length();i++){
             JSONObject reader=readers.optJSONObject(i);if(reader==null)continue;String card=reader.optString("card_id");JSONObject sim=Json.object(reader,"sim");
@@ -583,7 +594,7 @@ public final class MainActivity extends Activity {
             if(!usb.hasPermission(device)){state=getString(R.string.reader_usb_wait_permission);pending=true;}
             else if(!service.available()){state=getString(R.string.reader_usb_paused);pending=true;}
             else if(!service.sharing()){state=getString(R.string.reader_usb_not_shared);pending=true;}
-            else if(failure!=null){state=failure.render(this);fault=true;}
+            else if(failure!=null){state=failure.render(this);if(failure.resource==R.string.reader_usb_recovering)pending=true;else fault=true;}
             else if(matched!=null){
                 String identity=Json.object(matched,"sim").optString("identity_state");
                 int label=identity.equals("ready")?R.string.reader_identity_ready:identity.equals("pin_required")?R.string.reader_identity_pin:identity.equals("partial")?R.string.reader_identity_partial:R.string.reader_identity_unavailable;

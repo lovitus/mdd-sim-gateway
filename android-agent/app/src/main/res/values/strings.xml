@@ -121,6 +121,8 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="reader_permission_missing">No reader permission granted</string>
 <string name="reader_usb_unavailable">USB reader unavailable: check access, card and APDU capability</string>
 <string name="reader_usb_write_failed">USB command write failed (%1$d); outcome unknown. Card identity has not been confirmed.</string>
+<string name="reader_usb_recovering">USB port reset completed; waiting to identify the card again.</string>
+<string name="reader_usb_recovery_failed">USB port recovery failed (%1$d). Automatic reset has stopped for this failure.</string>
 <string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">OMAPI access denied by the device or SIM</string>
 <string name="reader_count">Readers identified: %1$d</string>
@@ -367,6 +369,17 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="layer_gateway">Gateway dependency</string>
 <string name="call_history">Call history</string>
 <string name="no_call_history">No call history</string>
+<string name="call_direction_in">Incoming</string>
+<string name="call_direction_out">Outgoing</string>
+<string name="call_history_dialing">Dialing</string>
+<string name="call_history_ringing">Ringing</string>
+<string name="call_history_answered">Answered</string>
+<string name="call_history_ended">Ended</string>
+<string name="call_history_failed">Failed</string>
+<string name="call_history_missed">Missed</string>
+<string name="call_history_rejected">Rejected</string>
+<string name="call_history_interrupted">Interrupted</string>
+<string name="call_history_line_unavailable">Line: %1$s · Details unavailable</string>
 <string name="call_preflight_failed">Call not placed · %1$s\n%2$s</string>
 <string name="message_from">From: %1$s</string>
 <string name="message_to">To: %1$s</string>

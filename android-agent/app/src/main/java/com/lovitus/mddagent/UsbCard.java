@@ -9,6 +9,9 @@ final class UsbCard implements SimProtocol.Card {
     final UsbDevice device; final UsbDeviceConnection connection; final UsbInterface intf;
     final UsbEndpoint input,output,interrupt; final AtomicLong insertion=new AtomicLong(1);
     volatile boolean closed; int sequence; byte[] atr;
+    private final Object eventLock=new Object();
+    private UsbRequest eventRequest;
+    private Thread eventThread;
     static final class WriteFailure extends IOException {
         final int transferred;
         WriteFailure(int transferred){super("USB write failed ("+transferred+"); outcome unknown");this.transferred=transferred;}
@@ -23,7 +26,7 @@ final class UsbCard implements SimProtocol.Card {
         if(connection==null)throw new IOException("USB permission required");
         if(!Ccid.apduLevel(connection.getRawDescriptors(),intf.getId())||!connection.claimInterface(intf,true)){connection.close();throw new IOException("Reader must support APDU-level CCID (TPDU readers are not advertised)");}
         try{atr=exchange(0x62,new byte[0],0x80);}catch(Exception e){close();throw e;}
-        if(interrupt!=null){Thread t=new Thread(this::watch,"mdd-ccid-events");t.setDaemon(true);t.start();}
+        if(interrupt!=null){eventThread=new Thread(this::watch,"mdd-ccid-events");eventThread.setDaemon(true);eventThread.start();}
     }
     synchronized byte[] exchange(int type,byte[] data,int expected)throws Exception{
         if(closed)throw new IOException("Reader closed");int seq=sequence++&255;byte[] q=Ccid.command(type,0,seq,data);
@@ -47,14 +50,18 @@ final class UsbCard implements SimProtocol.Card {
     private void watch(){
         UsbRequest request=new UsbRequest();
         try{
-            if(!request.initialize(connection,interrupt))return;
-            while(!closed){ByteBuffer b=ByteBuffer.allocate(8);if(!request.queue(b))break;
+            synchronized(eventLock){if(closed||!request.initialize(connection,interrupt))return;eventRequest=request;}
+            while(!closed){ByteBuffer b=ByteBuffer.allocate(8);synchronized(eventLock){if(closed||!request.queue(b))break;}
                 // requestWait uses a native wait; this is not APDU or network polling.
                 UsbRequest completed=connection.requestWait();if(completed==null)break;
                 int size=b.position();if(size>=2&&(b.get(0)&255)==0x50&&(b.get(1)&2)!=0)insertion.incrementAndGet();
             }
         }catch(Exception ignored){if(!closed)insertion.incrementAndGet();}
-        finally{request.close();}
+        finally{synchronized(eventLock){eventRequest=null;request.close();}}
     }
-    public void close(){closed=true;insertion.incrementAndGet();connection.close();}
+    public void close(){
+        synchronized(eventLock){if(closed)return;closed=true;insertion.incrementAndGet();if(eventRequest!=null)eventRequest.cancel();}
+        if(eventThread!=null&&eventThread!=Thread.currentThread())try{eventThread.join(2000);}catch(InterruptedException interrupted){Thread.currentThread().interrupt();}
+        connection.releaseInterface(intf);connection.close();
+    }
 }
