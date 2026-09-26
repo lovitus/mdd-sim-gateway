@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/boa-z/vowifi-go/runtimehost/messaging"
@@ -137,6 +139,8 @@ type inboundMessaging struct {
 	started  bool
 }
 
+var inboundInviteSequence atomic.Uint64
+
 func (inbound *inboundMessaging) ConfigureVoice(stack *usernet.Stack, localIP, contactURI, localTag, userAgent string, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding, carrier voiceclient.SIPRequestTransport) error {
 	if inbound == nil || stack == nil || carrier == nil || strings.TrimSpace(binding.ContactURI) == "" {
 		return errors.New("invalid inbound voice configuration")
@@ -196,7 +200,9 @@ func (inbound *inboundMessaging) Start(flow inboundSIPFlow) error {
 }
 
 func (inbound *inboundMessaging) HandleSIPIncoming(ctx context.Context, request voiceclient.SIPIncomingRequest) []voiceclient.SIPIncomingResponse {
+	invite := beginInviteDiagnostic(request)
 	responses, err := inbound.server.HandleRequest(ctx, request)
+	logInviteDiagnostic(invite, "handler_complete", 0, err)
 	if strings.EqualFold(strings.TrimSpace(request.Method), "MESSAGE") {
 		inbound.mu.Lock()
 		inbound.fault = err
@@ -204,6 +210,9 @@ func (inbound *inboundMessaging) HandleSIPIncoming(ctx context.Context, request 
 	}
 	out := make([]voiceclient.SIPIncomingResponse, 0, len(responses))
 	for _, response := range responses {
+		if !response.NoResponse {
+			logInviteDiagnostic(invite, "response_prepared", response.StatusCode, nil)
+		}
 		out = append(out, voiceclient.SIPIncomingResponse{
 			StatusCode: response.StatusCode, Reason: response.Reason, Headers: response.Headers,
 			Body: append([]byte(nil), response.Body...), NoResponse: response.NoResponse,
@@ -216,18 +225,41 @@ func (inbound *inboundMessaging) HandleSIPIncomingStreaming(ctx context.Context,
 	if inbound == nil || emit == nil {
 		return errors.New("inbound SIP streaming handler is unavailable")
 	}
+	invite := beginInviteDiagnostic(request)
 	err := inbound.server.HandleRequestStreaming(ctx, request, func(response voicehost.IMSInboundWireResponse) error {
-		return emit(voiceclient.SIPIncomingResponse{
+		err := emit(voiceclient.SIPIncomingResponse{
 			StatusCode: response.StatusCode, Reason: response.Reason, Headers: response.Headers,
 			Body: append([]byte(nil), response.Body...), NoResponse: response.NoResponse,
 		})
+		if !response.NoResponse {
+			logInviteDiagnostic(invite, "response_write", response.StatusCode, err)
+		}
+		return err
 	})
+	logInviteDiagnostic(invite, "handler_complete", 0, err)
 	if strings.EqualFold(strings.TrimSpace(request.Method), "MESSAGE") {
 		inbound.mu.Lock()
 		inbound.fault = err
 		inbound.mu.Unlock()
 	}
 	return err
+}
+
+func beginInviteDiagnostic(request voiceclient.SIPIncomingRequest) uint64 {
+	if !strings.EqualFold(strings.TrimSpace(request.Method), "INVITE") {
+		return 0
+	}
+	invite := inboundInviteSequence.Add(1)
+	logInviteDiagnostic(invite, "received", 0, nil)
+	return invite
+}
+
+// Correlate within this process using a local sequence, never a carrier Call-ID,
+// URI, SDP, raw error or header. A prepared response is not proof of a wire write.
+func logInviteDiagnostic(invite uint64, phase string, status int, err error) {
+	if invite != 0 {
+		log.Printf("ims_inbound_invite request=%d phase=%s status=%d failed=%t", invite, phase, status, err != nil)
+	}
 }
 
 func (inbound *inboundMessaging) PendingCall() (ims.IncomingCallInfo, bool) {

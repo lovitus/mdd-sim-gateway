@@ -17,6 +17,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### INCIDENT_IMS_CALL_SMS
+
+**State: unresolved_cause; release relevance: current.** A real VoWiFi SMS was rejected for service location, and an independently attempted incoming call failed before ringback. The SMS candidate restores existing profile access/visited-network fields to MESSAGE construction. Scoped INVITE diagnostics retain pre-ringing response status without raw SIP or subscriber data; neither change proves either incident repaired.
+
+Acceptance scope / remaining action: Candidate only: preserve the failed paid operation and do not resend automatically. Validate the actual MESSAGE contract and collect exact-version INVITE arrival/response evidence before assigning the incoming root cause. Green CI, IMS registration and empty call history do not accept carrier SMS or incoming calls. Merge/deployment retains the owner review gate; diagnosis and scoped development may continue.
+
 ### ANDROID
 
 **State: partial; release relevance: current.** Client-focused implementation based on PR #7, excluding PR #8 pairing and durable call recovery. Exact source f627204 passed Android build/lint/unit/API28/API35 and full Go Runtime CI. Android 13 native login/pages, remembered login, silent-connection recovery and automatic reauthentication after isolated Core restart were verified. The owner authorized minimal mainline integration after this validation; production is unchanged.

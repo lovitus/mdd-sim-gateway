@@ -1,5 +1,27 @@
 # Upstream source and MDD patch
 
+## Incoming pre-ringing diagnostics
+
+A real incoming call failed before ringback, with no pending call or call-history
+entry. Those absences do not prove carrier non-delivery: SIP validation and local
+availability/SDP checks can reject INVITE before pending state exists.
+
+The MDD service adapter now logs receipt of parsed INVITEs, numeric response
+status and streaming response-write failure through the existing process logger.
+A process-local sequence correlates the records without carrier Call-ID, phone
+numbers, URI, SDP, headers or raw error strings. Non-streaming results are explicitly
+`response_prepared`, not delivered; a successful streaming write is not a carrier
+acknowledgement. `failed=false` describes handler/write completion, not call success:
+a locally rejected call can have a successfully written 4xx response.
+
+This does not alter SIP responses, availability checks, call ownership, routing or
+recovery. It does not capture parser failures before the adapter, so an absent
+receipt still is not proof of carrier fault. Repeated INVITEs receive separate
+local sequence numbers; no packet-level deduplication or wire capture is claimed.
+The incident remains unresolved until exact-version runtime evidence distinguishes
+non-arrival at this boundary from local rejection. Existing inbound/IMS tests are
+retained; no new red/green regression or real incoming acceptance is claimed.
+
 ## SMS registered network context
 
 A real single-part SMS returned `Forbidden - Service not allowed in this location`.
