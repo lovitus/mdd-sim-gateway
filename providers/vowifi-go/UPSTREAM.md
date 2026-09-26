@@ -1,5 +1,36 @@
 # Upstream source and MDD patch
 
+## Peer-initiated incoming TCP
+
+The registered TCP connection was the only SIP receive path. A new connection to
+the advertised Contact port was refused; the userspace Security-Agree installer
+also installed only the UE-initiated SA pair. Thus registration success did not
+prove that a peer-initiated incoming connection could reach the INVITE adapter.
+This is a reproduced implementation gap, not proof of the field carrier's path.
+
+The same flow now owns an optional userspace TCP listener. It accepts only the
+connected P-CSCF address and, for Security-Agree, its negotiated client port.
+It reuses the existing parser, streaming handler, response builder and write lock.
+Reset/deregistration closes the listener and accepted connections; no host listener,
+second registration owner, paid retry, Core change or user switch is introduced.
+The installer adds the other negotiated ESP pair with independent sequence/replay
+state and plaintext rejection. The local gVisor listener follows gonet.ListenTCP
+with reuse-address (not reuse-port), matching the existing caller-bound dial and
+allowing a Contact listener beside an established connection on the same port.
+
+Reference: [3GPP TS 33.203, section 7.1](https://www.etsi.org/deliver/etsi_ts/133200_133299/133203/18.00.00_60/ts_133203v180000p.pdf).
+The upstream main wire-flow source was checked; the fix remains a local adaptation,
+not an unreviewed wholesale upstream replacement. UDP behavior is not expanded.
+
+The two new regression tests use the real in-memory network and transport/security
+implementations. Against the pre-fix source overlay, a successful TCP REGISTER is
+followed by connection refusal, and the other valid ESP pair times out. Both pass
+with the fix, including ringing response and connection closure. This one-time
+red/green check selected only the registrar/security files; an earlier package
+attempt failed because the local AMR development library is absent and is not a
+test result. The existing full GitHub workflow remains the build/race gate.
+Physical incoming calls and the separate SMS rejection remain unaccepted.
+
 ## Incoming pre-ringing diagnostics
 
 A real incoming call failed before ringback, with no pending call or call-history

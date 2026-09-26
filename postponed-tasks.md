@@ -19,9 +19,9 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ### INCIDENT_IMS_CALL_SMS
 
-**State: unresolved_cause; release relevance: current.** A real VoWiFi SMS was rejected for service location, and an independently attempted incoming call failed before ringback. The SMS candidate restores existing profile access/visited-network fields to MESSAGE construction. Scoped INVITE diagnostics retain pre-ringing response status without raw SIP or subscriber data; neither change proves either incident repaired.
+**State: unresolved_cause; release relevance: current.** Real VoWiFi SMS and incoming-call failures remain unresolved. A further owner-confirmed incoming attempt produced no parsed INVITE in the deployed diagnostic Provider. Regression reproduces missing peer-initiated TCP listening and the missing second Security-Agree SA pair; the candidate repairs those transport paths without changing Core or user intent. This does not prove the field carrier used that path.
 
-Acceptance scope / remaining action: Candidate only: preserve the failed paid operation and do not resend automatically. Validate the actual MESSAGE contract and collect exact-version INVITE arrival/response evidence before assigning the incoming root cause. Green CI, IMS registration and empty call history do not accept carrier SMS or incoming calls. Merge/deployment retains the owner review gate; diagnosis and scoped development may continue.
+Acceptance scope / remaining action: Two targeted wire/security counterexamples fail against pre-fix source and pass with the candidate. Full GitHub build/race and physical incoming acceptance are separate gates. The earlier diagnostic trial was authorized and deployed only to the affected line; this new candidate is not deployed. Keep the failed paid SMS, do not resend automatically, and retain the separate modem incoming failure as unresolved. No PR merge authorization is implied.
 
 ### ANDROID
 

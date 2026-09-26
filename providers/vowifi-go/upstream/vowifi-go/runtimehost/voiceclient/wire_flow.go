@@ -52,21 +52,26 @@ type WireSIPFlow struct {
 	TLSConfig             *tls.Config
 	DialContext           DialContextFunc
 	DialContextLocal      DialContextLocalFunc
+	ListenContext         func(context.Context, string, string) (net.Listener, error)
 	SecurityInstaller     SecurityPlanRequestInstaller
 	IncomingHandler       SIPIncomingRequestHandler
 
-	mu          sync.Mutex
-	writeMu     sync.Mutex
-	conn        net.Conn
-	connContext context.Context
-	connCancel  context.CancelFunc
-	reader      *bufio.Reader
-	network     string
-	target      string
-	targets     []string
-	targetIndex int
-	security    *wireSIPSecurityBase
-	closed      bool
+	mu                 sync.Mutex
+	writeMu            sync.Mutex
+	conn               net.Conn
+	connContext        context.Context
+	connCancel         context.CancelFunc
+	reader             *bufio.Reader
+	network            string
+	target             string
+	targets            []string
+	targetIndex        int
+	security           *wireSIPSecurityBase
+	closed             bool
+	incomingListener   net.Listener
+	incomingConns      map[net.Conn]struct{}
+	incomingAddress    string
+	incomingRemotePort string
 }
 
 type wireSIPSecurityBase struct {
@@ -393,6 +398,10 @@ func (f *WireSIPFlow) UseSecurityAssociation(ctx context.Context, req IMSSecurit
 		f.targets = []string{remoteAddr}
 		f.targetIndex = 0
 	}
+	if req.ClientAgreement.PortServer > 0 && req.Agreement.PortClient > 0 {
+		f.incomingAddress = net.JoinHostPort(req.LocalEndpoint.Address, strconv.Itoa(req.ClientAgreement.PortServer))
+		f.incomingRemotePort = strconv.Itoa(req.Agreement.PortClient)
+	}
 	return f.closeConnLocked()
 }
 
@@ -408,6 +417,7 @@ func (f *WireSIPFlow) resetSecurityAssociationLocked() error {
 		return err
 	}
 	base := f.security
+	f.incomingAddress, f.incomingRemotePort = "", ""
 	f.LocalAddr, f.ServerAddr, f.target = base.localAddr, base.serverAddr, base.target
 	f.targets, f.targetIndex = append([]string(nil), base.targets...), base.targetIndex
 	f.security = nil
@@ -883,6 +893,9 @@ func (f *WireSIPFlow) handleIncomingWireLocked(ctx context.Context, conn net.Con
 	}
 	if handler, ok := f.IncomingHandler.(SIPStreamingIncomingRequestHandler); ok {
 		requestContext := f.connContext
+		if conn != f.conn {
+			requestContext = ctx
+		}
 		if requestContext == nil {
 			requestContext = context.Background()
 		}
@@ -907,6 +920,8 @@ func (f *WireSIPFlow) handleIncomingWireLocked(ctx context.Context, conn net.Con
 				f.mu.Lock()
 				if f.conn == conn {
 					_ = f.closeConnLocked()
+				} else {
+					_ = conn.Close()
 				}
 				f.mu.Unlock()
 			}
@@ -1007,6 +1022,10 @@ func (f *WireSIPFlow) ensureConnLocked(ctx context.Context, msg SIPRequestMessag
 	f.connContext, f.connCancel = context.WithCancel(context.Background())
 	f.network = network
 	f.target = target
+	if err := f.listenIncomingLocked(); err != nil {
+		_ = f.closeConnLocked()
+		return nil, "", 0, err
+	}
 	if isSIPStreamNetwork(network) {
 		f.reader = bufio.NewReader(conn)
 	} else {
@@ -1066,6 +1085,14 @@ func (f *WireSIPFlow) targetCountLocked() int {
 }
 
 func (f *WireSIPFlow) closeConnLocked() error {
+	if f.incomingListener != nil {
+		_ = f.incomingListener.Close()
+		f.incomingListener = nil
+	}
+	for conn := range f.incomingConns {
+		_ = conn.Close()
+		delete(f.incomingConns, conn)
+	}
 	if f.connCancel != nil {
 		f.connCancel()
 		f.connCancel = nil

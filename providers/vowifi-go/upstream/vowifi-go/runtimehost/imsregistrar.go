@@ -105,6 +105,7 @@ type WireIMSRegistrar struct {
 	IncomingHandler                voiceclient.SIPIncomingRequestHandler
 	DialContext                    voiceclient.DialContextFunc
 	DialContextLocal               voiceclient.DialContextLocalFunc
+	ListenContext                  func(context.Context, string, string) (net.Listener, error)
 }
 
 // ClassifyIMSRegisterResponse maps SIP REGISTER status codes to conservative local recovery hints.
@@ -313,6 +314,7 @@ func (r WireIMSRegistrar) defaultSIPFlow(cfg IMSRegistrationConfig) *voiceclient
 		MaxRetransmits:        r.MaxRetransmits,
 		DialContext:           r.DialContext,
 		DialContextLocal:      r.DialContextLocal,
+		ListenContext:         r.ListenContext,
 		SecurityInstaller:     r.SecurityAssociationInstaller,
 		IncomingHandler:       r.IncomingHandler,
 	}

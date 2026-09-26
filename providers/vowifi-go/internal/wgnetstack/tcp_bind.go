@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// This file follows gVisor's gonet.DialTCPWithBind. The gVisor Authors retain
+// This file follows gVisor's gonet.DialTCPWithBind and ListenTCP. The gVisor Authors retain
 // copyright in the upstream implementation.
 package wgnetstack
 
@@ -16,6 +16,27 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
+
+// A SIP Contact can use the same local port as an established outbound flow.
+// Like the caller-bound dial above, reuse-address permits distinct TCP tuples;
+// reuse-port is not enabled, so a second listener cannot take the same endpoint.
+func listenTCPWithBindReuse(tcpStack *stack.Stack, local tcpip.FullAddress, protocol tcpip.NetworkProtocolNumber) (*gonet.TCPListener, error) {
+	var queue waiter.Queue
+	endpoint, err := tcpStack.NewEndpoint(tcp.ProtocolNumber, protocol, &queue)
+	if err != nil {
+		return nil, errors.New(err.String())
+	}
+	endpoint.SocketOptions().SetReuseAddress(true)
+	if err := endpoint.Bind(local); err != nil {
+		endpoint.Close()
+		return nil, fmt.Errorf("bind incoming TCP: %s", err)
+	}
+	if err := endpoint.Listen(4096); err != nil {
+		endpoint.Close()
+		return nil, fmt.Errorf("listen incoming TCP: %s", err)
+	}
+	return gonet.NewTCPListener(tcpStack, &queue, endpoint), nil
+}
 
 // dialTCPWithBindReuse matches gonet.DialTCPWithBind except that a
 // caller-selected local port is reusable across distinct remote tuples. IMS

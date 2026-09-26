@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Package imssec applies one IMS Security-Agree ESP transport-mode pair to
+// Package imssec applies the negotiated IMS Security-Agree transport-mode pairs to
 // full IP packets travelling through the in-memory SWu stack.
 package imssec
 
@@ -37,6 +37,15 @@ type Config struct {
 	Encryption         string
 	IntegrityKey       []byte
 	ConfidentialityKey []byte
+	PeerInitiated      *PeerInitiatedConfig
+}
+
+// The peer-initiated TCP connection uses the other negotiated SA pair.
+type PeerInitiatedConfig struct {
+	LocalServerPort  uint16
+	RemoteClientPort uint16
+	LocalServerSPI   uint32
+	RemoteClientSPI  uint32
 }
 
 type Transformer struct {
@@ -47,6 +56,7 @@ type Transformer struct {
 	remotePort uint16
 	outbound   *upstreamesp.SA
 	inbound    *upstreamesp.SA
+	peer       *Transformer
 }
 
 func New(config Config) (*Transformer, error) {
@@ -83,11 +93,26 @@ func New(config Config) (*Transformer, error) {
 		zeroSA(outbound)
 		return nil, err
 	}
-	return &Transformer{
+	transformer := &Transformer{
 		local: config.LocalAddress, remote: config.RemoteAddress,
 		localPort: config.LocalPort, remotePort: config.RemotePort,
 		outbound: outbound, inbound: inbound,
-	}, nil
+	}
+	if peer := config.PeerInitiated; peer != nil {
+		if peer.LocalServerPort == config.LocalPort || peer.RemoteClientPort == config.RemotePort || peer.LocalServerSPI == config.SPIClient {
+			_ = transformer.Close()
+			return nil, ErrInvalidConfig
+		}
+		config.PeerInitiated = nil
+		config.LocalPort, config.RemotePort = peer.LocalServerPort, peer.RemoteClientPort
+		config.SPIClient, config.SPIServer = peer.LocalServerSPI, peer.RemoteClientSPI
+		transformer.peer, err = New(config)
+		if err != nil {
+			_ = transformer.Close()
+			return nil, err
+		}
+	}
+	return transformer, nil
 }
 
 func (transformer *Transformer) Protect(packet []byte) ([]byte, bool, error) {
@@ -104,6 +129,9 @@ func (transformer *Transformer) Protect(packet []byte) ([]byte, bool, error) {
 		return nil, true, fmt.Errorf("%w: fragmented protected packet", ErrInvalidConfig)
 	}
 	if !portsMatch(view.payload, view.protocol, transformer.localPort, transformer.remotePort) {
+		if transformer.peer != nil {
+			return transformer.peer.Protect(packet)
+		}
 		return nil, false, nil
 	}
 	sealed, err := transformer.outbound.Seal(view.protocol, view.payload, upstreamesp.SealOptions{})
@@ -124,6 +152,9 @@ func (transformer *Transformer) Unprotect(packet []byte) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 	if view.protocol == protocolESP {
+		if transformer.peer != nil && len(view.payload) >= 4 && binary.BigEndian.Uint32(view.payload[:4]) == transformer.peer.inbound.SPI {
+			return transformer.peer.Unprotect(packet)
+		}
 		opened, err := transformer.inbound.Open(view.payload)
 		if err != nil {
 			return nil, true, err
@@ -139,6 +170,9 @@ func (transformer *Transformer) Unprotect(packet []byte) ([]byte, bool, error) {
 	if portsMatch(view.payload, view.protocol, transformer.remotePort, transformer.localPort) {
 		return nil, true, ErrProtectionRequired
 	}
+	if transformer.peer != nil {
+		return transformer.peer.Unprotect(packet)
+	}
 	return nil, false, nil
 }
 
@@ -151,6 +185,10 @@ func (transformer *Transformer) Close() error {
 	zeroSA(transformer.inbound)
 	transformer.outbound = nil
 	transformer.inbound = nil
+	if transformer.peer != nil {
+		_ = transformer.peer.Close()
+		transformer.peer = nil
+	}
 	transformer.mu.Unlock()
 	return nil
 }
