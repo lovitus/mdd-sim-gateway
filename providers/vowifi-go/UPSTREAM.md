@@ -1,5 +1,30 @@
 # Upstream source and MDD patch
 
+## SMS receive-report network context
+
+The `524bd33` affected-line trial received six carrier redeliveries whose separate
+RP reports were rejected with SIP 403. The durable Core history added only one
+new-format event across those attempts, supporting ingress deduplication rather
+than successful acknowledgement. This is distinct from the earlier quiet rollout
+sample, the old outgoing 403 and RP cause 38; only one outbound SMS was submitted.
+
+Inspection found that the MDD report adapter omitted the existing registration
+profile's access and visited-network fields. The shared upstream dialog builder
+does not inherit them from Profile, so the report fell back to bare IEEE-802.11.
+The affected configuration has a non-default access value. Reuse the same two
+fields as the already adapted upstream `IMSSMSTransport`; do not invent location,
+alter registration/configuration or change report identity, route, RPDU or retries.
+This is a proven propagation defect, not a captured verdict that it caused 403.
+
+Failure checklist: configured network context disappearing, unconfigured values
+being invented, and a report still using the fallback on the actual wire. The
+existing real userspace registered-flow test and the report adapter's configured
+context case both compiled and failed on unchanged `524bd33`. Empty-context,
+gateway, storage/write-failure and rejection controls retained their expectations.
+Focused post-fix race results and full GitHub qualification are recorded in PR #13;
+local policy tests do not establish carrier acceptance. No further paid SMS or
+manual notification replay is included.
+
 ## Configured SMS service centre
 
 The follow-up to the retained RP cause 38 failure found a separate, reproducible

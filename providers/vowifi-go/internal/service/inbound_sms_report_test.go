@@ -60,13 +60,19 @@ func newSMSReportReceiver(t *testing.T, sink MessageSink, generation string) *in
 }
 
 func TestInboundSMSReportIsSeparateFromSIPResponse(t *testing.T) {
-	for _, scenario := range []string{"success", "gateway_list", "gateway_repeated_headers", "queue_failure", "response_write_failure", "report_rejected", "missing_asserted_gateway", "ambiguous_gateway"} {
+	for _, scenario := range []string{"success", "registered_network_context", "gateway_list", "gateway_repeated_headers", "queue_failure", "response_write_failure", "report_rejected", "missing_asserted_gateway", "ambiguous_gateway"} {
 		t.Run(scenario, func(t *testing.T) {
 			sink := &recoverableMessageSink{}
 			if scenario == "queue_failure" {
 				sink.err = errors.New("durable queue unavailable")
 			}
 			inbound := newSMSReportReceiver(t, sink, "generation-1")
+			access, visited := "IEEE-802.11", ""
+			if scenario == "registered_network_context" {
+				access, visited = "IEEE-802.11;i-wlan-node-id=020000000001;country=GB", "visited.example"
+				inbound.server.Profile.AccessNetworkInfo = access
+				inbound.server.Profile.VisitedNetworkID = visited
+			}
 			request := incomingSMSFixture(t, "inbound-one", 42)
 			if scenario == "missing_asserted_gateway" {
 				delete(request.Headers, "P-Asserted-Identity")
@@ -80,7 +86,7 @@ func TestInboundSMSReportIsSeparateFromSIPResponse(t *testing.T) {
 			if scenario == "ambiguous_gateway" {
 				request.Headers["P-Asserted-Identity"] = []string{"<sip:ipsmgw@ims.example>, <sip:another@ims.example>"}
 			}
-			success := scenario == "success" || scenario == "gateway_list" || scenario == "gateway_repeated_headers"
+			success := scenario == "success" || scenario == "registered_network_context" || scenario == "gateway_list" || scenario == "gateway_repeated_headers"
 			responseWritten, sends, status := false, 0, 0
 			inbound.server.CarrierTransport = smsReportPeer(func(ctx context.Context, report voiceclient.SIPRequestMessage) (voiceclient.SIPResponse, error) {
 				sends++
@@ -89,6 +95,13 @@ func TestInboundSMSReportIsSeparateFromSIPResponse(t *testing.T) {
 				}
 				if _, bounded := ctx.Deadline(); !bounded {
 					t.Error("report request has no deadline")
+				}
+				wantVisited := ""
+				if visited != "" {
+					wantVisited = `"` + visited + `"`
+				}
+				if report.Headers["P-Access-Network-Info"] != access || report.Headers["P-Visited-Network-ID"] != wantVisited {
+					t.Errorf("report lost registered network context: access=%q visited=%q", report.Headers["P-Access-Network-Info"], report.Headers["P-Visited-Network-ID"])
 				}
 				if report.Method != "MESSAGE" || report.URI != "sip:ipsmgw@ims.example" ||
 					report.Headers["In-Reply-To"] != "inbound-one" || report.Headers["Content-Type"] != messaging.IMS3GPPSMSContentType ||

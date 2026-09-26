@@ -73,7 +73,9 @@ func (inbound *inboundMessaging) buildSMSReport(request voiceclient.SIPIncomingR
 		Profile: inbound.server.Profile, Registration: inbound.server.Registration,
 		ContactURI: inbound.server.ContactURI, LocalTag: inbound.server.LocalTag,
 		RemoteURI: gateway, CallID: "sms-report-" + rand.Text(), CSeq: 1,
-		UserAgent: inbound.server.UserAgent,
+		UserAgent:         inbound.server.UserAgent,
+		AccessNetworkInfo: inbound.server.Profile.AccessNetworkInfo,
+		VisitedNetworkID:  inbound.server.Profile.VisitedNetworkID,
 	}, response.Headers["Content-Type"], response.Body)
 	if err != nil {
 		return nil, err

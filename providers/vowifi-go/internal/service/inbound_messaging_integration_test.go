@@ -107,7 +107,8 @@ func testInboundSIPMessageSharesRegisteredUserspaceFlow(t *testing.T, binarySMS 
 		Timeout: 2 * time.Second, DialContext: clientStack.DialContext, DialContextLocal: clientStack.DialContextLocal,
 		IncomingHandler: inbound,
 	}
-	inbound.server.Profile = voiceclient.IMSProfile{IMPU: "sip:user@example", Domain: "example"}
+	inbound.server.Profile = voiceclient.IMSProfile{IMPU: "sip:user@example", Domain: "example",
+		AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=020000000001;country=GB", VisitedNetworkID: "visited.example"}
 	inbound.server.Registration = voiceclient.RegistrationBinding{PublicIdentity: "sip:user@example", ContactURI: "sip:user@10.0.0.1:5060"}
 	inbound.server.CarrierTransport = flow
 	t.Cleanup(func() {
@@ -180,6 +181,14 @@ func testInboundSIPMessageSharesRegisteredUserspaceFlow(t *testing.T, binarySMS 
 			if binarySMS && parseErr == nil && duplicate.Method == "MESSAGE" {
 				if !gotMessageResponse || duplicate.URI != "sip:ipsmgw@example" || !bytes.Equal(duplicate.Body, messaging.BuildSMSRPAck(42)) {
 					err = errors.New("incorrect SMS report on registered flow")
+					break
+				}
+				if values := duplicate.Headers["P-Access-Network-Info"]; len(values) != 1 || values[0] != inbound.server.Profile.AccessNetworkInfo {
+					err = errors.New("wire SMS report lost registered access network")
+					break
+				}
+				if values := duplicate.Headers["P-Visited-Network-ID"]; len(values) != 1 || values[0] != `"visited.example"` {
+					err = errors.New("wire SMS report lost registered visited network")
 					break
 				}
 				ack, buildErr := voiceclient.BuildSIPResponseWire(duplicate, 202, "Accepted", nil, nil)
