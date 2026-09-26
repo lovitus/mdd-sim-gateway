@@ -31,10 +31,17 @@ final class ReaderHub implements AutoCloseable {
             }catch(Exception failure){remove(name);
                 UiText detail=failure instanceof UsbCard.WriteFailure?UiText.of(R.string.reader_usb_write_failed,((UsbCard.WriteFailure)failure).transferred):UiText.of(R.string.reader_usb_unavailable);
                 if(recovery.failed(failure instanceof UsbCard.WriteFailure)){
-                    recovery.resetResult=UsbRecovery.reset(usb,d);
-                    android.util.Log.i("MDDUSB","USB port recovery result="+recovery.resetResult);
-                    // Publish unavailable first; only a subsequent identity read can advertise a new generation.
-                    detail=recovery.resetResult==0?UiText.of(R.string.reader_usb_recovering):UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult);
+                    try{
+                        UsbCard card=UsbRecovery.reset(usb,d);Entry restored=new Entry(name,card);entries.put(name,restored);
+                        discover(restored);restored.insertion=card.insertion.get();
+                        recovery.resetResult=0;recovery.healthy(android.os.SystemClock.elapsedRealtime());
+                        android.util.Log.i("MDDUSB","USB port recovery result=0 stage=identified");
+                        continue;
+                    }catch(Exception recoveryFailure){
+                        remove(name);recovery.resetResult=recoveryFailure instanceof UsbRecovery.Failure?((UsbRecovery.Failure)recoveryFailure).code:-android.system.OsConstants.EIO;
+                        android.util.Log.i("MDDUSB","USB port recovery result="+recovery.resetResult+" stage=failed");
+                        detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult));
+                    }
                 }else if(recovery.resetResult!=0)detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(R.string.reader_usb_recovery_failed,recovery.resetResult));
                 failures.put(name,detail);
             }

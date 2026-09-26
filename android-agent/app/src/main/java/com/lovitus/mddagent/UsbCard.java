@@ -1,6 +1,7 @@
 package com.lovitus.mddagent;
 import android.hardware.usb.*;
 import android.os.SystemClock;
+import android.system.OsConstants;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -17,6 +18,9 @@ final class UsbCard implements SimProtocol.Card {
         WriteFailure(int transferred){super("USB write failed ("+transferred+"); outcome unknown");this.transferred=transferred;}
     }
     UsbCard(UsbManager manager,UsbDevice d)throws Exception{
+        this(manager,d,false);
+    }
+    UsbCard(UsbManager manager,UsbDevice d,boolean reset)throws Exception{
         device=d;UsbInterface found=null;UsbEndpoint in=null,out=null,intr=null;
         for(int i=0;i<d.getInterfaceCount();i++){UsbInterface f=d.getInterface(i);if(f.getInterfaceClass()!=11)continue;in=null;out=null;intr=null;
             for(int e=0;e<f.getEndpointCount();e++){UsbEndpoint p=f.getEndpoint(e);if(p.getType()==UsbConstants.USB_ENDPOINT_XFER_BULK){if(p.getDirection()==UsbConstants.USB_DIR_IN)in=p;else out=p;}else if(p.getType()==UsbConstants.USB_ENDPOINT_XFER_INT&&p.getDirection()==UsbConstants.USB_DIR_IN)intr=p;}
@@ -24,8 +28,18 @@ final class UsbCard implements SimProtocol.Card {
         if(found==null)throw new IOException("USB device has no CCID bulk interface");
         intf=found;input=in;output=out;interrupt=intr;connection=manager.openDevice(d);
         if(connection==null)throw new IOException("USB permission required");
-        if(!Ccid.apduLevel(connection.getRawDescriptors(),intf.getId())||!connection.claimInterface(intf,true)){connection.close();throw new IOException("Reader must support APDU-level CCID (TPDU readers are not advertised)");}
-        try{atr=exchange(0x62,new byte[0],0x80);}catch(Exception e){close();throw e;}
+        if(!Ccid.apduLevel(connection.getRawDescriptors(),intf.getId())||!connection.claimInterface(intf,!reset)){connection.close();throw new IOException("Reader must support APDU-level CCID (TPDU readers are not advertised)");}
+        try{
+            if(reset){
+                if(!connection.releaseInterface(intf))throw new UsbRecovery.Failure(-OsConstants.EIO);
+                int result=UsbPortReset.reset(connection.getFileDescriptor());
+                if(result!=0)throw new UsbRecovery.Failure(result);
+                if(!connection.claimInterface(intf,false))throw new UsbRecovery.Failure(-OsConstants.EBUSY);
+                // Keep the recovered descriptor alive through CCID handshake and power-on.
+                status();
+            }
+            atr=exchange(0x62,new byte[0],0x80);
+        }catch(Exception|LinkageError e){close();throw e;}
         if(interrupt!=null){eventThread=new Thread(this::watch,"mdd-ccid-events");eventThread.setDaemon(true);eventThread.start();}
     }
     synchronized byte[] exchange(int type,byte[] data,int expected)throws Exception{

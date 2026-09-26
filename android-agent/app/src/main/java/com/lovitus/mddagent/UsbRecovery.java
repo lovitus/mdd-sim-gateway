@@ -2,6 +2,7 @@ package com.lovitus.mddagent;
 
 import android.hardware.usb.*;
 import android.system.OsConstants;
+import java.io.IOException;
 
 /** One reset per transport failure episode, rearmed only after sustained health. */
 final class UsbRecovery {
@@ -27,28 +28,25 @@ final class UsbRecovery {
         }
     }
 
-    static int reset(UsbManager manager, UsbDevice device) {
-        UsbDeviceConnection connection = null;
+    static final class Failure extends IOException {
+        final int code;
+        Failure(int code) { super("USB recovery failed (" + code + ")"); this.code = code; }
+    }
+
+    static UsbCard reset(UsbManager manager, UsbDevice device) throws Exception {
         try {
-            if (!manager.hasPermission(device)) return -OsConstants.EACCES;
+            if (!manager.hasPermission(device)) throw new Failure(-OsConstants.EACCES);
             // A device reset must never affect another interface of a composite device.
-            if (device.getConfigurationCount() != 1) return -OsConstants.ENOTSUP;
+            if (device.getConfigurationCount() != 1) throw new Failure(-OsConstants.ENOTSUP);
             UsbConfiguration config = device.getConfiguration(0);
-            if (config.getInterfaceCount() != 1) return -OsConstants.ENOTSUP;
+            if (config.getInterfaceCount() != 1) throw new Failure(-OsConstants.ENOTSUP);
             UsbInterface intf = config.getInterface(0);
-            if (intf.getInterfaceClass() != 11) return -OsConstants.ENOTSUP;
-            connection = manager.openDevice(device);
-            if (connection == null) return -OsConstants.EACCES;
-            if (!Ccid.apduLevel(connection.getRawDescriptors(), intf.getId())) return -OsConstants.ENOTSUP;
-            if (!connection.claimInterface(intf, false)) return -OsConstants.EBUSY;
-            if (!connection.releaseInterface(intf)) return -OsConstants.EIO;
-            return UsbPortReset.reset(connection.getFileDescriptor());
+            if (intf.getInterfaceClass() != 11) throw new Failure(-OsConstants.ENOTSUP);
+            return new UsbCard(manager, device, true);
         } catch (SecurityException denied) {
-            return -OsConstants.EACCES;
+            throw new Failure(-OsConstants.EACCES);
         } catch (LinkageError unavailable) {
-            return -OsConstants.ENOSYS;
-        } finally {
-            if (connection != null) connection.close();
+            throw new Failure(-OsConstants.ENOSYS);
         }
     }
 }

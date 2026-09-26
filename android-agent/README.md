@@ -89,7 +89,12 @@ The client now cancels the old interrupt request before releasing its connection
 Two consecutive failed USB writes permit one port reset for that failure episode,
 only on a single-configuration, single-interface APDU-level CCID reader with
 existing USB permission. Composite devices and interfaces owned elsewhere are
-not reset. A subsequent fresh card read creates the new attachment generation;
+not reset. Reset, reclaim, CCID slot-status handshake and power-on retain the same
+descriptor; fresh card identity then creates the new attachment generation.
+The first integrated candidate closed the reset handle and waited for the next
+scan: it reproduced a successful reset return followed by failed card reads.
+That native return alone is not recovery. The corrected path follows the working
+field comparison without the intervening close/idle gap;
 PIN/AKA, SMS and call requests are never replayed. Sixty seconds of successful
 scans rearm recovery for a later fault; continuing failure does not cause a reset
 loop. Home/Readers distinguish recovery pending from failure and retain the
