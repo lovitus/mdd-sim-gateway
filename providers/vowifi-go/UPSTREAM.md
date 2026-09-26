@@ -1,5 +1,44 @@
 # Upstream source and MDD patch
 
+## SMS request-local failure containment
+
+The deployed receive-path trial recorded two parsed incoming INVITEs and locally
+written 488 responses. This narrows that incident to local media negotiation;
+the exact rejected SDP was not captured, so no codec-specific field cause is
+claimed. The owner permits deferring further incoming diagnosis. A separate
+modem incoming attempt and received SMS were found in Core and the native app;
+the call was missed, not answered or acoustically accepted.
+
+The UK SMS readiness was blocked by `inbound_messaging_failed`. Its old handler
+assigned every individual MESSAGE error to the whole-channel fault, including
+malformed RPDU, unsupported content and a failed response write. That could keep
+outgoing SMS disabled until another incoming request happened to succeed. The
+original request's error was not retained; the field trigger is still unknown.
+
+The existing SIP parser and transaction responses are unchanged. Only actual
+durable publication establishes or clears the queue fault; peer input rejection
+does neither. A terminal receive-loop error remains independently blocking and
+cannot be erased by an in-flight successful message. The existing wire-flow owner
+still closes a failed response socket and owns registration recovery. Numeric
+MESSAGE status and content/persistence failure booleans use the process logger,
+without content, addresses, headers, identities or raw errors. Core, Android,
+carrier location, desired state and paid retry policy are unchanged.
+
+`TestInboundRequestFailureDoesNotPoisonMessaging` exercises both real adapter
+entry points, upstream MESSAGE handling, runtime readiness and one captured
+outbound transport submission. On the unmodified source it fails for invalid
+RPDU, unsupported content, lost durable-failure identity, erased terminal failure
+and a response-write error. The same test passes after this fix. The first test
+fixture omitted required Via and was rejected before MESSAGE handling; that run
+is retained but is not the counterexample. The corrected fixture did not change
+any response expectations. This one-time local red/green used the hash-verified
+Homebrew opencore-amr 0.1.6 static library in an isolated task directory, without
+a system installation. Full build/race remains the unchanged GitHub workflow.
+
+The owner authorized one new self-SMS after the earlier paid rejection. It has
+not yet been sent because the actual UI is blocked. This patch is not carrier
+SMS acceptance and does not authorize an automatic resend or PR merge.
+
 ## Peer-initiated incoming TCP
 
 The registered TCP connection was the only SIP receive path. A new connection to
@@ -29,7 +68,10 @@ with the fix, including ringing response and connection closure. This one-time
 red/green check selected only the registrar/security files; an earlier package
 attempt failed because the local AMR development library is absent and is not a
 test result. The existing full GitHub workflow remains the build/race gate.
-Physical incoming calls and the separate SMS rejection remain unaccepted.
+The exact `494cf899` GitHub workflow subsequently passed and that artifact was
+trial-deployed to the one affected line. The later 488 observations above prove
+parsed incoming arrival, not a successfully ringing or answered call. The separate
+SMS rejection remains unaccepted.
 
 ## Incoming pre-ringing diagnostics
 

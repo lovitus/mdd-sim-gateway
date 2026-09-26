@@ -61,9 +61,9 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ### INCIDENT_IMS_CALL_SMS
 
-**State: unresolved_cause; release relevance: current.** Real VoWiFi SMS and incoming-call failures remain unresolved. A further owner-confirmed incoming attempt produced no parsed INVITE in the deployed diagnostic Provider. Regression reproduces missing peer-initiated TCP listening and the missing second Security-Agree SA pair; the candidate repairs those transport paths without changing Core or user intent. This does not prove the field carrier used that path.
+**State: unresolved_cause; release relevance: current.** Exact 494cf899 CI passed and its authorized single-line trial now records incoming INVITEs followed by local 488 responses; the exact media mismatch remains unknown and further incoming diagnosis is owner-deferred. The modem's newer incoming attempt and received SMS are visible in Core and native Android; the call is missed, not answered. A separate request-local MESSAGE error can persistently poison SMS readiness; the scoped candidate separates rejected input and response-write errors from actual persistence and receive-loop faults.
 
-Acceptance scope / remaining action: Two targeted wire/security counterexamples fail against pre-fix source and pass with the candidate. Full GitHub build/race and physical incoming acceptance are separate gates. The earlier diagnostic trial was authorized and deployed only to the affected line; this new candidate is not deployed. Keep the failed paid SMS, do not resend automatically, and retain the separate modem incoming failure as unresolved. No PR merge authorization is implied.
+Acceptance scope / remaining action: The new real-adapter/runtime failure matrix fails on pre-fix source and passes with the candidate; full GitHub validation and deployment of this new SMS fix remain pending. Preserve genuine storage/transport failure gates and the old paid carrier rejection. The owner explicitly authorized one fresh self-SMS, not automatic retries; it has not been sent while the UI remains blocked. No incoming audio acceptance, exact historical error attribution, Core/Android change or PR merge is claimed.
 
 ### ANDROID
 

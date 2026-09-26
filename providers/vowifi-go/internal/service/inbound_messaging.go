@@ -203,11 +203,6 @@ func (inbound *inboundMessaging) HandleSIPIncoming(ctx context.Context, request 
 	invite := beginInviteDiagnostic(request)
 	responses, err := inbound.server.HandleRequest(ctx, request)
 	logInviteDiagnostic(invite, "handler_complete", 0, err)
-	if strings.EqualFold(strings.TrimSpace(request.Method), "MESSAGE") {
-		inbound.mu.Lock()
-		inbound.fault = err
-		inbound.mu.Unlock()
-	}
 	out := make([]voiceclient.SIPIncomingResponse, 0, len(responses))
 	for _, response := range responses {
 		if !response.NoResponse {
@@ -237,11 +232,6 @@ func (inbound *inboundMessaging) HandleSIPIncomingStreaming(ctx context.Context,
 		return err
 	})
 	logInviteDiagnostic(invite, "handler_complete", 0, err)
-	if strings.EqualFold(strings.TrimSpace(request.Method), "MESSAGE") {
-		inbound.mu.Lock()
-		inbound.fault = err
-		inbound.mu.Unlock()
-	}
 	return err
 }
 
@@ -339,9 +329,18 @@ func (inbound *inboundMessaging) handle(ctx context.Context, request voicehost.I
 		}
 		publishErr = inbound.sink.Publish(event)
 	}
+	// A bad peer payload is a transaction failure, not a dead receive loop.
+	// Only an actual durable write can establish or clear the queue fault.
+	if err == nil && (result.Incoming != nil || result.DeliveryReport != nil) {
+		inbound.mu.Lock()
+		inbound.fault = publishErr
+		inbound.mu.Unlock()
+	}
 	if publishErr != nil {
+		log.Printf("ims_inbound_message status=500 content_failed=false persistence_failed=true")
 		return voicehost.IMSMessageResult{StatusCode: 500, Reason: "message persistence unavailable"}, publishErr
 	}
+	log.Printf("ims_inbound_message status=%d content_failed=%t persistence_failed=false", result.StatusCode, err != nil)
 	return voicehost.IMSMessageResult{
 		StatusCode: result.StatusCode, Reason: result.Reason,
 		ContentType: result.ReplyContentType, Body: append([]byte(nil), result.ReplyBody...),
@@ -360,9 +359,6 @@ func firstNonEmpty(values ...string) string {
 func (inbound *inboundMessaging) finish(err error) {
 	inbound.mu.Lock()
 	inbound.serveErr = err
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, voiceclient.ErrSIPFlowClosed) {
-		inbound.fault = err
-	}
 	inbound.mu.Unlock()
 	close(inbound.done)
 }
@@ -373,6 +369,9 @@ func (inbound *inboundMessaging) Fault() error {
 	}
 	inbound.mu.Lock()
 	defer inbound.mu.Unlock()
+	if inbound.serveErr != nil && !errors.Is(inbound.serveErr, context.Canceled) && !errors.Is(inbound.serveErr, voiceclient.ErrSIPFlowClosed) {
+		return errors.Join(inbound.serveErr, inbound.fault)
+	}
 	return inbound.fault
 }
 
