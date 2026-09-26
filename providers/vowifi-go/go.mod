@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/boa-z/vowifi-go v0.0.0-20260709161034-1e9c6e6adbfc
 	github.com/coder/websocket v1.8.15
+	github.com/emiago/sipgo v1.4.0
 	github.com/lovitus/mdd-sim-gateway/go-runtime v0.0.0
 	github.com/pion/rtcp v1.2.16
 	github.com/pion/rtp v1.10.2
@@ -21,7 +22,6 @@ replace github.com/boa-z/vowifi-go => ./upstream/vowifi-go
 replace github.com/lovitus/mdd-sim-gateway/go-runtime => ../../go-runtime
 
 require (
-	github.com/emiago/sipgo v1.4.0 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect

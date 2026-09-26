@@ -98,6 +98,8 @@ type OutboundCallRequest struct {
 }
 
 type OutboundCallResult struct {
+	// A final 2xx creates cleanup ownership even if ACK or media setup fails.
+	DialogEstablished          bool
 	Accepted                   bool
 	StatusCode                 int
 	Reason                     string

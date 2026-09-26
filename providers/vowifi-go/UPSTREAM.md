@@ -1,5 +1,226 @@
 # Upstream source and MDD patch
 
+## SMS receive-report network context
+
+The `524bd33` affected-line trial received six carrier redeliveries whose separate
+RP reports were rejected with SIP 403. The durable Core history added only one
+new-format event across those attempts, supporting ingress deduplication rather
+than successful acknowledgement. This is distinct from the earlier quiet rollout
+sample, the old outgoing 403 and RP cause 38; only one outbound SMS was submitted.
+
+Inspection found that the MDD report adapter omitted the existing registration
+profile's access and visited-network fields. The shared upstream dialog builder
+does not inherit them from Profile, so the report fell back to bare IEEE-802.11.
+The affected configuration has a non-default access value. Reuse the same two
+fields as the already adapted upstream `IMSSMSTransport`; do not invent location,
+alter registration/configuration or change report identity, route, RPDU or retries.
+This is a proven propagation defect, not a captured verdict that it caused 403.
+
+Failure checklist: configured network context disappearing, unconfigured values
+being invented, and a report still using the fallback on the actual wire. The
+existing real userspace registered-flow test and the report adapter's configured
+context case both compiled and failed on unchanged `524bd33`. Empty-context,
+gateway, storage/write-failure and rejection controls retained their expectations.
+Focused post-fix race results and full GitHub qualification are recorded in PR #13;
+local policy tests do not establish carrier acceptance. No further paid SMS or
+manual notification replay is included.
+
+## Configured SMS service centre
+
+The follow-up to the retained RP cause 38 failure found a separate, reproducible
+configuration loss: Core rendering, Provider settings and prepared identity retain
+the configured SMSC, but `WireIMSRegistrar.smsTransport` omitted it when constructing
+the existing `IMSSMSTransport`. The resulting RP-DATA destination was empty even
+with a configured service centre. The inspected [upstream registrar](https://github.com/boa-z/vowifi-go/blob/main/runtimehost/imsregistrar.go)
+has the same omission. This is not proof that it caused the carrier's RP error.
+
+The adaptation passes the effective registration profile's SMSC to the existing
+encoder. Recipient routing, TPDU construction, transport ownership, unknown-outcome
+handling and retry policy are unchanged. An unset SMSC remains unset; no carrier
+number is guessed. There is no Core, Android, configuration-schema or API change.
+
+Failure checklist: a configured SMSC disappearing on transport creation, an
+international/national address being changed, and an unconfigured address being
+invented. `TestWireIMSRegistrarSMSUsesConfiguredServiceCentre` failed on unmodified
+`bc7dd36` for both configured forms, with the unset control already passing.
+The existing real-loopback REGISTER/MESSAGE test also failed after decoding an
+empty RP destination from the actual UDP message. Both pass with the adaptation
+under `-race`; related prepared-identity and recovery-binding checks also pass.
+The one-time focused red/green uses the same isolated native dependency described
+below. Full build/race remains the existing GitHub workflow, not a local suite.
+No further carrier SMS was sent; the prior single-use authorization is consumed.
+Carrier delivery, deployment and exact historical cause remain unverified.
+
+## Established-call cleanup ownership
+
+Reconciliation of old PR #9/#10 found missing F1/F3 safety fixes in the current
+Provider. This batch adapts the existing implementation from PR #9 at `274983d`
+(including `d005080`), without its separate Core durable-call receipts or pairing
+changes. Existing source licenses, paid-operation identity, guard/backoff, DTMF
+and inbound handling are retained.
+
+The final 2xx dialog is now stored before ACK/SDP work. A media-start error returns
+the original cleanup handle through both wrappers; it cannot trigger registration
+recovery/redial while that handle exists. Media closes locally, but the Backend
+keeps the call busy until cleanup is positively confirmed. Runtime stop, explicit
+hangup and failed start all check the actual End result, not only a nil error.
+Existing confirmed BYE idempotency and the original-call cleanup guard are reused.
+
+The failure checklist is final-2xx/unusable media, invalid SDP, lost ACK write,
+rejected cleanup, new-call admission during cleanup, and runtime shutdown before
+confirmed termination. The real SIP/media/wrapper/Backend regression failed on
+unmodified `4ca9315` in all six scenarios and passed with the scoped port under
+`-race`. The synthetic SIP peer rejects two BYEs and accepts the original call's
+third; only one INVITE is allowed. It never contacts a carrier. The existing media
+test's nil-handle expectation was corrected because even already-confirmed cleanup
+now returns an idempotent handle; its wire trace still requires exactly one BYE.
+The focused one-time check used the same isolated opencore-amr 0.1.6 static library
+as the SMS counterexample. Full build/race qualification remains GitHub-only.
+This is not production deployment, incoming audio acceptance or Core restart recovery.
+
+## SMS request-local failure containment
+
+The deployed receive-path trial recorded two parsed incoming INVITEs and locally
+written 488 responses. This narrows that incident to local media negotiation;
+the exact rejected SDP was not captured, so no codec-specific field cause is
+claimed. The owner permits deferring further incoming diagnosis. A separate
+modem incoming attempt and received SMS were found in Core and the native app;
+the call was missed, not answered or acoustically accepted.
+
+The UK SMS readiness was blocked by `inbound_messaging_failed`. Its old handler
+assigned every individual MESSAGE error to the whole-channel fault, including
+malformed RPDU, unsupported content and a failed response write. That could keep
+outgoing SMS disabled until another incoming request happened to succeed. The
+original request's error was not retained; the field trigger is still unknown.
+
+The existing SIP parser and transaction responses are unchanged. Only actual
+durable publication establishes or clears the queue fault; peer input rejection
+does neither. A terminal receive-loop error remains independently blocking and
+cannot be erased by an in-flight successful message. The existing wire-flow owner
+still closes a failed response socket and owns registration recovery. Numeric
+MESSAGE status and content/persistence failure booleans use the process logger,
+without content, addresses, headers, identities or raw errors. Core, Android,
+carrier location, desired state and paid retry policy are unchanged.
+
+`TestInboundRequestFailureDoesNotPoisonMessaging` exercises both real adapter
+entry points, upstream MESSAGE handling, runtime readiness and one captured
+outbound transport submission. On the unmodified source it fails for invalid
+RPDU, unsupported content, lost durable-failure identity, erased terminal failure
+and a response-write error. The same test passes after this fix. The first test
+fixture omitted required Via and was rejected before MESSAGE handling; that run
+is retained but is not the counterexample. The corrected fixture did not change
+any response expectations. This one-time local red/green used the hash-verified
+Homebrew opencore-amr 0.1.6 static library in an isolated task directory, without
+a system installation. Full build/race remains the unchanged GitHub workflow.
+
+The owner-authorized self-SMS was subsequently submitted once after the `4ca9315`
+trial deployment. SIP accepted it, followed by delivery failure with RP cause 38
+(network out of order); there was no received self-message. This differs from the
+earlier SIP 403 and does not establish the carrier's root cause. The authorization
+is consumed. This patch is not carrier SMS acceptance and does not authorize an
+automatic resend or PR merge.
+
+## Peer-initiated incoming TCP
+
+The registered TCP connection was the only SIP receive path. A new connection to
+the advertised Contact port was refused; the userspace Security-Agree installer
+also installed only the UE-initiated SA pair. Thus registration success did not
+prove that a peer-initiated incoming connection could reach the INVITE adapter.
+This is a reproduced implementation gap, not proof of the field carrier's path.
+
+The same flow now owns an optional userspace TCP listener. It accepts only the
+connected P-CSCF address and, for Security-Agree, its negotiated client port.
+It reuses the existing parser, streaming handler, response builder and write lock.
+Reset/deregistration closes the listener and accepted connections; no host listener,
+second registration owner, paid retry, Core change or user switch is introduced.
+The installer adds the other negotiated ESP pair with independent sequence/replay
+state and plaintext rejection. The local gVisor listener follows gonet.ListenTCP
+with reuse-address (not reuse-port), matching the existing caller-bound dial and
+allowing a Contact listener beside an established connection on the same port.
+
+Reference: [3GPP TS 33.203, section 7.1](https://www.etsi.org/deliver/etsi_ts/133200_133299/133203/18.00.00_60/ts_133203v180000p.pdf).
+The upstream main wire-flow source was checked; the fix remains a local adaptation,
+not an unreviewed wholesale upstream replacement. UDP behavior is not expanded.
+
+The two new regression tests use the real in-memory network and transport/security
+implementations. Against the pre-fix source overlay, a successful TCP REGISTER is
+followed by connection refusal, and the other valid ESP pair times out. Both pass
+with the fix, including ringing response and connection closure. This one-time
+red/green check selected only the registrar/security files; an earlier package
+attempt failed because the local AMR development library is absent and is not a
+test result. The existing full GitHub workflow remains the build/race gate.
+The exact `494cf899` GitHub workflow subsequently passed and that artifact was
+trial-deployed to the one affected line. The later 488 observations above prove
+parsed incoming arrival, not a successfully ringing or answered call. The separate
+SMS rejection remains unaccepted.
+
+## Incoming pre-ringing diagnostics
+
+A real incoming call failed before ringback, with no pending call or call-history
+entry. Those absences do not prove carrier non-delivery: SIP validation and local
+availability/SDP checks can reject INVITE before pending state exists.
+
+The MDD service adapter now logs receipt of parsed INVITEs, numeric response
+status and streaming response-write failure through the existing process logger.
+A process-local sequence correlates the records without carrier Call-ID, phone
+numbers, URI, SDP, headers or raw error strings. Non-streaming results are explicitly
+`response_prepared`, not delivered; a successful streaming write is not a carrier
+acknowledgement. `failed=false` describes handler/write completion, not call success:
+a locally rejected call can have a successfully written 4xx response.
+
+This does not alter SIP responses, availability checks, call ownership, routing or
+recovery. It does not capture parser failures before the adapter, so an absent
+receipt still is not proof of carrier fault. Repeated INVITEs receive separate
+local sequence numbers; no packet-level deduplication or wire capture is claimed.
+The incident remains unresolved until exact-version runtime evidence distinguishes
+non-arrival at this boundary from local rejection. Existing inbound/IMS tests are
+retained; no new red/green regression or real incoming acceptance is claimed.
+
+## SMS registered network context
+
+A real single-part SMS returned `Forbidden - Service not allowed in this location`.
+That response is retained as failed, not successful submission. Source inspection
+found that REGISTER carries the configured profile's access/visited network
+headers, while `IMSSMSTransport` constructed MESSAGE dialogs without them. The
+shared dialog builder consequently used its bare `IEEE-802.11` fallback. It does
+not inherit these fields automatically from `DialogRequestConfig.Profile`.
+
+The local adaptation copies those two existing profile fields into the SMS dialog.
+It uses the same registered context, not a fabricated country or a new location
+policy. Empty values retain the existing builder defaults. Authentication, route
+sets, transport ownership, redirect handling, paid-operation identity and retry
+policy are unchanged. No registration, SIM, Core or user configuration is changed.
+
+This is a concrete propagation correction, not proof that the carrier's rejection
+was caused by this omission. It also does not explain or repair the separately
+reported incoming-call failure. Existing messaging/IMS suites cover the wire path;
+no new red/green regression result or post-fix carrier acceptance is claimed.
+The one authorized self-SMS must not be repeated automatically for validation.
+
+## Outbound DTMF media ownership
+
+An actual native outbound call reached `SendDTMF`, but the carrier rejected the
+SIP INFO fallback with 405. The MDD PCM bridge owns that call's RTP socket; the
+upstream dialog relay is absent, so querying its RTP sender cannot send an event.
+
+The outbound wrapper now offers 8 kHz telephone-event alongside its existing
+audio codec and honors the answer's payload and event set. It reuses the pinned
+upstream `BuildRTPDTMFSequence`, including terminal event repetitions, on the
+existing userspace media socket. Packet writes share the audio SSRC and sequence
+space; the event timestamp stays fixed while microphone audio continues. No new
+SIP stack, host-network fallback, audio synthesizer or dependency is introduced.
+The wire contract is [RFC 4733](https://www.rfc-editor.org/rfc/rfc4733.html).
+
+Failure boundaries: no accepted event payload means the existing fallback stays;
+a failed or partially sent RTP event must not fall back to INFO and duplicate a
+digit. Cancellation and bridge shutdown stop pending event packets. This change
+does not modify inbound B2BUA DTMF, call ownership, Core authentication or recovery.
+CI covers the existing media/IMS/protocol suites. The pre-fix physical error is
+retained separately; new carrier RTP-DTMF acceptance is still required before a
+production success claim. No new automated red/green result is claimed here.
+
+## Existing Transport Patches
+
 IKE diagnostic datagrams include late, duplicate and rejected candidates.
 They are not mutually exclusive successful outcomes of the sent requests.
 The IPC contract preserves them unchanged and only bounds timed-out exchanges

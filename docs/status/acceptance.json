@@ -830,11 +830,14 @@
       "requirement": "通话中 Agent 断线：服务端结束或标记失败的通话、关闭 RTP、通知所有客户端并保留记录。",
       "implementation": "implemented",
       "acceptance": "pending_hardware",
-      "rationale": "Exact-call guards retain cleanup ownership and terminate or report uncertain outcomes after media/Agent loss. Hardware carrier terminal-state acceptance is not implied.",
+      "rationale": "Exact-call guards retain cleanup ownership and terminate or report uncertain outcomes after media/Agent loss. The September 26 PR reconciliation ports established-dialog cleanup from old PR #9/#10: final-2xx ACK/SDP/media failures preserve the original handle, new calls remain blocked until cleanup, and End requires a positive result before runtime release. Six real SIP/media/wrapper/Backend regression cases failed before the port and passed with race detection; existing media confirmation remains idempotent. No Core durable-call recovery or hardware carrier terminal-state acceptance is implied.",
       "evidence": [
         "go-runtime/internal/agentmedia/broker.go",
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/call.go",
+        "providers/vowifi-go/internal/service/call_cleanup_test.go",
+        "providers/vowifi-go/internal/ims/media_call.go",
+        "providers/vowifi-go/UPSTREAM.md",
         "webui/src/goCallCoordinator.jsx"
       ],
       "historicalEvidence": []
@@ -1395,6 +1398,26 @@
     }
   ],
   "workstreams": [
+    {
+      "id": "INCIDENT_IMS_CALL_SMS",
+      "state": "unresolved_cause",
+      "summary": "Incoming INVITEs and local 488 responses remain scoped evidence, with further incoming diagnosis owner-deferred. One separately authorized self-SMS after the SMSC correction was submitted once and received, followed by repeated carrier deliveries and Telegram notifications. Receive correction 524bd33 passed full workflow 36260170582 and was restored to the affected-line trial; the original temporary pause lease was released. Later field logs show six RP report attempts rejected with SIP 403, while Core added only one new-format received event across those retries. The current followup passes the existing registered access/visited-network fields to the report builder, matching the established outgoing SMS adapter; its previous fallback omitted actual configured context.",
+      "acceptance": "Original separate-report and durable-identity counterexamples failed on d69bdbb and passed after correction. The new report network-context case and actual userspace wire assertion compiled and failed on unchanged 524bd33; both passed with the two-field adaptation under race detection, including unchanged empty-context and failure controls. Full GitHub qualification and deployment of this followup are pending. Field deduplication has scoped evidence, but carrier report acceptance remains failed/unresolved; the propagation defect is not proof of the carrier's 403 cause. The one-shot SMS permission is consumed; no extra outbound SMS or manual replay. A first new-format event can coexist with old history; no record is erased. Incomplete multipart assembly retains its upstream in-memory lifetime. Core, Android, Telegram settings, desired state and retry policy are unchanged. Preserve distinct prior RP 38 and outgoing 403 evidence. Native incoming audio and PR merge remain unaccepted.",
+      "evidence": [
+        "providers/vowifi-go/UPSTREAM.md",
+        "providers/vowifi-go/internal/service/inbound_messaging.go",
+        "providers/vowifi-go/internal/service/inbound_sms_report.go",
+        "providers/vowifi-go/internal/service/inbound_sms_report_test.go",
+        "providers/vowifi-go/internal/service/inbound_messaging_integration_test.go",
+        "providers/vowifi-go/internal/service/messaging_test.go",
+        "providers/vowifi-go/upstream/vowifi-go/runtimehost/imsregistrar.go",
+        "providers/vowifi-go/upstream/vowifi-go/runtimehost/imsregistrar_test.go",
+        "providers/vowifi-go/upstream/vowifi-go/runtimehost/messaging/ims_sms.go",
+        "providers/vowifi-go/internal/ims/incoming_tcp_test.go",
+        "providers/vowifi-go/upstream/vowifi-go/runtimehost/voiceclient/wire_incoming_listener.go"
+      ],
+      "releaseRelevance": "current"
+    },
     {
       "id": "ANDROID",
       "state": "partial",

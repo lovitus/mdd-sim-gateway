@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"maps"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/boa-z/vowifi-go/runtimehost/messaging"
@@ -137,6 +140,8 @@ type inboundMessaging struct {
 	started  bool
 }
 
+var inboundInviteSequence atomic.Uint64
+
 func (inbound *inboundMessaging) ConfigureVoice(stack *usernet.Stack, localIP, contactURI, localTag, userAgent string, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding, carrier voiceclient.SIPRequestTransport) error {
 	if inbound == nil || stack == nil || carrier == nil || strings.TrimSpace(binding.ContactURI) == "" {
 		return errors.New("invalid inbound voice configuration")
@@ -196,14 +201,22 @@ func (inbound *inboundMessaging) Start(flow inboundSIPFlow) error {
 }
 
 func (inbound *inboundMessaging) HandleSIPIncoming(ctx context.Context, request voiceclient.SIPIncomingRequest) []voiceclient.SIPIncomingResponse {
+	invite := beginInviteDiagnostic(request)
 	responses, err := inbound.server.HandleRequest(ctx, request)
-	if strings.EqualFold(strings.TrimSpace(request.Method), "MESSAGE") {
-		inbound.mu.Lock()
-		inbound.fault = err
-		inbound.mu.Unlock()
-	}
+	logInviteDiagnostic(invite, "handler_complete", 0, err)
 	out := make([]voiceclient.SIPIncomingResponse, 0, len(responses))
 	for _, response := range responses {
+		if isSMSReport(request, response) {
+			// Reports require a post-write callback. WireSIPFlow uses the
+			// streaming interface; buffered callers must not silently lose them.
+			response = withoutSMSReport(response)
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				response.StatusCode, response.Reason = 503, "SMS report requires streaming transport"
+			}
+		}
+		if !response.NoResponse {
+			logInviteDiagnostic(invite, "response_prepared", response.StatusCode, nil)
+		}
 		out = append(out, voiceclient.SIPIncomingResponse{
 			StatusCode: response.StatusCode, Reason: response.Reason, Headers: response.Headers,
 			Body: append([]byte(nil), response.Body...), NoResponse: response.NoResponse,
@@ -216,18 +229,71 @@ func (inbound *inboundMessaging) HandleSIPIncomingStreaming(ctx context.Context,
 	if inbound == nil || emit == nil {
 		return errors.New("inbound SIP streaming handler is unavailable")
 	}
+	invite := beginInviteDiagnostic(request)
+	var report *voiceclient.SIPRequestMessage
 	err := inbound.server.HandleRequestStreaming(ctx, request, func(response voicehost.IMSInboundWireResponse) error {
-		return emit(voiceclient.SIPIncomingResponse{
+		var reportErr error
+		if isSMSReport(request, response) {
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				report, reportErr = inbound.buildSMSReport(request, response)
+			}
+			response = withoutSMSReport(response)
+			if reportErr != nil {
+				response.StatusCode, response.Reason = 500, "SMS report unavailable"
+				log.Printf("ims_inbound_sms_report phase=prepare status=500 failed=true")
+			}
+		}
+		err := emit(voiceclient.SIPIncomingResponse{
 			StatusCode: response.StatusCode, Reason: response.Reason, Headers: response.Headers,
 			Body: append([]byte(nil), response.Body...), NoResponse: response.NoResponse,
 		})
+		if !response.NoResponse {
+			logInviteDiagnostic(invite, "response_write", response.StatusCode, err)
+		}
+		return errors.Join(err, reportErr)
 	})
-	if strings.EqualFold(strings.TrimSpace(request.Method), "MESSAGE") {
-		inbound.mu.Lock()
-		inbound.fault = err
-		inbound.mu.Unlock()
+	logInviteDiagnostic(invite, "handler_complete", 0, err)
+	if err == nil && report != nil {
+		// TS 24.341 section 5.3.2.4: RP-ACK is a separate MESSAGE to
+		// the asserted IP-SM-GW, sent only after the SIP response is written.
+		reportCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		response, sendErr := voiceclient.RoundTripRequestWithDigestAuth(reportCtx, inbound.server.CarrierTransport, *report)
+		err = sendErr
+		if err == nil && (response.StatusCode < 200 || response.StatusCode >= 300) {
+			err = fmt.Errorf("SMS report rejected: SIP %d", response.StatusCode)
+		}
+		log.Printf("ims_inbound_sms_report status=%d failed=%t", response.StatusCode, err != nil)
 	}
 	return err
+}
+
+func withoutSMSReport(response voicehost.IMSInboundWireResponse) voicehost.IMSInboundWireResponse {
+	response.Body = nil
+	response.Headers = maps.Clone(response.Headers)
+	for name := range response.Headers {
+		if strings.EqualFold(name, "Content-Type") || strings.EqualFold(name, "Content-Length") {
+			delete(response.Headers, name)
+		}
+	}
+	return response
+}
+
+func beginInviteDiagnostic(request voiceclient.SIPIncomingRequest) uint64 {
+	if !strings.EqualFold(strings.TrimSpace(request.Method), "INVITE") {
+		return 0
+	}
+	invite := inboundInviteSequence.Add(1)
+	logInviteDiagnostic(invite, "received", 0, nil)
+	return invite
+}
+
+// Correlate within this process using a local sequence, never a carrier Call-ID,
+// URI, SDP, raw error or header. A prepared response is not proof of a wire write.
+func logInviteDiagnostic(invite uint64, phase string, status int, err error) {
+	if invite != 0 {
+		log.Printf("ims_inbound_invite request=%d phase=%s status=%d failed=%t", invite, phase, status, err != nil)
+	}
 }
 
 func (inbound *inboundMessaging) PendingCall() (ims.IncomingCallInfo, bool) {
@@ -290,6 +356,15 @@ func (inbound *inboundMessaging) handle(ctx context.Context, request voicehost.I
 	if err == nil && result.Incoming != nil {
 		event := inbound.tracker.identity(fmt.Sprintf("received:%s:%d", request.CallID, request.CSeq), providermessages.KindReceived)
 		event.MessageID = fmt.Sprintf("ims:%s:%d", request.CallID, request.CSeq)
+		if result.RPDU.Kind == messaging.SMSRPDUKindData && !result.Incoming.Timestamp.IsZero() {
+			id, identityErr := incomingSMSIdentity(result.Incoming)
+			if identityErr != nil {
+				return voicehost.IMSMessageResult{StatusCode: 500, Reason: "SMS identity unavailable"}, identityErr
+			}
+			// Carrier retries may change Call-ID, RP-MR and process generation.
+			// Core's existing durable identity/notification store deduplicates this key.
+			event.EventID, event.MessageID = id, id
+		}
 		event.Sender, event.Recipient, event.Body = result.Incoming.Sender, result.Incoming.Recipient, result.Incoming.Content
 		if !result.Incoming.Timestamp.IsZero() {
 			event.ObservedAt = result.Incoming.Timestamp
@@ -307,9 +382,18 @@ func (inbound *inboundMessaging) handle(ctx context.Context, request voicehost.I
 		}
 		publishErr = inbound.sink.Publish(event)
 	}
+	// A bad peer payload is a transaction failure, not a dead receive loop.
+	// Only an actual durable write can establish or clear the queue fault.
+	if err == nil && (result.Incoming != nil || result.DeliveryReport != nil) {
+		inbound.mu.Lock()
+		inbound.fault = publishErr
+		inbound.mu.Unlock()
+	}
 	if publishErr != nil {
+		log.Printf("ims_inbound_message status=500 content_failed=false persistence_failed=true")
 		return voicehost.IMSMessageResult{StatusCode: 500, Reason: "message persistence unavailable"}, publishErr
 	}
+	log.Printf("ims_inbound_message status=%d content_failed=%t persistence_failed=false", result.StatusCode, err != nil)
 	return voicehost.IMSMessageResult{
 		StatusCode: result.StatusCode, Reason: result.Reason,
 		ContentType: result.ReplyContentType, Body: append([]byte(nil), result.ReplyBody...),
@@ -328,9 +412,6 @@ func firstNonEmpty(values ...string) string {
 func (inbound *inboundMessaging) finish(err error) {
 	inbound.mu.Lock()
 	inbound.serveErr = err
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, voiceclient.ErrSIPFlowClosed) {
-		inbound.fault = err
-	}
 	inbound.mu.Unlock()
 	close(inbound.done)
 }
@@ -341,6 +422,9 @@ func (inbound *inboundMessaging) Fault() error {
 	}
 	inbound.mu.Lock()
 	defer inbound.mu.Unlock()
+	if inbound.serveErr != nil && !errors.Is(inbound.serveErr, context.Canceled) && !errors.Is(inbound.serveErr, voiceclient.ErrSIPFlowClosed) {
+		return errors.Join(inbound.serveErr, inbound.fault)
+	}
 	return inbound.fault
 }
 

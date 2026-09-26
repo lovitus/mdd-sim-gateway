@@ -111,8 +111,11 @@ func TestMediaCallEndsAcceptedDialogWhenAnswerCannotBeUsed(t *testing.T) {
 		LocalRTP: "10.0.0.1:0", LocalRTCP: "10.0.0.1:0",
 		Codec: media.CodecPCMU, BufferMS: 500,
 	}, voicehost.OutboundCallRequest{DeviceID: "device-media", CallID: "bad-media", Callee: "+100"})
-	if call != nil || !result.Accepted || !errors.Is(err, ErrMediaNegotiation) || !strings.Contains(err.Error(), "ptime") {
+	if call == nil || !result.Accepted || !errors.Is(err, ErrMediaNegotiation) || !strings.Contains(err.Error(), "ptime") {
 		t.Fatalf("StartMediaCall() = %v, %+v, %v", call, result, err)
+	}
+	if ended, err := call.End(ctx); err != nil || !ended.Accepted {
+		t.Fatalf("confirmed cleanup must remain idempotent: %+v, %v", ended, err)
 	}
 	finishVoiceFixture(t, registration, requests, serverDone,
 		[]string{"REGISTER", "INVITE", "ACK", "BYE", "REGISTER"})

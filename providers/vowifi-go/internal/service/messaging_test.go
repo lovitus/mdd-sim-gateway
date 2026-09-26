@@ -5,11 +5,13 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/boa-z/vowifi-go/runtimehost"
 	"github.com/boa-z/vowifi-go/runtimehost/messaging"
+	"github.com/boa-z/vowifi-go/runtimehost/voiceclient"
 	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
@@ -31,6 +33,111 @@ func (sink *captureMessageSink) Publish(event providermessages.Event) error {
 type failingMessageSink struct{}
 
 func (failingMessageSink) Publish(providermessages.Event) error { return context.DeadlineExceeded }
+
+type recoverableMessageSink struct {
+	captureMessageSink
+	err error
+}
+
+func (sink *recoverableMessageSink) Publish(event providermessages.Event) error {
+	if sink.err != nil {
+		return sink.err
+	}
+	return sink.captureMessageSink.Publish(event)
+}
+
+func TestInboundRequestFailureDoesNotPoisonMessaging(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		mode := "buffered"
+		if streaming {
+			mode = "streaming"
+		}
+		t.Run(mode, func(t *testing.T) {
+			for _, scenario := range []string{"invalid_rpdu", "unsupported_content", "durable_queue", "receive_loop", "response_write"} {
+				t.Run(scenario, func(t *testing.T) {
+					sink := &recoverableMessageSink{}
+					tracker := newMessageTracker(sink, func(id string, kind providermessages.Kind) providermessages.Event {
+						return providermessages.Event{SchemaVersion: providermessages.SchemaVersion, EventID: id, LineID: "line-1", ProviderID: "native", ProcessGeneration: "generation-1", Kind: kind, ObservedAt: time.Now()}
+					})
+					inbound, err := newInboundMessaging(messaging.NewService("device-1", "234100000000001", tracker, nil), tracker, sink)
+					if err != nil {
+						t.Fatal(err)
+					}
+					transport := &captureSMSTransport{}
+					runtime := &upstreamRuntime{deviceID: "device-1", imsi: "234100000000001", inbound: inbound, tracker: tracker,
+						registration: runtimehost.IMSRegistrationResult{Registered: true, SMSTransport: transport}}
+					sequence := 0
+					writeErr := error(nil)
+					receive := func(contentType string, body []byte) int {
+						t.Helper()
+						sequence++
+						request := voiceclient.SIPIncomingRequest{Method: "MESSAGE", URI: "sip:recipient@example.test", Headers: map[string][]string{
+							"Via": {fmt.Sprintf("SIP/2.0/TCP 192.0.2.1:5060;branch=z9hG4bK-message-%d", sequence)}, "Max-Forwards": {"70"},
+							"From": {"<sip:sender@example.test>;tag=remote"}, "To": {"<sip:recipient@example.test>"},
+							"Call-ID": {fmt.Sprintf("message-%d", sequence)}, "CSeq": {"1 MESSAGE"}, "Content-Type": {contentType},
+						}, Body: body}
+						status := 0
+						if streaming {
+							_ = inbound.HandleSIPIncomingStreaming(t.Context(), request, func(response voiceclient.SIPIncomingResponse) error {
+								status = response.StatusCode
+								return writeErr
+							})
+						} else {
+							for _, response := range inbound.HandleSIPIncoming(t.Context(), request) {
+								status = response.StatusCode
+							}
+						}
+						return status
+					}
+					switch scenario {
+					case "invalid_rpdu":
+						if status := receive("application/vnd.3gpp.sms", []byte{0xff}); status != 400 {
+							t.Fatalf("invalid RPDU status=%d", status)
+						}
+					case "unsupported_content":
+						if status := receive("application/example-unsupported", []byte("unsupported")); status != 415 {
+							t.Fatalf("unsupported content status=%d", status)
+						}
+					case "durable_queue":
+						sink.err = context.DeadlineExceeded
+						if status := receive("text/plain", []byte("retain me")); status != 500 || runtime.Layers().Messaging.Available {
+							t.Fatalf("queue failure status=%d fault=%v", status, inbound.Fault())
+						}
+						receive("application/example-unsupported", nil)
+						if !errors.Is(inbound.Fault(), context.DeadlineExceeded) {
+							t.Fatalf("invalid peer content replaced persistence failure: %v", inbound.Fault())
+						}
+						sink.err = nil
+						receive("text/plain", []byte("queue recovered"))
+					case "receive_loop":
+						failure := errors.New("receive loop stopped")
+						inbound.finish(failure)
+						receive("text/plain", []byte("in-flight message"))
+						if !errors.Is(inbound.Fault(), failure) || runtime.Layers().Messaging.Available {
+							t.Fatalf("in-flight success erased terminal receive failure: %v", inbound.Fault())
+						}
+						return
+					case "response_write":
+						if !streaming {
+							return
+						}
+						writeErr = errors.New("peer response socket closed")
+						receive("text/plain", []byte("already retained"))
+						if len(sink.events) != 1 {
+							t.Fatal("message not retained before response write")
+						}
+					}
+					if fault := inbound.Fault(); fault != nil || !runtime.Layers().Messaging.Available {
+						t.Fatalf("request error poisoned messaging: %v", fault)
+					}
+					if err := runtime.SendMessage(t.Context(), vowifiipc.SendMessageRequest{OperationID: "send-once", MessageID: "outbound-once", Recipient: "+441234567890", Body: "one outbound message"}); err != nil || len(transport.requests) != 1 {
+						t.Fatalf("outbound after rejected request: error=%v attempts=%d", err, len(transport.requests))
+					}
+				})
+			}
+		})
+	}
+}
 
 func (transport *captureSMSTransport) SendSMSPart(_ context.Context, request messaging.SMSSendRequest) (messaging.SMSSendResult, error) {
 	transport.requests = append(transport.requests, request)
