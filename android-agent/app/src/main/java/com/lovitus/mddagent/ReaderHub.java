@@ -47,6 +47,9 @@ final class ReaderHub implements AutoCloseable {
                 if(recovery.resetResult!=0){
                     int message=recovery.retryPending()?R.string.reader_usb_recovery_retrying:R.string.reader_usb_recovery_failed;
                     detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(message,recovery.resetResult,recovery.resetStage));
+                }else if(recovery.retryPending()||recovery.exhausted()){
+                    int message=recovery.retryPending()?R.string.reader_usb_recovery_unstable_retrying:R.string.reader_usb_recovery_unstable_stopped;
+                    detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(message));
                 }
                 failures.put(name,detail);
             }

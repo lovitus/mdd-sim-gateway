@@ -124,6 +124,8 @@
 <string name="reader_usb_recovering">USB 端口已重置，正在等待重新识别卡片。</string>
 <string name="reader_usb_recovery_failed">USB 恢复失败：%2$s（%1$d），已停止本次故障的自动重置。</string>
 <string name="reader_usb_recovery_retrying">USB 恢复失败：%2$s（%1$d）。若命令写入仍失败，将延迟再尝试一次。</string>
+<string name="reader_usb_recovery_unstable_retrying">USB 恢复后再次不可用。若命令写入仍失败，将延迟再尝试一次。</string>
+<string name="reader_usb_recovery_unstable_stopped">USB 恢复后再次不可用，已停止本次故障的自动重置。</string>
 <string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">设备或 SIM 访问规则拒绝了 OMAPI</string>
 <string name="reader_count">已识别读卡器：%1$d</string>

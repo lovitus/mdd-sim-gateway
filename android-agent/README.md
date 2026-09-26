@@ -96,13 +96,15 @@ scan: it reproduced a successful reset return followed by failed card reads.
 That native return alone is not recovery. The corrected path follows the working
 field comparison without the intervening close/idle gap;
 PIN/AKA, SMS and call requests are never replayed. Sixty seconds of successful
-scans rearm recovery for a later fault. If that reset fails specifically during
-the read-only slot-status handshake and fresh command writes still fail, one
-additional reset is permitted at least 30 seconds after the first attempt.
+scans rearm recovery for a later fault. One delayed followup is available if the
+first reset fails during the read-only slot-status handshake, or succeeds but
+fresh command writes fail again before sustained health rearms the budget.
+Both cases require two consecutive write failures and at least 30 seconds since
+the first attempt.
 There is no third reset, and permission, shape, claim, native reset, power-on and
 identity failures do not gain a retry. Continuing failure does not cause a reset
-loop. Home/Readers distinguish the pending followup from exhausted recovery and retain the
-unplug/OTG advice. No wake lock, root, hidden Java API, server change, permission
+loop. Home/Readers distinguish the pending followup from exhausted recovery and
+retain the unplug/OTG advice. No wake lock, root, hidden Java API, server change, permission
 grant or availability/share intent change is added.
 
 The small JNI boundary uses the Linux `USBDEVFS_RESET` operation on the descriptor
@@ -138,8 +140,17 @@ The bounded followup above addresses this observed recovery dead end without an
 App restart, permanent wake lock or paid-operation retry. A focused policy test
 compiled and failed with the old one-reset behavior (only its timestamp parameter
 was added), then all three policy tests passed after the change. This counterexample
-uses real UsbRecovery policy, not USB hardware; Android CI and actual automatic
-followup acceptance are still pending. The physical sleep-fault cause is unknown.
+uses real UsbRecovery policy, not USB hardware. Signed v80 / `aeb0004` passed
+workflow `36249215118`; a short field sample did not establish durable recovery.
+Later, a successful reset was followed by renewed write failures before the
+60-second healthy rearm. Refresh did not recover the reader; a manual App restart
+did. The v80 policy incorrectly excluded this successful-but-unstable case from
+its second recovery attempt. The new regression compiled and failed on v80,
+then all four focused policy tests passed after the correction. The old test's
+expectation that a completed reset could never get a followup was replaced by
+this observed sequence; unsafe failure-stage exclusions remain unchanged.
+Full signed CI and physical acceptance of this new branch are still pending.
+The original physical sleep-fault cause is unknown; no paid operation is replayed.
 
 Call history now displays direction, peer, line name/number/card when present,
 localized colored status and local time. Missing catalog details remain unknown;

@@ -4,7 +4,7 @@ import android.hardware.usb.*;
 import android.system.OsConstants;
 import java.io.IOException;
 
-/** One recovery plus a bounded slot-handshake followup; sustained health rearms it. */
+/** At most two resets per unstable episode; sustained health rearms the budget. */
 final class UsbRecovery {
     private int failures;
     private int attempts;
@@ -24,7 +24,12 @@ final class UsbRecovery {
     }
 
     boolean retryPending() {
-        return attempts == 1 && resetResult != 0 && "slot_status".equals(resetStage);
+        return attempts == 1 && (resetResult == 0 && failures > 0
+                || resetResult != 0 && "slot_status".equals(resetStage));
+    }
+
+    boolean exhausted() {
+        return attempts >= 2 && failures > 0;
     }
 
     void healthy(long now) {
