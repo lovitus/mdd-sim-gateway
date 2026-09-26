@@ -72,6 +72,16 @@ Reader transport state is retained separately from local card-scan state so a sc
 cannot hide a failed connection. Home/Readers show that state; diagnostic sharing
 contains only bounded failure codes, never raw response bodies, URLs or credentials.
 
+Home and Readers also share a USB-specific status renderer: current attachment,
+permission, saved availability/sharing, local card identity and Agent link are
+distinct. USB transfer failures stay visible alongside a link failure and suggest
+reconnecting the reader/OTG adapter only when no call or SIM operation is active.
+The advice does not diagnose a power, OS-sleep or software cause. An unrelated
+OMAPI denial does not color this USB-specific status as a failed USB reader.
+No device reset, permission change, PIN attempt, wake lock or automatic activation
+is added. Ordinary app launch after the owner's unlock recovered the real reader
+without replugging; this does not explain the prior intermittent USB write failure.
+
 Recent/history messages show peer, line name, own number when known, card suffix,
 transport, time and body. Reply revalidates the original line/card and fills that
 SIM, transport and peer into the existing composer; it does not send automatically.

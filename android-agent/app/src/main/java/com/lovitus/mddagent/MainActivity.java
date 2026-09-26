@@ -28,7 +28,7 @@ public final class MainActivity extends Activity {
     private AgentService service;private boolean bound,renderedAudioControls;private LinearLayout page,content,callBox,primaryBar;private TextView status,notice,pageTitle;private BottomNavigationView navigation;private RemoteCall renderedCall;
     private String focusIncoming="";private int tab;private EditText server,pin,username,password,number,message;private Spinner lineChoice;private MaterialButtonToggleGroup routeChoice;
     private TextView readerSummary,directoryStatus;private LinearLayout readerItems,usbPermissions;private String usbPermissionState="",readerItemsState="";private Button sharingButton;private TextView capability;private JSONObject lastData;private LinearLayout messageList,messageOperations;private String messageOperationView="";private JSONObject pinnedLine;private long historyEpoch,historyAccountEpoch;private AlertDialog activeHistoryDialog;
-    private TextView homeConnection,homeAvailability,homeReaders,homeLines,homeActivity;private LinearLayout homeEvents;private long homeEventsRevision=-1;
+    private TextView homeConnection,homeAvailability,homeReaders,homeLines,homeActivity,homeUsbState,readerUsbState;private LinearLayout homeEvents;private long homeEventsRevision=-1;
     private JSONObject savedConfig=new JSONObject();private String storageError="";private boolean storageLoaded,startRequested;
     private LoginProfile loginProfile;private CheckBox rememberLogin;private TextView draftStatus;private boolean certificateExpanded;private volatile boolean loginBusy;private volatile long loginVersion;
     private volatile GatewayApi loginRequest;
@@ -119,6 +119,7 @@ public final class MainActivity extends Activity {
     private void confirm(String message,Runnable action){new AlertDialog.Builder(this).setMessage(message).setPositiveButton(R.string.confirm,(d,w)->{try{action.run();}catch(Exception e){error(e.getMessage());}}).setNegativeButton(R.string.cancel,null).show();}
     private void startAvailability(){if(savedConfig.optString("token").isEmpty()){tab=0;render();return;}startForegroundService(new Intent(this,AgentService.class).setAction(AgentService.START));}
     private void render(){if(content==null)return;captureDraft();captureLoginDraft();content.removeAllViews();primaryBar.removeAllViews();primaryBar.setVisibility(View.GONE);callSurfaceKey="";callBox.removeAllViews();callAudioDetails=null;messageList=null;messageOperations=null;messageOperationView="";readerSummary=null;readerItems=null;usbPermissions=null;usbPermissionState="";readerItemsState="";sharingButton=null;capability=null;directoryStatus=null;homeConnection=homeAvailability=homeReaders=homeLines=homeActivity=null;homeEvents=null;homeEventsRevision=-1;number=message=null;lineChoice=null;routeChoice=null;server=pin=username=password=null;rememberLogin=null;draftStatus=null;
+        homeUsbState=readerUsbState=null;
         if(renderedTab!=tab){renderedTab=tab;contentScroll.scrollTo(0,0);}
         int[] titles={R.string.home,R.string.calls,R.string.messages,R.string.readers,R.string.settings};int[] tabs={R.id.tab_home,R.id.tab_calls,R.id.tab_messages,R.id.tab_readers,R.id.tab_settings};pageTitle.setText("MDD · "+getString(titles[tab]));pageTitle.setContentDescription("page:"+new String[]{"home","calls","messages","readers","settings"}[tab]);navigation.getMenu().findItem(tabs[tab]).setChecked(true);
         if(!storageLoaded){label(getString(R.string.reading_settings));return;}if(!storageError.isEmpty()){label(storageError);button(content,getString(R.string.storage_retry),this::reloadStorage);if(service!=null&&service.call!=null)button(content,getString(R.string.end_known_call),service::hangup);return;}
@@ -193,6 +194,7 @@ public final class MainActivity extends Activity {
         Button availability=button(service!=null&&service.available()?R.string.pause:R.string.resume,()->{if(service!=null&&service.available())service.pause();else{requestNotification();startAvailability();}});
         availability.setId(R.id.home_availability_toggle);availability.setEnabled(service!=null&&!service.intentSaving());
         section(R.string.home_readers_section);homeReaders=text("",14);homeReaders.setId(R.id.home_reader_state);content.addView(homeReaders);
+        homeUsbState=text("",14);homeUsbState.setId(R.id.home_usb_state);content.addView(homeUsbState);
         button(content,getString(R.string.open_readers),()->openTab(3)).setId(R.id.home_open_readers);
         section(R.string.home_lines_section);homeLines=text("",14);homeLines.setId(R.id.home_line_state);content.addView(homeLines);
         LinearLayout lineActions=new LinearLayout(this);lineActions.setOrientation(LinearLayout.HORIZONTAL);content.addView(lineActions);
@@ -207,6 +209,7 @@ public final class MainActivity extends Activity {
     private void openTab(int target){int[] ids={R.id.tab_home,R.id.tab_calls,R.id.tab_messages,R.id.tab_readers,R.id.tab_settings};if(target>=0&&target<ids.length&&navigation!=null)navigation.setSelectedItemId(ids[target]);}
     private void updateHomePage(){
         if(homeConnection==null)return;
+        updateUsbReaderStatus(homeUsbState);
         if(service==null){homeConnection.setText(R.string.local_service_connecting);homeAvailability.setText(R.string.not_available);homeReaders.setText(R.string.not_available);homeLines.setText(R.string.not_available);homeActivity.setText(R.string.not_available);updateHomeEvents();return;}
         homeConnection.setText(getString(R.string.home_connection_status,service.connection.render(this)));
         homeConnection.setTextColor(UiLabels.statusColor(service.connection));
@@ -517,6 +520,7 @@ public final class MainActivity extends Activity {
     }
     private void readerPage(){
         readerSummary=text("",15);readerSummary.setId(R.id.reader_status_summary);content.addView(readerSummary);
+        readerUsbState=text("",14);readerUsbState.setId(R.id.reader_usb_state);content.addView(readerUsbState);
         sharingButton=button(R.string.share,()->{if(service==null)return;if(service.sharing())service.shareReaders(false);else confirm(getString(R.string.consent_share),()->service.shareReaders(true));});
         readerItems=new LinearLayout(this);readerItems.setId(R.id.reader_items);readerItems.setOrientation(LinearLayout.VERTICAL);content.addView(readerItems);
         usbPermissions=new LinearLayout(this);usbPermissions.setOrientation(LinearLayout.VERTICAL);content.addView(usbPermissions);updateReaderPage();
@@ -524,6 +528,7 @@ public final class MainActivity extends Activity {
     }
     private void updateReaderPage(){
         if(readerSummary==null)return;
+        updateUsbReaderStatus(readerUsbState);
         if(service==null){readerSummary.setText(R.string.local_service_connecting);sharingButton.setEnabled(false);return;}
         ArrayList<UsbDevice> devices=attachedCcidReaders();UsbManager usb=getSystemService(UsbManager.class);int pending=pendingReaderCount();
         String readerStateText=!service.available()?(service.sharing()?getString(R.string.sharing_paused):getString(R.string.sharing_off)):
@@ -549,7 +554,7 @@ public final class MainActivity extends Activity {
                 !service.sharing()?R.string.reader_usb_not_shared:
                 !service.readerLinkOnline?R.string.reader_usb_wait_link:R.string.reader_usb_wait_scan;
             UiText failure=failures.get(name);
-            String description=stateText==R.string.reader_usb_wait_scan&&failure!=null?failure.render(this):getString(stateText);
+            String description=failure!=null&&usb.hasPermission(device)&&service.available()&&service.sharing()?failure.render(this):getString(stateText);
             TextView pendingRow=text(getString(R.string.reader_usb_detected,device.getVendorId(),device.getProductId())+"\n"+description,15);pendingRow.setTextColor(failure!=null?UiLabels.ERROR:UiLabels.WARNING);readerItems.addView(pendingRow);
         }
         for(int i=0;i<readers.length();i++){
@@ -561,6 +566,36 @@ public final class MainActivity extends Activity {
             row.setTextColor(!service.readerLinkOnline?UiLabels.WARNING:state.equals("ready")?UiLabels.OK:state.equals("unavailable")?UiLabels.ERROR:UiLabels.WARNING);
             row.setOnClickListener(v->error(sim.optString("error_code",description)));readerItems.addView(row);
         }
+    }
+    private void updateUsbReaderStatus(TextView view){
+        if(view==null)return;
+        if(service==null){view.setText(R.string.local_service_connecting);view.setTextColor(UiLabels.NEUTRAL);return;}
+        ArrayList<UsbDevice> devices=attachedCcidReaders();
+        if(devices.isEmpty()){view.setText(R.string.reader_usb_none);view.setTextColor(UiLabels.NEUTRAL);return;}
+        UsbManager usb=getSystemService(UsbManager.class);
+        JSONArray readers=Json.array(service.readers(),"readers");
+        Map<String,UiText> failures=service.readerUSBFailures;
+        StringBuilder details=new StringBuilder();boolean fault=false,pending=false;
+        for(UsbDevice device:devices){
+            String name=usbReaderName(device);JSONObject matched=null;
+            for(int i=0;i<readers.length();i++){JSONObject row=readers.optJSONObject(i);if(row!=null&&name.equals(row.optString("reader_name"))){matched=row;break;}}
+            UiText failure=failures.get(name);String state;
+            if(!usb.hasPermission(device)){state=getString(R.string.reader_usb_wait_permission);pending=true;}
+            else if(!service.available()){state=getString(R.string.reader_usb_paused);pending=true;}
+            else if(!service.sharing()){state=getString(R.string.reader_usb_not_shared);pending=true;}
+            else if(failure!=null){state=failure.render(this);fault=true;}
+            else if(matched!=null){
+                String identity=Json.object(matched,"sim").optString("identity_state");
+                int label=identity.equals("ready")?R.string.reader_identity_ready:identity.equals("pin_required")?R.string.reader_identity_pin:identity.equals("partial")?R.string.reader_identity_partial:R.string.reader_identity_unavailable;
+                state=getString(label)+" · "+UiLabels.cardSuffix(this,matched.optString("card_id"));
+                pending|=!identity.equals("ready");
+            }else{state=getString(service.readerLinkOnline?R.string.reader_usb_wait_scan:R.string.reader_usb_wait_link);pending=true;}
+            if(service.available()&&service.sharing()&&!service.readerLinkOnline&&(matched!=null||failure!=null)){state+="\n"+getString(R.string.reader_usb_wait_link);pending=true;}
+            if(details.length()>0)details.append("\n\n");
+            details.append(getString(R.string.reader_usb_detected,device.getVendorId(),device.getProductId())).append("\n").append(state);
+        }
+        if(fault)details.append("\n").append(getString(R.string.reader_usb_reconnect_hint));
+        view.setText(details);view.setTextColor(fault?UiLabels.ERROR:pending?UiLabels.WARNING:UiLabels.OK);
     }
     private void section(int title){TextView label=text(getString(title),14);label.setTypeface(null,android.graphics.Typeface.BOLD);label.setPadding(0,dp(16),0,dp(6));content.addView(label);}
     private void diagnostics(){

@@ -137,6 +137,8 @@
 <string name="reader_usb_not_shared">请启动读卡器共享，将此设备登记到 Core。</string>
 <string name="reader_usb_wait_link">共享已开启，正在等待 Agent 连接。</string>
 <string name="reader_usb_wait_scan">连接已建立，正在等待读卡器扫描。</string>
+<string name="reader_usb_none">未检测到 USB CCID 读卡器。如果已插入，请检查读卡器和 OTG 连接。</string>
+<string name="reader_usb_reconnect_hint">USB 通信失败。确认没有通话或 SIM 操作后，可尝试重新插拔读卡器和 OTG 转接头。供电、系统休眠或软件均可能有关，原因尚未确认。</string>
 <string name="reader_identity_local_only">SIM 身份仅是本机读取结果，不代表 Core 已收到最新读卡器状态。</string>
 <string name="home_gateway_section">网关</string>
 <string name="home_readers_section">读卡器</string>

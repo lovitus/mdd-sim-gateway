@@ -137,6 +137,8 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="reader_usb_not_shared">Start reader sharing to register this device with Core.</string>
 <string name="reader_usb_wait_link">Sharing is on; waiting for the Agent connection.</string>
 <string name="reader_usb_wait_scan">Connected; waiting for the next reader scan.</string>
+<string name="reader_usb_none">No USB CCID reader detected. If one is attached, check the reader and OTG connection.</string>
+<string name="reader_usb_reconnect_hint">USB communication failed. When no call or SIM operation is active, try unplugging and reconnecting the reader and OTG adapter. Power, system sleep or software may be involved; the cause is not confirmed.</string>
 <string name="reader_identity_local_only">SIM identity is read locally; it does not confirm Core received the latest reader state.</string>
 <string name="home_gateway_section">Gateway</string>
 <string name="home_readers_section">Readers</string>

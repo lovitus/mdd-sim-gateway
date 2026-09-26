@@ -38,4 +38,6 @@
   <item type="id" name="dial_plus" /><item type="id" name="dial_backspace" />
     <item name="message_reply" type="id" />
     <item name="operation_notice" type="id" />
+    <item name="home_usb_state" type="id" />
+    <item name="reader_usb_state" type="id" />
 </resources>
