@@ -97,7 +97,7 @@ That native return alone is not recovery. The corrected path follows the working
 field comparison without the intervening close/idle gap;
 PIN/AKA, SMS and call requests are never replayed. Sixty seconds of successful
 scans rearm recovery for a later fault; continuing failure does not cause a reset
-loop. Home/Readers distinguish recovery pending from failure and retain the
+loop. Home/Readers retain recovery failure details and the
 unplug/OTG advice. No wake lock, root, hidden Java API, server change, permission
 grant or availability/share intent change is added.
 
@@ -105,10 +105,13 @@ The small JNI boundary uses the Linux `USBDEVFS_RESET` operation on the descript
 returned by Android's public `UsbDeviceConnection.getFileDescriptor()`, following
 [AOSP USB host](https://android.googlesource.com/platform/system/core/+/refs/heads/android13-release/libusbhost/usbhost.c)
 and the [libusb unrooted Android model](https://github.com/libusb/libusb/blob/master/android/examples/unrooted_android.c).
-No USB discovery or device-path opening occurs in native code. The field
-comparison is pre-integration evidence; the new APK still requires exact-head
-GitHub CI and actual automatic-recovery/screen-off verification. No new automated
-red/green test is claimed for this hardware-specific path.
+No USB discovery or device-path opening occurs in native code. Signed v75 at
+`02eeb2d`, qualified by workflow `36234941184`, recovered a real recurrent write
+failure without a replug or an additional App restart during recovery. Fresh card
+identity and Core readiness were checked, not just the reset return code. A
+powered-handset 180-second screen-off/wake check retained the same process and
+card; Android device-idle was not entered. Long deep-idle/battery acceptance is
+still open. No automated red/green test is claimed for this hardware-specific path.
 
 Call history now displays direction, peer, line name/number/card when present,
 localized colored status and local time. Missing catalog details remain unknown;
@@ -139,6 +142,27 @@ Field evidence reproduced `kind=submitted, state=failed` and an omitted gateway
 reason. The existing CI suite and read-only physical history inspection qualify
 this presentation fix; no new automated red/green test is claimed. This change
 does not repair carrier registration, location rejection or incoming-call routing.
+
+A later real send received SIP acceptance followed by `delivery/failed`, RP cause
+38 (`network out of order`). The native local receipt incorrectly remained
+submitted, while history rendered the delivery event as a separate row without
+the original recipient/body. The client now adapts the existing WebUI
+`historyAdapter.js` correlation: exact line, transport, message ID and part attach
+the latest delivery report to its submission. Orphan reports remain visible when
+an older submission page has not been loaded; raw events are not changed.
+The original account-scoped encrypted receipt also observes failed delivery
+events after submission. A late submission response cannot erase that failure.
+Existing snapshots/history provide the observations, without another polling loop
+or automatic send. Repeated unchanged events do not cause storage writes.
+
+The two focused journal regressions both failed on `02eeb2d` with incorrect
+`submitted`/`unknown` states and passed after the fix. That one-time Java check
+used the real journal/JSON code and unused dependency traps, not Android, TLS or
+carrier mocks presented as physical acceptance. Normal GitHub tests still qualify
+the full App. The physical pre-fix event remains available for read-only UI
+qualification of the new signed APK; no additional paid SMS is needed. RP cause
+38 is an observed network receipt, not proof of its underlying cause or successful
+delivery, and the authorized one-shot attempt has been consumed.
 
 Pre-fix physical evidence: a subsequent call cleared to a generic no-call notice
 without a new carrier history entry; message records omitted own-SIM information

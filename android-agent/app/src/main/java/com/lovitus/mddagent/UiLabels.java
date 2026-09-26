@@ -22,7 +22,7 @@ final class UiLabels {
     }
     static int messageColor(JSONObject message){
         if(message.optString("state").equals("failed"))return ERROR;
-        String code=message.optString("kind").equals("delivery")?message.optString("state"):message.optString("kind");
+        String code=message.optString("kind").equals("delivery")||message.has("delivery_state")?message.optString("state"):message.optString("kind");
         return code.equals("failed")||code.equals("failure_observed")||code.equals("not_dispatched")?ERROR:code.equals("received")||code.equals("delivered")||code.equals("sent")||code.equals("submitted")?OK:WARNING;
     }
     static String messagePeer(JSONObject message){
@@ -89,7 +89,7 @@ final class UiLabels {
     static String messageEvent(Context context,JSONObject event){
         String kind=event.optString("kind"),state=event.optString("state"),label;
         if(state.equals("failed"))label=context.getString(R.string.message_failed);
-        else if(kind.equals("delivery"))label=context.getString(state.equals("delivered")?R.string.message_delivered:state.equals("pending")?R.string.message_delivery_pending:R.string.message_delivery_unknown);
+        else if(kind.equals("delivery")||event.has("delivery_state"))label=context.getString(state.equals("delivered")?R.string.message_delivered:state.equals("pending")?R.string.message_delivery_pending:R.string.message_delivery_unknown);
         else label=messageState(context,kind);
         return event.optInt("part")>0?context.getString(R.string.message_part,event.optInt("part"),label):label;
     }

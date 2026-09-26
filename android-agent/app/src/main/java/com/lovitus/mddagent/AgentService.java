@@ -43,6 +43,8 @@ public final class AgentService extends Service {
     private final Retry loginRetry=new Retry();
     private ScheduledFuture<?> loginTimer;
     private final Set<String> messageChecks=ConcurrentHashMap.newKeySet();
+    private GatewayApi messageEventsOwner;
+    private String messageEventsKey="";
     private ScheduledFuture<?> healthTask;
     private volatile long configurationEpoch;
     private volatile long sharingIntentEpoch;
@@ -106,7 +108,7 @@ public final class AgentService extends Service {
             public void authenticationRequired(){main.post(()->renewSession(connectionOwner));}
             public void state(int label,boolean yes){if(api!=connectionOwner)return;boolean recovered=yes&&!online;connection=UiText.of(label);online=yes;if(recovered){main.post(()->{if(api!=connectionOwner)return;requestMessageSync(false);refreshLineNumbers(true);});RemoteCall c=call;if(c!=null&&(c.audio==null||c.audio.closed))c.reconcile();}changed();}
             public void message(JSONObject message){if(message.optString("type").equals("mobile.snapshot"))main.post(()->{
-                if(api!=connectionOwner)return;snapshot=normalizeSnapshot(Json.object(message,"data"));notifyEvents();changed();
+                if(api!=connectionOwner)return;snapshot=normalizeSnapshot(Json.object(message,"data"));observeMessageEvents(connectionOwner,Json.array(snapshot,"messages"),false);notifyEvents();changed();
                 JSONArray rows=Json.array(snapshot,"lines");
                 for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&!row.has("number")){refreshLineNumbers(false);break;}}
             });}
@@ -344,11 +346,33 @@ public final class AgentService extends Service {
                 if(recorded&&!dispatch){final String account=scope;try{store.update(current->MessageJournal.notDispatched(current,account,id));}catch(Exception ignored){}}
                 if(recorded){final String account=scope;try{store.update(current->MessageJournal.failure(current,account,id,e));}catch(Exception ignored){}}
                 if(api==owner)notice=dispatch?UiText.of(R.string.message_request_failed,id,RemoteCall.safe(e)):UiText.of(R.string.message_not_dispatched);
-            }finally{smsPending.set(false);refreshPrivateState(owner);}
+            }finally{smsPending.set(false);refreshPrivateState(owner);observeMessageEvents(owner,Json.array(snapshot,"messages"),true);}
         });
     }
 
     private void refreshPrivateState(GatewayApi owner){ConfigStore.intent(()->{try{JSONObject saved=store.load();main.post(()->{if(destroyed||api!=owner)return;config=saved;changed();});}catch(Exception failure){main.post(()->{if(api==owner){notice=UiText.of(R.string.message_state_unreadable);changed();}});}});}
+    private void observeMessageEvents(GatewayApi owner,JSONArray events,boolean force){
+        final String encoded=events.toString();
+        main.post(()->{
+            if(destroyed||!available||api!=owner)return;
+            if(!force&&messageEventsOwner==owner&&encoded.equals(messageEventsKey))return;
+            messageEventsOwner=owner;messageEventsKey=encoded;
+            ConfigStore.intent(()->{
+                try{
+                    JSONObject current=store.load();requireMessageOwner(current,owner);
+                    String scope=current.optString("account_scope");if(scope.isEmpty())return;
+                    JSONArray received=new JSONArray(encoded);
+                    if(!MessageJournal.observe(current,scope,received))return;
+                    store.update(saved->{
+                        requireMessageOwner(saved,owner);
+                        if(!scope.equals(saved.optString("account_scope")))throw new IllegalStateException("Account changed");
+                        MessageJournal.observe(saved,scope,received);
+                    });
+                    refreshPrivateState(owner);
+                }catch(Exception failure){main.post(()->{if(api==owner&&available){notice=UiText.of(R.string.message_state_unreadable);changed();}});}
+            });
+        });
+    }
     long accountEpoch(){return configurationEpoch;}
     boolean canQueryMessages(){return available&&!destroyed&&api!=null;}
     boolean messageChecking(String scope,String operation){return messageChecks.contains(scope+"\n"+operation);}
@@ -397,7 +421,7 @@ public final class AgentService extends Service {
     }
     private void messagePageRequest(String path,long expectedEpoch,java.util.function.Consumer<JSONObject> success,java.util.function.Consumer<String> failure){
         final GatewayApi owner=api;if(owner==null||configurationEpoch!=expectedEpoch){failure.accept(getString(R.string.history_account_changed));return;}
-        io.execute(()->{try{JSONObject page=owner.json("GET",path,null);main.post(()->{if(api==owner&&configurationEpoch==expectedEpoch)success.accept(page);else failure.accept(getString(R.string.history_account_changed));});}catch(Exception e){main.post(()->failure.accept(getString(api==owner&&configurationEpoch==expectedEpoch?R.string.history_failed:R.string.history_account_changed)));}});
+        io.execute(()->{try{JSONObject page=owner.json("GET",path,null);main.post(()->{if(api==owner&&configurationEpoch==expectedEpoch){if(page.has("messages"))observeMessageEvents(owner,Json.array(page,"messages"),true);success.accept(page);}else failure.accept(getString(R.string.history_account_changed));});}catch(Exception e){main.post(()->failure.accept(getString(api==owner&&configurationEpoch==expectedEpoch?R.string.history_failed:R.string.history_account_changed)));}});
     }
     private boolean seenMessages;
     private void notifyEvents(){
@@ -431,7 +455,7 @@ public final class AgentService extends Service {
         io.execute(()->{try{
             JSONObject result=owner.json("GET","/v1/messages?limit=50",null);
             main.post(()->{if(api!=owner||!available)return;try{
-                JSONObject next=new JSONObject(snapshot.toString());next.put("messages",Json.array(result,"messages"));snapshot=next;notifyEvents();changed();
+                JSONObject next=new JSONObject(snapshot.toString());next.put("messages",Json.array(result,"messages"));snapshot=next;observeMessageEvents(owner,Json.array(result,"messages"),true);notifyEvents();changed();
             }catch(JSONException failure){notice=UiText.of(R.string.history_failed);changed();}});
         }catch(Exception failure){main.post(()->{if(api==owner){notice=UiText.of(R.string.history_failed);changed();}});}});
     }

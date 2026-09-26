@@ -420,7 +420,25 @@ public final class MainActivity extends Activity {
         TextView status=text(getString(R.string.reading_history),14);box.addView(status);ListView list=new ListView(this);list.setId(R.id.message_history_list);box.addView(list,new LinearLayout.LayoutParams(-1,Math.min(dp(320),getResources().getDisplayMetrics().heightPixels/2)));Button more=command(getString(R.string.older_messages));more.setId(R.id.message_history_more);box.addView(more);
         AlertDialog dialog=new AlertDialog.Builder(this).setTitle(getString(R.string.message_history_title,title)).setView(box).setNegativeButton(getString(R.string.close),null).create();bindHistory(dialog,account);
         String[] before={""};ArrayList<JSONObject> messages=new ArrayList<>();long epoch=++historyEpoch;
-        Runnable load=()->{if(owner!=service||account!=owner.accountEpoch()){dialog.dismiss();return;}more.setEnabled(false);owner.messageHistory(line,mode,peer,before[0],account,page->{if(!dialog.isShowing()||historyEpoch!=epoch)return;JSONArray rows=Json.array(page,"messages");ArrayList<JSONObject> older=new ArrayList<>();for(int i=0;i<rows.length();i++){JSONObject m=rows.optJSONObject(i);if(m!=null)older.add(m);}int previous=messages.size();messages.addAll(0,older);before[0]=page.optString("next_before");list.setAdapter(new BaseAdapter(){public int getCount(){return messages.size();}public Object getItem(int position){return messages.get(position);}public long getItemId(int position){return position;}public View getView(int position,View reuse,ViewGroup parent){return messageRow(messages.get(position),owner,account);}});list.setSelection(previous==0?Math.max(0,messages.size()-1):0);more.setEnabled(!before[0].isEmpty());status.setText(getString(R.string.message_count,messages.size()));status.setTextColor(UiLabels.OK);},failure->{if(dialog.isShowing()&&historyEpoch==epoch){status.setText(failure);status.setTextColor(UiLabels.ERROR);more.setEnabled(true);}});};
+        Runnable load=()->{
+            if(owner!=service||account!=owner.accountEpoch()){dialog.dismiss();return;}
+            more.setEnabled(false);
+            owner.messageHistory(line,mode,peer,before[0],account,page->{
+                if(!dialog.isShowing()||historyEpoch!=epoch)return;
+                JSONArray rows=Json.array(page,"messages");ArrayList<JSONObject> older=new ArrayList<>();
+                for(int i=0;i<rows.length();i++){JSONObject m=rows.optJSONObject(i);if(m!=null)older.add(m);}
+                int previous=messages.size();messages.addAll(0,older);before[0]=page.optString("next_before");
+                JSONArray visible=MessageJournal.history(new JSONArray(messages));
+                list.setAdapter(new BaseAdapter(){
+                    public int getCount(){return visible.length();}
+                    public Object getItem(int position){return visible.optJSONObject(position);}
+                    public long getItemId(int position){return position;}
+                    public View getView(int position,View reuse,ViewGroup parent){return messageRow(visible.optJSONObject(position),owner,account);}
+                });
+                list.setSelection(previous==0?Math.max(0,visible.length()-1):0);
+                more.setEnabled(!before[0].isEmpty());status.setText(getString(R.string.message_count,visible.length()));status.setTextColor(UiLabels.OK);
+            },failure->{if(dialog.isShowing()&&historyEpoch==epoch){status.setText(failure);status.setTextColor(UiLabels.ERROR);more.setEnabled(true);}});
+        };
         more.setOnClickListener(v->load.run());dialog.show();load.run();
     }
     private View messageRow(JSONObject event,AgentService owner,long account){
@@ -431,6 +449,8 @@ public final class MainActivity extends Activity {
         TextView from=text(getString(event.optString("kind").equals("received")?R.string.message_from:R.string.message_to,peer.isEmpty()?getString(R.string.number_unavailable):peer),15);from.setTextIsSelectable(true);row.addView(from);
         TextView destination=text(getString(R.string.message_line,lineLabel(line)),13);destination.setTextIsSelectable(true);row.addView(destination);
         TextView body=text(event.optString("body"),16);body.setTextIsSelectable(true);row.addView(body);
+        String reason=event.optString("error",event.optString("error_code"));
+        if(!reason.isEmpty()){TextView detail=text(reason,13);detail.setTextColor(UiLabels.messageColor(event));detail.setTextIsSelectable(true);row.addView(detail);}
         if(event.optString("kind").equals("received")){
             Button reply=button(row,getString(R.string.message_reply),()->{
                 if(service!=owner||owner.accountEpoch()!=account){error(getString(R.string.history_account_changed));return;}
@@ -449,7 +469,7 @@ public final class MainActivity extends Activity {
         return row;
     }
     private void updateMessages(){
-        if(messageList==null||service==null)return;JSONArray messages=Json.array(service.snapshot,"messages");StringBuilder key=new StringBuilder(messages.toString()).append(service.accountEpoch());
+        if(messageList==null||service==null)return;JSONArray messages=MessageJournal.history(Json.array(service.snapshot,"messages"));StringBuilder key=new StringBuilder(messages.toString()).append(service.accountEpoch());
         for(int i=0;i<messages.length();i++){JSONObject event=messages.optJSONObject(i);if(event!=null)key.append(lineLabel(service.messageLine(event.optString("line_id"))));}
         if(messageList.getChildCount()>0&&key.toString().equals(messageViewKey))return;messageViewKey=key.toString();messageList.removeAllViews();
         for(int i=0;i<messages.length();i++){JSONObject event=messages.optJSONObject(i);if(event!=null)messageList.addView(messageRow(event,service,service.accountEpoch()));}
