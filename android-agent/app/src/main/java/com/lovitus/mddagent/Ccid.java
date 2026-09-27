@@ -14,6 +14,27 @@ final class Ccid {
         if(count<10)return -1;long n=Integer.toUnsignedLong(ByteBuffer.wrap(b,1,4).order(ByteOrder.LITTLE_ENDIAN).getInt());
         if(n>65536)throw new IOException("CCID response too large");return (int)n+10;
     }
+    interface BulkReader {
+        int read(byte[] buffer,int offset,int length)throws IOException;
+    }
+    static byte[] receive(int packetSize,BulkReader input)throws IOException{
+        if(packetSize<=0||packetSize>1024)throw new IOException("Invalid USB bulk packet size");
+        byte[] frame=new byte[MAX];
+        int count=0,expected=-1,empty=0;
+        // OpenEUICC reads endpoint-sized packets and assembles by CCID dwLength.
+        // Large USB reads can wait for a short packet after a complete CCID frame.
+        while(expected<0||count<expected){
+            int requested=Math.min(packetSize,frame.length-count);
+            int read=input.read(frame,count,requested);
+            // An exact-packet response may leave a terminating ZLP for this read.
+            if(read==0&&count==0&&empty++<3)continue;
+            if(read<=0||read>requested)throw new IOException("Incomplete CCID response");
+            count+=read;
+            expected=length(frame,count);
+            if(expected>=0&&count>expected)throw new IOException("CCID trailing data");
+        }
+        return Arrays.copyOf(frame,count);
+    }
     static byte[] result(byte[] b,int slot,int sequence,int type)throws IOException{
         if(b.length<10||length(b,b.length)!=b.length||(b[0]&255)!=type||(b[5]&255)!=slot||(b[6]&255)!=sequence)throw new IOException("CCID response identity mismatch");
         if((b[7]&0xc0)!=0)throw new IOException("CCID command failed");

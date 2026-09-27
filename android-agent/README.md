@@ -202,13 +202,56 @@ still need the displayed reconnect guidance, not a fabricated healthy state.
 Three new `UsbRecoveryTest` regressions failed with the old ignored-event
 behavior (same compiled API), then all seven policy cases passed after enabling
 event recovery. They cover exhausted budgets, event coalescing/cooldown and
-transient versus unsupported reset stages. This one-time policy check does not
-prove the event receivers or real USB hardware work. Full GitHub qualification
-and installed foreground/background wake recovery are still pending.
+transient versus unsupported reset stages. Signed v84 / `fd8fc0b` passed the full
+[Android workflow](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36289241552)
+and [Go workflow](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36289239524).
+Source/tree, archive digests, APK hash, stable signer and four native ABIs were
+independently checked before one retained-data installation. Reports contain 19
+JVM tests, 13 native fixtures on each API 28/35, and 219 scoped Core/agentlink race
+cases without failures/skips; those counts do not describe the whole Go matrix.
+
+Actual handset evidence: the exhausted reader received two new bounded attempts
+after an ordinary background screen-off/wake event with the notification active.
+Both attempts failed; unlock/foreground return then reidentified the original
+card in the same App process, without replug or restart. Native Home/Readers and
+Core independently showed the recovered card route and IMS/message readiness.
+Pause stopped the service/notification; another sleep/wake added no USB activity,
+and reopening the UI remained paused. Explicit resume restored the original
+sharing/availability and again recovered the reader automatically. Final native
+and Core checks agreed, with no active calls and no new paid call/SMS or PIN action.
+
+This qualifies the event-rearm and stop-intent paths, not elimination of the
+underlying intermittent transport fault: write timeout `-110` and one read `-12`
+were retained. Kernel diagnostics were inaccessible; neither a hardware cause
+nor kernel allocation pressure is proven. Deep-idle/battery durability remains open.
 
 The implementation follows Android's existing USB permission/owned-connection
 lifecycle, not a new USB stack: [USB host](https://developer.android.com/develop/connectivity/usb/host)
 and [device-idle transitions](https://developer.android.com/reference/android/os/PowerManager#ACTION_DEVICE_IDLE_MODE_CHANGED).
+
+### Bounded CCID packet reads
+
+The CCID receiver now follows the endpoint-sized bulk-read and declared-length
+assembly approach used by
+[OpenEUICC's UsbCcidTransceiver](https://github.com/estkme-group/openeuicc/blob/1c70ca7a701adc0047c4d6c12579a9b072a3a244/app-common/src/main/java/im/angry/openeuicc/core/usb/UsbCcidTransceiver.kt).
+The upstream is GPL-3.0. This is a small Java adaptation of its transport approach, not an import of its
+TPDU, retry, voltage-selection or payload logging behavior. MDD retains its
+existing five-second whole-response deadline, eight-extension limit, 65,536-byte
+body bound and exact slot/sequence/type validation. Up to three leading zero
+packets are consumed without resending any command. Negative native results
+still fail immediately with their original errno; writes and reset policy do
+not change.
+
+The actual reader's bulk endpoint is 16 bytes. Previously each read requested up
+to 65,546 bytes, including tiny slot-status responses. Endpoint-sized reads avoid
+that large native allocation and do not require another short packet after a
+complete full-packet CCID response. Retained -12/read and -110/write observations
+justify this correction, but do not prove it fixes the underlying sleep/USB
+fault. Two deterministic behavioral tests were red with the old oversized native
+request restored (the API still compiled), then green with packet-sized reads.
+They cover full/partial packets, leading zero packets, native allocation failure,
+header/body bounds and original read failures. These are transport-model tests,
+not physical USB evidence. Source is not yet CI-qualified or physically accepted.
 
 ### Cellular incoming event dependency
 
@@ -223,12 +266,29 @@ There is no safe client-only substitute for the missing exact incoming event.
 `TestCellularMediaIncomingReachesBrowserAndMobileStreams` exercises both real
 WebSocket endpoints, with and without WebUI. All four cases failed with missing
 incoming data before the correction and passed after it, including removal of
-the ended event. That one-time regression check does not replace full GitHub CI,
-deployment or physical answer/audio acceptance, all still pending for this fix.
-The installed preview remains v83. A subsequent USB write timeout and failed
-bounded recovery again left its reader unidentified; the earlier short healthy
-observation is not durable USB acceptance. No additional outgoing call or SMS was
-sent to investigate the incoming defect.
+the ended event. Full GitHub workflows for `fd8fc0b` passed and the owner authorized
+its Core-only production rollout. The running binary and offline backup hashes
+were verified; unrelated processes, saved lines, notification settings and
+configuration stayed unchanged. All connected Agent generations reconnected and
+the maintenance lease was resumed. Source comparison against the old `8d0c4c6`
+confirms only the three-line binding move
+and its regression test changed in Go/Provider/WebUI. The Android preview is v84;
+its event-recovery result above is separate from incoming-call acceptance. No
+additional outgoing call or SMS was sent to investigate the incoming defect.
+
+One actual owner-assisted incoming call reached both mobile/browser event streams
+with matching event/card identity. Native Answer/Decline were visible, Answer was
+clicked, and the owner confirmed two-way speech. Durable history records 45.944
+answered seconds and a terminal end; subsequent native/Core checks were idle.
+This qualifies incoming answer and speech connectivity, not audio quality.
+
+The planned native Hang up was not exercised: an in-call screenshot timed out,
+and the independent device fallback stopped the same App process. The first
+readback was still active; later history/session readback confirmed the end.
+In-call XML showed audio reconnecting; its cause is not established by the
+screenshot timeout. Reopening the App restored saved availability/sharing and
+the identified card. No automatic redial or paid SMS followed. Earlier outgoing
+native-hangup evidence remains separate from this fallback-terminated attempt.
 
 Call history now displays direction, peer, line name/number/card when present,
 localized colored status and local time. Missing catalog details remain unknown;

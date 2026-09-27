@@ -4,7 +4,6 @@ import android.os.SystemClock;
 import android.system.OsConstants;
 import java.io.*;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 final class UsbCard implements SimProtocol.Card {
     final UsbDevice device; final UsbDeviceConnection connection; final UsbInterface intf;
@@ -74,10 +73,13 @@ final class UsbCard implements SimProtocol.Card {
         if(written!=q.length)throw new WriteFailure(type,written,SystemClock.elapsedRealtime()-started);
         long deadline=SystemClock.elapsedRealtime()+5000;
         for(int extensions=0;extensions<8;extensions++){
-            byte[] b=new byte[Ccid.MAX];int count=0,length=-1;
-            while(length<0||count<length){int wait=(int)(deadline-SystemClock.elapsedRealtime());if(wait<=0||closed)throw new IOException("USB response timeout");
-                int n=transfer(type,input,b,count,b.length-count,Math.min(wait,2000));if(n<=0)throw new TransportFailure("read",type,n,SystemClock.elapsedRealtime()-started);count+=n;length=Ccid.length(b,count);if(length>=0&&count>length)throw new IOException("CCID trailing data");}
-            byte[] r=Arrays.copyOf(b,count);
+            byte[] r=Ccid.receive(input.getMaxPacketSize(),(buffer,offset,length)->{
+                int wait=(int)(deadline-SystemClock.elapsedRealtime());
+                if(wait<=0||closed)throw new IOException("USB response timeout");
+                int n=transfer(type,input,buffer,offset,length,Math.min(wait,2000));
+                if(n<0)throw new TransportFailure("read",type,n,SystemClock.elapsedRealtime()-started);
+                return n;
+            });
             if((r[5]&255)!=0||(r[6]&255)!=seq||(r[0]&255)!=expected)throw new IOException("CCID stale response");
             if((r[7]&0xc0)==0x80)continue;
             if(type==0x65 && (r[7]&3)==2){insertion.incrementAndGet();throw new IOException("SIM removed");}
