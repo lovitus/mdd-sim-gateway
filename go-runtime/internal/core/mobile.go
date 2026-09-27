@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +143,27 @@ func (s *Server) readMobileSnapshot(ctx context.Context) mobileData {
 	return result
 }
 
+func mobileDigest(data mobileData) ([32]byte, error) {
+	// Health confirmations refresh receipt clocks without changing readiness.
+	// Compare a copy: freshness and identity remain significant, while snapshots
+	// still carry the original timestamps and shared cached facts stay untouched.
+	data.Lines = slices.Clone(data.Lines)
+	for i := range data.Lines {
+		line := &data.Lines[i]
+		line.Operations = maps.Clone(line.Operations)
+		for name, readiness := range line.Operations {
+			readiness.Facts = slices.Clone(readiness.Facts)
+			for j := range readiness.Facts {
+				readiness.Facts[j].ReceivedAt = time.Time{}
+				readiness.Facts[j].ExpiresAt = time.Time{}
+			}
+			line.Operations[name] = readiness
+		}
+	}
+	raw, err := json.Marshal(data)
+	return sha256.Sum256(raw), err
+}
+
 // Mobile events avoid sending the large desktop snapshot every three seconds.
 // Server-side reads use existing facts. Unchanged clients get a 30s heartbeat;
 // changed call/SMS observations are delivered on the existing 3s cadence.
@@ -168,11 +191,10 @@ func (s *Server) mobileState(response http.ResponseWriter, request *http.Request
 			return
 		}
 		data := s.mobileSnapshot(ctx)
-		raw, err := json.Marshal(data)
+		digest, err := mobileDigest(data)
 		if err != nil {
 			return
 		}
-		digest := sha256.Sum256(raw)
 		changed := sequence == 0 || digest != previous
 		if changed || time.Since(sent) >= 30*time.Second {
 			sequence++

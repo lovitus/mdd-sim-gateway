@@ -251,7 +251,40 @@ fault. Two deterministic behavioral tests were red with the old oversized native
 request restored (the API still compiled), then green with packet-sized reads.
 They cover full/partial packets, leading zero packets, native allocation failure,
 header/body bounds and original read failures. These are transport-model tests,
-not physical USB evidence. Source is not yet CI-qualified or physically accepted.
+not physical USB evidence.
+
+Signed v85 / `a1bf28b` passed
+[workflow 36292625372](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36292625372):
+21 JVM tests, 13 native fixtures on each API 28/35 and 219 scoped Core/agentlink
+race cases, without failures or skips. Source/tree, archive hashes, the unchanged
+stable signer, non-debuggable manifest and four native ABIs were checked before
+one retained-data install. Core and Provider were not redeployed.
+
+Initial USB power-on still had one write `-110` timeout; the existing bounded reset
+then reidentified the original card. Native Home/Readers agreed. The following
+eight-minute background observation retained the same App process and foreground
+service with no additional first-scan failure/reset. Final Core showed the same
+card, current reader route and IMS/messaging readiness, unchanged desired lines
+and no active calls/media. No replug, manual reset, paid call/SMS or PIN action was
+performed. This is scoped recovery evidence, not proof the write fault is fixed.
+
+The attempted seven-minute screen-off interval was interrupted by the phone waking
+about 15.9 seconds after sleep; its final state was Awake/ACTIVE. It is not a
+continuous screen-off, deep-idle or battery test. No screen-keeping app, network,
+device-idle exemption or power setting was changed to force a pass. The App was
+returned to Readers with saved availability/sharing intact; the observer exited.
+
+A subsequent official Android device-idle check held deep `IDLE` with the screen
+off for four minutes. App process, Agent generation, reader session and socket
+connection were unchanged; the next Core heartbeat advanced and was fresh.
+Cleanup first cleared the forced flag, then a motion event and authorized unlock
+restored `ACTIVE` with the screen on. Actual native Readers and final Core agreed
+on the same card and live route, with idle call/media owners and unchanged desired
+state. No App restart, reader replug, battery exemption, persistent power/network
+change, user-switch change or paid operation was used. This qualifies that bounded
+deep-idle entry/exit, not long-duration availability, battery life or the original
+write-timeout cause. The procedure follows
+[Android's Doze testing guidance](https://developer.android.com/training/monitoring-device-state/doze-standby).
 
 ### Cellular incoming event dependency
 
@@ -358,6 +391,44 @@ UI checks must qualify the candidate; no extra paid call/SMS is implied by them.
 ## Sessions, power and recovery
 
 Cookie/CSRF sessions slide through existing Core validation. Expired administrator sessions can renew using remembered encrypted login, without enabling availability or reader sharing. Rejected passwords, certificate identity failures and revoked reader credentials require user action. Reader enrollment is distinct from the administrator session. NetworkCallback changes replace sockets; epoch guards reject stale callbacks. Reconnect uses capped jittered backoff without an attempt limit and never redials/resubmits messages.
+
+A bounded physical QA check exercised invalid JSON after a snapshot, unknown
+message type, unsupported schema and heartbeat-before-snapshot against a local
+synthetic TLS peer. All four connections closed and recovered automatically;
+the fifth valid snapshot restored native online state in the same App process.
+This used the retained CI QA `f627204`; its relevant Link control flow is unchanged
+in `a1bf28b` except diagnostic recording. It is scoped recovery evidence, not a
+fresh full-v85 or carrier test. Reader sharing stayed off; prior encrypted QA
+state was restored byte-for-byte, QA stopped, and temporary resources removed.
+Earlier locked/autofill/save-password setup failures remain separate from the
+completed cases. No password-manager setting, production configuration or paid
+operation was changed. Existing isolated-Core restart evidence separately covers
+automatic remembered-login renewal, not a natural twelve-hour expiry experiment.
+
+Fifteen retained production readbacks span about 67 minutes on v85 with the same
+Agent process generation, reader session and card, fresh heartbeats and unchanged
+desired catalog. One control reconnection occurred within that interval. This
+supports sampled session continuity/recovery, not gap-free monitoring, overnight
+endurance or measured battery life.
+
+One subsequent eight-minute background sample retained the same v85 process,
+reader/card, foreground service and desired state. App-UID CPU increased by
+6.999 seconds with no foreground-activity time or wake-lock-stat change. This is
+a scoped runtime-cost measurement, not measured battery life. Wi-Fi accounting
+also increased by about 19 MB received. A separate read-only mobile stream sample
+found roughly 150 KB snapshots every three seconds with only readiness
+`received_at`/`expires_at` changing. The old digest therefore defeated
+unchanged-state suppression on live health updates. The current Core candidate
+excludes only those two readiness receipt clocks from a copied comparison, not
+from the transmitted snapshot or shared cache. Actual freshness, producer/card
+identity, observation sequence, incoming calls and SMS changes remain significant;
+authentication and the heartbeat cadence are unchanged. A real WebSocket/replay
+regression and the semantic-change matrix both failed with normalization removed,
+then passed with race detection after restoration. The first WebSocket attempt
+had an incomplete catalog fixture and is not counted as defect reproduction.
+Full GitHub validation and actual deployed traffic comparison are still required.
+No power setting or client intent was changed by the measurement; do not claim
+the heartbeat design alone proves low traffic or battery life.
 
 Observer-only mode receives changed snapshots plus a 30-second heartbeat rather than polling the whole desktop page. Core shares a one-second read cache, limits Provider concurrency to eight and a two-second deadline, and caps mobile presentation at 128 lines / 50 messages with an explicit incomplete flag. Existing routes remain available through gateway management for larger installations.
 
