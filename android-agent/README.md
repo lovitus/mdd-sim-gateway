@@ -149,8 +149,25 @@ its second recovery attempt. The new regression compiled and failed on v80,
 then all four focused policy tests passed after the correction. The old test's
 expectation that a completed reset could never get a followup was replaced by
 this observed sequence; unsafe failure-stage exclusions remain unchanged.
-Full signed CI and physical acceptance of this new branch are still pending.
-The original physical sleep-fault cause is unknown; no paid operation is replayed.
+Signed v82 / `74e97c5` passed full workflow `36263260716`. The real delayed second
+reset identified the card, then writes failed again and the native UI correctly
+reported exhaustion. A subsequent owner replug and USB permission grant restored
+the exact card without restarting the App, but it failed again after about eight
+minutes while awake in the same process. Durable USB recovery is still failed;
+the cause is not established and is not attributable solely to phone sleep.
+
+The current client-only diagnostic batch retains the original negative errno
+from one `USBDEVFS_BULK` ioctl on the already-owned descriptor. It follows
+[AOSP libusbhost's bulk request](https://android.googlesource.com/platform/system/core/+/refs/heads/main/libusbhost/usbhost.c);
+the [framework JNI wrapper](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/jni/android_hardware_UsbDeviceConnection.cpp)
+otherwise exposes just `-1`. Endpoint, payload, timeout, serialized ownership and
+the number of transfers are unchanged; there is no fallback or replay. Partial
+writes remain unknown outcomes. Home/Readers distinguish write, response-read
+and missing-native-transport failures. The first scan failure in each unhealthy
+episode records only its class, phase, CCID command number, result and duration,
+not card identifiers, APDU data or credentials. This is a diagnostic change, not
+a USB root-cause repair. Signed qualification and real errno capture are pending;
+no new automated red/green or hardware acceptance is claimed for this boundary.
 
 Call history now displays direction, peer, line name/number/card when present,
 localized colored status and local time. Missing catalog details remain unknown;

@@ -12,6 +12,7 @@ final class UsbRecovery {
     private long healthySince = -1;
     int resetResult;
     String resetStage = "";
+    boolean failureReported;
 
     boolean failed(boolean writeFailure, long now) {
         healthySince = -1;
@@ -40,6 +41,7 @@ final class UsbRecovery {
             retryAt = 0;
             resetResult = 0;
             resetStage = "";
+            failureReported = false;
         }
     }
 

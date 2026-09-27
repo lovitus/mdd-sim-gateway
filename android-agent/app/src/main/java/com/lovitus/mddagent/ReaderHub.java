@@ -30,6 +30,19 @@ final class ReaderHub implements AutoCloseable {
                 if(e!=null)recovery.healthy(android.os.SystemClock.elapsedRealtime());
             }catch(Exception failure){remove(name);
                 UiText detail=failure instanceof UsbCard.WriteFailure?UiText.of(R.string.reader_usb_write_failed,((UsbCard.WriteFailure)failure).transferred):UiText.of(R.string.reader_usb_unavailable);
+                if(failure instanceof UsbCard.TransportFailure){
+                    UsbCard.TransportFailure transport=(UsbCard.TransportFailure)failure;
+                    if(!(failure instanceof UsbCard.WriteFailure))detail=UiText.of(transport.phase.equals("read")?R.string.reader_usb_read_failed:R.string.reader_usb_native_failed,transport.transferred);
+                }
+                if(!recovery.failureReported){
+                    recovery.failureReported=true;
+                    String diagnostic="USB first scan failure class="+failure.getClass().getSimpleName();
+                    if(failure instanceof UsbCard.TransportFailure){
+                        UsbCard.TransportFailure transport=(UsbCard.TransportFailure)failure;
+                        diagnostic+=" phase="+transport.phase+" command="+transport.command+" result="+transport.transferred+" elapsed_ms="+transport.elapsedMillis;
+                    }
+                    android.util.Log.i("MDDUSB",diagnostic);
+                }
                 if(recovery.failed(failure instanceof UsbCard.WriteFailure,android.os.SystemClock.elapsedRealtime())){
                     try{
                         UsbCard card=UsbRecovery.reset(usb,d);Entry restored=new Entry(name,card);entries.put(name,restored);

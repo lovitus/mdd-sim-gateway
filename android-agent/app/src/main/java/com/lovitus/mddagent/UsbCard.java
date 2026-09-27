@@ -14,9 +14,15 @@ final class UsbCard implements SimProtocol.Card {
     private UsbRequest eventRequest;
     private Thread eventThread;
     private boolean claimed;
-    static final class WriteFailure extends IOException {
-        final int transferred;
-        WriteFailure(int transferred){super("USB write failed ("+transferred+"); outcome unknown");this.transferred=transferred;}
+    static class TransportFailure extends IOException {
+        final String phase;final int command,transferred;final long elapsedMillis;
+        TransportFailure(String phase,int command,int transferred,long elapsedMillis){
+            super("USB "+phase+" failed ("+transferred+"); outcome unknown");
+            this.phase=phase;this.command=command;this.transferred=transferred;this.elapsedMillis=elapsedMillis;
+        }
+    }
+    static final class WriteFailure extends TransportFailure {
+        WriteFailure(int command,int transferred,long elapsedMillis){super("write",command,transferred,elapsedMillis);}
     }
     UsbCard(UsbManager manager,UsbDevice d)throws Exception{
         this(manager,d,false);
@@ -63,19 +69,24 @@ final class UsbCard implements SimProtocol.Card {
     }
     synchronized byte[] exchange(int type,byte[] data,int expected)throws Exception{
         if(closed)throw new IOException("Reader closed");int seq=sequence++&255;byte[] q=Ccid.command(type,0,seq,data);
-        int written=connection.bulkTransfer(output,q,q.length,2000);
-        if(written!=q.length)throw new WriteFailure(written);
+        long started=SystemClock.elapsedRealtime();
+        int written=transfer(type,output,q,0,q.length,2000);
+        if(written!=q.length)throw new WriteFailure(type,written,SystemClock.elapsedRealtime()-started);
         long deadline=SystemClock.elapsedRealtime()+5000;
         for(int extensions=0;extensions<8;extensions++){
             byte[] b=new byte[Ccid.MAX];int count=0,length=-1;
             while(length<0||count<length){int wait=(int)(deadline-SystemClock.elapsedRealtime());if(wait<=0||closed)throw new IOException("USB response timeout");
-                int n=connection.bulkTransfer(input,b,count,b.length-count,Math.min(wait,2000));if(n<=0)throw new IOException("USB reader disconnected or timed out");count+=n;length=Ccid.length(b,count);if(length>=0&&count>length)throw new IOException("CCID trailing data");}
+                int n=transfer(type,input,b,count,b.length-count,Math.min(wait,2000));if(n<=0)throw new TransportFailure("read",type,n,SystemClock.elapsedRealtime()-started);count+=n;length=Ccid.length(b,count);if(length>=0&&count>length)throw new IOException("CCID trailing data");}
             byte[] r=Arrays.copyOf(b,count);
             if((r[5]&255)!=0||(r[6]&255)!=seq||(r[0]&255)!=expected)throw new IOException("CCID stale response");
             if((r[7]&0xc0)==0x80)continue;
             if(type==0x65 && (r[7]&3)==2){insertion.incrementAndGet();throw new IOException("SIM removed");}
             return Ccid.result(r,0,seq,expected);
         }throw new IOException("CCID extension budget exhausted");
+    }
+    private int transfer(int command,UsbEndpoint endpoint,byte[] buffer,int offset,int length,int timeout)throws IOException{
+        try{return UsbPortReset.transfer(connection.getFileDescriptor(),endpoint.getAddress(),buffer,offset,length,timeout);}
+        catch(LinkageError unavailable){TransportFailure failure=new TransportFailure("native_library",command,-OsConstants.ENOSYS,0);failure.initCause(unavailable);throw failure;}
     }
     public byte[] transmit(byte[] q)throws Exception{return exchange(0x6f,q,0x80);}
     public void select(String application)throws Exception{SimProtocol.selectApplication(this,application);}
