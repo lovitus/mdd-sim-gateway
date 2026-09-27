@@ -4,21 +4,36 @@ import android.hardware.usb.*;
 import android.system.OsConstants;
 import java.io.IOException;
 
-/** At most two resets per unstable episode; sustained health rearms the budget. */
+/** Two resets per episode; a lifecycle event can rearm after the shared cooldown. */
 final class UsbRecovery {
     private int failures;
     private int attempts;
     private long retryAt;
     private long healthySince = -1;
+    private boolean recheckRequested;
     int resetResult;
     String resetStage = "";
     boolean failureReported;
 
-    boolean failed(boolean writeFailure, long now) {
+    void recheck() {
+        recheckRequested = true;
+    }
+
+    boolean failed(boolean transportFailure, long now) {
         healthySince = -1;
-        failures = writeFailure ? Math.min(2, failures + 1) : 0;
+        failures = transportFailure ? Math.min(2, failures + 1) : 0;
+        if (recheckRequested && now >= retryAt && (attempts >= 2 || attempts == 1 && !retryPending())
+                && !"device_shape".equals(resetStage) && !"native_library".equals(resetStage)) {
+            attempts = 0;
+            resetResult = 0;
+            resetStage = "";
+            failureReported = false;
+            recheckRequested = false;
+        }
         if (failures < 2 || attempts >= 2) return false;
         if (attempts == 1 && (!retryPending() || now < retryAt)) return false;
+        // An event observed during a pending retry belongs to that retry, not a third reset.
+        recheckRequested = false;
         attempts++;
         retryAt = now + 30000;
         return true;
@@ -35,6 +50,7 @@ final class UsbRecovery {
 
     void healthy(long now) {
         failures = 0;
+        recheckRequested = false;
         if (healthySince < 0) healthySince = now;
         if (now - healthySince >= 60000) {
             attempts = 0;

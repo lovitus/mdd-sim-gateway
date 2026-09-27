@@ -166,8 +166,69 @@ writes remain unknown outcomes. Home/Readers distinguish write, response-read
 and missing-native-transport failures. The first scan failure in each unhealthy
 episode records only its class, phase, CCID command number, result and duration,
 not card identifiers, APDU data or credentials. This is a diagnostic change, not
-a USB root-cause repair. Signed qualification and real errno capture are pending;
-no new automated red/green or hardware acceptance is claimed for this boundary.
+a USB root-cause repair. Signed v83 / `4e2f4d8` passed workflow `36281446154`, with
+all four native ABIs packaged and the stable signer verified. The retained-data
+update captured a real CCID power-on write timeout (`-110`, about 2016 ms), then
+the bounded reset reidentified the original card. One 572-second read-only sample
+retained the same process and card without a new failure. Native Home/Readers
+and final Core routing/IMS/message readiness were checked; no new paid action or
+extra reset/replug was used. This is not long-idle/battery or root-cause acceptance.
+No new automated red/green claim is made for this native diagnostic boundary.
+
+### Event-driven USB recovery
+
+The September 27 owner requirement is to maintain the attached reader while the
+app is foreground or its availability notification/service is active, checking
+and repairing it at meaningful lifecycle events until the user stops it. Existing
+Pause, sign-out and sharing-off choices remain authoritative; this does not turn
+sharing back on or silently grant Android USB permission.
+
+Activity resume, screen-on/unlock, leaving device idle, USB attach/detach/permission,
+reader-link reconnection and local call completion request a serialized fresh
+scan. Events coalesce into the existing reader-I/O owner and health schedule;
+there is no additional polling loop or permanent wake lock. An event reopens an
+exhausted recovery episode only after the existing 30-second cooldown. Each
+episode still allows at most two resets; events during a pending retry are
+consumed by that retry. An unsupported device shape or missing native reset
+implementation remains a visible manual-recovery case.
+
+Both read and write transport failures during a read-only scan may qualify for
+recovery. Opening/resetting is deferred during the client's call or SMS operation;
+queued scans check the original owner before touching hardware. Reader I/O and
+AKA remain serialized. No PIN/AKA command, SMS or dial is automatically replayed.
+Healthy readers are checked, not reset. Unrecoverable physical/firmware faults
+still need the displayed reconnect guidance, not a fabricated healthy state.
+
+Three new `UsbRecoveryTest` regressions failed with the old ignored-event
+behavior (same compiled API), then all seven policy cases passed after enabling
+event recovery. They cover exhausted budgets, event coalescing/cooldown and
+transient versus unsupported reset stages. This one-time policy check does not
+prove the event receivers or real USB hardware work. Full GitHub qualification
+and installed foreground/background wake recovery are still pending.
+
+The implementation follows Android's existing USB permission/owned-connection
+lifecycle, not a new USB stack: [USB host](https://developer.android.com/develop/connectivity/usb/host)
+and [device-idle transitions](https://developer.android.com/reference/android/os/PowerManager#ACTION_DEVICE_IDLE_MODE_CHANGED).
+
+### Cellular incoming event dependency
+
+The September 27 owner-assisted attempt reached the cellular modem and produced
+missed-call history, but neither the native client nor the independent mobile
+stream received an actionable incoming event. Core bound its existing cellular
+event source inside `WithWebUI`, where the static page handler does not implement
+it, instead of inside `WithCellularMedia`. The minimal correction moves that
+binding; it changes no authentication, call lifetime, SIM fences or user intent.
+There is no safe client-only substitute for the missing exact incoming event.
+
+`TestCellularMediaIncomingReachesBrowserAndMobileStreams` exercises both real
+WebSocket endpoints, with and without WebUI. All four cases failed with missing
+incoming data before the correction and passed after it, including removal of
+the ended event. That one-time regression check does not replace full GitHub CI,
+deployment or physical answer/audio acceptance, all still pending for this fix.
+The installed preview remains v83. A subsequent USB write timeout and failed
+bounded recovery again left its reader unidentified; the earlier short healthy
+observation is not durable USB acceptance. No additional outgoing call or SMS was
+sent to investigate the incoming defect.
 
 Call history now displays direction, peer, line name/number/card when present,
 localized colored status and local time. Missing catalog details remain unknown;

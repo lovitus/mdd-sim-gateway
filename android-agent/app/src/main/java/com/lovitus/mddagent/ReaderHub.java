@@ -18,14 +18,15 @@ final class ReaderHub implements AutoCloseable {
     private static final class Entry{String name,generation=Json.id(),id="";JSONObject sim;SimProtocol.Card card;long insertion,metadataNext;int metadataAttempts;Entry(String name,SimProtocol.Card card){this.name=name;this.card=card;}}
     private static final class Receipt{String fingerprint;JSONObject response;Receipt(String f,JSONObject r){fingerprint=f;response=r;}}
     ReaderHub(Context context){usb=context.getSystemService(UsbManager.class);try{se=new SEService(context,Runnable::run,()->{});}catch(Exception ignored){}}
-    synchronized void scan(){scan(false);}
-    synchronized void scan(boolean explicitMetadata){if(closed)return;
+    synchronized void scan(boolean explicitMetadata,boolean recheck,java.util.function.BooleanSupplier canRecover){if(closed)return;
         Set<String> seen=new HashSet<>();Map<String,UiText> failures=new LinkedHashMap<>();boolean omapiFailed=false;
         for(UsbDevice d:usb.getDeviceList().values()){
             if(!usb.hasPermission(d))continue;boolean ccid=false;for(int i=0;i<d.getInterfaceCount();i++)ccid|=d.getInterface(i).getInterfaceClass()==11;if(!ccid)continue;
             String name="USB-"+d.getVendorId()+"-"+d.getProductId()+"-"+d.getDeviceId()+"-slot0";seen.add(name);
             UsbRecovery recovery=usbRecovery.computeIfAbsent(name,ignored->new UsbRecovery());
+            if(recheck)recovery.recheck();
             try{Entry e=entries.get(name);if(e!=null){UsbCard c=(UsbCard)e.card;c.status();if(c.insertion.get()!=e.insertion){remove(name);e=null;}else repairMetadata(e,explicitMetadata);}
+                if(e==null&&!canRecover.getAsBoolean()){failures.put(name,UiText.of(R.string.reader_usb_recovery_busy));continue;}
                 if(e==null&&entries.size()<8){UsbCard card=new UsbCard(usb,d);e=new Entry(name,card);entries.put(name,e);discover(e);e.insertion=card.insertion.get();}
                 if(e!=null)recovery.healthy(android.os.SystemClock.elapsedRealtime());
             }catch(Exception failure){remove(name);
@@ -43,7 +44,8 @@ final class ReaderHub implements AutoCloseable {
                     }
                     android.util.Log.i("MDDUSB",diagnostic);
                 }
-                if(recovery.failed(failure instanceof UsbCard.WriteFailure,android.os.SystemClock.elapsedRealtime())){
+                boolean transportFailure=failure instanceof UsbCard.TransportFailure&&!"native_library".equals(((UsbCard.TransportFailure)failure).phase);
+                if(canRecover.getAsBoolean()&&recovery.failed(transportFailure,android.os.SystemClock.elapsedRealtime())){
                     try{
                         UsbCard card=UsbRecovery.reset(usb,d);Entry restored=new Entry(name,card);entries.put(name,restored);
                         discover(restored);restored.insertion=card.insertion.get();
@@ -58,7 +60,8 @@ final class ReaderHub implements AutoCloseable {
                     }
                 }
                 if(recovery.resetResult!=0){
-                    int message=recovery.retryPending()?R.string.reader_usb_recovery_retrying:R.string.reader_usb_recovery_failed;
+                    boolean unsupported="device_shape".equals(recovery.resetStage)||"native_library".equals(recovery.resetStage);
+                    int message=unsupported?R.string.reader_usb_recovery_unsupported:recovery.retryPending()?R.string.reader_usb_recovery_retrying:R.string.reader_usb_recovery_failed;
                     detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(message,recovery.resetResult,recovery.resetStage));
                 }else if(recovery.retryPending()||recovery.exhausted()){
                     int message=recovery.retryPending()?R.string.reader_usb_recovery_unstable_retrying:R.string.reader_usb_recovery_unstable_stopped;

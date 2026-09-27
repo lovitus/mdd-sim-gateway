@@ -4,6 +4,61 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class UsbRecoveryTest {
+    @Test public void lifecycleEventRearmsExhaustedReaderWithoutBypassingCooldown() {
+        for (String stage : new String[]{"", "slot_status"}) {
+            UsbRecovery recovery = new UsbRecovery();
+            assertFalse(recovery.failed(true, 0));
+            assertTrue(recovery.failed(true, 10));
+            recovery.resetStage = stage;
+            recovery.resetResult = stage.isEmpty() ? 0 : -5;
+            assertTrue(recovery.failed(true, 30010));
+            assertFalse(recovery.failed(true, 30011));
+
+            for (long now : new long[]{30012, 40000, 60009}) {
+                recovery.recheck();
+                assertFalse("Coalesced wake/foreground/USB events keep the reset cooldown",
+                        recovery.failed(true, now));
+            }
+            assertTrue("A new lifecycle event must recover a previously exhausted reader",
+                    recovery.failed(true, 60010));
+            recovery.resetStage = "slot_status";
+            recovery.resetResult = -5;
+            assertFalse(recovery.failed(true, 90009));
+            assertTrue(recovery.failed(true, 90010));
+            assertFalse("One event grants one bounded episode, not an endless reset loop",
+                    recovery.failed(true, 120010));
+        }
+    }
+
+    @Test public void eventDuringPendingRetryDoesNotGrantAnExtraEpisode() {
+        UsbRecovery recovery = new UsbRecovery();
+        recovery.failed(true, 0);
+        assertTrue(recovery.failed(true, 10));
+        recovery.resetStage = "slot_status";
+        recovery.resetResult = -5;
+        recovery.recheck();
+        assertFalse(recovery.failed(true, 30009));
+        assertTrue(recovery.failed(true, 30010));
+        assertFalse("The pending retry must consume the earlier event", recovery.failed(true, 60010));
+        recovery.recheck();
+        assertTrue("Only a subsequent event starts another episode", recovery.failed(true, 60011));
+    }
+
+    @Test public void lifecycleEventRetriesTransientResetStagesButNotUnsupportedDevices() {
+        for (String stage : new String[]{"claim", "reset", "reclaim", "power_on", "identity",
+                "device_shape", "native_library"}) {
+            UsbRecovery recovery = new UsbRecovery();
+            recovery.failed(true, 0);
+            assertTrue(recovery.failed(true, 10));
+            recovery.resetStage = stage;
+            recovery.resetResult = -5;
+            assertFalse("A periodic scan alone must not restart a failed reset", recovery.failed(true, 60010));
+            recovery.recheck();
+            assertEquals(stage, !stage.equals("device_shape") && !stage.equals("native_library"),
+                    recovery.failed(true, 60011));
+        }
+    }
+
     @Test public void failedSlotHandshakeGetsOneDelayedFollowupNotAnEndlessResetLoop() {
         UsbRecovery recovery = new UsbRecovery();
         assertFalse(recovery.failed(true, 0));

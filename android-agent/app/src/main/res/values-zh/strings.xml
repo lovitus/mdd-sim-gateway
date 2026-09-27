@@ -124,10 +124,12 @@
 <string name="reader_usb_read_failed">USB 响应读取失败（%1$d），结果未知；尚未确认卡片身份。</string>
 <string name="reader_usb_native_failed">USB 原生传输不可用（%1$d）；尚未确认卡片身份。</string>
 <string name="reader_usb_recovering">USB 端口已重置，正在等待重新识别卡片。</string>
-<string name="reader_usb_recovery_failed">USB 恢复失败：%2$s（%1$d），已停止本次故障的自动重置。</string>
-<string name="reader_usb_recovery_retrying">USB 恢复失败：%2$s（%1$d）。若命令写入仍失败，将延迟再尝试一次。</string>
-<string name="reader_usb_recovery_unstable_retrying">USB 恢复后再次不可用。若命令写入仍失败，将延迟再尝试一次。</string>
-<string name="reader_usb_recovery_unstable_stopped">USB 恢复后再次不可用，已停止本次故障的自动重置。</string>
+<string name="reader_usb_recovery_failed">USB 恢复失败：%2$s（%1$d）。等待唤醒、回到前台或 USB 事件后，冷却重试恢复。</string>
+<string name="reader_usb_recovery_retrying">USB 恢复失败：%2$s（%1$d）。若通信仍失败，将延迟再尝试一次。</string>
+<string name="reader_usb_recovery_unstable_retrying">USB 恢复后再次不可用。若通信仍失败，将延迟再尝试一次。</string>
+<string name="reader_usb_recovery_unstable_stopped">USB 仍不可用。等待唤醒、回到前台或 USB 事件后，冷却重试恢复。</string>
+<string name="reader_usb_recovery_busy">读卡器恢复正在等待当前通话或 SIM 操作结束。</string>
+<string name="reader_usb_recovery_unsupported">无法安全执行 USB 自动重置：%2$s（%1$d）。请重新插拔读卡器和 OTG 转接头。</string>
 <string name="reader_scan_details">%1$s\n%2$s</string>
 <string name="reader_omapi_blocked">设备或 SIM 访问规则拒绝了 OMAPI</string>
 <string name="reader_count">已识别读卡器：%1$d</string>
