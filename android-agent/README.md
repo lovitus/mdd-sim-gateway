@@ -2,6 +2,24 @@
 
 This is a fresh native Android app, not a WebView or an exposed VPCD service. Android 9/API 28 or newer. The application ID is `com.lovitus.mddagent.preview`; it does not replace an unknown historical Android package.
 
+## Current preview milestone
+
+The September 27 Android preview milestone is complete within its recorded scope
+and ready for owner review in draft PR #12; it is not merged. Signed v85 /
+`a1bf28b` and minimal Core `b6f3a4c` are already deployed. Reader sharing, scoped
+call/SMS paths, five native pages, ordinary reconnect and bounded USB recovery
+have the evidence described below. The separately reviewed Provider fix in
+PR #13 remains a single-line trial, not a broad Provider rollout.
+
+The owner accepts missing long-duration USB/OEM/battery validation for this stage;
+extreme network-switching validation is also non-blocking. Failures remain visible,
+automatic recovery is bounded, and Home/Readers retain manual recovery advice.
+Unproven startup-timeout causes and deferred tests are not claims of success.
+See [the existing postponed work](../postponed-tasks.md) and
+[ANDROID_PREVIEW_CLOSE](../docs/decisions/2026-09-21-android-agent.md#android_preview_close---september-27-owner-delivery-decision).
+Desktop isolation/installer work is outside this Android delivery. Older candidate
+notes below preserve evidence history, not instructions to repeat finished work.
+
 ## Setup
 
 1. Install the preview APK, open it, and enter the gateway **HTTPS origin**, account name and password. Remembered login is encrypted using Android Keystore; disable Remember or use Forget login to remove the saved password. For self-signed servers, independently verify the displayed **leaf certificate SHA-256** before accepting it. Certificate changes require explicit confirmation; there is no trust-all toggle or credential-bearing redirect.
@@ -390,6 +408,23 @@ UI checks must qualify the candidate; no extra paid call/SMS is implied by them.
 
 ## Sessions, power and recovery
 
+### Current qualification boundary
+
+The owner confirmed two-way speech on the resumed incoming modem call. Together
+with the separately recorded outgoing voice, self-SMS, history/Reply, five native
+pages and bounded recovery cases, this supplies scoped preview acceptance, not a
+claim that every carrier or hardware permutation is qualified. The current APK
+and minimal Core fixes are deployed; draft PRs still require owner review.
+
+Actual Wi-Fi/cellular-data handover remains untested. On September 27 the owner
+made extreme network-switching validation non-blocking for the main workflow;
+a phone-native data SIM is not a prerequisite for continued delivery. This does
+not remove ordinary automatic reconnection or session recovery, whose existing
+physical evidence is retained. Long-duration USB/OEM/battery qualification and
+the historical write timeout cause remain unverified and are deferred from this
+preview's delivery gate under ANDROID_PREVIEW_CLOSE; short samples do not close
+them. A new reproducible main-flow failure still warrants investigation.
+
 Cookie/CSRF sessions slide through existing Core validation. Expired administrator sessions can renew using remembered encrypted login, without enabling availability or reader sharing. Rejected passwords, certificate identity failures and revoked reader credentials require user action. Reader enrollment is distinct from the administrator session. NetworkCallback changes replace sockets; epoch guards reject stale callbacks. Reconnect uses capped jittered backoff without an attempt limit and never redials/resubmits messages.
 
 A bounded physical QA check exercised invalid JSON after a snapshot, unknown
@@ -405,11 +440,16 @@ completed cases. No password-manager setting, production configuration or paid
 operation was changed. Existing isolated-Core restart evidence separately covers
 automatic remembered-login renewal, not a natural twelve-hour expiry experiment.
 
-Fifteen retained production readbacks span about 67 minutes on v85 with the same
-Agent process generation, reader session and card, fresh heartbeats and unchanged
-desired catalog. One control reconnection occurred within that interval. This
-supports sampled session continuity/recovery, not gap-free monitoring, overnight
-endurance or measured battery life.
+Twenty-five retained production readbacks now span about 155 minutes on v85 with
+the same Agent process generation, reader session and identified card, fresh
+heartbeats and unchanged desired catalog. Five control-connection timestamps
+appear across the interval, including the Core rollout; installed and final App
+PIDs match. This is sampled continuity/recovery, not gap-free monitoring, overnight
+endurance or measured battery life. A final read-only history request returned
+the same ten event IDs for this reader's line as the earlier post-rollout snapshot,
+without a new SMS or replay. It does not directly qualify Telegram or future
+carrier delivery. The final black screenshot and empty filtered USB log are not
+positive UI or error-free evidence.
 
 One subsequent eight-minute background sample retained the same v85 process,
 reader/card, foreground service and desired state. App-UID CPU increased by
@@ -426,13 +466,22 @@ authentication and the heartbeat cadence are unchanged. A real WebSocket/replay
 regression and the semantic-change matrix both failed with normalization removed,
 then passed with race detection after restoration. The first WebSocket attempt
 had an incomplete catalog fixture and is not counted as defect reproduction.
-Full GitHub validation and actual deployed traffic comparison are still required.
-No power setting or client intent was changed by the measurement; do not claim
-the heartbeat design alone proves low traffic or battery life.
+Full Go workflow `36298445701` passed at `b6f3a4c`. Its verified Core was deployed
+with idle/maintenance guards and a checked rollback backup; unrelated processes,
+six Agent generations, desired lines and notifications were preserved. The real
+post-rollout stream sent one initial snapshot and two heartbeats in 65 seconds,
+with no timestamp-only snapshot. Stable v85 then received about 0.01 MB in two
+background minutes and used 151 ms of CPU, versus about 19 MB and 6.999 CPU seconds
+in the prior eight-minute sample. Counters are rounded; these are scoped runtime
+and traffic measurements, not a laboratory power or all-day battery qualification.
+Actual Home/Readers and final Core confirmed the same card, online state and idle
+call/media ownership. A later short reader-link reconnect remains recorded; no
+gap-free socket uptime is claimed. No power setting, client intent, APK, Provider,
+desktop Agent or paid operation changed. Temporary collectors and sessions ended.
 
 Observer-only mode receives changed snapshots plus a 30-second heartbeat rather than polling the whole desktop page. Core shares a one-second read cache, limits Provider concurrency to eight and a two-second deadline, and caps mobile presentation at 128 lines / 50 messages with an explicit incomplete flag. Existing routes remain available through gateway management for larger installations.
 
-Reader mode must satisfy the current Core 10-second health interval; unchanged topology is omitted. No idle wake lock, exact alarm, heartbeat restart watchdog or automatic boot activation. A bounded partial wake lock is used only during a call. Pause stops links and sharing. After force-stop or reboot, open the app to resume. Android Doze/OEM power management may still delay inbound delivery despite a visible foreground notification. This is **not** a claim of guaranteed 24/7 reachability or measured battery life; screen-off/cellular handover tests are required on actual devices.
+Reader mode must satisfy the current Core 10-second health interval; unchanged topology is omitted. No idle wake lock, exact alarm, heartbeat restart watchdog or automatic boot activation. A bounded partial wake lock is used only during a call. Pause stops links and sharing. After force-stop or reboot, open the app to resume. Android Doze/OEM power management may still delay inbound delivery despite a visible foreground notification. This is **not** a claim of guaranteed 24/7 reachability or measured battery life. Physical screen-off evidence retains its recorded limits; extreme cellular-handover validation is unverified and owner-designated non-blocking, not a main-flow release gate.
 
 Call transport recovery resumes the same lease/ticket within a bounded window. It never acquires another paid call after failure. If media cannot recover, close audio and rely on existing server guards; keep the unknown call visible for explicit status checks/hangup. Process death follows browser-equivalent semantics: no persistent call owner is restored. After reopening, use Call history. This client does not require PR #8 pairing, call recovery, receipt or message-sync endpoints.
 

@@ -15,7 +15,11 @@ not used to override those decisions. Root TODO summaries are generated; origina
 Final eSIM direction is physical deletion + retained deletion notifications + multiply-confirmed manual replay.
 Do not reopen abandoned soft deletion/customization. Android is reprioritized by the owner as a draft native app / preview APK;
 read docs/decisions/2026-09-21-android-agent.md. Do not merge its draft or claim physical acceptance from emulator tests.
-Windows/macOS/Linux remote Agents are the current priority. Enabled 4G must be isolated and fail closed on all
+The September 27 ANDROID_PREVIEW_CLOSE decision in the Android decision document
+now closes this Android preview milestone for owner review. Endurance validation
+gaps and non-Android follow-up belong in the existing postponed ledger, not new
+delivery gates. Windows/macOS/Linux remote Agents remain product requirements.
+Enabled 4G must be isolated and fail closed on all
 three: no host sharing or default-network fallback, no override of stored user intent, no automatic enabling.
 Notarization and .p8 credentials are excluded this round; preserve signing and track Universal work separately.
 

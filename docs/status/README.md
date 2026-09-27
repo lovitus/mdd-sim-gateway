@@ -5,7 +5,7 @@
 Original audit baseline: `3e6d5db7657e468eedc0c31316bb97c04b2b599b`; tree `f0f6b038519bdce6520ea805c4c77c5aecd0535a`; review 2026-09-20.
 Scope-correction baseline: `19f966f7d673a074e7218680d6c0ed8b1d530e1c`; tree `49935012e44af8e006a01b6795f26a3c94851885`.
 
-Repository/source and evidence-provenance review only; no new live tests or production deployment. Latest owner decisions govern current scope; historical acceptance is not reset by this review.
+September 27 Android native preview milestone closed for owner review under ANDROID_PREVIEW_CLOSE. Main-flow evidence is scoped below; long-duration qualification and non-Android follow-up are deferred, not passed or cancelled. Existing product safety requirements and historical reports remain in force. Repository merge, deployed artifacts and hardware qualification are separate facts; this documentation update performs no new live test, deployment or merge.
 
 ## Reading and updating the ledger
 
@@ -23,15 +23,19 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 | Scope | Disposition | Current decision |
 |---|---|---|
+| ANDROID_ENDURANCE | deferred | Implemented keepalive/recovery with incomplete long-duration USB/OEM/battery validation is acceptable for this preview. Retain visible errors and manual remedies; unperformed tests remain unverified. |
+| ANDROID_NETWORK_EXTREMES | deferred | Extreme network-switching validation is unverified and non-blocking; no phone data SIM prerequisite for main-flow delivery. Ordinary reconnect/session recovery remains required. |
 | ESIM | accepted | Physical deletion + retained deletion notifications + multiple-confirmation manual replay. No soft-delete implementation backlog. |
-| REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. |
-| ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. |
-| ANDROID | required | Client-focused native Android draft/preview with existing server APIs; no pairing or durable server call recovery. Hardware and screen-off qualification remain separate. |
+| REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. Desktop follow-up is outside this Android PR and is separately postponed. |
+| ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. Further desktop qualification is deferred from this Android PR, not a waiver of isolation. |
+| ANDROID | accepted | Android preview milestone completed within scoped main-flow evidence; PR #12 remains draft for owner review. This is not all-carrier/hardware qualification or permission to merge. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
 | MACOS_UNIVERSAL | needs_decision | Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build. |
 
 ## Decision provenance
 
+- **ANDROID_PREVIEW_CLOSE** (2026-09-27, project_owner): Close the usable Android Agent preview as a staged delivery. Missing long-duration stability qualification is acceptable with visible failures, bounded recovery and manual remedies. Defer meaningful other directions in the existing postponed ledger; preserve all safety requirements and owner review before merge. [Source](../../docs/decisions/2026-09-21-android-agent.md).
+- **ANDROID_NETWORK_EXTREMES** (2026-09-27, project_owner): Extreme network-switching validation is non-blocking for the main reader/call/SMS workflow and delivery. Keep physical handover unverified without requiring a phone data SIM; ordinary automatic reconnect/session recovery remains required. [Source](../../docs/decisions/2026-09-21-android-agent.md).
 - **ESIM_FINAL** (2026-09-20, project_owner): Physical deletion, retained notification and multiply-confirmed manual replay are the accepted final direction; abandoned soft deletion is superseded. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **PRIMARY_AGENTS** (2026-09-20, project_owner): Windows/macOS/Linux remote Agents are the current priority; Android is deferred. Enabled 4G must be isolated and fail closed without overriding user intent. [Source](../../docs/decisions/2026-09-20-current-scope.md).
 - **MACOS_RELEASE** (2026-09-20, project_owner): No notarization or .p8 this round. Preserve signing and track Universal packaging separately. [Source](../../docs/decisions/2026-09-20-current-scope.md).
@@ -59,37 +63,31 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+## Accepted, deferred, excluded and separately prioritized work
+
 ### ANDROID
 
-**State: partial; release relevance: current.** Client-focused native preview, excluding PR #8 pairing and durable server call recovery. Production Core fd8fc0b has an authorized rollback-backed rollout and actual native incoming Answer with owner-confirmed two-way speech. Current signed Android v85 / a1bf28b passed workflow 36292625372 and was qualified and installed once with retained data. Its endpoint-sized CCID receive correction follows OpenEUICC; two compiled behavioral counterexamples were red before and green after. Existing lifecycle recovery, intent/ownership guards and exact protocol limits remain. Startup power-on still had one write -110 timeout, followed by successful bounded automatic recovery. Native Home/Readers and final Core agreed on the original card, current routing and IMS/messaging readiness, with no active call/media and unchanged desired lines. PR #12 remains draft.
+**State: completed; release relevance: current.** The client-focused Android preview milestone is implemented and ready for owner review, not whole-product or universal hardware acceptance. Signed Android v85 / a1bf28b passed workflow 36292625372 and is installed; minimal Core b6f3a4c passed full Go workflow 36298445701 and is deployed with rollback evidence. Scope includes reader registration/sharing, scoped VoWiFi/modem calls and SMS, five usable native pages, visible errors, ordinary reconnect/session renewal, bounded event-driven USB recovery and the measured idle-snapshot traffic correction. PR #12 remains draft and unmerged. Separate Provider PR #13 has scoped single-line trial evidence; desktop PR #14 is not an Android delivery gate.
 
-Acceptance scope / remaining action: Preserve earlier isolated-Core login, silent-connection recovery, reauthentication, native pages/reply, call-history and scoped outgoing voice evidence. A real call exercised RTP DTMF after the separate Provider fix; IVR digit recognition is not claimed. One authorized self-SMS was received, followed by duplicate Telegram ingress. Separate Provider PR #13 candidate 9e0ec67 passed CI 36264788240 and was deployed only to the affected trial Provider. Its actual pending receive report returned 202; Core history stayed unchanged across the delivery/process generation. This is scoped report/dedup evidence, not online quiet-window or all-SMS acceptance. The one-shot SMS permission is consumed; no resend or manual replay occurred. USB event-rearm/stop-intent paths now have scoped hardware evidence, not underlying-fault or long-duration battery acceptance. After the authorized rollout, matching actual incoming events reached both mobile/browser streams and native Answer was exercised. The owner confirmed both phones heard each other; durable history records 45.944 answered seconds and a terminal end. An in-call screenshot timeout bypassed the planned native Hang up, so the independent same-process fallback stopped the App; later Core/Agent-backed readback was idle. Preserve the visible audio-reconnect state without inventing its cause. The App was reopened with saved intent and reader identity restored. This qualifies incoming connectivity, not native-Hang-up execution in this attempt or audio quality. The one-shot observer was adjusted so optional screenshots cannot bypass native end; that adjustment has syntax validation only and was not paid-retested. No Provider change, automatic paid retry or broader server expansion is added. UK incoming and shared-network root causes remain owner-deferred. PRs remain subject to owner review. Malformed observer-frame recovery now has scoped physical QA evidence: invalid JSON, unknown type, unsupported schema and heartbeat-first each closed/reconnected, followed by native online state on a fifth valid connection in the same process. This reused CI QA f627204; the relevant Link decisions are unchanged in a1bf28b except diagnostics. It is not fresh full-v85, reader-link or carrier acceptance. Sharing stayed off, exact encrypted QA state was restored and temporary resources were removed. Earlier autofill/setup failures remain retained. Natural elapsed-session expiry and restricted OMAPI qualification remain unaccepted. The receive correction avoids a 65546-byte native read for a 16-byte endpoint and handles bounded leading zero packets. CI reports 21 JVM, 13 native fixtures per API 28/35 and 219 scoped Core/agentlink race cases, without failures/skips. Following startup recovery, an eight-minute background sample retained the process/service with no additional USB first-scan fault/reset. The phone woke about 15.9 seconds after the attempted sleep; final Awake/ACTIVE is not continuous screen-off/deep-idle or battery acceptance. No screen-keeping app, power/network setting, user switch or shared ADB was changed. The observer ended and the App returned to Readers. Startup timeout causality remains unresolved; no replug, manual reset, paid call/SMS, PIN, server or Provider change accompanies this batch. A later four-minute forced deep-IDLE check kept App PID, Agent generation, reader session and socket connection unchanged; the next Core heartbeat advanced and was fresh. Unforce cleared the forced flag but initially left natural IDLE; motion and authorized unlock then restored ACTIVE with the screen on. Actual native Readers and final Core agreed on the original card and current routing, with idle call/media owners and unchanged desired state. All temporary observation ended. No App restart, replug, persistent power/network or exemption change, user-switch change or paid operation occurred. This qualifies bounded deep-idle entry/exit, not long-duration availability, battery life or initial-write-timeout causality. Fifteen retained v85 readbacks span 66.98 minutes with the same Agent process generation, reader session and card, fresh heartbeats and unchanged desired catalog. One control reconnection occurred; this is sampled continuity/recovery evidence, not gap-free or overnight monitoring and not measured battery life. A subsequent eight-minute background sample retained the process, card, availability service and desired catalog, with fresh final facts and idle call/media. App-UID CPU increased 6.999 seconds, foreground activity zero and wake-lock statistics were unchanged; no settings or history reset was used. This is not battery-life acceptance. About 19 MB was received. Four read-only production mobile snapshots were about 150 KB each on the three-second cadence, with only readiness received_at/expires_at changing. Volatile timestamps therefore defeat intended unchanged-state suppression. This is a reproduced open transport-cost defect, not permission to disable availability or rewrite Core; a minimal follow-up must retain freshness/identity and call/SMS updates. The observer logged out, socket/tunnel and sampler ended, and no implementation/deployment or paid operation accompanied this diagnosis. The current minimal Core candidate removes only readiness receipt/expiry clocks from copied digest inputs, preserving original wire data, shared cache, freshness and every identity/call/SMS change. The real WebSocket/replay and semantic-matrix regressions failed with normalization disabled and passed with race after restoration; an initial invalid fixture is excluded from reproduction evidence. Full GitHub and deployed traffic validation are pending; Android v85 and production Core remain unchanged at this point.
+Acceptance scope / remaining action: Retain actual outgoing voice, native incoming Answer and owner-confirmed two-way speech, the one authorized received self-SMS, exact-card history/Reply, native page/control checks, ordinary transport/session/malformed-frame recovery and bounded USB/Doze evidence. The last incoming call used an independent termination fallback after a screenshot timeout; an earlier outgoing call exercised native Hang up. DTMF acknowledgement is not carrier IVR recognition. The Provider trial processed a pending receive report and exact-line history remained at the same ten event IDs; this is not all-carrier or direct Telegram acceptance. Twenty-five retained readbacks span 154.78 minutes with the same card/session/process generation and five control connections, not gap-free uptime. The post-fix 65-second mobile stream removed timestamp-only updates; unequal-duration CPU/traffic samples are not all-day battery qualification. Long-duration USB/OEM/battery, historical USB timeout causality, physical handover and separately identified hardware/carrier subcases remain unverified and non-blocking under ANDROID_PREVIEW_CLOSE. Detailed redacted receipts, failure history and limitations are published in android-agent/README.md and docs/decisions/2026-09-24-android-client-scope.md for GitHub-plugin review. Private raw evidence is retained outside Git; earlier local-only publication instructions are superseded by the owner. No new paid call/SMS, replay, device-setting change, build or deployment is needed for closure. Owner review of PR #12 and the separate Provider dependency is next; no automatic merge or broader rollout.
 
-### INSTALLER_WAIT
+Resolution (implementation_evidence): The owner narrowed this stage to the usable Android preview and accepted remaining endurance-validation gaps. Existing source, successful exact-candidate workflows and scoped physical main-flow evidence support milestone completion. This does not mark unperformed tests passed or merge the draft PR.
 
-**State: partial; release relevance: current.** Exact service/launchd ownership, captured-process waiting, bounded immediate readiness and rollback-stop protection are implemented. Fully event-driven service waiting and least-privilege service architecture are still partial.
+### ANDROID_ENDURANCE
 
-Acceptance scope / remaining action: Verify exact polling paths on Windows/macOS before changing them; retain bounded waits and error diagnostics.
+**State: deferred; release relevance: deferred.** Long-session keepalive, event-driven bounded USB recovery, ordinary reconnect and visible/manual recovery guidance are implemented. Overnight USB/OEM screen-off durability, all-day battery life, natural elapsed-session-expiry qualification and extreme physical network switching remain unverified. The historical startup USB write-timeout cause is not established; a recovered short sample does not explain it.
 
-### IDENTICAL_REINSERT
+Acceptance scope / remaining action: Accepted as non-blocking validation gaps for this Android preview. Preserve fault/status indicators, reset limits, Pause/share intent and manual reader/OTG guidance. Do not add automatic paid retries, wake locks or tests solely to prolong closure. Reopen for a later owner-requested endurance effort or a reproduced main-flow failure, starting with retained evidence. Restricted OMAPI/phone-native subscription and owner-deferred UK incoming carrier subcases remain unqualified, not inferred from server-routed calling.
 
-**State: needs_verification; release relevance: current.** A SIM unplug/reinsert with identical observed USB/ICCID/owner between samples cannot be certified by ordinary snapshot tests.
+Resolution (user_decision): The owner explicitly accepts implemented stability/recovery mechanisms without complete long-duration validation for this stage, given visible faults, bounded recovery and manual user remedies.
 
-Acceptance scope / remaining action: First reconcile any native event/generation and narrowly timed reports. Test only the identical-identity between-samples gap on specifically authorized hardware; report uncertainty when indistinguishable.
+### PRIMARY_AGENT_ISOLATION
 
-### INCIDENT_MM_CLOSE
+**State: deferred; release relevance: deferred.** Desktop enabled-4G fail-closed evidence reconciliation and uncovered cases (M19/M44) are separate from Android delivery. Existing Linux nftables/cgroup/mark isolation and bearer/relay/disconnect reports are retained; this is not a claim that isolation is missing or that every platform is qualified.
 
-**State: unresolved_cause; release relevance: current.** Historical forced-close root cause remains unknown. Current Linux ModemManager access is private D-Bus, not an mmcli subprocess whose stderr can simply be recovered.
+Acceptance scope / remaining action: Before any later hardware work, reconcile the prior artifact and exact scenario. Bearer recovery, protected status and absence of a main-table WWAN route alone do not prove that attempted traffic cannot escape over a retained default network. The uncovered traffic-loss/fallback scenario and platform gaps remain explicitly unverified. Do not enable an off capability, modify user switches or weaken existing fail-closed gates. Schedule any disruptive or paid experiment separately, not as an Android closure prerequisite.
 
-Acceptance scope / remaining action: Collect bounded redacted evidence at the real current transport boundary when authorized; do not invent carrier/port causes from generic symptoms.
-
-### INCIDENT_TOPOLOGY
-
-**State: unresolved_cause; release relevance: current.** Historical topology_invalid report did not identify the exact rejected field. It is not evidence of a newly reproduced current defect. Additive fixed-schema field diagnostics now narrow reader/card and modem-network readback failures without disclosing raw values; this does not prove the old incident cause.
-
-Acceptance scope / remaining action: Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.
-
-## Accepted, deferred, excluded and separately prioritized work
+Resolution (user_decision): The owner deferred meaningful non-Android directions to the existing postponed backlog. Permanent isolation requirements remain required; only this PR's follow-up scope changes.
 
 ### ESIM_DELETE
 
@@ -106,6 +104,38 @@ Resolution (user_decision): Owner accepted the implemented physical-delete direc
 Acceptance scope / remaining action: Unit tests plus real-browser synthetic tone/codec validation; preserve existing real-line evidence and reconcile only missing field subcases.
 
 Resolution (implementation_evidence): Opt-in local recording is implemented with consent, security/storage limits and exact call lifecycle; field acceptance is tracked separately.
+
+### INSTALLER_WAIT
+
+**State: deferred; release relevance: deferred.** Exact service/launchd ownership, captured-process waiting, bounded immediate readiness and rollback-stop protection are implemented. Fully event-driven service waiting and least-privilege service architecture are still partial.
+
+Acceptance scope / remaining action: Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Verify exact polling paths on Windows/macOS before changing them; retain bounded waits and error diagnostics.
+
+Resolution (user_decision): The owner directed meaningful non-Android work into the existing postponed ledger rather than extending this Android PR. Existing implementation, unknown causes and earlier evidence are retained; this is scheduling deferral, not a safety waiver or completed validation.
+
+### IDENTICAL_REINSERT
+
+**State: deferred; release relevance: deferred.** A SIM unplug/reinsert with identical observed USB/ICCID/owner between samples cannot be certified by ordinary snapshot tests.
+
+Acceptance scope / remaining action: Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. First reconcile any native event/generation and narrowly timed reports. Test only the identical-identity between-samples gap on specifically authorized hardware; report uncertainty when indistinguishable.
+
+Resolution (user_decision): The owner directed meaningful non-Android work into the existing postponed ledger rather than extending this Android PR. Existing implementation, unknown causes and earlier evidence are retained; this is scheduling deferral, not a safety waiver or completed validation.
+
+### INCIDENT_MM_CLOSE
+
+**State: deferred; release relevance: deferred.** Historical forced-close root cause remains unknown. Current Linux ModemManager access is private D-Bus, not an mmcli subprocess whose stderr can simply be recovered.
+
+Acceptance scope / remaining action: Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Collect bounded redacted evidence at the real current transport boundary when authorized; do not invent carrier/port causes from generic symptoms.
+
+Resolution (user_decision): The owner directed meaningful non-Android work into the existing postponed ledger rather than extending this Android PR. Existing implementation, unknown causes and earlier evidence are retained; this is scheduling deferral, not a safety waiver or completed validation.
+
+### INCIDENT_TOPOLOGY
+
+**State: deferred; release relevance: deferred.** Historical topology_invalid report did not identify the exact rejected field. It is not evidence of a newly reproduced current defect. Additive fixed-schema field diagnostics now narrow reader/card and modem-network readback failures without disclosing raw values; this does not prove the old incident cause.
+
+Acceptance scope / remaining action: Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.
+
+Resolution (user_decision): The owner directed meaningful non-Android work into the existing postponed ledger rather than extending this Android PR. Existing implementation, unknown causes and earlier evidence are retained; this is scheduling deferral, not a safety waiver or completed validation.
 
 ### FORK_MAINTENANCE
 
@@ -215,7 +245,7 @@ Linked criteria: [M01](#m01), [M35](#m35).
 
 **Implementation: partial; acceptance/evidence: evidence_review_pending.**
 
-**Current requirement:** Current Windows/macOS/Linux delivery and native qualification: preserve prior deployment/installer reports, then verify only unresolved privilege, backend and failure-matrix cases. Android is deferred.
+**Current requirement:** Preserve Windows/macOS/Linux delivery and earlier native/deployment qualification as product requirements. Remaining desktop privilege, backend and failure-matrix work is separate from the current Android preview milestone, not its delivery gate.
 
 Preserved original ([TODO.md:49](../../docs/archive/2026-09-20/TODO.md#L49)): 仍未达到“所有平台可直接交付”：Windows 一次提权安装器/低权限守卫服务、持久 URC companion、       飞行模式最终状态验收、短信页视觉验收、Linux/macOS Provider 和拔插/崩溃/换卡矩阵仍待完成。
 
@@ -365,6 +395,8 @@ Preserved original ([TODO.md:128](../../docs/archive/2026-09-20/TODO.md#L128)): 
 
 A single Windows service and elevated installer exist. The old Gammu companion/license recipe is obsolete; full least-privilege service separation and event-driven installer waiting require separate design/acceptance.
 
+Remaining scope: Deferred from this Android preview under ANDROID_PREVIEW_CLOSE; existing product and safety requirements remain. Separately scope any remaining least-privilege or event-driven installer work; do not extend the Android PR.
+
 Source/test boundaries: [`.github/workflows/go-runtime.yml`](../../.github/workflows/go-runtime.yml), [`go-runtime/internal/agentconnection/manager.go`](../../go-runtime/internal/agentconnection/manager.go), [`go-runtime/internal/agenthost/worker.go`](../../go-runtime/internal/agenthost/worker.go), [`go-runtime/release/install-macos-agent.sh`](../../go-runtime/release/install-macos-agent.sh), [`go-runtime/release/install-windows-agent.ps1`](../../go-runtime/release/install-windows-agent.ps1).
 
 ### M16
@@ -419,7 +451,7 @@ The Linux nftables/cgroup/mark path and scoped EC20 field reports are retained. 
 
 Existing reports: [H-LINUX-BEARER](#h-linux-bearer), [H-LINUX-WSS-ISOLATION](#h-linux-wss-isolation).
 
-Remaining scope: Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.
+Remaining scope: Deferred from this Android preview under ANDROID_PREVIEW_CLOSE; existing product and safety requirements remain. Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.
 
 Source/test boundaries: [`TODO_MACOS_AGENT.md`](../../TODO_MACOS_AGENT.md), [`agent/cellular-io/CMakeLists.txt`](../../agent/cellular-io/CMakeLists.txt), [`go-runtime/internal/agentdata/broker.go`](../../go-runtime/internal/agentdata/broker.go), [`go-runtime/internal/linuxdataguard/guard_linux.go`](../../go-runtime/internal/linuxdataguard/guard_linux.go), [`go-runtime/internal/linuxmodem/data_linux.go`](../../go-runtime/internal/linuxmodem/data_linux.go), [`go-runtime/release/install-macos-agent.sh`](../../go-runtime/release/install-macos-agent.sh).
 
@@ -705,7 +737,7 @@ Reconcile the recorded Linux relay/disconnect isolation cases first. The default
 
 Existing reports: [H-LINUX-WSS-ISOLATION](#h-linux-wss-isolation).
 
-Remaining scope: Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.
+Remaining scope: Deferred from this Android preview under ANDROID_PREVIEW_CLOSE; existing product and safety requirements remain. Reconcile the linked report scope and artifact first. Validate only uncovered or contradicted cases; no fresh field test is claimed by this review.
 
 Source/test boundaries: [`go-runtime/internal/agentdata/broker.go`](../../go-runtime/internal/agentdata/broker.go), [`go-runtime/internal/linuxdataguard/guard_linux.go`](../../go-runtime/internal/linuxdataguard/guard_linux.go), [`go-runtime/internal/linuxmodem/data_linux.go`](../../go-runtime/internal/linuxmodem/data_linux.go).
 
