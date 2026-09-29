@@ -327,7 +327,7 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 	callEnded := false
 	failureLayer, stopFailureCode := "runtime", "close_failed"
 	if active != nil {
-		_, err = active.call.End(ctx)
+		err = confirmedCallEnd(ctx, active.call)
 		if err == nil {
 			callEnded = true
 			active.session.EndStream("runtime stopped")

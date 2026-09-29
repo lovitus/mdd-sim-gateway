@@ -29,7 +29,115 @@ authorized handset. This document is scope, not evidence that those checks passe
 
 ## Current cursor
 
-### September 29 PR #12 review correction
+### September 29 reviewed merge and rollout
+
+The owner authorized merge, deployment and updating the newly specified handset,
+conditional on review, with issues returned to the same ChatGPT reviewer. No
+previously delivered Android feature was withdrawn. The earlier PR #8 pairing and
+server call-recovery exclusion and accepted endurance deferrals are unchanged.
+
+PR #12 was normally merged at `0b663b9a1f04149a6c5eb771e2b1f7f699ddd867`;
+its tree exactly matches reviewed head `7df49d4`. Signed Android workflow
+[36520354543](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36520354543)
+passed. APK v91 SHA-256 is
+`020ad0882c62660a726b91f288dd494e600fad463d5869a53d15bda848faa21c`.
+Signature lineage, source and installed version were verified. The newly
+authorized API 35 phone was updated from its existing v54 with `install -r`,
+preserving package UID/data, remembered login, certificate pin, availability and
+reader-sharing intent. The old APK and raw evidence remain private.
+
+All five native pages were actually opened after upgrade. They showed real
+catalog/history and v91/source readback, not mock data. Normal USB permission for
+the attached reader was granted without changing sharing intent; native Readers
+then read the exact card, and Core independently reported current card routing,
+IMS and messaging readiness. This is startup/route verification, not a new paid
+call/SMS or audio acceptance. No reset, uninstall, SIM/PIN change or replay occurred.
+Core remains the already deployed `b6f3a4c`; its runtime matches the PR #12 merge,
+so an identical Core is not restarted merely to change its revision label.
+
+The same reviewer found one remaining Provider PR #13 defect: new receive reports
+used the initial call-server registration after maintenance/recovery changed it.
+The correction reads profile, binding and transport once from the existing runtime
+registration owner and uses that snapshot to construct and send the RP report.
+Existing call-dialog bindings, durable ingress, bare SIP response ordering,
+stable message identity and paid retry policy are unchanged. Failure checklist:
+stale B1 route/security, mixed B2/B3 transport, unavailable registration, persistence
+or response-write failure. Tests cover the concrete B1-to-B2 regression using real
+WireSIPFlow packets; temporary hosted validation reverts only snapshot selection
+to the frozen B1 source, preserving compiled tests and wiring.
+
+Hosted [36522474384](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36522474384)
+qualified candidate `a682e8d2203bcc5e8c552d812fb7690b1a7be8ac`, tree
+`3a3c14a2913108827a5fd0c2bd480ff9b752fb4e`. The B1 old-behavior reversion
+executed and failed both recovery subcases with the retired-transport error; it
+is not a claim of running unchanged `9e0ec67`. Restoring only snapshot selection
+passed 31 focused test/subtest results, plus the existing real registrar B1-to-B2
+test, under race detection with zero skips. The artifact contains source IDs,
+exact reversion patch and red/green JSON; artifact digest is
+`ce99ca26c218baac32e954b2b4523f54bf5327c9047e0f560b5e8a57459ae9f5`.
+The temporary hosted entry point is removed; permanent CI gates are unchanged.
+
+Full integrated [36522731598](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36522731598)
+passed for reviewed head `657ee1f71d9ab25a4d7b4564be74dd8160b998aa`.
+Its PR-merge artifact source `2fcfda83bd51a9747e7d874a8e91b103ccb6516e`
+has the identical tree `bad38021a06a9846dfd49e4db425cc5298667057`.
+The original reviewer independently inspected the exact code, tree equality,
+reversion patch and JSON artifacts and formally closed the only P2. Core full
+race, Provider/upstream, liveness, production graph/context and release gates
+passed. Suite-level Xray and liveness opt-in skips were followed by passing
+dedicated jobs; the simulator helper is invoked only by that liveness harness.
+The opt-in real-systemd test was not enabled and is not claimed as passed.
+
+Linux artifact `11013364589` ZIP SHA-256:
+`4ae31509610803f53d75112858d4307eb410ccf28ea08d73d16128ac5bd54a7f`.
+All 22 manifest entries were verified. Archive SHA-256:
+`9bd75175505de9a016431e21b95a6c38dc501a995b3cbdd6ef770b82246af231`.
+Deployed Provider SHA-256:
+`2f0f55f9ef6f08f7865eb322aec85f1459757a7bd63084ef1d4738fb4aa5db8b`.
+
+The first rollout failed its deployment-script check because systemd omitted an
+empty EnvironmentFiles array. It was still under maintenance and rolled back all
+seven process binaries and the exact prior trial overrides, released its lease
+and did not rewind live databases. Fresh readback confirmed the original two
+ready lines. The script normalized that optional empty array, moved environment
+comparison before process start and checked the base unit hash. The second
+explicit attempt reused the byte-verified artifact, acquired fresh idle/maintenance
+ownership and completed at September 29 05:07:46 UTC.
+
+Seven already-running Provider processes now use the verified binary, checked via
+their actual PID executable, arguments, configuration/state path, user/environment
+and stable PID. The shared Provider entry point also governs future starts; this
+was not limited to a single-line trial. No previously stopped process or disabled
+VoWiFi intent was enabled. Only the six known, byte-checked trial ExecStart
+overrides were removed after backup; unknown drop-ins would have stopped cutover.
+Old binaries, configuration and hashed state snapshots remain available; rollback
+does not restore those snapshots over newly written business records.
+
+Both previously ready lines recovered IMS/messaging readiness; absent cards and
+disabled lines remain honestly unavailable. All maintenance leases were released.
+Independent final readback found the catalog and notification configuration exactly
+unchanged, Core binary unchanged and Core/Agent/egress/apply PIDs unchanged.
+There were zero new paid calls, SMS sends or manual replays. Readiness is not a new
+carrier-delivery or acoustic test. The earlier `9e0ec67` receive-report 202 remains
+scoped historical evidence, not a claim of another report accepted after rollout.
+
+Private operator evidence SHA-256 (raw material stays outside Git): first failed
+rollout `d86dc080dbba234170b03132fabfab27fd061b65814bdbb4c24a890a47997dac`;
+successful rollout `e1f11f05576cf783e815363e4ddd49f4a84ad743a99bdcab7dc737f4c006f5d0`;
+independent final readback `587251460981f30da4548014df3b24cdb4980a540ecc36df5eebc27b5e40159f`.
+These are traceable operator reports, not reviewer-operated hardware tests.
+After Provider deployment, the phone's Calls and Messages pages independently
+showed ready routes; Home retained the read card, availability, history and no
+unresolved message/call recovery. No send or call control was activated.
+
+Close-out: the final records-only head preserves the qualified runtime, tests,
+build inputs and permanent workflows; it does not claim a new CI execution or
+relabel the deployed binary's source. PR #13 is the authoritative normal-merge
+receipt. No new implementation, paid test or endurance gate belongs to this batch.
+The pre-existing dirty Provider record updates were absorbed by workstream identity,
+not by replacing the newer Android ledger; original dirty worktrees remain intact.
+
+### September 29 PR #12 review correction (closed history)
 
 The owner authorized continuing the concrete review in the existing ChatGPT
 conversation and publishing the changes for that same reviewer. N1/N2/N3 form one
@@ -39,8 +147,9 @@ endurance deferrals remain intact. This entry supersedes older next-step text.
 
 Status: N1/N2/N3 are closed after code review and hosted regression validation.
 The original reviewer independently checked the exact source and both emulator
-XML artifacts, including the two additional N3 findings. PR #12 remains draft,
-unmerged and not deployed. Installed Android v85/Core artifacts are unchanged.
+XML artifacts, including the two additional N3 findings. At this review checkpoint
+the draft was unmerged and undeployed; the rollout section above supersedes that
+earlier deployment state.
 
 - N1: persist whole-submission certainty separately from failed delivery display.
   Exact accepted responses resolve the submission budget in either arrival order;

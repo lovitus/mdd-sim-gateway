@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/usernet"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
@@ -111,6 +112,8 @@ type Bridge struct {
 	rtcpGap   time.Duration
 
 	mu              sync.Mutex
+	rtpWriteMu      sync.Mutex
+	dtmfMu          sync.Mutex
 	stats           Stats
 	remoteSeen      bool
 	remoteSequence  uint16
@@ -376,6 +379,8 @@ waitForFreshFrame:
 }
 
 func (bridge *Bridge) writeRTP(pcm []byte, silence bool) bool {
+	bridge.rtpWriteMu.Lock()
+	defer bridge.rtpWriteMu.Unlock()
 	select {
 	case <-bridge.ctx.Done():
 		return false
@@ -416,6 +421,78 @@ func (bridge *Bridge) writeRTP(pcm []byte, silence bool) bool {
 	}
 	bridge.mu.Unlock()
 	return true
+}
+
+// SendDTMF reuses the upstream RFC 4733 encoder, but sends on the socket that
+// actually owns this call's media. Audio and events share SSRC/sequence space.
+// The caller must supply the payload negotiated in the SIP answer.
+func (bridge *Bridge) SendDTMF(ctx context.Context, signal string, durationMS int, payload uint8) error {
+	if bridge == nil || bridge.ctx.Err() != nil {
+		return ErrClosed
+	}
+	if payload < 96 || payload > 127 || payload == bridge.codec.PayloadType() {
+		return fmt.Errorf("%w: invalid negotiated telephone-event payload", ErrInvalidConfig)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	bridge.dtmfMu.Lock()
+	defer bridge.dtmfMu.Unlock()
+	bridge.mu.Lock()
+	peer, timestamp := bridge.rtpPeer, bridge.timestamp
+	bridge.mu.Unlock()
+	if peer == nil {
+		return fmt.Errorf("%w: remote RTP is not negotiated", ErrInvalidConfig)
+	}
+	if durationMS <= 0 {
+		durationMS = voicehost.DefaultDTMFDurationMS
+	}
+	stepMS := min(voicehost.DefaultRTPDTMFStepMS, durationMS)
+	packets, err := voicehost.BuildRTPDTMFSequence(voicehost.RTPDTMFSequenceConfig{
+		PayloadType: payload, Signal: signal, DurationMS: durationMS, StepMS: stepMS,
+		SSRC: bridge.ssrc, Timestamp: timestamp, ClockRate: SampleRate,
+	})
+	if err != nil {
+		return err
+	}
+	for index, packet := range packets {
+		if index > 0 {
+			timer := time.NewTimer(time.Duration(stepMS) * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-bridge.ctx.Done():
+				timer.Stop()
+				return ErrClosed
+			}
+		}
+		bridge.rtpWriteMu.Lock()
+		if ctx.Err() != nil || bridge.ctx.Err() != nil {
+			bridge.rtpWriteMu.Unlock()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return ErrClosed
+		}
+		bridge.mu.Lock()
+		binary.BigEndian.PutUint16(packet[2:4], bridge.sequence)
+		bridge.mu.Unlock()
+		_, err = bridge.rtpConn.WriteTo(packet, peer)
+		if err == nil {
+			bridge.mu.Lock()
+			bridge.sequence++
+			bridge.sentOctets += uint32(len(packet) - 12)
+			bridge.stats.RTPPacketsSent++
+			bridge.mu.Unlock()
+		}
+		bridge.rtpWriteMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("write userspace RTP DTMF: %w", err)
+		}
+	}
+	return nil
 }
 
 func (bridge *Bridge) receiveRTP() {

@@ -14,7 +14,9 @@ not used to override those decisions. Root TODO summaries are generated; origina
 
 Final eSIM direction is physical deletion + retained deletion notifications + multiply-confirmed manual replay.
 Do not reopen abandoned soft deletion/customization. Android is reprioritized by the owner as a draft native app / preview APK;
-read docs/decisions/2026-09-21-android-agent.md. Do not merge its draft or claim physical acceptance from emulator tests.
+read docs/decisions/2026-09-21-android-agent.md. The owner authorized reviewed merge
+and deployment on September 29; PR #12 is merged and signed v91 is installed.
+This does not authorize merging unrelated drafts or claiming physical acceptance from emulator tests.
 The September 27 ANDROID_PREVIEW_CLOSE decision in the Android decision document
 now closes this Android preview milestone for owner review. Endurance validation
 gaps and non-Android follow-up belong in the existing postponed ledger, not new
