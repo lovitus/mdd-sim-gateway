@@ -142,9 +142,6 @@ type Option func(*Server)
 func WithWebUI(handler http.Handler) Option {
 	return func(server *Server) {
 		if handler != nil {
-			if facts, ok := handler.(CellularCallFacts); ok {
-				server.cellularCalls = facts
-			}
 			for _, pattern := range []string{
 				"GET /{$}", "GET /index.html", "GET /logo.svg", "GET /assets/", "GET /licenses/",
 				"GET /overview", "GET /devices", "GET /imeis", "GET /calls", "GET /messages",
@@ -271,6 +268,9 @@ func WithAgentUSBIP(handler http.Handler) Option {
 func WithCellularMedia(handler http.Handler) Option {
 	return func(server *Server) {
 		if handler != nil {
+			if facts, ok := handler.(CellularCallFacts); ok {
+				server.cellularCalls = facts
+			}
 			server.mux.Handle("/v1/cellular/media/leases", handler)
 			server.mux.Handle("GET /api/cellular-browser-media/{sessionID}/ws", handler)
 			server.mux.Handle("GET /v1/lines/{lineID}/cellular/calls/{operation}", handler)

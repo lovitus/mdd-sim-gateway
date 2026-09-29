@@ -27,24 +27,35 @@ public final class AgentService extends Service {
     private final LinkedHashSet<String> announced=new LinkedHashSet<>();
     private static final class ReaderScan {final ReaderHub hub;final Link link;final long epoch;ReaderScan(ReaderHub hub,Link link,long epoch){this.hub=hub;this.link=link;this.epoch=epoch;}}
     private final java.util.concurrent.atomic.AtomicReference<ReaderScan> scanOwner=new java.util.concurrent.atomic.AtomicReference<>();
+    private final AtomicBoolean readerRecoveryEvent=new AtomicBoolean();
     private volatile long readerEpoch;
     private final String process=Json.id();
     private ConnectivityManager connectivity;private ConnectivityManager.NetworkCallback networkCallback;
     private ConfigStore store;private volatile JSONObject config;private volatile GatewayApi api;private volatile Link observer,agent;private volatile ReaderHub hub;
     private volatile boolean destroyed,available,sharing,online;volatile boolean readerLinkOnline;private boolean foreground;
     volatile JSONObject snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());
+    private JSONArray catalogNumbers=new JSONArray();
+    private GatewayApi numbersRequest;
+    private long numbersAttempt;
     volatile UiText connection=UiText.of(R.string.paused),readerStatus=UiText.of(R.string.sharing_off),notice=UiText.EMPTY;volatile RemoteCall call;
+    volatile UiText readerConnection=UiText.of(R.string.reader_link_pending);
     private final AtomicBoolean smsPending=new AtomicBoolean(),enrollmentPending=new AtomicBoolean();
     private final AtomicBoolean loginPending=new AtomicBoolean();
     private final Retry loginRetry=new Retry();
     private ScheduledFuture<?> loginTimer;
     private final Set<String> messageChecks=ConcurrentHashMap.newKeySet();
+    private GatewayApi messageEventsOwner;
+    private String messageEventsKey="";
     private ScheduledFuture<?> healthTask;
     private volatile long configurationEpoch;
+    private boolean storageResetting;
     private volatile long sharingIntentEpoch;
     private volatile boolean intentSaving;
     private volatile boolean configurationLoaded;
-    private final BroadcastReceiver usbReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){refreshReaders();changed();}};
+    private final BroadcastReceiver usbReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){readerEnvironmentChanged();changed();}};
+    private final BroadcastReceiver readerWakeReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){
+        if(!PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED.equals(i.getAction())||!getSystemService(PowerManager.class).isDeviceIdleMode())readerEnvironmentChanged();
+    }};
     public IBinder onBind(Intent intent){return new LocalBinder();}
     @Override public void onCreate(){super.onCreate();store=new ConfigStore(this);config=new JSONObject();
         ConfigStore.intent(()->{try{JSONObject saved=store.load();main.post(()->{if(destroyed||configurationEpoch!=0)return;config=saved;sharing=saved.optBoolean("share");readerStatus=UiText.of(sharing?R.string.sharing_paused:R.string.sharing_off);changed();});}catch(Exception failure){main.post(()->{if(destroyed||configurationEpoch!=0)return;notice=UiText.of(R.string.settings_unavailable);changed();});}});
@@ -56,13 +67,19 @@ public final class AgentService extends Service {
         connectivity.registerDefaultNetworkCallback(networkCallback);
         IntentFilter f=new IntentFilter(getPackageName()+".USB_PERMISSION");f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         if(Build.VERSION.SDK_INT>=33)registerReceiver(usbReceiver,f,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(usbReceiver,f);
+        IntentFilter wake=new IntentFilter(Intent.ACTION_SCREEN_ON);wake.addAction(Intent.ACTION_USER_PRESENT);wake.addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED);
+        if(Build.VERSION.SDK_INT>=33)registerReceiver(readerWakeReceiver,wake,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(readerWakeReceiver,wake);
     }
     @Override public int onStartCommand(Intent intent,int flags,int id){
+        if(storageResetting)return START_NOT_STICKY;
         if(intent!=null&&PAUSE.equals(intent.getAction())){pause();return START_NOT_STICKY;}
         if(intent==null||START.equals(intent.getAction())||RESTORE.equals(intent.getAction())){
             try{
                 if(call!=null&&call.busy())return START_STICKY;
                 invalidateCall();
+                // A bound Service may have been recreated while local reset was committing.
+                // Explicit availability admission reads from the current storage owner.
+                store=new ConfigStore(this);
                 final long expected=++configurationEpoch;final boolean explicit=intent!=null&&START.equals(intent.getAction());available=true;intentSaving=true;notice=UiText.EMPTY;promote(false);
                 ConfigStore.intent(()->{try{JSONObject loaded=explicit?store.update(current->current.put("available",true)):store.load();main.post(()->{
                     if(destroyed||expected!=configurationEpoch)return;
@@ -93,14 +110,19 @@ public final class AgentService extends Service {
     }
     private void configure()throws Exception{
         closeLinks();snapshot=Json.obj("lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());if(api!=null){api.close();api=null;}
+        catalogNumbers=new JSONArray();numbersRequest=null;numbersAttempt=0;
         call=null;
         if(config.optString("token").isEmpty()){connection=UiText.of(R.string.login_required);changed();return;}
         api=new GatewayApi(new Endpoint(config.getString("server"),config.optString("pin")),config.getString("token"),config.getString("csrf"));
         final GatewayApi connectionOwner=api;
         observer=new Link(api,loop,"/v1/mobile/ws","","",process,new Link.Events(){
             public void authenticationRequired(){main.post(()->renewSession(connectionOwner));}
-            public void state(int label,boolean yes){if(api!=connectionOwner)return;boolean recovered=yes&&!online;connection=UiText.of(label);online=yes;if(recovered){main.post(()->{if(api!=connectionOwner)return;requestMessageSync(false);});RemoteCall c=call;if(c!=null&&(c.audio==null||c.audio.closed))c.reconcile();}changed();}
-            public void message(JSONObject message){if(api!=connectionOwner)return;if(message.optString("type").equals("mobile.snapshot")){snapshot=normalizeSnapshot(Json.object(message,"data"));notifyEvents();changed();}}
+            public void state(int label,boolean yes){if(api!=connectionOwner)return;boolean recovered=yes&&!online;connection=UiText.of(label);online=yes;if(recovered){main.post(()->{if(api!=connectionOwner)return;requestMessageSync(false);refreshLineNumbers(true);});RemoteCall c=call;if(c!=null&&(c.audio==null||c.audio.closed))c.reconcile();}changed();}
+            public void message(JSONObject message){if(message.optString("type").equals("mobile.snapshot"))main.post(()->{
+                if(api!=connectionOwner)return;snapshot=normalizeSnapshot(Json.object(message,"data"));observeMessageEvents(connectionOwner,Json.array(snapshot,"messages"),false);notifyEvents();changed();
+                JSONArray rows=Json.array(snapshot,"lines");
+                for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&!row.has("number")){refreshLineNumbers(false);break;}}
+            });}
         });observer.connect();
         if(sharing&&!config.optString("agent_token").isEmpty())startReaderLink();
         else if(sharing){sharing=false;readerStatus=UiText.of(R.string.enroll_readers);}
@@ -110,6 +132,13 @@ public final class AgentService extends Service {
         JSONArray lines=Json.array(data,"lines"),calls=Json.array(data,"cellular_calls");
         for(int i=0;i<lines.length();i++){
             JSONObject line=lines.optJSONObject(i);if(line==null)continue;
+            line.remove("number");
+            for(int j=0;j<catalogNumbers.length();j++){
+                JSONObject saved=catalogNumbers.optJSONObject(j);
+                if(saved!=null&&!saved.optBoolean("deleted")&&line.optString("id").equals(saved.optString("id"))&&line.optString("card_id").equals(saved.optString("card_id"))){
+                    try{line.put("number",Json.object(saved,"sim").optString("msisdn"));}catch(JSONException ignored){}break;
+                }
+            }
             for(int j=0;j<calls.length();j++){
                 JSONObject event=calls.optJSONObject(j);
                 if(event!=null&&event.optBoolean("actionable")&&line.optString("id").equals(event.optString("line_id")))
@@ -117,6 +146,19 @@ public final class AgentService extends Service {
             }
         }
         return data;
+    }
+    void refreshLineNumbers(boolean explicit){
+        final GatewayApi owner=api;long now=SystemClock.elapsedRealtime();
+        if(owner==null||!online()||numbersRequest==owner||!explicit&&numbersAttempt!=0&&now-numbersAttempt<30000)return;
+        numbersRequest=owner;numbersAttempt=now;
+        io.execute(()->{try{
+            JSONArray rows=Json.array(owner.json("GET","/v1/catalog/lines",null),"lines");
+            main.post(()->{
+                if(api!=owner||numbersRequest!=owner)return;numbersRequest=null;catalogNumbers=rows;
+                try{snapshot=normalizeSnapshot(new JSONObject(snapshot.toString()));}catch(JSONException ignored){}
+                changed();
+            });
+        }catch(Exception failure){main.post(()->{if(api==owner&&numbersRequest==owner)numbersRequest=null;});}});
     }
     private void renewSession(GatewayApi owner){
         if(!available||destroyed||api!=owner||owner==null)return;
@@ -156,9 +198,11 @@ public final class AgentService extends Service {
         if(agent!=null){agent.close();agent=null;}
         if(hub==null||hub.closed)hub=new ReaderHub(this);
         lastReaders=recoveringReaders();lastReaderAt=0;
+        readerUSBFailures=Collections.emptyMap();
         final long epoch=++readerEpoch;scanOwner.set(null);readerLinkOnline=false;
+        readerConnection=UiText.of(R.string.link_connecting);
         agent=new Link(api,loop,"/v1/agent/ws",config.optString("agent_id"),config.optString("agent_token"),process,new Link.Events(){
-            public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerLinkOnline=connected;readerStatus=UiText.of(label);changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}}
+            public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerLinkOnline=connected;readerConnection=UiText.of(label);readerStatus=readerConnection;changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);readerEnvironmentChanged();}}
             public void message(JSONObject message){if(epoch!=readerEpoch||!sharing)return;if(message.optString("kind").equals("aka_request")){
                 final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;final long generation=owner.generation();
                 readerIO.execute(()->{JSONObject answer=device.authenticate(Json.object(message,"aka_request"));owner.respond(generation,message.optString("request_id"),answer);});
@@ -166,7 +210,9 @@ public final class AgentService extends Service {
         });agent.connect();refreshReaders();
     }
     void refreshReaders(){refreshReaders(false);}
-    void refreshReaderMetadata(){refreshReaders(true);}
+    void readerEnvironmentChanged(){if(destroyed||!available||!sharing)return;readerRecoveryEvent.set(true);refreshReaders();}
+    void refreshReaderMetadata(){readerRecoveryEvent.set(true);refreshReaders(true);}
+    private boolean readerRecoveryAllowed(){return available&&sharing&&!destroyed&&call==null&&!smsPending.get();}
     private void refreshReaders(boolean explicitMetadata){
         if(destroyed||!available||!sharing)return;
         ReaderHub owner=hub;Link link=agent;long epoch=readerEpoch;
@@ -175,12 +221,14 @@ public final class AgentService extends Service {
         if(!scanOwner.compareAndSet(null,ticket))return;
         try{readerIO.execute(()->{
             try{
-                owner.scan(explicitMetadata);JSONObject fresh=owner.topology();
+                if(ticket.epoch!=readerEpoch||ticket.hub!=hub||ticket.link!=agent||destroyed||!available||!sharing){scanOwner.compareAndSet(ticket,null);return;}
+                boolean recheck=readerRecoveryAllowed()&&readerRecoveryEvent.getAndSet(false);
+                owner.scan(explicitMetadata,recheck,()->ticket.epoch==readerEpoch&&ticket.hub==hub&&ticket.link==agent&&readerRecoveryAllowed());JSONObject fresh=owner.topology();Map<String,UiText> failures=owner.usbFailures();
                 if(!main.post(()->{
                     if(scanOwner.get()!=ticket)return;
                     try{
                         if(ticket.epoch==readerEpoch&&ticket.hub==hub&&ticket.link==agent&&available&&sharing&&!owner.closed){
-                            if(link!=null)link.health(fresh);lastReaders=fresh;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();
+                            if(link!=null)link.health(fresh);lastReaders=fresh;readerUSBFailures=failures;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();
                         }
                     }finally{scanOwner.compareAndSet(ticket,null);}
                 }))scanOwner.compareAndSet(ticket,null);
@@ -201,8 +249,10 @@ public final class AgentService extends Service {
     volatile long lastReaderAt;
     private static JSONObject recoveringReaders(){return Json.obj("reader_condition","recovering","reader_detail","Fresh reader observation required","readers",new JSONArray(),"modem_condition","disabled");}
     volatile JSONObject lastReaders=recoveringReaders();
+    volatile Map<String,UiText> readerUSBFailures=Collections.emptyMap();
     void shareReaders(boolean enabled){if(call!=null){notice=UiText.of(R.string.sharing_call_busy);changed();return;}
         if(!enabled){
+            readerUSBFailures=Collections.emptyMap();readerRecoveryEvent.set(false);
             final long expected=++sharingIntentEpoch;readerEpoch++;scanOwner.set(null);sharing=false;readerLinkOnline=false;lastReaders=recoveringReaders();lastReaderAt=0;
             if(agent!=null)agent.close();agent=null;ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
             readerStatus=UiText.of(R.string.sharing_off);notice=UiText.EMPTY;if(available)promote(false);changed();
@@ -228,9 +278,28 @@ public final class AgentService extends Service {
     boolean available(){return available;}
     boolean hasLoadedConfiguration(){return configurationLoaded;}
     boolean sharing(){return sharing;}
+    String readerLinkDiagnostic(){Link current=agent;return current==null?"":current.diagnostic();}
     boolean intentSaving(){return intentSaving||enrollmentPending.get();}
     boolean messageBusy(){return smsPending.get();}
     boolean accountBusy(){return call!=null&&call.busy()||smsPending.get()||enrollmentPending.get();}
+    void prepareStorageReset(){
+        // Any call object can still own an unknown remote operation, even while not busy.
+        if(call!=null||accountBusy()||intentSaving()||loginPending.get())throw new IllegalStateException(getString(R.string.account_busy));
+        ConfigStore.requireResettable(config);
+        stopConnections();sharing=false;sharingIntentEpoch++;intentSaving=true;storageResetting=true;
+        connection=UiText.of(R.string.paused);stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;changed();
+    }
+    void finishStorageReset(JSONObject fresh){
+        if(destroyed)return;
+        store=new ConfigStore(this);intentSaving=false;storageResetting=false;
+        if(fresh!=null){
+            config=fresh;catalogNumbers=new JSONArray();
+            snapshot=Json.obj("lines",new JSONArray(),"incoming_lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());
+            synchronized(announced){announced.clear();}
+            getSystemService(NotificationManager.class).cancelAll();
+        }
+        notice=UiText.of(fresh==null?R.string.settings_unavailable:R.string.storage_reset_done);changed();
+    }
     void addListener(Runnable l){listeners.addIfAbsent(l);}
     void removeListener(Runnable l){listeners.remove(l);}
     private synchronized void captureActivity(){
@@ -266,7 +335,7 @@ public final class AgentService extends Service {
         if(Build.VERSION.SDK_INT>=29)startForeground(1,notification(),type);else startForeground(1,notification());foreground=true;}
     void begin(CallPlan plan)throws Exception{if(!online()||api==null)throw new IllegalStateException(getString(R.string.connect_first));if(call!=null)throw new IllegalStateException(getString(R.string.account_busy));
         // The IO owner performs authoritative exact-line validation, including paged lines.
-        promote(true);RemoteCall next=new RemoteCall(this,api,plan,io);call=next;
+        promote(true);RemoteCall next=new RemoteCall(this,api,plan,io);call=next;notice=UiText.EMPTY;
         try{next.wake=getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"mdd:active-call");next.wake.acquire(2*60*60*1000L);next.start();}
         catch(RuntimeException failure){next.invalidate();releaseWake(next);if(call==next)call=null;if(!destroyed&&available)promote(false);changed();throw failure;}
         changed();}
@@ -279,7 +348,7 @@ public final class AgentService extends Service {
         if(destroyed)return;
         try{loop.schedule(()->{if(available&&call==owner&&!owner.phase.equals("TERMINAL"))owner.reconcile();},1,TimeUnit.SECONDS);}catch(RejectedExecutionException ignored){}
     }
-    void clearCall(RemoteCall owner,UiText message){main.post(()->{if(ownsCall(owner)){releaseWake(owner);notice=message;call=null;changed();}});}
+    void clearCall(RemoteCall owner,UiText message){main.post(()->{if(ownsCall(owner)){releaseWake(owner);notice=message;call=null;readerEnvironmentChanged();changed();}});}
     void hangup(){RemoteCall c=call;if(c!=null)c.hangup();}
     void reject(JSONObject line,String mode,JSONObject incoming,Runnable confirmed){if(!online()||api==null)return;final GatewayApi owner=api;io.execute(()->{try{
         JSONObject b=Json.obj("operation_id",Json.id());if(mode.equals("cellular"))b.put("incoming_event_id",incoming.getString("incoming_event_id")).put("expected_card_id",incoming.getString("card_id")).put("sim_session_generation",incoming.getString("sim_session_generation")).put("native_call_index",incoming.getInt("native_call_index")).put("call_occurrence",incoming.getLong("occurrence"));else b.put("call_id",incoming.getString("call_id")).put("reason_code","user_rejected");
@@ -296,8 +365,8 @@ public final class AgentService extends Service {
         notice=UiText.of(R.string.message_saving);changed();io.execute(()->{
             String scope="";boolean recorded=false,dispatch=false;
             try{
-                scope=owner.authenticatedScope();GatewayApi.requireReady(owner.exactLine(line.getString("id"),line.getString("card_id")),mode+"_sms");final String account=scope;
-                store.update(current->{if(!owner.token.equals(current.optString("token")))throw new IllegalStateException("Account changed");MessageJournal.begin(current,account,id,line,mode,payload.getString("recipient"),payload.getString("body"));current.put("account_scope",account);});
+                scope=owner.authenticatedScope();final JSONObject exact=owner.exactLine(line.getString("id"),line.getString("card_id"));GatewayApi.requireReady(exact,mode+"_sms");final String account=scope;
+                store.update(current->{if(!owner.token.equals(current.optString("token")))throw new IllegalStateException("Account changed");MessageJournal.begin(current,account,id,exact,mode,payload.getString("recipient"),payload.getString("body"));current.put("account_scope",account);});
                 recorded=true;
                 refreshPrivateState(owner);
                 if(api!=owner||!available)throw new IllegalStateException("Connection owner changed");
@@ -308,12 +377,35 @@ public final class AgentService extends Service {
                 if(api==owner)notice=UiText.of(R.string.message_result_returned);
             }catch(Exception e){
                 if(recorded&&!dispatch){final String account=scope;try{store.update(current->MessageJournal.notDispatched(current,account,id));}catch(Exception ignored){}}
-                if(api==owner)notice=dispatch?UiText.of(R.string.message_unknown_id,id):UiText.of(R.string.message_not_dispatched);
-            }finally{smsPending.set(false);refreshPrivateState(owner);}
+                if(recorded){final String account=scope;try{store.update(current->MessageJournal.failure(current,account,id,e));}catch(Exception ignored){}}
+                if(api==owner)notice=dispatch?UiText.of(R.string.message_request_failed,id,RemoteCall.safe(e)):UiText.of(R.string.message_not_dispatched);
+            }finally{smsPending.set(false);refreshPrivateState(owner);observeMessageEvents(owner,Json.array(snapshot,"messages"),true);}
         });
     }
 
     private void refreshPrivateState(GatewayApi owner){ConfigStore.intent(()->{try{JSONObject saved=store.load();main.post(()->{if(destroyed||api!=owner)return;config=saved;changed();});}catch(Exception failure){main.post(()->{if(api==owner){notice=UiText.of(R.string.message_state_unreadable);changed();}});}});}
+    private void observeMessageEvents(GatewayApi owner,JSONArray events,boolean force){
+        final String encoded=events.toString();
+        main.post(()->{
+            if(destroyed||!available||api!=owner)return;
+            if(!force&&messageEventsOwner==owner&&encoded.equals(messageEventsKey))return;
+            messageEventsOwner=owner;messageEventsKey=encoded;
+            ConfigStore.intent(()->{
+                try{
+                    JSONObject current=store.load();requireMessageOwner(current,owner);
+                    String scope=current.optString("account_scope");if(scope.isEmpty())return;
+                    JSONArray received=new JSONArray(encoded);
+                    if(!MessageJournal.observe(current,scope,received))return;
+                    store.update(saved->{
+                        requireMessageOwner(saved,owner);
+                        if(!scope.equals(saved.optString("account_scope")))throw new IllegalStateException("Account changed");
+                        MessageJournal.observe(saved,scope,received);
+                    });
+                    refreshPrivateState(owner);
+                }catch(Exception failure){main.post(()->{if(api==owner&&available){notice=UiText.of(R.string.message_state_unreadable);changed();}});}
+            });
+        });
+    }
     long accountEpoch(){return configurationEpoch;}
     boolean canQueryMessages(){return available&&!destroyed&&api!=null;}
     boolean messageChecking(String scope,String operation){return messageChecks.contains(scope+"\n"+operation);}
@@ -325,7 +417,8 @@ public final class AgentService extends Service {
             JSONObject original=MessageJournal.find(store.load(),scope,operation);
             JSONObject page=owner.json("GET","/v1/messages?line_id="+CallPlan.encode(original.getString("line_id"))+"&transport="+original.getString("transport")+"&limit=100",null);
             store.update(current->{requireMessageOwner(current,owner);MessageJournal.observe(current,scope,Json.array(page,"messages"));});
-            notice=UiText.of(R.string.message_retained_unknown);
+            JSONObject retained=MessageJournal.find(store.load(),scope,operation);
+            if(api==owner)notice=UiText.of(retained.optString("state").equals("failure_observed")?R.string.message_failure_observed:R.string.message_retained_unknown);
         }catch(Exception failure){notice=UiText.of(R.string.history_failed);}
         finally{messageChecks.remove(key);refreshPrivateState(owner);}});
     }
@@ -345,9 +438,23 @@ public final class AgentService extends Service {
         messagePageRequest("/v1/calls?limit=100",expectedEpoch,success,failure);
     }
     void messageConversations(long expectedEpoch,java.util.function.Consumer<JSONObject> success,java.util.function.Consumer<String> failure){messagePageRequest("/v1/messages/conversations?all=true",expectedEpoch,success,failure);}
+    JSONObject messageLine(String id){
+        JSONArray current=Json.array(snapshot,"lines");
+        for(int i=0;i<current.length();i++){JSONObject line=current.optJSONObject(i);if(line!=null&&id.equals(line.optString("id")))return line;}
+        for(int i=0;i<catalogNumbers.length();i++){
+            JSONObject line=catalogNumbers.optJSONObject(i);
+            if(line!=null&&id.equals(line.optString("id"))&&!line.optBoolean("deleted"))return Json.obj("id",id,"card_id",line.optString("card_id"),"name",line.optString("name"),"number",Json.object(line,"sim").optString("msisdn"),"enabled",line.optBoolean("enabled"));
+        }
+        return Json.obj("id",id,"name",id,"enabled",false);
+    }
+    void messageReplyLine(String id,String card,long epoch,java.util.function.Consumer<JSONObject> success,java.util.function.Consumer<String> failure){
+        GatewayApi owner=api;if(owner==null||!online()||epoch!=configurationEpoch){failure.accept(getString(R.string.connect_first));return;}
+        io.execute(()->{try{JSONObject line=owner.exactLine(id,card);main.post(()->{if(api==owner&&epoch==configurationEpoch)success.accept(line);else failure.accept(getString(R.string.history_account_changed));});}
+            catch(Exception e){main.post(()->failure.accept(getString(R.string.message_reply_unavailable)+"\n"+RemoteCall.safe(e)));}});
+    }
     private void messagePageRequest(String path,long expectedEpoch,java.util.function.Consumer<JSONObject> success,java.util.function.Consumer<String> failure){
         final GatewayApi owner=api;if(owner==null||configurationEpoch!=expectedEpoch){failure.accept(getString(R.string.history_account_changed));return;}
-        io.execute(()->{try{JSONObject page=owner.json("GET",path,null);main.post(()->{if(api==owner&&configurationEpoch==expectedEpoch)success.accept(page);else failure.accept(getString(R.string.history_account_changed));});}catch(Exception e){main.post(()->failure.accept(getString(api==owner&&configurationEpoch==expectedEpoch?R.string.history_failed:R.string.history_account_changed)));}});
+        io.execute(()->{try{JSONObject page=owner.json("GET",path,null);main.post(()->{if(api==owner&&configurationEpoch==expectedEpoch){if(page.has("messages"))observeMessageEvents(owner,Json.array(page,"messages"),true);success.accept(page);}else failure.accept(getString(R.string.history_account_changed));});}catch(Exception e){main.post(()->failure.accept(getString(api==owner&&configurationEpoch==expectedEpoch?R.string.history_failed:R.string.history_account_changed)));}});
     }
     private boolean seenMessages;
     private void notifyEvents(){
@@ -381,7 +488,7 @@ public final class AgentService extends Service {
         io.execute(()->{try{
             JSONObject result=owner.json("GET","/v1/messages?limit=50",null);
             main.post(()->{if(api!=owner||!available)return;try{
-                JSONObject next=new JSONObject(snapshot.toString());next.put("messages",Json.array(result,"messages"));snapshot=next;notifyEvents();changed();
+                JSONObject next=new JSONObject(snapshot.toString());next.put("messages",Json.array(result,"messages"));snapshot=next;observeMessageEvents(owner,Json.array(result,"messages"),true);notifyEvents();changed();
             }catch(JSONException failure){notice=UiText.of(R.string.history_failed);changed();}});
         }catch(Exception failure){main.post(()->{if(api==owner){notice=UiText.of(R.string.history_failed);changed();}});}});
     }
@@ -406,7 +513,7 @@ public final class AgentService extends Service {
     private void closeLinks(){if(loginTimer!=null)loginTimer.cancel(false);if(observer!=null)observer.close();if(agent!=null)agent.close();observer=agent=null;online=false;readerLinkOnline=false;}
     private void stopConnections(){
         invalidateCall();
-        available=false;configurationEpoch++;configurationLoaded=true;
+        available=false;readerRecoveryEvent.set(false);configurationEpoch++;configurationLoaded=true;
         if(healthTask!=null)healthTask.cancel(false);
         readerEpoch++;scanOwner.set(null);lastReaders=recoveringReaders();lastReaderAt=0;closeLinks();
         ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
@@ -425,5 +532,13 @@ public final class AgentService extends Service {
         ConfigStore.intent(()->{try{JSONObject saved=store.signOut();main.post(()->{if(destroyed||configurationEpoch!=expected)return;config=saved;intentSaving=false;snapshot=Json.obj("lines",new JSONArray(),"incoming_lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());synchronized(announced){announced.clear();}connection=UiText.of(R.string.paused);notice=UiText.of(R.string.signed_out_preserved);getSystemService(NotificationManager.class).cancelAll();stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;stopSelf();changed();complete.run();});}
             catch(Exception e){main.post(()->{if(destroyed||configurationEpoch!=expected)return;intentSaving=false;notice=UiText.of(R.string.signout_failed);changed();});}});
     }
-    @Override public void onDestroy(){destroyed=true;invalidateCall();closeLinks();if(call!=null)releaseWake(call);if(api!=null)api.close();try{connectivity.unregisterNetworkCallback(networkCallback);unregisterReceiver(usbReceiver);}catch(Exception ignored){}ReaderHub old=hub;if(old!=null)readerIO.execute(old::close);loop.shutdownNow();io.shutdownNow();controlIO.shutdownNow();readerIO.shutdown();super.onDestroy();}
+    @Override public void onDestroy(){
+        destroyed=true;readerRecoveryEvent.set(false);invalidateCall();closeLinks();
+        if(call!=null)releaseWake(call);if(api!=null)api.close();
+        try{connectivity.unregisterNetworkCallback(networkCallback);}catch(Exception ignored){}
+        try{unregisterReceiver(usbReceiver);}catch(Exception ignored){}
+        try{unregisterReceiver(readerWakeReceiver);}catch(Exception ignored){}
+        ReaderHub old=hub;if(old!=null)readerIO.execute(old::close);
+        loop.shutdownNow();io.shutdownNow();controlIO.shutdownNow();readerIO.shutdown();super.onDestroy();
+    }
 }

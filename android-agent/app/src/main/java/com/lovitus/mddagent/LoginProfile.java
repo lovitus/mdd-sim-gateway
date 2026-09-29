@@ -4,11 +4,14 @@ import org.json.JSONObject;
 
 /** A local encrypted form draft, separate from the active gateway/session owner. */
 final class LoginProfile {
+    final long storageEpoch;
+    private LoginProfile(long epoch){storageEpoch=epoch;}
     String address="",username="",password="",manualPin="";
     String enrollmentOrigin="",agentID="",agentToken="";
     boolean remember=true;
-    static LoginProfile read(JSONObject state){
-        LoginProfile p=new LoginProfile();JSONObject saved=state.optJSONObject("login_profile");
+    static LoginProfile read(JSONObject state){return read(state,ConfigStore.currentEpoch());}
+    static LoginProfile read(JSONObject state,long epoch){
+        LoginProfile p=new LoginProfile(epoch);JSONObject saved=state.optJSONObject("login_profile");
         if(saved!=null){p.address=saved.optString("server");p.username=saved.optString("username");p.manualPin=saved.optString("manual_pin");p.enrollmentOrigin=saved.optString("enrollment_origin");p.agentID=saved.optString("agent_id");p.agentToken=saved.optString("agent_token");p.remember=saved.optBoolean("remember",true);if(p.remember)p.password=saved.optString("password");}
         else{p.address=state.optString("server");p.username=state.optString("username");}
         return p;

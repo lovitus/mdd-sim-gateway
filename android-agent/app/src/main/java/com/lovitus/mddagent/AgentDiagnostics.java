@@ -29,6 +29,7 @@ final class AgentDiagnostics {
         result.put("gateway_connected",R.string.diagnostics_gateway,service==null?null:service.online());
         result.put("reader_sharing_intent",R.string.diagnostics_sharing,service==null?null:service.sharing());
         result.put("reader_link_connected",R.string.diagnostics_reader_link,service==null?null:service.readerLinkOnline);
+        result.put("reader_link_failure",R.string.diagnostics_reader_failure,service==null?null:service.readerLinkDiagnostic());
         result.put("reported_readers",R.string.diagnostics_readers,service==null?null:Json.array(service.readers(),"readers").length());
         result.put("network_transport",R.string.diagnostics_network,network(context));
         result.put("microphone_permission",R.string.diagnostics_microphone,context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED);

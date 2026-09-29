@@ -8,16 +8,18 @@ All 59 original general criteria and four macOS criteria remain preserved. Curre
 
 | Scope | Disposition | Current decision |
 |---|---|---|
+| ANDROID_ENDURANCE | deferred | Implemented keepalive/recovery with incomplete long-duration USB/OEM/battery validation is acceptable for this preview. Retain visible errors and manual remedies; unperformed tests remain unverified. |
+| ANDROID_NETWORK_EXTREMES | deferred | Extreme network-switching validation is unverified and non-blocking; no phone data SIM prerequisite for main-flow delivery. Ordinary reconnect/session recovery remains required. |
 | ESIM | accepted | Physical deletion + retained deletion notifications + multiple-confirmation manual replay. No soft-delete implementation backlog. |
-| REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. |
-| ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. |
-| ANDROID | required | Client-focused native Android draft/preview with existing server APIs; no pairing or durable server call recovery. Hardware and screen-off qualification remain separate. |
+| REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. Desktop follow-up is outside this Android PR and is separately postponed. |
+| ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. Further desktop qualification is deferred from this Android PR, not a waiver of isolation. |
+| ANDROID | accepted | Android preview milestone completed within scoped main-flow evidence; PR #12 remains draft for owner review. This is not all-carrier/hardware qualification or permission to merge. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
 | MACOS_UNIVERSAL | needs_decision | Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build. |
 
 | Criterion | Implementation | Acceptance / evidence | Current requirement (original preserved in detail) |
 |---|---|---|---|
-| [M01](docs/status/README.md#m01) | partial | evidence_review_pending | Current Windows/macOS/Linux delivery and native qualification: preserve prior deployment/installer reports, then verify only unresolved privilege, backend and failure-matrix cases. Android is deferred. |
+| [M01](docs/status/README.md#m01) | partial | evidence_review_pending | Preserve Windows/macOS/Linux delivery and earlier native/deployment qualification as product requirements. Remaining desktop privilege, backend and failure-matrix work is separate from the current Android preview milestone, not its delivery gate. |
 | [M02](docs/status/README.md#m02) | policy | not_applicable | 不建立独立的远程 Modem 产品、页面或数据库体系。 |
 | [M03](docs/status/README.md#m03) | implemented | covered_by_tests | 不让浏览器或未来网络电话应用直接连接 Agent。 |
 | [M04](docs/status/README.md#m04) | policy | not_applicable | 不在 Agent 内实现另一套软电话、用户权限、历史记录或路由策略。 |

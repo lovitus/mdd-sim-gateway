@@ -11,28 +11,78 @@ import java.nio.charset.StandardCharsets;
 final class ReaderHub implements AutoCloseable {
     private final UsbManager usb;private SEService se;private final TreeMap<String,Entry> entries=new TreeMap<>();
     volatile boolean closed;volatile UiText diagnostic=UiText.of(R.string.reader_permission_missing);
+    private Map<String,UiText> usbFailures=Collections.emptyMap();
+    private final Map<String,UsbRecovery> usbRecovery=new HashMap<>();
+    synchronized Map<String,UiText> usbFailures(){return new HashMap<>(usbFailures);}
     private final LinkedHashMap<String,Receipt> receipts=new LinkedHashMap<>();
     private static final class Entry{String name,generation=Json.id(),id="";JSONObject sim;SimProtocol.Card card;long insertion,metadataNext;int metadataAttempts;Entry(String name,SimProtocol.Card card){this.name=name;this.card=card;}}
     private static final class Receipt{String fingerprint;JSONObject response;Receipt(String f,JSONObject r){fingerprint=f;response=r;}}
     ReaderHub(Context context){usb=context.getSystemService(UsbManager.class);try{se=new SEService(context,Runnable::run,()->{});}catch(Exception ignored){}}
-    synchronized void scan(){scan(false);}
-    synchronized void scan(boolean explicitMetadata){if(closed)return;
-        Set<String> seen=new HashSet<>();
+    synchronized void scan(boolean explicitMetadata,boolean recheck,java.util.function.BooleanSupplier canRecover){if(closed)return;
+        Set<String> seen=new HashSet<>();Map<String,UiText> failures=new LinkedHashMap<>();boolean omapiFailed=false;
         for(UsbDevice d:usb.getDeviceList().values()){
             if(!usb.hasPermission(d))continue;boolean ccid=false;for(int i=0;i<d.getInterfaceCount();i++)ccid|=d.getInterface(i).getInterfaceClass()==11;if(!ccid)continue;
             String name="USB-"+d.getVendorId()+"-"+d.getProductId()+"-"+d.getDeviceId()+"-slot0";seen.add(name);
+            UsbRecovery recovery=usbRecovery.computeIfAbsent(name,ignored->new UsbRecovery());
+            if(recheck)recovery.recheck();
             try{Entry e=entries.get(name);if(e!=null){UsbCard c=(UsbCard)e.card;c.status();if(c.insertion.get()!=e.insertion){remove(name);e=null;}else repairMetadata(e,explicitMetadata);}
+                if(e==null&&!canRecover.getAsBoolean()){failures.put(name,UiText.of(R.string.reader_usb_recovery_busy));continue;}
                 if(e==null&&entries.size()<8){UsbCard card=new UsbCard(usb,d);e=new Entry(name,card);entries.put(name,e);discover(e);e.insertion=card.insertion.get();}
-            }catch(Exception failure){remove(name);diagnostic=UiText.of(R.string.reader_usb_unavailable);}
+                if(e!=null)recovery.healthy(android.os.SystemClock.elapsedRealtime());
+            }catch(Exception failure){remove(name);
+                UiText detail=failure instanceof UsbCard.WriteFailure?UiText.of(R.string.reader_usb_write_failed,((UsbCard.WriteFailure)failure).transferred):UiText.of(R.string.reader_usb_unavailable);
+                if(failure instanceof UsbCard.TransportFailure){
+                    UsbCard.TransportFailure transport=(UsbCard.TransportFailure)failure;
+                    if(!(failure instanceof UsbCard.WriteFailure))detail=UiText.of(transport.phase.equals("read")?R.string.reader_usb_read_failed:R.string.reader_usb_native_failed,transport.transferred);
+                }
+                if(!recovery.failureReported){
+                    recovery.failureReported=true;
+                    String diagnostic="USB first scan failure class="+failure.getClass().getSimpleName();
+                    if(failure instanceof UsbCard.TransportFailure){
+                        UsbCard.TransportFailure transport=(UsbCard.TransportFailure)failure;
+                        diagnostic+=" phase="+transport.phase+" command="+transport.command+" result="+transport.transferred+" elapsed_ms="+transport.elapsedMillis;
+                    }
+                    android.util.Log.i("MDDUSB",diagnostic);
+                }
+                boolean transportFailure=failure instanceof UsbCard.TransportFailure&&!"native_library".equals(((UsbCard.TransportFailure)failure).phase);
+                if(canRecover.getAsBoolean()&&recovery.failed(transportFailure,android.os.SystemClock.elapsedRealtime())){
+                    try{
+                        UsbCard card=UsbRecovery.reset(usb,d);Entry restored=new Entry(name,card);entries.put(name,restored);
+                        discover(restored);restored.insertion=card.insertion.get();
+                        recovery.resetResult=0;recovery.resetStage="";recovery.healthy(android.os.SystemClock.elapsedRealtime());
+                        android.util.Log.i("MDDUSB","USB port recovery result=0 stage=identified");
+                        continue;
+                    }catch(Exception recoveryFailure){
+                        remove(name);UsbRecovery.Failure reason=UsbRecovery.Failure.at("identity",recoveryFailure);
+                        recovery.resetResult=reason.code;recovery.resetStage=reason.stage;
+                        Throwable cause=reason.getCause()==null?reason:reason.getCause();
+                        android.util.Log.i("MDDUSB","USB port recovery result="+reason.code+" stage="+reason.stage+" failure="+cause.getClass().getSimpleName()+" retry_pending="+recovery.retryPending());
+                    }
+                }
+                if(recovery.resetResult!=0){
+                    boolean unsupported="device_shape".equals(recovery.resetStage)||"native_library".equals(recovery.resetStage);
+                    int message=unsupported?R.string.reader_usb_recovery_unsupported:recovery.retryPending()?R.string.reader_usb_recovery_retrying:R.string.reader_usb_recovery_failed;
+                    detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(message,recovery.resetResult,recovery.resetStage));
+                }else if(recovery.retryPending()||recovery.exhausted()){
+                    int message=recovery.retryPending()?R.string.reader_usb_recovery_unstable_retrying:R.string.reader_usb_recovery_unstable_stopped;
+                    detail=UiText.of(R.string.reader_scan_details,detail,UiText.of(message));
+                }
+                failures.put(name,detail);
+            }
         }
+        usbRecovery.keySet().retainAll(seen);
         if(se!=null&&se.isConnected())for(Reader reader:se.getReaders()){
             String name="OMAPI-"+reader.getName();seen.add(name);
             try{Entry e=entries.get(name);if(!reader.isSecureElementPresent()){remove(name);continue;}
                 if(e==null&&entries.size()<8){e=new Entry(name,new OmapiCard(reader));entries.put(name,e);discover(e);}else if(e!=null)repairMetadata(e,explicitMetadata);
-            }catch(Exception failure){remove(name);diagnostic=UiText.of(R.string.reader_omapi_blocked);}
+            }catch(Exception failure){remove(name);omapiFailed=true;}
         }
         for(String name:new ArrayList<>(entries.keySet()))if(!seen.contains(name))remove(name);
-        if(!entries.isEmpty())diagnostic=UiText.of(R.string.reader_count,entries.size());
+        usbFailures=failures;
+        diagnostic=entries.isEmpty()?UiText.EMPTY:UiText.of(R.string.reader_count,entries.size());
+        for(UiText failure:failures.values())diagnostic=diagnostic.empty()?failure:UiText.of(R.string.reader_scan_details,diagnostic,failure);
+        if(omapiFailed){UiText failure=UiText.of(R.string.reader_omapi_blocked);diagnostic=diagnostic.empty()?failure:UiText.of(R.string.reader_scan_details,diagnostic,failure);}
+        if(diagnostic.empty())diagnostic=UiText.of(R.string.reader_permission_missing);
     }
     private void discover(Entry e)throws Exception{JSONObject identity=SimProtocol.identity(e.card);e.id=identity.getString("card_id");e.sim=identity.getJSONObject("sim");e.metadataNext=android.os.SystemClock.elapsedRealtime()+60000;}
     private void repairMetadata(Entry e,boolean explicit)throws Exception{

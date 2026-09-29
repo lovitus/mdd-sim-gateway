@@ -19,6 +19,7 @@ final class NativeAudio implements AutoCloseable {
     private final AudioManager manager;private AudioRecord record;private AudioTrack track;private AcousticEchoCanceler echo;private NoiseSuppressor noise;
     private final ArrayBlockingQueue<byte[]> receive=new ArrayBlockingQueue<>(25);
     private final AtomicLong captured=new AtomicLong(),played=new AtomicLong(),callbacks=new AtomicLong();
+    private final AtomicLong sent=new AtomicLong(),sentSignal=new AtomicLong(),received=new AtomicLong(),receivedSignal=new AtomicLong(),inputPeak=new AtomicLong(),outputPeak=new AtomicLong();
     private final CompletableFuture<Void> ready=new CompletableFuture<>();
     private final AudioFocusRequest focus;private WebSocket socket;private String session,path,ticket,resumeTicket="",challenge="";private long connectionEpoch,epoch,recoverUntil,lastInbound;
     volatile boolean closed,started,active,muted;private volatile boolean focusSuspended;private volatile long focusEpoch;private ScheduledFuture<?> evidence,reconnect;
@@ -51,7 +52,7 @@ final class NativeAudio implements AutoCloseable {
             if(focusSuspended){SystemClock.sleep(20);continue;}
             long ownerEpoch=focusEpoch;
             try{synchronized(this){if(closed)return;if(focusSuspended||focusEpoch!=ownerEpoch)continue;if(record.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING)record.startRecording();}byte[] frame=new byte[320];int n=0;while(n<320&&!closed){int read=record.read(frame,n,320-n,AudioRecord.READ_BLOCKING);if(read<=0){if(focusSuspended||focusEpoch!=ownerEpoch)break;throw new IOException();}n+=read;captured.incrementAndGet();}
-                synchronized(this){WebSocket ws=socket;if(!closed&&!focusSuspended&&started&&n==320&&ws!=null&&ws.queueSize()<=8000)ws.send(ByteString.of(muted?new byte[320]:frame));}
+                synchronized(this){WebSocket ws=socket;if(!closed&&!focusSuspended&&started&&n==320&&ws!=null&&ws.queueSize()<=8000){byte[] payload=muted?new byte[320]:frame;boolean signal=measure(payload,inputPeak);if(ws.send(ByteString.of(payload))){sent.incrementAndGet();if(signal)sentSignal.incrementAndGet();}}}
             }catch(Exception error){if(closed)return;if(focusSuspended||focusEpoch!=ownerEpoch)continue;fail(R.string.audio_capture_stopped);return;}
         }
     }
@@ -82,7 +83,7 @@ final class NativeAudio implements AutoCloseable {
         lastInbound=SystemClock.elapsedRealtime();
         socket=api.http.newWebSocket(api.request(path).build(),new WebSocketListener(){
             public void onOpen(WebSocket ws,Response r){synchronized(NativeAudio.this){if(!current(mine,ws))return;ws.send((resume?Json.obj("type","browser.media.resume","version",1,"session_id",session,"resume_ticket",resumeTicket,"connection_epoch",connectionEpoch):Json.obj("type","browser.media.hello","version",1,"session_id",session,"ticket",ticket)).toString());}}
-            public void onMessage(WebSocket ws,ByteString bytes){synchronized(NativeAudio.this){if(!current(mine,ws))return;lastInbound=SystemClock.elapsedRealtime();if(bytes.size()!=320){fail(R.string.audio_invalid_frame);return;}if(focusSuspended)return;if(!receive.offer(bytes.toByteArray())){receive.poll();receive.offer(bytes.toByteArray());}}}
+            public void onMessage(WebSocket ws,ByteString bytes){synchronized(NativeAudio.this){if(!current(mine,ws))return;lastInbound=SystemClock.elapsedRealtime();if(bytes.size()!=320){fail(R.string.audio_invalid_frame);return;}byte[] frame=bytes.toByteArray();received.incrementAndGet();if(measure(frame,outputPeak))receivedSignal.incrementAndGet();if(focusSuspended)return;if(!receive.offer(frame)){receive.poll();receive.offer(frame);}}}
             public void onMessage(WebSocket ws,String text){synchronized(NativeAudio.this){if(!current(mine,ws))return;try{lastInbound=SystemClock.elapsedRealtime();if(text.length()>16384)throw new IOException();JSONObject m=new JSONObject(text);String type=m.getString("type");
                 if(type.equals("browser.media.claimed")||type.equals("browser.media.resumed")){challenge=m.getString("challenge");resumeTicket=m.getString("resume_ticket");connectionEpoch=m.getLong("connection_epoch");if(challenge.isEmpty()||resumeTicket.isEmpty()||connectionEpoch<1)throw new IOException();evidence();}
                 else if(type.equals("browser.media.started")){String purpose=resume||active?"call":"canary";if(!purpose.equals(m.getString("purpose")))throw new IOException();started=true;if(resume)recoverUntil=0;events.state(resume?R.string.audio_reconnected:R.string.audio_checking);}
@@ -110,6 +111,16 @@ final class NativeAudio implements AutoCloseable {
     void speaker(){manager.setSpeakerphoneOn(!manager.isSpeakerphoneOn());events.state(manager.isSpeakerphoneOn()?R.string.audio_speaker:R.string.audio_earpiece);}
     private void deliverEnded(int label){try{timer.execute(()->events.ended(label));}catch(RejectedExecutionException ignored){/* The owning Service is already shutting down and closes its call resources. */}}
     private synchronized void fail(int label){if(closed)return;closedReason=label;ready.completeExceptionally(new IOException(context.getString(label)));close();deliverEnded(label);}
+    // Observe the existing Core PCM threshold; never generate or modify audio evidence.
+    private static boolean measure(byte[] frame,AtomicLong peak){
+        int maximum=0,signalSamples=0;
+        for(int i=0;i+1<frame.length;i+=2){int sample=(short)((frame[i]&255)|(frame[i+1]<<8));int amplitude=Math.abs(sample);maximum=Math.max(maximum,amplitude);if(amplitude>128)signalSamples++;}
+        peak.accumulateAndGet(maximum,Math::max);return signalSamples>=8;
+    }
+    UiText failureDescription(){
+        if(closedReason!=R.string.audio_check_timeout)return UiText.of(closedReason);
+        return UiText.of(R.string.audio_timeout_evidence,UiText.of(closedReason),captured.get(),sent.get(),sentSignal.get(),received.get(),receivedSignal.get(),played.get(),inputPeak.get(),outputPeak.get());
+    }
     UiText description(){
         if(closed)return UiText.of(closedReason);
         if(focusSuspended)return UiText.of(R.string.audio_focus_suspended);

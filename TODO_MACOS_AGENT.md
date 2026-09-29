@@ -8,10 +8,12 @@ All 59 original general criteria and four macOS criteria remain preserved. Curre
 
 | Scope | Disposition | Current decision |
 |---|---|---|
+| ANDROID_ENDURANCE | deferred | Implemented keepalive/recovery with incomplete long-duration USB/OEM/battery validation is acceptable for this preview. Retain visible errors and manual remedies; unperformed tests remain unverified. |
+| ANDROID_NETWORK_EXTREMES | deferred | Extreme network-switching validation is unverified and non-blocking; no phone data SIM prerequisite for main-flow delivery. Ordinary reconnect/session recovery remains required. |
 | ESIM | accepted | Physical deletion + retained deletion notifications + multiple-confirmation manual replay. No soft-delete implementation backlog. |
-| REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. |
-| ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. |
-| ANDROID | required | Client-focused native Android draft/preview with existing server APIs; no pairing or durable server call recovery. Hardware and screen-off qualification remain separate. |
+| REMOTE_AGENTS | required | Authenticated remote access for Windows, macOS and Linux; report backend-specific capability and qualification honestly. Desktop follow-up is outside this Android PR and is separately postponed. |
+| ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. Further desktop qualification is deferred from this Android PR, not a waiver of isolation. |
+| ANDROID | accepted | Android preview milestone completed within scoped main-flow evidence; PR #12 remains draft for owner review. This is not all-carrier/hardware qualification or permission to merge. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
 | MACOS_UNIVERSAL | needs_decision | Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build. |
 

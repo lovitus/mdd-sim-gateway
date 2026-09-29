@@ -38,7 +38,7 @@ final class GatewayApi {
             if(r.body()==null)throw new IOException("Empty gateway response");
             okio.BufferedSource source=r.body().source(); if(source.request(2*1024*1024+1L))throw new IOException("Gateway response too large");
             String raw=source.readUtf8();JSONObject v=raw.isEmpty()?new JSONObject():new JSONObject(raw);
-            if(!r.isSuccessful())throw new Failure(r.code(),v.optString("code",v.optString("detail","Request rejected")));
+            if(!r.isSuccessful())throw new Failure(r.code(),v);
             return v;
         }finally{synchronized(active){allRequests.remove(request);if(tag!=null){java.util.Set<Call> owned=active.get(tag);if(owned!=null){owned.remove(request);if(owned.isEmpty())active.remove(tag);}}}}
     }
@@ -82,7 +82,11 @@ final class GatewayApi {
     static void requireReady(JSONObject line,String operation)throws IOException{
         // Same machine keys as Go internal/operations/catalog.go; never parse IMS display text.
         JSONObject readiness=Json.object(Json.object(line,"operations"),operation);
-        if(!readiness.optBoolean("ready"))throw new IOException("所选通道尚未就绪，请检查网关设备状态");
+        if(!readiness.optBoolean("ready")){
+            StringBuilder reason=new StringBuilder("Selected route is not ready");JSONArray blocked=Json.array(readiness,"blocked"),facts=Json.array(readiness,"facts");
+            for(int i=0;i<Math.min(4,blocked.length());i++){String layer=blocked.optString(i);reason.append("\n").append(layer);for(int j=0;j<facts.length();j++){JSONObject fact=facts.optJSONObject(j);if(fact!=null&&layer.equals(fact.optString("layer"))){reason.append(": ").append(fact.optString("code"));break;}}}
+            throw new IOException(reason.toString());
+        }
     }
     void cancel(Object tag){synchronized(active){cancelled.put(tag,true);java.util.Set<Call> owned=active.get(tag);if(owned!=null)for(Call c:owned)c.cancel();}}
     void close(){
@@ -91,5 +95,13 @@ final class GatewayApi {
         java.util.concurrent.ExecutorService cleanup=http.dispatcher().executorService();
         cleanup.execute(()->{try{for(Call request:pending)request.cancel();http.dispatcher().cancelAll();http.connectionPool().evictAll();}finally{cleanup.shutdown();}});
     }
-    static final class Failure extends IOException {final int status;Failure(int status,String message){super("HTTP "+status+": "+message);this.status=status;}}
+    static final class Failure extends IOException {
+        final int status;
+        Failure(int status,JSONObject error){
+            super("HTTP "+status+": "+error.optString("code","Request rejected")+
+                (error.optString("layer").isEmpty()?"":" ["+error.optString("layer")+"]")+
+                (error.optString("detail").isEmpty()?"":" · "+error.optString("detail")));
+            this.status=status;
+        }
+    }
 }

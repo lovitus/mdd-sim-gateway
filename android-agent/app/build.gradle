@@ -2,6 +2,8 @@ plugins { id 'com.android.application' }
 android {
     namespace 'com.lovitus.mddagent'
     compileSdk 36
+    ndkVersion '30.0.16248370'
+    externalNativeBuild { ndkBuild { path 'src/main/jni/Android.mk' } }
     defaultConfig {
         applicationId 'com.lovitus.mddagent.preview'
         minSdk 28

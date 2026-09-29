@@ -16,6 +16,11 @@ final class RemoteCall {
     android.os.PowerManager.WakeLock wake;
     volatile NativeAudio audio;
     volatile UiText state=UiText.of(R.string.call_preparing);
+    volatile UiText toneState=UiText.EMPTY;
+    private final AtomicBoolean sendingTone=new AtomicBoolean();
+    private volatile UiText preparationFailure=UiText.EMPTY;
+    private volatile int mediaEndReason;
+    private volatile int preparationStage=R.string.layer_card;
     volatile String session="",phase="PREPARING";
     private volatile String releasedSession="";
     volatile boolean submitted,ended;
@@ -37,9 +42,22 @@ final class RemoteCall {
         if(ended){finishPreparation();return;}
         JSONObject fresh=api.exactLine(plan.line,plan.card);if(plan.incoming==null)GatewayApi.requireReady(fresh,plan.mode+"_call");
         requireOwner();if(ended){finishPreparation();return;}
+        preparationStage=R.string.layer_media;
         audio=new NativeAudio(service,api,service.loop,new NativeAudio.Events(){
             public void state(int label){if(!ended&&ownsRecord())service.changed();}
-            public void ended(int reason){if(!ownsRecord())return;synchronized(RemoteCall.this){ended=true;}api.cancel(RemoteCall.this);state=UiText.of(R.string.call_audio_stopped);service.callAudioEnded(RemoteCall.this);}
+            public void ended(int reason){
+                if(!ownsRecord())return;
+                synchronized(RemoteCall.this){
+                    if(!ended){
+                        if(submitted)mediaEndReason=reason;
+                        else preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(R.string.layer_media),audio==null?UiText.of(reason):audio.failureDescription());
+                    }
+                    ended=true;
+                }
+                api.cancel(RemoteCall.this);
+                state=submitted?UiText.of(R.string.call_reason,UiText.of(R.string.call_audio_stopped),UiText.of(reason)):preparationFailure;
+                service.callAudioEnded(RemoteCall.this);
+            }
         });
         if(ended){audio.close();finishPreparation();return;}
         requireOwner();
@@ -53,12 +71,13 @@ final class RemoteCall {
         boolean activate;synchronized(this){activate=ownsRecord()&&!ended&&!retired;if(activate){phase="ACTIVE";state=UiText.of(R.string.call_request_accepted);}}
         if(activate)audio.markActive();
     }catch(Exception e){
+        synchronized(this){if(!submitted&&preparationFailure.empty()&&!ended){UiText reason=audio!=null&&audio.closedReason!=R.string.audio_off?audio.failureDescription():null;preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(preparationStage),reason==null?safe(e):reason);}}
         if(audio!=null)audio.close();service.microphoneFinished(this);
         if(!submitted)finishPreparation();else if(ownsRecord()&&!ending.get()){state=UiText.of(R.string.call_result_unknown);service.reconcileSoon(this);}
     }finally{starting=false;service.changed();}});}
     private void finishPreparationAsync(){io.execute(this::finishPreparation);}
     private void finishPreparation(){
-        retire(UiText.of(R.string.call_not_started));
+        retire(preparationFailure.empty()?UiText.of(R.string.call_not_started):preparationFailure);
     }
     private boolean authorized(){return service.ownsCall(this)&&origin.equals(api.endpoint.origin)&&pin.equals(api.endpoint.fingerprint);}
     void reconcile(){reconcile(true);}
@@ -111,11 +130,41 @@ final class RemoteCall {
         if(!ownsRecord())return;
         synchronized(this){if(retired||retiring)return;retiring=true;ended=true;}
         if(audio!=null)audio.close();service.microphoneFinished(this);
-        if(!release()&&!phase.equals("TERMINAL")){state=UiText.of(R.string.call_prepare_cleanup_unknown);retiring=false;service.changed();return;}
+        if(!release()&&!phase.equals("TERMINAL")){state=preparationFailure.empty()?UiText.of(R.string.call_prepare_cleanup_unknown):UiText.of(R.string.call_reason,UiText.of(R.string.call_prepare_cleanup_unknown),preparationFailure);retiring=false;service.changed();return;}
         synchronized(this){retired=true;retiring=false;phase="TERMINAL";if(reconcileTimer!=null)reconcileTimer.cancel(false);}
+        // A terminal history record confirms the end, not the absence of a media failure.
+        if(submitted&&mediaEndReason!=0){
+            boolean closedNormally=mediaEndReason==R.string.audio_transport_closed;
+            message=UiText.of(closedNormally?R.string.call_ended_audio_detail:R.string.call_reason,message,
+                UiText.of(closedNormally?R.string.audio_transport_closed_confirmed:mediaEndReason));
+        }
         state=message;service.clearCall(this,message);
     }
     boolean release(){String current=session;if(current.isEmpty()||current.equals(releasedSession))return true;try{api.json("DELETE",plan.leases(),Json.obj("session_id",current));releasedSession=current;return true;}catch(Exception e){return false;}}
     static String safe(Exception e){Throwable c=e instanceof ExecutionException?e.getCause():e;String s=c==null?"Unavailable":c.getMessage();return s==null?"Unavailable":s.substring(0,Math.min(180,s.length()));}
-    void dtmf(String signal){if(!ownsRecord()||ended||audio==null||!audio.active||!signal.matches("[0-9*#A-D]"))return;io.execute(()->{try{if(!ownsRecord()||ended||audio==null||audio.closed)return;JSONObject b=Json.obj("operation_id",Json.id(),"signal",signal);if(plan.mode.equals("cellular"))b.put("session_id",session);else b.put("call_id",plan.id).put("duration_ms",160);api.json("POST",plan.prefix()+"dtmf",b);}catch(Exception e){state=UiText.of(R.string.dtmf_unconfirmed);service.changed();}});}
+    boolean canSendTone(){NativeAudio current=audio;return ownsRecord()&&!ended&&phase.equals("ACTIVE")&&current!=null&&current.active&&!current.closed;}
+    boolean toneBusy(){return sendingTone.get();}
+    void dtmf(String signal){
+        if(sendingTone.get())return;
+        if(!canSendTone()||signal==null||!signal.matches("[0-9*#A-D]")){
+            toneState=UiText.of(R.string.dtmf_unavailable);service.changed();return;
+        }
+        // Only the currently displayed request may run; never queue or retry tones.
+        if(!sendingTone.compareAndSet(false,true))return;
+        toneState=UiText.of(R.string.dtmf_sending,signal);service.changed();
+        try{io.execute(()->{
+            try{
+                if(!canSendTone()){toneState=UiText.of(R.string.dtmf_unavailable);return;}
+                String operation=Json.id();JSONObject body=Json.obj("operation_id",operation,"signal",signal);
+                if(plan.mode.equals("cellular"))body.put("session_id",session);
+                else body.put("call_id",plan.id).put("duration_ms",160);
+                JSONObject result=api.json("POST",plan.prefix()+"dtmf",body);
+                boolean confirmed=plan.mode.equals("cellular")
+                    ?session.equals(result.optString("session_id"))&&signal.equals(result.optString("signal"))&&"cellular_dtmf_sent".equals(result.optString("code"))
+                    :operation.equals(result.optString("operation_id"))&&plan.id.equals(result.optString("call_id"))&&result.optBoolean("accepted");
+                toneState=confirmed?UiText.of(R.string.dtmf_accepted,signal):UiText.of(R.string.dtmf_unconfirmed);
+            }catch(Exception e){toneState=UiText.of(R.string.dtmf_failed,signal,safe(e));}
+            finally{sendingTone.set(false);service.changed();}
+        });}catch(RejectedExecutionException e){sendingTone.set(false);toneState=UiText.of(R.string.dtmf_unavailable);service.changed();}
+    }
 }
