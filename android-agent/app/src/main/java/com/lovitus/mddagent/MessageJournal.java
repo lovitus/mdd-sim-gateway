@@ -13,8 +13,13 @@ final class MessageJournal {
         if(legacy!=null&&!legacy.optString("operation_id").isEmpty()){
             boolean found=false;
             for(int i=0;i<records.length();i++)found|=legacy.optString("operation_id").equals(records.getJSONObject(i).optString("operation_id"));
-            if(!found){JSONObject imported=new JSONObject(legacy.toString());imported.put("scope","legacy-unverified");imported.put("state","unknown");records.put(imported);}
+            if(!found){JSONObject imported=new JSONObject(legacy.toString());imported.put("scope","legacy-unverified");imported.put("state","unknown").put("submission_state","unknown");records.put(imported);}
             config.remove("last_sms");
+        }
+        // Preserve old whole-request receipts before an observation changes display state.
+        for(int i=0;i<records.length();i++){
+            JSONObject row=records.getJSONObject(i);
+            if(!row.has("submission_state"))row.put("submission_state",submissionState(row));
         }
         return records;
     }
@@ -37,7 +42,7 @@ final class MessageJournal {
         if(bytes>BODY_BUDGET)throw new IllegalStateException("未决短信内容已达安全容量，请先核对原提交");
         JSONObject record=Json.obj("scope",scope,"operation_id",id,"message_id",id,"line_id",line.getString("id"),
             "card_id",line.getString("card_id"),"line_name",line.optString("name"),"line_number",line.optString("number"),"gateway_origin",config.optString("server"),"gateway_pin",config.optString("pin"),
-            "recipient",recipient.length==0?"":recipient[0],"transport",transport,"state","unknown","created_at",System.currentTimeMillis());
+            "recipient",recipient.length==0?"":recipient[0],"transport",transport,"state","unknown","submission_state","unknown","created_at",System.currentTimeMillis());
         if(!body.isEmpty())record.put("body",body);kept.put(record);
         config.put("message_operations",kept);
     }
@@ -47,14 +52,21 @@ final class MessageJournal {
             JSONObject row=records.getJSONObject(i);
             if(!id.equals(row.optString("operation_id"))||!scope.equals(row.optString("scope")))continue;
             boolean accepted=confirmed(row,result);
-            if(accepted&&!row.optString("state").equals("failure_observed"))row.put("state","submitted");
+            if(accepted){
+                if(submissionState(row).equals("not_dispatched"))throw new IllegalStateException("Conflicting submission receipt");
+                row.put("submission_state","confirmed");
+                if(!row.optString("state").equals("failure_observed"))row.put("state","submitted");
+            }
             return;
         }
         throw new IllegalStateException("Message record owner changed");
     }
     static void notDispatched(JSONObject config,String scope,String id)throws JSONException {
         JSONArray records=rows(config);
-        for(int i=0;i<records.length();i++){JSONObject row=records.getJSONObject(i);if(id.equals(row.optString("operation_id"))&&scope.equals(row.optString("scope")))row.put("state","not_dispatched");}
+        for(int i=0;i<records.length();i++){JSONObject row=records.getJSONObject(i);if(id.equals(row.optString("operation_id"))&&scope.equals(row.optString("scope"))){
+            if(submissionState(row).equals("confirmed"))throw new IllegalStateException("Confirmed submission cannot become undispatched");
+            row.put("state","not_dispatched").put("submission_state","not_dispatched");
+        }}
     }
     static void failure(JSONObject config,String scope,String id,Exception failure)throws JSONException {
         JSONArray records=rows(config);
@@ -133,7 +145,14 @@ final class MessageJournal {
         }
         return java.time.Instant.EPOCH;
     }
-    static boolean resolved(JSONObject row){return row.optString("state").equals("submitted")||row.optString("state").equals("not_dispatched");}
+    private static String submissionState(JSONObject row){
+        if(row.has("submission_state")){
+            Object value=row.opt("submission_state");
+            return "confirmed".equals(value)?"confirmed":"not_dispatched".equals(value)?"not_dispatched":"unknown";
+        }
+        return row.optString("state").equals("submitted")?"confirmed":row.optString("state").equals("not_dispatched")?"not_dispatched":"unknown";
+    }
+    static boolean resolved(JSONObject row){String state=submissionState(row);return state.equals("confirmed")||state.equals("not_dispatched");}
     static boolean confirmed(JSONObject row,JSONObject result){return row.optString("message_id").equals(result.optString("message_id"))&&(row.optString("transport").equals("cellular")?result.optString("code").equals("cellular_sms_submitted"):row.optString("operation_id").equals(result.optString("operation_id"))&&result.optBoolean("accepted")&&result.optString("code").equals("sent"));}
     static JSONObject find(JSONObject config,String scope,String id)throws JSONException{JSONArray records=rows(config);for(int i=0;i<records.length();i++){JSONObject row=records.getJSONObject(i);if(scope.equals(row.optString("scope"))&&id.equals(row.optString("operation_id")))return new JSONObject(row.toString());}throw new IllegalStateException("原短信记录不属于当前登录");}
     static void adoptConfirmedTrustChange(JSONObject config,String origin,String pin,String authenticatedUser)throws JSONException{

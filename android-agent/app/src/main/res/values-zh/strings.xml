@@ -382,7 +382,7 @@
 <string name="message_line">SIM / 线路：%1$s</string>
 <string name="message_reply">回复</string>
 <string name="message_reply_unavailable">原接收卡或回复号码不可用，请手动确认线路和收件人。</string>
-<string name="message_reply_replace">替换当前短信草稿，使用这条消息的卡和号码回复？</string>
+<string name="message_reply_replace">使用已选定的回复线路和收件人替换当前草稿？</string>
 <string name="call_keypad">数字键盘</string>
 <string name="call_send_tone">发送按键 %1$s</string>
 <string name="message_body_unavailable">此本地记录未保留正文，请查看短信历史。</string>
@@ -397,4 +397,16 @@
 <string name="call_history_rejected">已拒接</string>
 <string name="call_history_interrupted">已中断</string>
 <string name="call_history_line_unavailable">线路：%1$s · 详情不可用</string>
+<string name="message_historical_card_unknown">历史卡身份未知</string>
+<string name="message_historical_card">历史 SIM：%1$s</string>
+<string name="message_current_line">当前线路配置：%1$s</string>
+<string name="message_reply_choose">主动选择当前回复用卡</string>
+<string name="message_reply_confirm">使用 %1$s 回复 %2$s？这是你本次选择的卡，不代表它就是接收原短信的卡。</string>
+<string name="storage_reset">恢复本地设置</string>
+<string name="storage_reset_warning">当前无法读取已存设置。恢复会先在本机私有目录保留原始密文，再清除本地凭据并暂停共享。密文不保证可以恢复。服务器可能仍有未知通话或已提交短信，此操作不会挂断或取消它们。</string>
+<string name="storage_reset_final">确认重置本地设置？已知未决操作会阻止重置。旧记录无法检查时，你将失去其本地恢复入口，请到网关核对不确定的操作。不会自动拨号、发送短信、共享读卡器或登录。</string>
+<string name="storage_reset_changed">设置或账户已变化，请重新检查并确认。</string>
+<string name="storage_reset_blocked">拒绝恢复，请先保留并核对已知未决操作。</string>
+<string name="storage_reset_failed">尚未确认恢复完成。原始材料已保留，请重试读取或重新确认恢复。</string>
+<string name="storage_reset_done">本地设置已恢复，Agent 和共享均已暂停。</string>
 </resources>

@@ -29,6 +29,141 @@ authorized handset. This document is scope, not evidence that those checks passe
 
 ## Current cursor
 
+### September 29 PR #12 review correction
+
+The owner authorized continuing the concrete review in the existing ChatGPT
+conversation and publishing the changes for that same reviewer. N1/N2/N3 form one
+client-only correction batch; no Core, Provider, desktop, pairing or durable server
+call-recovery expansion. The September 27 scoped physical acceptance and accepted
+endurance deferrals remain intact. This entry supersedes older next-step text.
+
+Status: N1/N2/N3 are closed after code review and hosted regression validation.
+The original reviewer independently checked the exact source and both emulator
+XML artifacts, including the two additional N3 findings. PR #12 remains draft,
+unmerged and not deployed. Installed Android v85/Core artifacts are unchanged.
+
+- N1: persist whole-submission certainty separately from failed delivery display.
+  Exact accepted responses resolve the submission budget in either arrival order;
+  failure details remain red. Migrate legacy `submitted` before observations change
+  its display state. Legacy `failure_observed` without an independent confirmation
+  remains unknown; part history cannot reconstruct a lost whole response. Unknown
+  fields do not fall back to legacy success. No automatic SMS retry.
+- N2: the actual history contract lacks `card_id`. Label its historical identity
+  unknown and current catalog information as current, not as the original SIM.
+  Reply requires an explicit current-line item selection and confirmation, keeps
+  draft replacement confirmation, then rechecks that exact line/card. Trusted
+  historical card IDs still require the original card. Sending continues to bind
+  `expected_card_id` to the frozen intent and revalidate before dispatch.
+- N3: recover unreadable local settings only after two confirmations. Preserve all
+  readable original bytes and a presence/SHA-256 manifest in the private no-backup
+  directory; verify copies before replacement. Material changes invalidate consent.
+  Readable recovery candidates and known in-memory pending operations block reset.
+  Unknown unreadable records require an explicit warning, not a claim of no remote
+  work. A durable reset marker prevents old-state/XML fallback after interruption.
+  Capture storage ownership when intents are queued, invalidate old writers and
+  UI/Service callbacks, and publish only paused, credential-free state. Preserve
+  the existing Keystore key; unavailable keys or failed archival remain errors.
+
+This reuses the earlier repository client F6 recovery mechanisms, not its excluded
+server changes. Android's [Keystore contract](https://developer.android.com/privacy-and-security/keystore)
+and [no-backup directory guidance](https://developer.android.com/identity/data/autobackup)
+support keeping keys non-exportable and recovery material private. Retained
+ciphertext is not a guarantee that a lost key or damaged file is recoverable.
+
+Pre-fix counterexample: existing workflow
+[36513116448](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36513116448),
+temporary verification-only commit `4142facfab919cc86abc022f5622fd89d56c60bf`
+on runtime baseline `86cb9de`. Build/JVM/lint and Core checks passed. Both API 28
+and API 35 executed 16 methods: 13 original passes, exactly three new behavioral
+failures and zero skips. N1 lost resolved status after delivery failure; N2 lacked
+historical/current identity separation; N3 never exposed a recovery action after
+key-only initialization loss. No missing-symbol compilation failure is counted.
+The existing JVM assertion that a whole-confirmed failed delivery is unresolved
+was corrected because it encoded the N1 defect, not to hide an unknown submission.
+
+The correction adds native TLS/UI and encrypted-state regression checks, including
+128-entry/body limits, both receipt orders, conservative legacy migration,
+confirmation-time card rebinding, cancellation, key-only/marker-only/partial-new
+recovery, material changes, queued old writers and known unresolved backup state.
+First candidate `a2f4bd8` was pushed as one complete implementation/test/documentation
+commit. Android workflow [36514247706](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36514247706)
+built and passed JVM/lint/Core checks. API 28/35 each passed 15 of 16 native methods:
+N1 and N2 passed; N3 did not finish (API 28 line 124; API 35 reached the later
+scenario at line 143). The fixture did not drain asynchronous
+Activity.onStop draft persistence before removing its files; the correction waits
+for the existing intent queue before corruption, without changing the assertion.
+Also preserve reset-commit provenance across ordinary clear, so it remains readable
+with the durable marker. At that stage, post-fix validation and review remained
+pending; the final results below now supersede that gate. Full Go workflow
+`36514247965` exceeded one 600-second observation window; its terminal state was
+not observed, not classified as a code failure. No paid call/SMS, notification
+replay, hardware mutation or production deployment has been performed.
+
+The original reviewer accepted N1/N2 at `a2f4bd8` and identified two additional N3
+boundaries: retained Activity login drafts need their own storage generation, and
+intent admission/construction must read that generation without waiting on the
+I/O lock. Native regression methods now reproduce those exact interleavings with
+bounded barriers, not orientation/layout work. The complete batch candidate is
+used for hosted pre-fix evidence under the September 29 owner exception; it is not
+a new test-only delivery commit or a request to merge a known-red candidate.
+The correction makes generation snapshots volatile/nonblocking while
+retaining locked owner checks, and binds retained login drafts and their writes
+to their source generation. Normal Activity recreation still keeps a valid draft;
+reset-era retained credentials cannot be saved under a newer storage owner. This
+is credential/lifecycle protection, not landscape compatibility work.
+
+Hosted counterexample candidate `724564dd694a67bec06c45e64f6d3cb6de5d9cc8`
+ran in [36516219462](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36516219462).
+Both API levels executed 18 methods: 16 passed, exactly the two new N3 regressions
+failed, zero skipped/errors. The retained draft assertion observed the old fixture
+password after reset; the main-thread heartbeat could not run until the disk lock
+was released. The original N3 method now passed completely after draining the
+fixture queue, including stale material, old writers and unresolved backup guards.
+These are behavior failures on compiled code, not inferred source checks. N1's
+JSON serialize/reparse coverage is not an Android process-death acceptance claim.
+The corresponding production changes preserve locked writes, add lock-free epoch
+snapshots and bind login drafts/readbacks/login saves to their original epoch.
+Availability admission also obtains the current store wrapper if the Service was
+recreated during a reset; it does not automatically enable availability or sharing.
+The candidate history is consolidated into one delivery commit above `86cb9de`;
+prior run/head evidence stays recorded here.
+
+Final qualification: reviewed head `33f8440181e51aaa3724920fcf45b17cf9ea66f2`
+and PR test merge `5eea6e757ec23fadd79e9fa18932ed1aa258eb8e` have the identical
+tree `132a159d0a129d203a10af343d5105dc15169c1b`. Android workflow
+[36517184960](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36517184960)
+succeeded. API 28 and API 35 each executed 18 methods, with zero failures, errors
+or skips; all five `ReviewRegressionTest` methods completed. The Core/Agent race
+artifact contains 221 passing tests and no skips. Build, JVM, lint, WebUI and
+repository checks passed. Preview signing/publication was not selected for this
+PR event, so this is not a newly signed or installed APK.
+
+The downloaded emulator ZIP hashes match GitHub's artifact digests:
+
+- API 28: `e773a4378dfdbe9370146146b1c85df4aea903d1a210f90000f241179a23d2b5`.
+- API 35: `a12ac974c06f09b2f744fad3429f6d6b508cf2203dc36b2060472d0080f5f0b1`.
+
+Full Go workflow [36517185239](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36517185239)
+also succeeded at that exact head/tree. The retained logs include all 82 Linux
+Core race-tested packages, the production graph/context checks and real loopback
+Xray verification. Non-verbose module output does not establish zero opt-in test
+skips or new hardware acceptance. Raw logs/XML remain private.
+
+The original ChatGPT reviewer independently verified both ZIP hashes, all 18 XML
+methods on each API and their five regression methods, then formally closed
+N1/N2/N3 including both follow-up N3 findings. Activity recreation is not process
+death; the main-thread barrier is not a physical slow-flash measurement. Existing
+physical and endurance evidence retains its original limits. Final publication
+only updates this cursor, README, ledger and generated summaries; runtime code,
+tests and build configuration remain identical to the qualified source above.
+The documentation head is not claimed to have rerun those tests.
+
+Unique next: owner review of the complete correction in draft PR #12; no remaining
+N1/N2/N3 implementation or automated-validation blocker. Separately review PR #13
+before any integrated release: merging or redeploying #12 alone does not carry the
+trial Provider fixes. PR #14 is not an Android merge prerequisite. No automatic
+merge, signing, APK installation, production rollout or paid revalidation.
+
 ### September 27 GitHub review publication
 
 The owner now requires all non-sensitive work and records to be available through

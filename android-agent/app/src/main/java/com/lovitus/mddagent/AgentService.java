@@ -48,6 +48,7 @@ public final class AgentService extends Service {
     private String messageEventsKey="";
     private ScheduledFuture<?> healthTask;
     private volatile long configurationEpoch;
+    private boolean storageResetting;
     private volatile long sharingIntentEpoch;
     private volatile boolean intentSaving;
     private volatile boolean configurationLoaded;
@@ -70,11 +71,15 @@ public final class AgentService extends Service {
         if(Build.VERSION.SDK_INT>=33)registerReceiver(readerWakeReceiver,wake,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(readerWakeReceiver,wake);
     }
     @Override public int onStartCommand(Intent intent,int flags,int id){
+        if(storageResetting)return START_NOT_STICKY;
         if(intent!=null&&PAUSE.equals(intent.getAction())){pause();return START_NOT_STICKY;}
         if(intent==null||START.equals(intent.getAction())||RESTORE.equals(intent.getAction())){
             try{
                 if(call!=null&&call.busy())return START_STICKY;
                 invalidateCall();
+                // A bound Service may have been recreated while local reset was committing.
+                // Explicit availability admission reads from the current storage owner.
+                store=new ConfigStore(this);
                 final long expected=++configurationEpoch;final boolean explicit=intent!=null&&START.equals(intent.getAction());available=true;intentSaving=true;notice=UiText.EMPTY;promote(false);
                 ConfigStore.intent(()->{try{JSONObject loaded=explicit?store.update(current->current.put("available",true)):store.load();main.post(()->{
                     if(destroyed||expected!=configurationEpoch)return;
@@ -277,6 +282,24 @@ public final class AgentService extends Service {
     boolean intentSaving(){return intentSaving||enrollmentPending.get();}
     boolean messageBusy(){return smsPending.get();}
     boolean accountBusy(){return call!=null&&call.busy()||smsPending.get()||enrollmentPending.get();}
+    void prepareStorageReset(){
+        // Any call object can still own an unknown remote operation, even while not busy.
+        if(call!=null||accountBusy()||intentSaving()||loginPending.get())throw new IllegalStateException(getString(R.string.account_busy));
+        ConfigStore.requireResettable(config);
+        stopConnections();sharing=false;sharingIntentEpoch++;intentSaving=true;storageResetting=true;
+        connection=UiText.of(R.string.paused);stopForeground(STOP_FOREGROUND_REMOVE);foreground=false;changed();
+    }
+    void finishStorageReset(JSONObject fresh){
+        if(destroyed)return;
+        store=new ConfigStore(this);intentSaving=false;storageResetting=false;
+        if(fresh!=null){
+            config=fresh;catalogNumbers=new JSONArray();
+            snapshot=Json.obj("lines",new JSONArray(),"incoming_lines",new JSONArray(),"messages",new JSONArray(),"cellular_calls",new JSONArray());
+            synchronized(announced){announced.clear();}
+            getSystemService(NotificationManager.class).cancelAll();
+        }
+        notice=UiText.of(fresh==null?R.string.settings_unavailable:R.string.storage_reset_done);changed();
+    }
     void addListener(Runnable l){listeners.addIfAbsent(l);}
     void removeListener(Runnable l){listeners.remove(l);}
     private synchronized void captureActivity(){

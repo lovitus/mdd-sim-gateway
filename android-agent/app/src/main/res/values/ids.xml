@@ -40,4 +40,6 @@
     <item name="operation_notice" type="id" />
     <item name="home_usb_state" type="id" />
     <item name="reader_usb_state" type="id" />
+    <item name="storage_reset" type="id" />
+    <item name="message_history_identity" type="id" />
 </resources>

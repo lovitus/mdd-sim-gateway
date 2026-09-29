@@ -4,6 +4,21 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
+September 29 review correction: all three client defects are fixed and the original
+reviewer has closed N1/N2/N3. Whole-confirmed SMS submissions retain their confirmation despite
+delivery failure; legacy unknown receipts remain protected. Historical messages
+without a card identity require explicit current-SIM selection for Reply. An
+unreadable-storage page now offers twice-confirmed, privately archived local reset,
+refusing known pending operations and leaving availability/sharing off. Reset also
+invalidates retained login drafts without blocking UI admission on storage I/O.
+At reviewed source `33f8440`, Android workflow `36517184960` passed all 18 methods
+on both API 28 and 35, including all five behavioral regressions; zero failed,
+errored or skipped. Pre-fix runs `36513116448` and `36516219462` establish their
+counterexamples. Full Go workflow `36517185239` also passed. Subsequent record-only
+closure preserves that runtime/test/build source; it is not a fresh test result.
+This correction is not installed and changes no server API or paid retry.
+See the [current correction cursor](../docs/decisions/2026-09-24-android-client-scope.md#september-29-pr-12-review-correction).
+
 The September 27 Android preview milestone is complete within its recorded scope
 and ready for owner review in draft PR #12; it is not merged. Signed v85 /
 `a1bf28b` and minimal Core `b6f3a4c` are already deployed. Reader sharing, scoped
@@ -345,11 +360,13 @@ Call history now displays direction, peer, line name/number/card when present,
 localized colored status and local time. Missing catalog details remain unknown;
 the UI does not invent an immutable historical SIM snapshot.
 
-Recent/history messages show peer, line name, own number when known, card suffix,
-transport, time and body. Reply revalidates the original line/card and fills that
-SIM, transport and peer into the existing composer; it does not send automatically.
-An existing draft needs confirmation before replacement. Alphanumeric senders,
-missing identities and changed cards are not guessed into another recipient/SIM.
+Recent/history messages show peer, transport, time and body. Catalog names/numbers
+are explicitly current configuration, not an immutable historical SIM snapshot.
+Without a historical card ID, Reply requires choosing a current SIM and confirming
+that new intent; with a trusted ID, the original card must still match. After any
+draft replacement confirmation the exact selected identity is rechecked. Reply
+fills the existing composer and never sends. Missing or changed identities are
+not silently substituted; normal send confirmation and expected-card checks remain.
 Submission receipts retain the original content and own-number snapshot in the
 existing encrypted, bounded store. Under its existing byte budget only resolved
 local previews are evicted; unresolved payloads remain intact. Older already-purged

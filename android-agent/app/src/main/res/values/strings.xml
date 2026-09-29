@@ -393,8 +393,20 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="message_line">SIM / line: %1$s</string>
 <string name="message_reply">Reply</string>
 <string name="message_reply_unavailable">Original SIM or reply number unavailable. Select the correct line and recipient manually.</string>
-<string name="message_reply_replace">Replace the current message draft and reply using this message’s SIM and number?</string>
+<string name="message_reply_replace">Replace the current draft using the selected reply line and recipient?</string>
 <string name="call_keypad">Keypad</string>
 <string name="call_send_tone">Send tone %1$s</string>
 <string name="message_body_unavailable">Content is not retained in this local receipt; check message history.</string>
+<string name="message_historical_card_unknown">Historical SIM identity unknown</string>
+<string name="message_historical_card">Historical SIM: %1$s</string>
+<string name="message_current_line">Current line configuration: %1$s</string>
+<string name="message_reply_choose">Choose a current SIM to reply</string>
+<string name="message_reply_confirm">Use %1$s to reply to %2$s? This is your new selection, not proof of which SIM received the original message.</string>
+<string name="storage_reset">Recover local settings</string>
+<string name="storage_reset_warning">Saved settings cannot be read. Recovery first retains the original encrypted files privately on this device, then removes local credentials and pauses sharing. The retained files are not a guaranteed usable backup. Unknown server calls or submitted SMS may still exist; this does not end or cancel them.</string>
+<string name="storage_reset_final">Reset local settings now? Known unresolved operations prevent reset. If the old records cannot be checked, you accept losing their local recovery controls. Check any uncertain operations on the gateway. No call, SMS, reader sharing or login will start automatically.</string>
+<string name="storage_reset_changed">Settings or account changed. Review recovery again.</string>
+<string name="storage_reset_blocked">Recovery refused. Preserve and resolve known pending operations first.</string>
+<string name="storage_reset_failed">Recovery was not confirmed. Original material is retained; retry storage or review recovery again.</string>
+<string name="storage_reset_done">Local settings recovered; Agent and sharing are paused.</string>
 </resources>

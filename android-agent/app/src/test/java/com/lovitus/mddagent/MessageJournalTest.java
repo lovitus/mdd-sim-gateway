@@ -43,6 +43,7 @@ public class MessageJournalTest {
         assertTrue(receipt.getString("failure_detail").contains("RP cause 38"));
         assertEquals("original body", receipt.getString("body"));
         assertEquals("+15550100123", receipt.getString("recipient"));
+        assertTrue(MessageJournal.resolved(receipt));
         String retained = config.toString();
         MessageJournal.observe(config, "owner", new JSONArray().put(failure()));
         assertEquals(retained, config.toString());
@@ -58,7 +59,8 @@ public class MessageJournalTest {
             "kind", "submitted", "state", "accepted")));
         JSONObject retained = MessageJournal.find(config, "owner", "operation");
         assertEquals("failure_observed", retained.getString("state"));
-        assertFalse(MessageJournal.resolved(retained));
+        // Submission certainty is independent of a later (or earlier) failed delivery.
+        assertTrue(MessageJournal.resolved(retained));
         assertEquals(1, config.getJSONArray("message_operations").length());
     }
 }
