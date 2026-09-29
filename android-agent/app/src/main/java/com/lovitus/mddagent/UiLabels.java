@@ -7,7 +7,37 @@ import org.json.JSONObject;
 final class UiLabels {
     static final int OK=0xff0c6b64, WARNING=0xff8a5100, ERROR=0xffb3261e, NEUTRAL=0xff52616b;
     private UiLabels(){}
+    static int routeState(JSONObject line,String mode,boolean sms,boolean online){
+        if(!online)return R.string.route_offline;
+        if(!line.optBoolean("enabled"))return R.string.route_disabled;
+        JSONObject readiness=Json.object(Json.object(line,"operations"),mode+(sms?"_sms":"_call"));
+        if(!sms&&mode.equals("vowifi")&&!Json.object(line,"active").optString("call_id").isEmpty())return R.string.route_busy;
+        if(!readiness.has("ready"))return R.string.route_unknown;
+        if(readiness.optBoolean("ready"))return R.string.route_ready;
+        org.json.JSONArray facts=Json.array(readiness,"facts");
+        for(int i=0;i<facts.length();i++){
+            JSONObject fact=facts.optJSONObject(i);if(fact==null)continue;
+            String code=fact.optString("code");
+            if(code.equals("vowifi_disabled")||code.equals("runtime_intent_uninitialized"))return R.string.route_disabled;
+            if(code.equals("opening_swu")||code.equals("registering"))return R.string.route_connecting;
+        }
+        return R.string.route_unavailable;
+    }
+    static int routeColor(int state){
+        if(state==R.string.route_ready)return OK;
+        if(state==R.string.route_unavailable)return ERROR;
+        if(state==R.string.route_busy||state==R.string.route_unknown||state==R.string.route_connecting)return WARNING;
+        return NEUTRAL;
+    }
+    static String messageTime(Context context,JSONObject event){
+        String value=event.optString("received_at",event.optString("observed_at"));
+        try{return android.text.format.DateFormat.getDateFormat(context).format(java.util.Date.from(java.time.Instant.parse(value)))+" "+
+            android.text.format.DateFormat.getTimeFormat(context).format(java.util.Date.from(java.time.Instant.parse(value)));}
+        catch(java.time.format.DateTimeParseException ignored){return value;}
+    }
     static int statusColor(UiText text){
+        if(text.resource==R.string.call_not_admitted)return ERROR;
+        if(text.resource==R.string.call_admission_unknown)return WARNING;
         if(text.resource==R.string.reader_usb_recovering)return WARNING;
         if(text.resource==R.string.reader_usb_recovery_failed)return ERROR;
         int id=text.resource;

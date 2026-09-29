@@ -50,7 +50,9 @@ public class NativeFlowTest {
                 scene.onActivity(a->{EditText input=a.findViewById(R.id.dial_number);input.setText("+15550100999");a.findViewById(R.id.tab_readers).performClick();});
                 awaitView(scene,R.id.reader_share);capture(context,"readers");
                 scene.onActivity(a->a.findViewById(R.id.tab_settings).performClick());awaitView(scene,R.id.gateway_manage);capture(context,"settings");
-                scene.onActivity(a->a.findViewById(R.id.tab_messages).performClick());awaitView(scene,R.id.message_send);capture(context,"messages");
+                scene.onActivity(a->a.findViewById(R.id.tab_messages).performClick());
+                scene.onActivity(a->{int id=context.getResources().getIdentifier("message_compose","id",context.getPackageName());if(id!=0&&a.findViewById(id)!=null)a.findViewById(id).performClick();});
+                awaitView(scene,R.id.message_send);capture(context,"messages");
                 scene.onActivity(a->{assertEquals("+15550100999",((EditText)a.findViewById(R.id.dial_number)).getText().toString());((EditText)a.findViewById(R.id.message_body)).setText("synthetic fixture only");});
                 android.app.UiAutomation automation=InstrumentationRegistry.getInstrumentation().getUiAutomation();android.accessibilityservice.AccessibilityServiceInfo info=automation.getServiceInfo();info.flags|=android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;automation.setServiceInfo(info);
                 // Wait for the actual dialog window, then cancel that dialog. A

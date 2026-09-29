@@ -1,4 +1,8 @@
 <resources>
+  <item type="id" name="line_vowifi_state" /><item type="id" name="line_cellular_state" />
+  <item type="id" name="message_inbox" /><item type="id" name="message_compose" />
+  <item type="id" name="message_search" /><item type="id" name="message_inbox_status" />
+  <item type="id" name="reply_line_list" />
   <item type="id" name="page_title" /><item type="id" name="login_remember" />
   <item type="id" name="login_saved" /><item type="id" name="certificate_options" />
   <item type="id" name="forget_login" />

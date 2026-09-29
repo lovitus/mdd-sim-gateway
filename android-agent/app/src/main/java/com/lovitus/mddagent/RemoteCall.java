@@ -24,6 +24,8 @@ final class RemoteCall {
     volatile String session="",phase="PREPARING";
     private volatile String releasedSession="";
     volatile boolean submitted,ended;
+    private volatile boolean admissionRejected,admissionAccepted;
+    private volatile boolean endDispatched;
     private boolean retired,retiring;
     private volatile boolean invalidated;
     private volatile boolean starting;
@@ -47,6 +49,7 @@ final class RemoteCall {
             public void state(int label){if(!ended&&ownsRecord())service.changed();}
             public void ended(int reason){
                 if(!ownsRecord())return;
+                if(admissionRejected){finishPreparationAsync();return;}
                 synchronized(RemoteCall.this){
                     if(!ended){
                         if(submitted)mediaEndReason=reason;
@@ -67,13 +70,19 @@ final class RemoteCall {
         synchronized(this){phase="START_MAY_HAVE_RUN";if(!ownsRecord()||!CallRecovery.mayDispatch(phase,ended)||audio.closed){ended=true;finishPreparationAsync();return;}submitted=true;}
         state=UiText.of(R.string.call_dispatching);service.changed();
         JSONObject result=api.json("POST",plan.startPath(),plan.start(session),this);
+        if(plan.mode.equals("vowifi")&&(!result.optBoolean("accepted")||!"active".equals(result.optString("code"))||!plan.id.equals(result.optString("call_id"))||!plan.operation.equals(result.optString("operation_id"))))throw new java.io.IOException("Call admission response identity unavailable");
+        admissionAccepted=true;
         // A late response must not reactivate audio after the user has hung up.
         boolean activate;synchronized(this){activate=ownsRecord()&&!ended&&!retired;if(activate){phase="ACTIVE";state=UiText.of(R.string.call_request_accepted);}}
         if(activate)audio.markActive();
+        else if(ownsRecord()&&ended)service.controlIO.execute(()->{if(!endDispatched&&!phase.equals("TERMINAL"))hangup();});
     }catch(Exception e){
+        if(submitted&&CallRecovery.rejectedAdmission(plan,e)){
+            synchronized(this){admissionRejected=true;phase="REJECTED";preparationFailure=UiText.of(R.string.call_reason,UiText.of(R.string.call_not_admitted),safe(e));}
+        }
         synchronized(this){if(!submitted&&preparationFailure.empty()&&!ended){UiText reason=audio!=null&&audio.closedReason!=R.string.audio_off?audio.failureDescription():null;preparationFailure=UiText.of(R.string.call_preflight_failed,UiText.of(preparationStage),reason==null?safe(e):reason);}}
         if(audio!=null)audio.close();service.microphoneFinished(this);
-        if(!submitted)finishPreparation();else if(ownsRecord()&&!ending.get()){state=UiText.of(R.string.call_result_unknown);service.reconcileSoon(this);}
+        if(!submitted||admissionRejected)finishPreparation();else if(ownsRecord()&&!ending.get()){state=UiText.of(R.string.call_result_unknown);service.reconcileSoon(this);}
     }finally{starting=false;service.changed();}});}
     private void finishPreparationAsync(){io.execute(this::finishPreparation);}
     private void finishPreparation(){
@@ -86,45 +95,64 @@ final class RemoteCall {
         io.execute(()->{boolean retry=true;try{
         if(!ownsRecord()){retry=false;return;}
         if(!authorized()){retry=false;state=UiText.of(R.string.call_owner_changed);return;}
+        if(admissionRejected){finishPreparation();return;}
         if(phase.equals("PREPARING")&&!submitted){finishPreparation();return;}
         if(phase.equals("TERMINAL")){retire(UiText.of(R.string.call_ended));return;}
         JSONObject status=api.json("GET",plan.mode.equals("cellular")?plan.prefix()+"status":"/v1/lines/"+CallPlan.encode(plan.line)+"/vowifi/status",null);
         if(!ownsRecord()){retry=false;return;}
+        if(admissionRejected){finishPreparation();return;}
+        boolean observedActive=false;
         if(plan.mode.equals("cellular")){
             JSONArray rows=Json.array(status,"sessions");boolean found=false;
             for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&session.equals(row.optString("session_id"))&&plan.id.equals(row.optString("call_id"))){found=true;state=UiText.of(R.string.call_remote_state,UiLabels.unconfirmedCallState(row.optString("phase")));break;}}
             if(!found)state=UiText.of(R.string.call_no_evidence);
         }else{
             JSONObject active=status.optJSONObject("active_call");
-            state=UiText.of(active!=null&&plan.id.equals(active.optString("call_id"))?R.string.call_still_active:R.string.call_no_active_evidence);
+            observedActive=active!=null&&plan.id.equals(active.optString("call_id"))||
+                plan.id.equals(Json.object(status,"pending_incoming_call").optString("call_id"));
+            state=UiText.of(plan.incoming!=null&&!admissionAccepted?R.string.call_admission_unknown:active!=null&&plan.id.equals(active.optString("call_id"))?R.string.call_still_active:R.string.call_no_active_evidence);
         }
-        if(audio==null||audio.closed){
+        // Shared display history may contain a losing answer's failed/ended row.
+        // It cannot override live ownership or retire an answer still in flight.
+        if((audio==null||audio.closed)&&!starting&&!observedActive){
             JSONObject history=api.json("GET","/v1/calls?line_id="+CallPlan.encode(plan.line)+"&transport="+plan.mode+"&limit=100",null);
+            if(!ownsRecord()){retry=false;return;}
+            if(admissionRejected){finishPreparation();return;}
             JSONArray records=Json.array(history,"calls");
             for(int i=0;i<records.length();i++){
                 JSONObject record=records.optJSONObject(i);
+                if(record!=null&&plan.mode.equals("vowifi")&&plan.incoming!=null&&record.optString("status").equals("failed"))continue;
                 if(record!=null&&plan.id.equals(record.optString("call_id"))&&plan.line.equals(record.optString("line_id"))&&plan.mode.equals(record.optString("transport"))&&!record.isNull("ended_at")&&!record.optString("ended_at").isEmpty()){
                     phase="TERMINAL";retire(UiText.of(R.string.call_ended));break;
                 }
             }
         }
-    }catch(Exception e){state=UiText.of(R.string.call_check_failed);if(e instanceof GatewayApi.Failure){int status=((GatewayApi.Failure)e).status;if(status==401||status==403){retry=false;state=UiText.of(R.string.call_login_required);}else if(status==404){retry=false;state=UiText.of(R.string.call_evidence_unavailable);}}}
+    }catch(Exception e){if(admissionRejected){finishPreparation();}else{state=UiText.of(R.string.call_check_failed);if(e instanceof GatewayApi.Failure){int status=((GatewayApi.Failure)e).status;if(status==401||status==403){retry=false;state=UiText.of(R.string.call_login_required);}else if(status==404){retry=false;state=UiText.of(R.string.call_evidence_unavailable);}}}}
         finally{checking.set(false);service.changed();synchronized(this){if(retry&&ownsRecord()&&!retired&&!phase.equals("TERMINAL")&&(audio==null||audio.closed)&&reconcileAttempts<6){try{reconcileTimer=service.loop.schedule(()->reconcile(false),Math.min(30,1L<<reconcileAttempts),TimeUnit.SECONDS);}catch(RejectedExecutionException ignored){}}}}});}
     void hangup(){
         if(!service.ownsCall(this)){if(audio!=null)audio.close();service.microphoneFinished(this);return;}
         if(!authorized()){state=UiText.of(R.string.call_owner_changed);service.changed();return;}
+        if(admissionRejected){service.controlIO.execute(this::finishPreparation);return;}
         if(!ending.compareAndSet(false,true))return;
         synchronized(this){ended=true;}
         api.cancel(this);if(audio!=null)audio.close();service.microphoneFinished(this);
         service.controlIO.execute(()->{try{
             if(!service.ownsCall(this))return;
+            if(admissionRejected){finishPreparation();return;}
+            if(phase.equals("TERMINAL"))return;
             if(!submitted){state=UiText.of(R.string.call_cancel_preparing);return;}
             if(session.isEmpty()){state=UiText.of(R.string.call_missing_media);return;}
+            // Incoming call IDs are shared by all ringing clients. Without our
+            // exact answer receipt, /end could terminate the winning client.
+            if(plan.mode.equals("vowifi")&&plan.incoming!=null&&!admissionAccepted){
+                release();state=UiText.of(R.string.call_admission_unknown);return;
+            }
+            endDispatched=true;
             JSONObject result=api.json("POST",plan.prefix()+(plan.mode.equals("cellular")?"hangup":"end"),plan.end(session));
             if(!service.ownsCall(this))return;
             if(CallRecovery.terminal(plan,session,result)){phase="TERMINAL";retire(UiText.of(R.string.call_remote_ended));}
             else state=UiText.of(R.string.call_end_unconfirmed);
-        }catch(Exception e){state=UiText.of(R.string.call_end_unknown);}finally{ending.set(false);service.changed();service.reconcileSoon(this);}});
+        }catch(Exception e){if(admissionRejected)finishPreparation();else state=UiText.of(R.string.call_end_unknown);}finally{ending.set(false);service.changed();service.reconcileSoon(this);}});
     }
     private void retire(UiText message){
         if(!ownsRecord())return;

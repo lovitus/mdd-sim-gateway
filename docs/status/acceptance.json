@@ -4,7 +4,7 @@
   "baselineTree": "f0f6b038519bdce6520ea805c4c77c5aecd0535a",
   "reviewDate": "2026-09-20",
   "issue": "https://github.com/lovitus/mdd-sim-gateway/issues/3",
-  "scope": "September 29 reviewed rollout: PR #12 merged at 0b663b9; signed Android v91/7df49d4 installed with data retained and five-page/card-route readback. Provider PR #13 P2 is closed by the original reviewer; full CI36522731598 passed for 657ee1f and same-tree artifact source2fcfda83bd51 is deployed to seven existing Provider processes/shared entry point. Core b6f3a4c and user configuration are unchanged. Final records-only close-out preserves tested runtime/build/workflows; normal merge status is recorded on PR #13. Earlier feature acceptance and endurance deferrals remain intact.",
+  "scope": "September 29 Android communication UX is implemented and qualified at f8a6a8c by hosted CI36536473242 and the original reviewer: communication-first Home, separate route indicators, full retained conversations, proven original-card reply selection and client-only incoming-call contention protection. Reader sharing is optional for multiple communication-only devices. Signed v95 is installed with data retained; all five native pages, older history pagination and original-card reply were inspected without paid operations. PR #15 Android/Go gates36539491925/36539492495 passed at d00575e and the reviewer approved normal merge; the PR is the authoritative merge receipt, not this pre-merge record. Final record-only edits preserve qualified runtime/test source. PR #12 and Provider PR #13 acceptance remain intact; the reviewed Provider artifact is already deployed. Core b6f3a4c and user configuration are unchanged. Earlier feature acceptance and endurance deferrals remain intact.",
   "archives": [
     {
       "original": "TODO.md",
@@ -1415,6 +1415,29 @@
   ],
   "workstreams": [
     {
+      "id": "ANDROID_COMMUNICATION_UX",
+      "state": "completed",
+      "releaseRelevance": "current",
+      "summary": "Client-only Home/Calls/Messages usability and multi-client call ownership batch on cc07e6d is qualified at f8a6a8c. Existing history APIs expose all 18 conversations and retained records beyond the recent 50-event preview. Signed v95 is installed and its pulled-back hash matches the qualified artifact. All five native pages, real 71-event history pagination and proven original-card reply were inspected. Several Android devices may communicate without a local reader; sharing stays optional and existing server call arbiters are reused. No Core or Provider source changed.",
+      "acceptance": "Hosted CI36536473242 passed 25 native tests on each of API28/35, 21 JVM tests and scoped existing gates; the original reviewer independently closed UX-R1/UX-R2 using exact code and red/green XML. Earlier four valid counterexamples remain in CI36533452043; CI36535217963 remains a failed evidence attempt, not accepted red coverage. Live native inspection used no call, SMS send or replay. This is not physical two-phone contention, new carrier acceptance or endurance qualification. Preserve paid-operation certainty, exact reply/draft and account identity, and optional sharing; an unaccepted or unknown incoming answer cannot end another client's call. Non-blocking visual follow-ups recorded here for the generated postponed ledger: initially scroll the checked original-SIM row into view in long reply lists, and color Home's partial-observation note separately from ready counts. Correct selection and warning text already exist; no extra matrix or build is required for this qualified batch.",
+      "evidence": [
+        "docs/decisions/2026-09-24-android-client-scope.md",
+        "android-agent/app/src/main/java/com/lovitus/mddagent/MainActivity.java",
+        "android-agent/app/src/main/java/com/lovitus/mddagent/MessageIdentity.java",
+        "android-agent/app/src/main/java/com/lovitus/mddagent/RemoteCall.java",
+        "android-agent/app/src/androidTest/java/com/lovitus/mddagent/CommunicationUxTest.java"
+      ],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "The complete client-only batch passed hosted behavioral regressions, original-reviewer closure and authorized native page/history/reply inspection. Source f8a6a8c and signed v95 remain distinct from the subsequent record-only PR close-out; no merge or new carrier/endurance claim is inferred.",
+        "decisionRefs": ["ANDROID_COMMUNICATION_UX"],
+        "evidence": [
+          "docs/decisions/2026-09-24-android-client-scope.md",
+          "android-agent/app/src/androidTest/java/com/lovitus/mddagent/CommunicationUxTest.java"
+        ]
+      }
+    },
+    {
       "id": "INCIDENT_IMS_CALL_SMS",
       "state": "unresolved_cause",
       "summary": "Incoming INVITEs and local 488 responses remain scoped evidence, with further incoming diagnosis owner-deferred. One authorized self-SMS was submitted once and received; repeated carrier delivery exposed separate-report and durable-identity defects. Qualified 524bd33 contained new duplicate events but its receive reports were rejected with SIP 403. Followup 9e0ec67 passed exact-head full workflow 36264788240 and was deployed only to the affected-line trial after the owner replugged the USB reader and native permission/exact-card recovery was verified. Its registered-network-context adaptation then received SIP 202 for the already-pending carrier delivery. No new outbound SMS or manual replay occurred. September 29 review additionally found that receive reports retained the initial registration binding after same-process recovery; the current correction uses one existing-owner snapshot for both construction and send. Hosted workflow 36522474384 reproduced two compiled B1 old-behavior reversion failures, then passed 31 focused test/subtest results plus the existing registrar recovery test under race detection with zero skips. Full CI36522731598 passed, the original reviewer independently closed P2, and the same-tree artifact source2fcfda83bd51 was deployed to seven existing Provider processes and the shared entry point. The first script-only empty-field failure rolled back; the second explicit attempt completed with all leases released and both previously ready lines restored.",
@@ -1715,6 +1738,13 @@
     }
   ],
   "decisions": [
+    {
+      "id": "ANDROID_COMMUNICATION_UX",
+      "date": "2026-09-29",
+      "authority": "project_owner",
+      "summary": "Improve Android Home and Calls status/interaction, expose complete retained Messages history and default a provable original reply SIM. Android is also a multi-client phone/SMS terminal without a local reader; keep sharing optional and reuse existing server contention control. Client-first scope and previous milestone acceptance are unchanged.",
+      "sourcePath": "docs/decisions/2026-09-24-android-client-scope.md"
+    },
     {
       "id": "ANDROID_PREVIEW_CLOSE",
       "date": "2026-09-27",

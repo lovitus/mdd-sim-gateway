@@ -25,7 +25,7 @@ public class LoginFlowTest {
             int[] tabs={R.id.tab_calls,R.id.tab_messages,R.id.tab_readers,R.id.tab_settings};
             int[] views={R.id.dial_number,R.id.message_body,R.id.reader_share,R.id.forget_login};
             int[] titles={R.string.calls,R.string.messages,R.string.readers,R.string.settings};
-            for(int i=0;i<tabs.length;i++){click(tabs[i]);int view=views[i],title=titles[i];await(scene,a->a.findViewById(view)!=null);scene.onActivity(a->{assertEquals("MDD · "+context.getString(title),((TextView)a.findViewById(R.id.page_title)).getText().toString());assertNull(a.findViewById(R.id.gateway_password));});}
+            for(int i=0;i<tabs.length;i++){click(tabs[i]);if(tabs[i]==R.id.tab_messages){int compose=context.getResources().getIdentifier("message_compose","id",context.getPackageName());if(compose!=0)click(compose);}int view=views[i],title=titles[i];await(scene,a->a.findViewById(view)!=null);scene.onActivity(a->{assertEquals("MDD · "+context.getString(title),((TextView)a.findViewById(R.id.page_title)).getText().toString());assertNull(a.findViewById(R.id.gateway_password));});}
             click(R.id.tab_home);await(scene,a->a.findViewById(R.id.gateway_password)!=null);
             scene.onActivity(a->assertEquals("remember-this-fixture",((EditText)a.findViewById(R.id.gateway_password)).getText().toString()));
             scene.recreate();await(scene,a->a.findViewById(R.id.gateway_password)!=null);
