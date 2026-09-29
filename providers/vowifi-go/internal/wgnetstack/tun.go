@@ -246,7 +246,7 @@ func (net *Net) DialTCP(addr *net.TCPAddr) (*gonet.TCPConn, error) {
 
 func (net *Net) ListenTCPAddrPort(addr netip.AddrPort) (*gonet.TCPListener, error) {
 	fa, pn := convertToFullAddr(addr)
-	return gonet.ListenTCP(net.stack, fa, pn)
+	return listenTCPWithBindReuse(net.stack, fa, pn)
 }
 
 func (net *Net) ListenTCP(addr *net.TCPAddr) (*gonet.TCPListener, error) {

@@ -876,6 +876,54 @@ func TestWireIMSRegistrarUsesPreparedPCSCFFallbackCandidates(t *testing.T) {
 	}
 }
 
+func TestWireIMSRegistrarSMSUsesConfiguredServiceCentre(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		smsc string
+		want string
+	}{
+		{name: "international", smsc: "+12025550199", want: "+12025550199"},
+		{name: "trimmed national", smsc: " 2025550199 ", want: "2025550199"},
+		{name: "unconfigured", smsc: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &runtimeVoiceTransport{responses: []voiceclient.SIPResponse{{StatusCode: 202, Reason: "Accepted"}}}
+			res, err := (WireIMSRegistrar{
+				Transport: &wireIMSRegistrarTransport{responses: []voiceclient.RegisterResponse{{
+					StatusCode: 200,
+					Reason:     "OK",
+				}}},
+				VoiceTransport: transport,
+				ContactHost:    "192.0.2.10",
+				ContactPort:    5060,
+			}).RegisterIMS(context.Background(), IMSRegistrationConfig{
+				DeviceID: "sms-config",
+				Profile: identity.Profile{
+					IMSI: "310280233641503", MCC: "310", MNC: "280", SMSC: tc.smsc,
+				},
+			})
+			if err != nil {
+				t.Fatalf("RegisterIMS() error = %v", err)
+			}
+			result, err := res.SMSTransport.SendSMSPart(context.Background(), messaging.SMSSendRequest{
+				Peer: "+12025550123", MessageID: "sms-config",
+				Part: messaging.SMSPart{PartNo: 1, TotalParts: 1, Text: "hello"},
+			})
+			if err != nil || result.State != "accepted" || len(transport.requests) != 1 {
+				t.Fatalf("SendSMSPart() result=%+v requests=%d err=%v", result, len(transport.requests), err)
+			}
+			request := transport.requests[0]
+			if request.Method != "MESSAGE" || request.URI != "sip:+12025550123@ims.mnc280.mcc310.3gppnetwork.org" {
+				t.Fatalf("unexpected SMS request target: %s %s", request.Method, request.URI)
+			}
+			rpdu, err := messaging.ParseSMSRPDU(request.Body)
+			if err != nil || rpdu.Kind != messaging.SMSRPDUKindData || rpdu.Destination != tc.want || rpdu.Originator != "" {
+				t.Fatalf("RP-DATA destination=%q want=%q originator=%q kind=%s err=%v", rpdu.Destination, tc.want, rpdu.Originator, rpdu.Kind, err)
+			}
+		})
+	}
+}
+
 func TestWireIMSRegistrarDefaultFlowReusesRegisterSocketForSMS(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -924,7 +972,7 @@ func TestWireIMSRegistrarDefaultFlowReusesRegisterSocketForSMS(t *testing.T) {
 	}.RegisterIMS(context.Background(), IMSRegistrationConfig{
 		DeviceID: "dev-1",
 		TraceID:  "trace-1",
-		Profile:  identity.Profile{IMSI: "310280233641503", MCC: "310", MNC: "280"},
+		Profile:  identity.Profile{IMSI: "310280233641503", MCC: "310", MNC: "280", SMSC: "+12025550199"},
 	})
 	if err != nil {
 		t.Fatalf("RegisterIMS() error = %v", err)
@@ -952,6 +1000,14 @@ func TestWireIMSRegistrarDefaultFlowReusesRegisterSocketForSMS(t *testing.T) {
 	if !strings.Contains(requests[0].wire, "REGISTER sip:ims.mnc280.mcc310.3gppnetwork.org SIP/2.0") ||
 		!strings.Contains(requests[1].wire, "MESSAGE sip:+18005551212@ims.mnc280.mcc310.3gppnetwork.org SIP/2.0") {
 		t.Fatalf("unexpected wires: %+v", requests)
+	}
+	message, err := voiceclient.ParseSIPRequest([]byte(requests[1].wire))
+	if err != nil {
+		t.Fatalf("ParseSIPRequest() error = %v", err)
+	}
+	rpdu, err := messaging.ParseSMSRPDU(message.Body)
+	if err != nil || rpdu.Destination != "+12025550199" {
+		t.Fatalf("wire SMSC=%q, want configured service centre: %v", rpdu.Destination, err)
 	}
 }
 

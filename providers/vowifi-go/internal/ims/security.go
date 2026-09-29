@@ -57,13 +57,24 @@ func (installer userspaceSecurityInstaller) InstallSecurityPlanRequest(ctx conte
 	if strings.EqualFold(strings.TrimSpace(plan.EncryptionAlgorithm), voiceclient.SecurityEncryptionAlgorithmAES) {
 		confidentialityKey = request.AKA.CK
 	}
-	protector, err := imssec.New(imssec.Config{
+	securityConfig := imssec.Config{
 		LocalAddress: local, RemoteAddress: remote,
 		LocalPort: uint16(plan.PortClient), RemotePort: uint16(plan.PortServer),
 		SPIClient: plan.SPIClient, SPIServer: plan.SPIServer,
 		Authentication: plan.Algorithm, Encryption: plan.EncryptionAlgorithm,
 		IntegrityKey: request.AKA.IK, ConfidentialityKey: confidentialityKey,
-	})
+	}
+	client, server := request.ClientAgreement, request.Agreement
+	if client.PortServer != 0 || server.PortClient != 0 || client.SPIServer != 0 || server.SPIClient != 0 {
+		if client.PortServer <= 0 || client.PortServer > 65535 || server.PortClient <= 0 || server.PortClient > 65535 || client.SPIServer == 0 || server.SPIClient == 0 {
+			return fmt.Errorf("%w: incomplete peer-initiated security pair", ErrInvalidConfig)
+		}
+		securityConfig.PeerInitiated = &imssec.PeerInitiatedConfig{
+			LocalServerPort: uint16(client.PortServer), RemoteClientPort: uint16(server.PortClient),
+			LocalServerSPI: client.SPIServer, RemoteClientSPI: server.SPIClient,
+		}
+	}
+	protector, err := imssec.New(securityConfig)
 	if err != nil {
 		return err
 	}

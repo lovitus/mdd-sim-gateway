@@ -52,16 +52,18 @@ func (t IMSSMSTransport) SendSMSPart(ctx context.Context, req SMSSendRequest) (S
 		return SMSSendResult{CallID: callID, RPMR: cseq, State: "failed", ErrorText: err.Error()}, err
 	}
 	cfg := voiceclient.DialogRequestConfig{
-		Profile:         t.Profile,
-		Registration:    t.Registration,
-		LocalURI:        localURI,
-		ContactURI:      firstNonEmpty(t.ContactURI, t.Registration.ContactURI),
-		RemoteURI:       remoteURI,
-		RemoteTargetURI: firstNonEmpty(t.RemoteTargetURI, remoteURI),
-		CallID:          callID,
-		LocalTag:        "sms",
-		CSeq:            cseq,
-		UserAgent:       firstNonEmpty(t.UserAgent, t.Profile.UserAgent, "vowifi-go"),
+		Profile:           t.Profile,
+		Registration:      t.Registration,
+		LocalURI:          localURI,
+		ContactURI:        firstNonEmpty(t.ContactURI, t.Registration.ContactURI),
+		RemoteURI:         remoteURI,
+		RemoteTargetURI:   firstNonEmpty(t.RemoteTargetURI, remoteURI),
+		CallID:            callID,
+		LocalTag:          "sms",
+		CSeq:              cseq,
+		UserAgent:         firstNonEmpty(t.UserAgent, t.Profile.UserAgent, "vowifi-go"),
+		AccessNetworkInfo: t.Profile.AccessNetworkInfo,
+		VisitedNetworkID:  t.Profile.VisitedNetworkID,
 	}
 	var resp voiceclient.SIPResponse
 	redirectRetries := 0

@@ -39,11 +39,12 @@ func NewRegistrar(stack *usernet.Stack, base runtimehost.WireIMSRegistrar) (*Reg
 		base.SMSTransport != nil || base.SMSFactory != nil ||
 		base.USSDTransport != nil || base.USSDFactory != nil ||
 		base.SecurityPlanInstaller != nil || base.SecurityAssociationInstaller != nil ||
-		base.DialContextLocal != nil {
+		base.DialContextLocal != nil || base.ListenContext != nil {
 		return nil, ErrUntrustedNetworking
 	}
 	base.DialContext = stack.DialContext
 	base.DialContextLocal = stack.DialContextLocal
+	base.ListenContext = stack.Listen
 	contactPort := base.ContactPort
 	if contactPort <= 0 {
 		contactPort = 5060

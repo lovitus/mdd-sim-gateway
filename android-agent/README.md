@@ -16,15 +16,21 @@ on both API 28 and 35, including all five behavioral regressions; zero failed,
 errored or skipped. Pre-fix runs `36513116448` and `36516219462` establish their
 counterexamples. Full Go workflow `36517185239` also passed. Subsequent record-only
 closure preserves that runtime/test/build source; it is not a fresh test result.
-This correction is not installed and changes no server API or paid retry.
-See the [current correction cursor](../docs/decisions/2026-09-24-android-client-scope.md#september-29-pr-12-review-correction).
+The owner subsequently authorized merge/deployment after review. PR #12 is merged
+at `0b663b9` and signed v91 (`7df49d4`, workflow `36520354543`) is installed on the
+newly authorized phone with data/UID retained. All five native pages, remembered
+connection settings, USB permission/card identity and Core card routing were read
+back. No additional paid call/SMS was made. This changes no server API or paid retry.
+See the [current rollout cursor](../docs/decisions/2026-09-24-android-client-scope.md#september-29-reviewed-merge-and-rollout).
 
 The September 27 Android preview milestone is complete within its recorded scope
-and ready for owner review in draft PR #12; it is not merged. Signed v85 /
-`a1bf28b` and minimal Core `b6f3a4c` are already deployed. Reader sharing, scoped
+and its PR #12 review/merge is complete. Signed v91 supersedes the earlier v85 /
+`a1bf28b` phone evidence; minimal Core `b6f3a4c` is unchanged. Reader sharing, scoped
 call/SMS paths, five native pages, ordinary reconnect and bounded USB recovery
 have the evidence described below. The separately reviewed Provider fix in
-PR #13 remains a single-line trial, not a broad Provider rollout.
+PR #13 passed full workflow `36522731598` and is deployed from artifact source
+`2fcfda83bd51` to the existing Provider processes/shared entry point. Core and
+desktop Agents were not redeployed; no new paid test or endurance claim is added.
 
 The owner accepts missing long-duration USB/OEM/battery validation for this stage;
 extreme network-switching validation is also non-blocking. Failures remain visible,
