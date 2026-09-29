@@ -4,6 +4,16 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
+The communication-UX batch is qualified: Home and separate call/SMS route status,
+complete retained conversations, provable original-card reply selection, and
+multiple Android communication clients without local readers. Sharing is optional.
+Hosted run `36536473242` qualified source `f8a6a8c`; the original reviewer closed
+UX-R1/UX-R2. Signed v95 is installed with data retained and five-page, older-history
+pagination and reply-preparation readback. No paid operation was performed.
+PR #15 integrated Android and Go gates also passed at `d00575e`; later record-only
+edits do not relabel the APK or test source. The v91 milestone below remains closed.
+See the [current cursor](../docs/decisions/2026-09-24-android-client-scope.md#current-cursor).
+
 September 29 review correction: all three client defects are fixed and the original
 reviewer has closed N1/N2/N3. Whole-confirmed SMS submissions retain their confirmation despite
 delivery failure; legacy unknown receipts remain protected. Historical messages
@@ -45,7 +55,7 @@ notes below preserve evidence history, not instructions to repeat finished work.
 
 1. Install the preview APK, open it, and enter the gateway **HTTPS origin**, account name and password. Remembered login is encrypted using Android Keystore; disable Remember or use Forget login to remove the saved password. For self-signed servers, independently verify the displayed **leaf certificate SHA-256** before accepting it. Certificate changes require explicit confirmation; there is no trust-all toggle or credential-bearing redirect.
 2. Alternatively scan/paste the setup JSON below; inspect and explicitly confirm the origin/pin. The account still requires sign-in. Reader enrollment may be included only in a QR kept private.
-3. Choose **Stay available** and grant notifications. Choose **Readers → Share attached readers**, then grant access to the particular OTG USB device. The gateway account must permit issuing the scoped Agent credential. Existing lines/SIM routing remain configured in gateway management.
+3. Choose **Stay available** and grant notifications. Calls and Messages can use server lines without a local reader. Optionally choose **Readers → Share attached readers**, then grant access to the particular OTG USB device; the gateway account must permit issuing the scoped Agent credential. Existing lines/SIM routing remain configured in gateway management.
 4. Choose the exact line and **VoWiFi** or **Cellular modem** in Calls/Messages. A paid mutation requires a confirmation. Uncertain submissions are not retried. Resolve the existing call with Hang up; check SMS history before any deliberate new send.
 
 ```json

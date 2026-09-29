@@ -29,6 +29,12 @@ public final class MainActivity extends Activity {
     private String focusIncoming="";private int tab;private EditText server,pin,username,password,number,message;private Spinner lineChoice;private MaterialButtonToggleGroup routeChoice;
     private TextView readerSummary,directoryStatus;private LinearLayout readerItems,usbPermissions;private String usbPermissionState="",readerItemsState="";private Button sharingButton;private TextView capability;private JSONObject lastData;private LinearLayout messageList,messageOperations;private String messageOperationView="";private JSONObject pinnedLine;private long historyEpoch,historyAccountEpoch;private AlertDialog activeHistoryDialog;
     private TextView homeConnection,homeAvailability,homeReaders,homeLines,homeActivity,homeUsbState,readerUsbState;private LinearLayout homeEvents;private long homeEventsRevision=-1;
+    private com.google.android.material.materialswitch.MaterialSwitch homeAvailable;
+    private boolean updatingAvailability,composingMessage;
+    private TextView inboxStatus;private LinearLayout inboxItems;private EditText inboxSearch;
+    private JSONArray conversations=new JSONArray();private String inboxSnapshotKey="";private long inboxAccount=-1,inboxVersion;private AgentService inboxOwner;
+    private String inboxIdentityKey="",inboxFailure="";
+    private boolean inboxLoading;
     private JSONObject savedConfig=new JSONObject();private String storageError="";private boolean storageLoaded,startRequested;
     private boolean resettingStorage;private long storageReadVersion,savedStorageEpoch=ConfigStore.currentEpoch();
     private LoginProfile loginProfile;private CheckBox rememberLogin;private TextView draftStatus;private boolean certificateExpanded;private volatile boolean loginBusy;private volatile long loginVersion;
@@ -42,9 +48,9 @@ public final class MainActivity extends Activity {
     private final Handler draftHandler=new Handler(Looper.getMainLooper());private final Runnable saveDraft=this::persistLoginDraft;
     private String selectedLine="",selectedCard="",draftNumber="",draftMessage="";private int selectedRoute;private JSONArray selectionSnapshot=new JSONArray();private final ExecutorService io=Executors.newSingleThreadExecutor();private final Runnable update=this::updateState;
     private final ServiceConnection binding=new ServiceConnection(){public void onServiceConnected(ComponentName n,IBinder b){service=((AgentService.LocalBinder)b).service();service.addListener(update);render();resumeSavedAvailability();if(resumed)service.readerEnvironmentChanged();}public void onServiceDisconnected(ComponentName n){service=null;updateState();}};
-    @Override public void onCreate(Bundle state){super.onCreate(state);Object retained=getLastNonConfigurationInstance();if(retained instanceof LoginProfile&&((LoginProfile)retained).storageEpoch==ConfigStore.currentEpoch())loginProfile=(LoginProfile)retained;if(state!=null){selectionFromState=state.containsKey("route")||state.containsKey("line")||state.containsKey("card");tab=state.getInt("tab");focusIncoming=state.getString("incoming","");draftNumber=state.getString("number","");draftMessage=state.getString("message","");selectedLine=state.getString("line","");selectedCard=state.getString("card","");selectedRoute=state.getInt("route");}else readNotification(getIntent());if(Build.VERSION.SDK_INT>=30)getWindow().setDecorFitsSystemWindows(false);getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);build();}
+    @Override public void onCreate(Bundle state){super.onCreate(state);Object retained=getLastNonConfigurationInstance();if(retained instanceof LoginProfile&&((LoginProfile)retained).storageEpoch==ConfigStore.currentEpoch())loginProfile=(LoginProfile)retained;if(state!=null){selectionFromState=state.containsKey("route")||state.containsKey("line")||state.containsKey("card");tab=state.getInt("tab");focusIncoming=state.getString("incoming","");draftNumber=state.getString("number","");draftMessage=state.getString("message","");selectedLine=state.getString("line","");selectedCard=state.getString("card","");selectedRoute=state.getInt("route");composingMessage=state.getBoolean("compose_message");}else readNotification(getIntent());if(Build.VERSION.SDK_INT>=30)getWindow().setDecorFitsSystemWindows(false);getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);build();}
     @Override public Object onRetainNonConfigurationInstance(){captureLoginDraft();return !resettingStorage&&loginProfile!=null&&loginProfile.storageEpoch==ConfigStore.currentEpoch()?loginProfile:null;}
-    private void readNotification(Intent intent){if(intent==null)return;String event=intent.getStringExtra("incoming_event");if(event!=null){focusIncoming=event;tab=1;}if(intent.getBooleanExtra("open_messages",false))tab=2;intent.removeExtra("incoming_event");intent.removeExtra("open_messages");}
+    private void readNotification(Intent intent){if(intent==null)return;String event=intent.getStringExtra("incoming_event");if(event!=null){focusIncoming=event;tab=1;}if(intent.getBooleanExtra("open_messages",false)){tab=2;composingMessage=false;}intent.removeExtra("incoming_event");intent.removeExtra("open_messages");}
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);readNotification(intent);render();}
     @Override protected void onStart(){super.onStart();bound=bindService(new Intent(this,AgentService.class),binding,BIND_AUTO_CREATE);reloadStorage();}
     @Override protected void onResume(){super.onResume();resumed=true;if(service!=null)service.readerEnvironmentChanged();}
@@ -161,7 +167,7 @@ public final class MainActivity extends Activity {
     private void confirm(String message,Runnable action){new AlertDialog.Builder(this).setMessage(message).setPositiveButton(R.string.confirm,(d,w)->{try{action.run();}catch(Exception e){error(e.getMessage());}}).setNegativeButton(R.string.cancel,null).show();}
     private void startAvailability(){if(savedConfig.optString("token").isEmpty()){tab=0;render();return;}startForegroundService(new Intent(this,AgentService.class).setAction(AgentService.START));}
     private void render(){if(content==null)return;captureDraft();captureLoginDraft();content.removeAllViews();primaryBar.removeAllViews();primaryBar.setVisibility(View.GONE);callSurfaceKey="";callBox.removeAllViews();callAudioDetails=null;messageList=null;messageOperations=null;messageOperationView="";readerSummary=null;readerItems=null;usbPermissions=null;usbPermissionState="";readerItemsState="";sharingButton=null;capability=null;directoryStatus=null;homeConnection=homeAvailability=homeReaders=homeLines=homeActivity=null;homeEvents=null;homeEventsRevision=-1;number=message=null;lineChoice=null;routeChoice=null;server=pin=username=password=null;rememberLogin=null;draftStatus=null;
-        homeUsbState=readerUsbState=null;
+        homeUsbState=readerUsbState=null;homeAvailable=null;inboxStatus=null;inboxItems=null;inboxSearch=null;inboxVersion++;inboxLoading=false;inboxSnapshotKey="";
         if(renderedTab!=tab){renderedTab=tab;contentScroll.scrollTo(0,0);}
         int[] titles={R.string.home,R.string.calls,R.string.messages,R.string.readers,R.string.settings};int[] tabs={R.id.tab_home,R.id.tab_calls,R.id.tab_messages,R.id.tab_readers,R.id.tab_settings};pageTitle.setText("MDD · "+getString(titles[tab]));pageTitle.setContentDescription("page:"+new String[]{"home","calls","messages","readers","settings"}[tab]);navigation.getMenu().findItem(tabs[tab]).setChecked(true);
         if(!storageLoaded||resettingStorage){label(getString(R.string.reading_settings));return;}if(!storageError.isEmpty()){label(storageError);button(content,getString(R.string.storage_retry),this::reloadStorage);button(content,getString(R.string.storage_reset),this::requestStorageReset).setId(R.id.storage_reset);if(service!=null&&service.call!=null)button(content,getString(R.string.end_known_call),service::hangup);return;}
@@ -232,48 +238,54 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int code,int result,Intent data){IntentResult scan=IntentIntegrator.parseActivityResult(code,result,data);if(scan!=null){if(scan.getContents()!=null)importSetup(scan.getContents());}else super.onActivityResult(code,result,data);}
     private void requestNotification(){if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},21);}
     private void homePage(JSONObject c){
-        section(R.string.home_gateway_section);label(c.optString("server"));homeConnection=text("",15);homeConnection.setId(R.id.home_connection_state);content.addView(homeConnection);
-        homeAvailability=text("",13);homeAvailability.setId(R.id.home_availability_state);content.addView(homeAvailability);
-        Button availability=button(service!=null&&service.available()?R.string.pause:R.string.resume,()->{if(service!=null&&service.available())service.pause();else{requestNotification();startAvailability();}});
-        availability.setId(R.id.home_availability_toggle);availability.setEnabled(service!=null&&!service.intentSaving());
-        section(R.string.home_readers_section);homeReaders=text("",14);homeReaders.setId(R.id.home_reader_state);content.addView(homeReaders);
-        homeUsbState=text("",14);homeUsbState.setId(R.id.home_usb_state);content.addView(homeUsbState);
-        button(content,getString(R.string.open_readers),()->openTab(3)).setId(R.id.home_open_readers);
-        section(R.string.home_lines_section);homeLines=text("",14);homeLines.setId(R.id.home_line_state);content.addView(homeLines);
+        TextView address=text(c.optString("server"),12);address.setTextColor(UiLabels.NEUTRAL);content.addView(address);
+        homeConnection=text("",18);homeConnection.setId(R.id.home_connection_state);content.addView(homeConnection);
+        homeAvailable=new com.google.android.material.materialswitch.MaterialSwitch(this);homeAvailable.setId(R.id.home_availability_toggle);
+        homeAvailable.setText(R.string.stay_connected);homeAvailable.setMinHeight(dp(48));content.addView(homeAvailable,new LinearLayout.LayoutParams(-1,-2));
+        homeAvailable.setOnCheckedChangeListener((v,checked)->{if(updatingAvailability||service==null)return;if(checked){requestNotification();startAvailability();}else service.pause();updateHomePage();});
+        homeAvailability=text("",12);homeAvailability.setId(R.id.home_availability_state);content.addView(homeAvailability);
+        section(R.string.home_communications);homeLines=text("",14);homeLines.setId(R.id.home_line_state);content.addView(homeLines);
         LinearLayout lineActions=new LinearLayout(this);lineActions.setOrientation(LinearLayout.HORIZONTAL);content.addView(lineActions);
-        button(lineActions,getString(R.string.open_calls),()->openTab(1)).setId(R.id.home_open_calls);
-        button(lineActions,getString(R.string.open_messages),()->openTab(2)).setId(R.id.home_open_messages);
-        section(R.string.home_activity_section);homeActivity=text("",14);homeActivity.setId(R.id.home_activity_state);content.addView(homeActivity);
+        MaterialButton calls=(MaterialButton)button(lineActions,getString(R.string.calls),()->openTab(1));calls.setId(R.id.home_open_calls);calls.setIconResource(R.drawable.ic_mdd_call);
+        MaterialButton messages=(MaterialButton)button(lineActions,getString(R.string.messages),()->openTab(2));messages.setId(R.id.home_open_messages);messages.setIconResource(R.drawable.ic_mdd_message);
+        homeActivity=text("",12);homeActivity.setId(R.id.home_activity_state);content.addView(homeActivity);
+        section(R.string.home_readers_optional);homeReaders=text("",13);homeReaders.setId(R.id.home_reader_state);content.addView(homeReaders);
+        homeUsbState=text("",13);homeUsbState.setId(R.id.home_usb_state);content.addView(homeUsbState);
+        MaterialButton readers=(MaterialButton)button(content,getString(R.string.readers),()->openTab(3));readers.setId(R.id.home_open_readers);readers.setIconResource(R.drawable.ic_mdd_sim_card);
         section(R.string.home_recent_events_section);homeEvents=new LinearLayout(this);homeEvents.setId(R.id.home_recent_events);homeEvents.setOrientation(LinearLayout.VERTICAL);content.addView(homeEvents);
-        button(content,getString(R.string.diagnostics),this::diagnostics).setId(R.id.home_diagnostics);
-        button(content,getString(R.string.open_settings),()->openTab(4)).setId(R.id.home_settings);
-        button(R.string.help,()->error(getString(R.string.help_text)));updateHomePage();
+        LinearLayout tools=new LinearLayout(this);content.addView(tools);
+        button(tools,getString(R.string.diagnostics),this::diagnostics).setId(R.id.home_diagnostics);
+        MaterialButton settings=(MaterialButton)button(tools,getString(R.string.settings),()->openTab(4));settings.setId(R.id.home_settings);settings.setIconResource(R.drawable.ic_mdd_settings);updateHomePage();
     }
     private void openTab(int target){int[] ids={R.id.tab_home,R.id.tab_calls,R.id.tab_messages,R.id.tab_readers,R.id.tab_settings};if(target>=0&&target<ids.length&&navigation!=null)navigation.setSelectedItemId(ids[target]);}
     private void updateHomePage(){
         if(homeConnection==null)return;
         updateUsbReaderStatus(homeUsbState);
+        if(homeAvailable!=null){updatingAvailability=true;homeAvailable.setChecked(service!=null&&service.available());homeAvailable.setEnabled(service!=null&&!service.intentSaving());updatingAvailability=false;}
         if(service==null){homeConnection.setText(R.string.local_service_connecting);homeAvailability.setText(R.string.not_available);homeReaders.setText(R.string.not_available);homeLines.setText(R.string.not_available);homeActivity.setText(R.string.not_available);updateHomeEvents();return;}
-        homeConnection.setText(getString(R.string.home_connection_status,service.connection.render(this)));
+        homeConnection.setText(service.connection.render(this));
         homeConnection.setTextColor(UiLabels.statusColor(service.connection));
         homeAvailability.setText(getString(R.string.home_availability_status,getString(service.available()?R.string.availability_on:R.string.paused)));
         homeAvailability.setTextColor(service.available()?UiLabels.OK:UiLabels.NEUTRAL);
         int attached=attachedCcidReaders().size(),pending=pendingReaderCount();
         String readerState=!service.available()?(service.sharing()?getString(R.string.sharing_paused):getString(R.string.sharing_off)):
             service.sharing()?(service.readerLinkOnline?service.readerStatus.render(this):service.readerConnection.render(this)):getString(R.string.sharing_off);
-        homeReaders.setText(getString(R.string.home_reader_status,readerState,attached,pending));
-        homeReaders.setTextColor(service.sharing()&&!service.readerLinkOnline?UiLabels.statusColor(service.readerConnection):pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
-        JSONArray lines=Json.array(service.snapshot,"lines");int enabled=0;
-        for(int i=0;i<lines.length();i++){JSONObject line=lines.optJSONObject(i);if(line!=null&&line.optBoolean("enabled"))enabled++;}
-        homeLines.setText(getString(R.string.home_line_status,lines.length(),enabled));
-        homeLines.setTextColor(!service.online()||lines.length()==0?UiLabels.WARNING:UiLabels.OK);
+        homeReaders.setText(attached==0&&!service.sharing()?getString(R.string.no_local_reader_needed):getString(R.string.home_reader_status,readerState,attached,pending));
+        homeReaders.setTextColor(attached==0&&!service.sharing()?UiLabels.NEUTRAL:service.sharing()&&!service.readerLinkOnline?UiLabels.statusColor(service.readerConnection):pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
+        JSONArray lines=Json.array(service.snapshot,"lines");int calls=0,sms=0;
+        for(int i=0;i<lines.length();i++){JSONObject line=lines.optJSONObject(i);if(line==null)continue;
+            if(UiLabels.routeState(line,"vowifi",false,service.online())==R.string.route_ready||UiLabels.routeState(line,"cellular",false,service.online())==R.string.route_ready)calls++;
+            if(UiLabels.routeState(line,"vowifi",true,service.online())==R.string.route_ready||UiLabels.routeState(line,"cellular",true,service.online())==R.string.route_ready)sms++;
+        }
+        homeLines.setText(getString(R.string.home_ready_lines,calls,sms,lines.length()));
+        homeLines.setTextColor(!service.online()||calls+sms==0?UiLabels.WARNING:UiLabels.OK);
         if(!service.online())homeLines.append("\n"+getString(service.connection.resource==R.string.link_upgrade?R.string.core_mobile_endpoint_required:R.string.directory_offline));
         else if(lines.length()==0)homeLines.append("\n"+getString(R.string.directory_empty));
-        if(service.snapshot.optBoolean("incomplete"))homeLines.append("\n"+getString(R.string.directory_partial));
+        if(service.snapshot.optBoolean("incomplete"))homeLines.append("\n"+getString(R.string.status_partial));
         JSONObject privateState=service.config();JSONArray operations=Json.array(privateState,"message_operations");int unresolved=0;
         for(int i=0;i<operations.length();i++){JSONObject row=operations.optJSONObject(i);if(row!=null&&!MessageJournal.resolved(row))unresolved++;}
         String call=service.call==null?getString(R.string.call_recovery_none):service.call.state.render(this);
-        homeActivity.setText(getString(R.string.home_activity_status,Json.array(service.snapshot,"messages").length(),unresolved,call));
+        homeActivity.setText(getString(R.string.home_recovery_status,unresolved,call));
         homeActivity.setTextColor(unresolved>0?UiLabels.WARNING:service.call==null?UiLabels.NEUTRAL:UiLabels.statusColor(service.call.state));
         renderReaderBadge(pending);
         updateHomeEvents();
@@ -284,7 +296,7 @@ public final class MainActivity extends Activity {
         List<AgentActivityLog.Entry> events=service==null?Collections.emptyList():service.activityLog.recent();
         if(events.isEmpty()){homeEvents.addView(text(getString(R.string.home_recent_events_empty),13));return;}
         java.text.DateFormat time=android.text.format.DateFormat.getTimeFormat(this);
-        for(AgentActivityLog.Entry event:events){
+        for(AgentActivityLog.Entry event:events.subList(0,Math.min(3,events.size()))){
             LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.TOP);TextView at=text(time.format(new java.util.Date(event.timestamp)),12);at.setTextColor(0xff667a80);row.addView(at,new LinearLayout.LayoutParams(dp(64),-2));
             TextView detail=text(getString(event.message),13);detail.setTextColor(UiLabels.statusColor(UiText.of(event.message)));row.addView(detail,new LinearLayout.LayoutParams(0,-2,1));homeEvents.addView(row);
         }
@@ -329,7 +341,6 @@ public final class MainActivity extends Activity {
     private JSONObject selected(){int index=lineChoice==null?-1:lineChoice.getSelectedItemPosition();JSONObject l=selectionSnapshot.optJSONObject(index);if(l==null||!l.optBoolean("enabled"))throw new IllegalArgumentException(getString(R.string.line_unavailable));selectedLine=l.optString("id");try{return new JSONObject(l.toString());}catch(Exception e){throw new IllegalArgumentException(e);}}
     private String route(){return routeChoice!=null&&routeChoice.getCheckedButtonId()==R.id.route_cellular?"cellular":"vowifi";}
     private void callPage(){
-        button(content,getString(R.string.call_history),this::callHistoryDialog);
         if(service!=null&&service.call!=null){
             RemoteCall current=service.call;button(R.string.hangup,current::hangup);
             if(current.audio!=null&&!current.audio.closed){
@@ -350,8 +361,10 @@ public final class MainActivity extends Activity {
         number=new EditText(this);number.setId(R.id.dial_number);number.setHint(R.string.number);number.setSingleLine(true);number.setInputType(InputType.TYPE_CLASS_PHONE);number.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI|android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN);number.setTextSize(18);number.setMinHeight(dp(52));number.setText(draftNumber);entry.addView(number,new LinearLayout.LayoutParams(0,-2,1));
         ImageButton erase=tool(R.drawable.ic_mdd_backspace,getString(R.string.erase_digit),()->{int end=number.getSelectionEnd();if(end>0)number.getText().delete(end-1,end);});erase.setId(R.id.dial_backspace);entry.addView(erase,new LinearLayout.LayoutParams(dp(48),dp(48)));content.addView(entry);
         dialPad();button(R.string.dial,()->{JSONObject l=selected();String mode=route(),target=number.getText().toString();confirm(getString(R.string.call_confirm)+"\n\n"+lineLabel(l)+" · "+UiLabels.transport(this,mode)+"\n"+target,()->startCall(l,mode,target,null));});
+        LinearLayout actions=new LinearLayout(this);content.addView(actions);
+        button(actions,getString(R.string.call_history),this::callHistoryDialog);
+        button(actions,getString(R.string.all_incoming),this::incomingDialog).setId(R.id.all_incoming);
         button(R.string.device_dial,()->{try{startActivity(new Intent(Intent.ACTION_DIAL,Uri.fromParts("tel",CallPlan.dialTarget(number.getText().toString()),null)));}catch(Exception e){error(getString(R.string.system_dialer_unavailable));}});
-        button(content,getString(R.string.all_incoming),this::incomingDialog).setId(R.id.all_incoming);
     }
     private void callHistoryDialog(){
         if(service==null||!service.online()){error(getString(R.string.connect_first));return;}
@@ -416,17 +429,72 @@ public final class MainActivity extends Activity {
         for(int i=0;i<toneKeys.getChildCount();i++)toneKeys.getChildAt(i).setEnabled(available&&!toneOwner.toneBusy());
     }
     private void startCall(JSONObject l,String mode,String number,JSONObject incoming){if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},22);error(getString(R.string.microphone_permission_needed));return;}try{if(service==null)throw new IllegalStateException(getString(R.string.connect_first));service.begin(new CallPlan(l,mode,number,incoming));}catch(Exception e){error(e.getMessage());}}
-    private void messagePage(){selectors();number=input(R.string.number,false);number.setInputType(InputType.TYPE_CLASS_PHONE);number.setText(draftNumber);message=input(R.string.sms_body,false);message.setSingleLine(false);message.setMinLines(3);message.setText(draftMessage);button(R.string.send,()->{JSONObject l=selected();String mode=route(),target=number.getText().toString(),body=message.getText().toString();confirm(getString(R.string.sms_confirm)+"\n\n"+lineLabel(l)+" · "+UiLabels.transport(this,mode)+"\n"+target,()->{try{if(service==null)throw new IllegalStateException(getString(R.string.connect_first));service.sendSMS(l,mode,target,body);}catch(Exception e){error(e.getMessage());}});});
+    private void messagePage(){
+        MaterialButtonToggleGroup views=new MaterialButtonToggleGroup(this);views.setSingleSelection(true);views.setSelectionRequired(true);
+        for(int i=0;i<2;i++){MaterialButton item=command(getString(i==0?R.string.message_inbox:R.string.message_compose));item.setId(i==0?R.id.message_inbox:R.id.message_compose);item.setCheckable(true);item.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{0xffdfefed,0xffffffff}));views.addView(item,new LinearLayout.LayoutParams(0,-2,1));}
+        views.check(composingMessage?R.id.message_compose:R.id.message_inbox);content.addView(views);
+        views.addOnButtonCheckedListener((group,id,checked)->{if(checked){captureDraft();composingMessage=id==R.id.message_compose;render();}});
+        if(!composingMessage){inboxPage();return;}
+        selectors();number=input(R.string.number,false);number.setInputType(InputType.TYPE_CLASS_PHONE);number.setText(draftNumber);message=input(R.string.sms_body,false);message.setSingleLine(false);message.setMinLines(3);message.setText(draftMessage);button(R.string.send,()->{JSONObject l=selected();String mode=route(),target=number.getText().toString(),body=message.getText().toString();confirm(getString(R.string.sms_confirm)+"\n\n"+lineLabel(l)+" · "+UiLabels.transport(this,mode)+"\n"+target,()->{try{if(service==null)throw new IllegalStateException(getString(R.string.connect_first));service.sendSMS(l,mode,target,body);}catch(Exception e){error(e.getMessage());}});});
         button(content,getString(R.string.all_conversations),this::conversationDialog).setId(R.id.message_conversations);
         button(content,getString(R.string.line_history),this::historyDialog).setId(R.id.message_history);button(content,getString(R.string.sync_messages),()->{if(service!=null)service.syncMessages();}).setId(R.id.message_sync);
         messageOperations=new LinearLayout(this);messageOperations.setId(R.id.message_operations);messageOperations.setOrientation(LinearLayout.VERTICAL);content.addView(messageOperations);updateMessageOperations();
         label(getString(R.string.recent_messages));messageList=new LinearLayout(this);messageList.setOrientation(LinearLayout.VERTICAL);content.addView(messageList);updateMessages();}
+    private void inboxPage(){
+        LinearLayout search=new LinearLayout(this);search.setGravity(Gravity.CENTER_VERTICAL);
+        inboxSearch=new EditText(this);inboxSearch.setId(R.id.message_search);inboxSearch.setSingleLine(true);inboxSearch.setTextSize(14);inboxSearch.setHint(R.string.search_messages);search.addView(inboxSearch,new LinearLayout.LayoutParams(0,dp(48),1));
+        ImageButton refresh=tool(R.drawable.ic_mdd_refresh,getString(R.string.sync_messages),()->loadInbox(true));refresh.setId(R.id.message_sync);search.addView(refresh,new LinearLayout.LayoutParams(dp(48),dp(48)));content.addView(search);
+        inboxStatus=text("",12);inboxStatus.setId(R.id.message_inbox_status);content.addView(inboxStatus);
+        inboxItems=new LinearLayout(this);inboxItems.setId(R.id.message_conversation_list);inboxItems.setOrientation(LinearLayout.VERTICAL);content.addView(inboxItems);
+        inboxSearch.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){renderInbox();}public void afterTextChanged(android.text.Editable value){}});
+        messageOperations=new LinearLayout(this);messageOperations.setId(R.id.message_operations);messageOperations.setOrientation(LinearLayout.VERTICAL);content.addView(messageOperations);
+        loadInbox(false);
+    }
+    private void loadInbox(boolean manual){
+        if(inboxItems==null||service==null)return;
+        AgentService owner=service;long account=owner.accountEpoch();
+        if(inboxOwner!=owner||inboxAccount!=account){inboxOwner=owner;inboxAccount=account;inboxVersion++;inboxLoading=false;conversations=new JSONArray();inboxSnapshotKey="";inboxIdentityKey="";inboxFailure="";renderInbox();}
+        StringBuilder identities=new StringBuilder();for(int i=0;i<conversations.length();i++){JSONObject row=conversations.optJSONObject(i);if(row!=null)identities.append(lineLabel(owner.messageLine(row.optString("line_id"))));}
+        if(!inboxIdentityKey.equals(identities.toString())){inboxIdentityKey=identities.toString();renderInbox();}
+        if(!owner.online()){inboxStatus.setText(R.string.directory_offline);inboxStatus.setTextColor(UiLabels.WARNING);return;}
+        String key=Json.array(owner.snapshot,"messages").toString();
+        if(inboxLoading||!manual&&key.equals(inboxSnapshotKey))return;
+        inboxSnapshotKey=key;inboxLoading=true;inboxFailure="";long version=++inboxVersion;
+        inboxStatus.setText(R.string.reading_conversations);inboxStatus.setTextColor(UiLabels.NEUTRAL);
+        owner.messageConversations(account,page->{
+            if(isDestroyed()||version!=inboxVersion||inboxItems==null||service!=owner||account!=owner.accountEpoch())return;
+            inboxLoading=false;conversations=Json.array(page,"conversations");renderInbox();loadInbox(false);
+        },failure->{if(version!=inboxVersion||inboxStatus==null||service!=owner||account!=owner.accountEpoch())return;inboxLoading=false;inboxFailure=failure;inboxStatus.setText(failure);inboxStatus.setTextColor(UiLabels.ERROR);});
+    }
+    private void renderInbox(){
+        if(inboxItems==null||service==null)return;inboxItems.removeAllViews();
+        AgentService owner=service;long account=owner.accountEpoch();String query=inboxSearch==null?"":inboxSearch.getText().toString().trim().toLowerCase(Locale.ROOT);int visible=0;
+        for(int i=0;i<conversations.length();i++){
+            JSONObject conversation=conversations.optJSONObject(i);if(conversation==null)continue;
+            JSONObject last=Json.object(conversation,"last"),line=owner.messageLine(conversation.optString("line_id"));
+            String peer=conversation.optString("peer"),body=last.optString("body");
+            if(!(peer+" "+body+" "+lineLabel(line)).toLowerCase(Locale.ROOT).contains(query))continue;
+            visible++;
+            LinearLayout row=new LinearLayout(this);row.setOrientation(LinearLayout.VERTICAL);row.setPadding(dp(8),dp(12),dp(8),dp(12));row.setMinimumHeight(dp(88));
+            TextView title=text(peer,16);title.setTypeface(null,android.graphics.Typeface.BOLD);row.addView(title);
+            TextView identity=text(line.optString("name",line.optString("id"))+" · "+line.optString("number",getString(R.string.number_unavailable))+" · "+UiLabels.transport(this,conversation.optString("transport")),12);identity.setMaxLines(2);identity.setTextColor(UiLabels.NEUTRAL);row.addView(identity);
+            TextView preview=text(body.isEmpty()?UiLabels.messageEvent(this,last):body,14);preview.setMaxLines(2);preview.setEllipsize(android.text.TextUtils.TruncateAt.END);row.addView(preview);
+            TextView at=text(UiLabels.messageTime(this,last)+" · "+getString(R.string.history_event_count,conversation.optInt("count")),11);at.setTextColor(UiLabels.NEUTRAL);row.addView(at);
+            android.util.TypedValue ripple=new android.util.TypedValue();getTheme().resolveAttribute(android.R.attr.selectableItemBackground,ripple,true);row.setBackgroundResource(ripple.resourceId);
+            row.setFocusable(true);row.setOnClickListener(v->{if(service!=owner||account!=owner.accountEpoch()){error(getString(R.string.history_account_changed));return;}historyDialog(conversation.optString("line_id"),conversation.optString("transport"),peer,peer);});
+            inboxItems.addView(row);View divider=new View(this);divider.setBackgroundColor(0xffdce5e8);inboxItems.addView(divider,new LinearLayout.LayoutParams(-1,dp(1)));
+        }
+        inboxStatus.setText(inboxFailure.isEmpty()?getString(R.string.inbox_count,visible,conversations.length()):inboxFailure);inboxStatus.setTextColor(inboxFailure.isEmpty()?UiLabels.NEUTRAL:UiLabels.ERROR);
+        if(!owner.online()){inboxStatus.setText(R.string.directory_offline);inboxStatus.setTextColor(UiLabels.WARNING);}
+        if(visible==0)inboxItems.addView(text(getString(R.string.no_conversations),14));
+    }
     private void updateMessageOperations(){
         if(messageOperations==null||service==null)return;View sync=findViewById(R.id.message_sync);if(sync!=null)sync.setEnabled(service.canQueryMessages());JSONObject privateState=service.config();String scope=privateState.optString("account_scope");
         if(privateState.optString("token").isEmpty()||!privateState.optString("server").equals(savedConfig.optString("server"))||!savedConfig.optString("account_scope").isEmpty()&&!scope.equals(savedConfig.optString("account_scope"))){messageOperations.removeAllViews();messageOperationView="";return;}
         JSONArray operations=Json.array(privateState,"message_operations");StringBuilder version=new StringBuilder(scope).append(operations).append(service.canQueryMessages()).append(Json.array(service.snapshot,"messages"));for(int i=0;i<operations.length();i++){JSONObject row=operations.optJSONObject(i);if(row!=null)version.append(service.messageChecking(scope,row.optString("operation_id"))).append(lineLabel(service.messageLine(row.optString("line_id"))));}
         boolean notifications=getSystemService(NotificationManager.class).areNotificationsEnabled();version.append(notifications).append(privateState.optJSONObject("last_sms"));if(version.toString().equals(messageOperationView))return;messageOperationView=version.toString();messageOperations.removeAllViews();int other=privateState.optJSONObject("last_sms")==null?0:1;
         for(int i=operations.length()-1;i>=0;i--){JSONObject record=operations.optJSONObject(i);if(record==null)continue;if(!scope.equals(record.optString("scope"))){if(!MessageJournal.resolved(record))other++;continue;}
+            if(!composingMessage&&MessageJournal.resolved(record))continue;
             String state=record.optString("state"),label=UiLabels.messageState(this,state);
             String operation=record.optString("operation_id"),name=record.optString("line_name");if(name.isEmpty())name=record.optString("line_id");
             String from=record.optString("line_number"),body=record.optString("body"),card=record.optString("card_id");
@@ -487,8 +555,8 @@ public final class MainActivity extends Activity {
     private View messageRow(JSONObject event,AgentService owner,long account){
         LinearLayout row=new LinearLayout(this);row.setOrientation(LinearLayout.VERTICAL);row.setPadding(dp(8),dp(10),dp(8),dp(10));
         String peer=UiLabels.messagePeer(event),mode=event.optString("transport"),lineID=event.optString("line_id");
-        JSONObject line=owner.messageLine(lineID);String card=event.optString("card_id");
-        TextView state=text(UiLabels.messageEvent(this,event)+" · "+UiLabels.transport(this,mode)+" · "+event.optString("received_at",event.optString("observed_at")),12);state.setTextColor(UiLabels.messageColor(event));row.addView(state);
+        JSONObject line=owner.messageLine(lineID);String card=MessageIdentity.historicalCard(event,line);
+        TextView state=text(UiLabels.messageEvent(this,event)+" · "+UiLabels.transport(this,mode)+" · "+UiLabels.messageTime(this,event),12);state.setTextColor(UiLabels.messageColor(event));row.addView(state);
         TextView from=text(getString(event.optString("kind").equals("received")?R.string.message_from:R.string.message_to,peer.isEmpty()?getString(R.string.number_unavailable):peer),15);from.setTextIsSelectable(true);row.addView(from);
         String identity=card.isEmpty()?getString(R.string.message_historical_card_unknown):getString(R.string.message_historical_card,card);
         TextView destination=text(identity+"\n"+getString(R.string.message_current_line,lineLabel(line)),13);destination.setId(R.id.message_history_identity);destination.setTextIsSelectable(true);row.addView(destination);
@@ -500,13 +568,12 @@ public final class MainActivity extends Activity {
                 if(service!=owner||owner.accountEpoch()!=account){error(getString(R.string.history_account_changed));return;}
                 if(!mode.equals("vowifi")&&!mode.equals("cellular")){error(getString(R.string.message_reply_unavailable));return;}
                 final String target;try{target=CallPlan.dialTarget(peer);}catch(Exception e){error(getString(R.string.message_reply_unavailable));return;}
-                if(card.isEmpty())chooseReplyLine(owner,account,mode,target);
-                else prepareReply(owner,account,lineID,card,mode,target);
+                chooseReplyLine(owner,account,mode,target,event);
             });reply.setId(R.id.message_reply);
         }
         return row;
     }
-    private void chooseReplyLine(AgentService owner,long account,String mode,String target){
+    private void chooseReplyLine(AgentService owner,long account,String mode,String target,JSONObject event){
         owner.directory("","",result->{
             if(isDestroyed()||service!=owner||owner.accountEpoch()!=account)return;
             ArrayList<JSONObject> choices=new ArrayList<>();ArrayList<String> labels=new ArrayList<>();
@@ -518,14 +585,26 @@ public final class MainActivity extends Activity {
                 }
             }
             if(choices.isEmpty()){error(getString(R.string.message_reply_unavailable));return;}
-            // An item click is required: neither the first item nor the old composer is selected.
-            new AlertDialog.Builder(this).setTitle(R.string.message_reply_choose)
-                .setItems(labels.toArray(new String[0]),(dialog,index)->{
-                    JSONObject selected=choices.get(index);
-                    String id=selected.optString("id"),card=selected.optString("card_id");
-                    confirm(getString(R.string.message_reply_confirm,lineLabel(selected),target),
-                        ()->prepareReply(owner,account,id,card,mode,target));
-                }).setNegativeButton(R.string.cancel,null).show();
+            int[] selected={-1};int matches=0;
+            for(int i=0;i<choices.size();i++){
+                JSONObject choice=choices.get(i);
+                String historical=MessageIdentity.historicalCard(event,choice);
+                if(event.optString("line_id").equals(choice.optString("id"))&&!historical.isEmpty()&&historical.equals(choice.optString("card_id"))){selected[0]=i;matches++;}
+            }
+            if(matches!=1)selected[0]=-1;
+            LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(dp(16),dp(8),dp(16),dp(8));
+            TextView identity=text(getString(selected[0]<0?R.string.reply_current_card_warning:R.string.reply_original_card_known),13);identity.setTextColor(selected[0]<0?UiLabels.WARNING:UiLabels.NEUTRAL);box.addView(identity);
+            ListView list=new ListView(this);list.setId(R.id.reply_line_list);list.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+            list.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_list_item_single_choice,labels));if(selected[0]>=0)list.setItemChecked(selected[0],true);
+            box.addView(list,new LinearLayout.LayoutParams(-1,Math.min(dp(280),getResources().getDisplayMetrics().heightPixels/2)));
+            AlertDialog dialog=new AlertDialog.Builder(this).setTitle(R.string.message_reply_choose).setView(box)
+                .setPositiveButton(R.string.confirm,(d,which)->{
+                    if(selected[0]<0)return;JSONObject choice=choices.get(selected[0]);
+                    String id=choice.optString("id"),card=choice.optString("card_id");
+                    confirm(getString(R.string.message_reply_confirm,lineLabel(choice),target),()->prepareReply(owner,account,id,card,mode,target));
+                }).setNegativeButton(R.string.cancel,null).create();
+            list.setOnItemClickListener((parent,view,index,id)->{selected[0]=index;dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);});
+            dialog.show();dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(selected[0]>=0);
         },this::error);
     }
     private void prepareReply(AgentService owner,long account,String id,String card,String mode,String target){
@@ -537,7 +616,7 @@ public final class MainActivity extends Activity {
                 if(isDestroyed()||service!=owner||owner.accountEpoch()!=account)return;
                 closeHistory();number=message=null;lineChoice=null;routeChoice=null;
                 pinnedLine=fresh;selectedLine=id;selectedCard=card;selectedRoute=mode.equals("cellular")?1:0;
-                draftNumber=target;draftMessage="";tab=2;render();contentScroll.scrollTo(0,0);message.requestFocus();
+                draftNumber=target;draftMessage="";tab=2;composingMessage=true;render();contentScroll.scrollTo(0,0);message.requestFocus();
             },this::error);
         };
         captureDraft();if(!draftMessage.trim().isEmpty())confirm(getString(R.string.message_reply_replace),prepare);else prepare.run();
@@ -549,10 +628,10 @@ public final class MainActivity extends Activity {
         for(int i=0;i<messages.length();i++){JSONObject event=messages.optJSONObject(i);if(event!=null)messageList.addView(messageRow(event,service,service.accountEpoch()));}
     }
     private void captureDraft(){if(number!=null)draftNumber=number.getText().toString();if(message!=null)draftMessage=message.getText().toString();if(routeChoice!=null)selectedRoute=routeChoice.getCheckedButtonId()==R.id.route_cellular?1:0;if(lineChoice!=null){JSONObject row=selectionSnapshot.optJSONObject(lineChoice.getSelectedItemPosition());if(row!=null){selectedLine=row.optString("id");selectedCard=row.optString("card_id");}}}
-    @Override protected void onSaveInstanceState(Bundle state){captureDraft();state.putInt("tab",tab);state.putString("incoming",focusIncoming);state.putString("number",draftNumber);state.putString("message",draftMessage);state.putString("line",selectedLine);state.putString("card",selectedCard);state.putInt("route",selectedRoute);super.onSaveInstanceState(state);}
+    @Override protected void onSaveInstanceState(Bundle state){captureDraft();state.putBoolean("compose_message",composingMessage);state.putInt("tab",tab);state.putString("incoming",focusIncoming);state.putString("number",draftNumber);state.putString("message",draftMessage);state.putString("line",selectedLine);state.putString("card",selectedCard);state.putInt("route",selectedRoute);super.onSaveInstanceState(state);}
     private void updateCapability(){
         if(capability==null||lineChoice==null)return;JSONObject line=selectionSnapshot.optJSONObject(lineChoice.getSelectedItemPosition());
-        boolean connected=service!=null&&service.online(),ready=line!=null&&line.optBoolean("enabled")&&Json.object(Json.object(line,"operations"),route()+(tab==2?"_sms":"_call")).optBoolean("ready");
+        boolean connected=service!=null&&service.online(),ready=line!=null&&UiLabels.routeState(line,route(),tab==2,connected)==R.string.route_ready;
         capability.setText(!connected?R.string.connect_first:ready?(tab==2?R.string.transport_sms_ready:R.string.transport_call_ready):R.string.transport_unavailable);
         capability.setTextColor(!connected?UiLabels.WARNING:ready?UiLabels.OK:UiLabels.ERROR);
         JSONObject readiness=Json.object(Json.object(line,"operations"),route()+(tab==2?"_sms":"_call"));
@@ -569,7 +648,8 @@ public final class MainActivity extends Activity {
         if(lineChoice==null)return;JSONObject prior=selectionSnapshot.optJSONObject(lineChoice.getSelectedItemPosition());
         String id=prior==null?selectedLine:prior.optString("id"),card=prior==null?selectedCard:prior.optString("card_id");
         JSONArray list=lines(),next=new JSONArray();ArrayList<String> labels=new ArrayList<>();int selected=-1;
-        for(int i=0;i<list.length();i++){JSONObject l=list.optJSONObject(i);if(l==null)continue;if(l.optString("id").equals(id)&&l.optString("card_id").equals(card))selected=next.length();next.put(l);labels.add(lineLabel(l));}
+        boolean online=service!=null&&service.online();
+        for(int i=0;i<list.length();i++){JSONObject l=list.optJSONObject(i);if(l==null)continue;if(l.optString("id").equals(id)&&l.optString("card_id").equals(card))selected=next.length();next.put(l);labels.add(lineLabel(l)+"\n"+getString(UiLabels.routeState(l,"vowifi",tab==2,online))+" / "+getString(UiLabels.routeState(l,"cellular",tab==2,online)));}
         if(!id.isEmpty()&&selected<0){
             JSONObject retained=pinnedLine!=null&&id.equals(pinnedLine.optString("id"))&&card.equals(pinnedLine.optString("card_id"))?pinnedLine:prior;
             boolean truncated=service!=null&&service.snapshot.optBoolean("incomplete");
@@ -577,7 +657,7 @@ public final class MainActivity extends Activity {
             else{selected=next.length();next.put(Json.obj("id",id,"card_id",card,"enabled",false,"name",getString(R.string.line_unavailable)));labels.add(getString(R.string.line_unavailable));}
         }
         if(labels.isEmpty())labels.add(getString(R.string.no_lines));selectionSnapshot=next;
-        if(!renderedLineLabels.equals(labels)||lineChoice.getAdapter()==null){renderedLineLabels.clear();renderedLineLabels.addAll(labels);lineChoice.setAdapter(lineAdapter(labels));}
+        if(!renderedLineLabels.equals(labels)||lineChoice.getAdapter()==null){renderedLineLabels.clear();renderedLineLabels.addAll(labels);lineChoice.setAdapter(lineAdapter(labels,next,online,tab==2));}
         int position=Math.max(0,selected);if(lineChoice.getSelectedItemPosition()!=position)lineChoice.setSelection(position);
         updateDirectoryStatus();
         updateCapability();
@@ -591,12 +671,11 @@ public final class MainActivity extends Activity {
         if(message==0){directoryStatus.setVisibility(View.GONE);return;}
         directoryStatus.setText(message);directoryStatus.setTextColor(message==R.string.core_mobile_endpoint_required?0xffb3261e:message==R.string.directory_offline?0xff9b5b00:0xff5b6875);directoryStatus.setVisibility(View.VISIBLE);
     }
-    private ArrayAdapter<String> lineAdapter(ArrayList<String> labels){
+    private ArrayAdapter<String> lineAdapter(ArrayList<String> labels,JSONArray rows,boolean online,boolean sms){
         return new ArrayAdapter<String>(this,android.R.layout.simple_spinner_item,android.R.id.text1,new ArrayList<>(labels)){
-            {setDropDownViewResource(R.layout.line_dropdown_item);}
-            private View wrap(View view){TextView text=view.findViewById(android.R.id.text1);text.setSingleLine(false);text.setMaxLines(Integer.MAX_VALUE);text.setEllipsize(null);text.setTextSize(14);text.setMinHeight(dp(48));text.setPadding(dp(8),dp(6),dp(8),dp(6));ViewGroup.LayoutParams size=text.getLayoutParams();if(size!=null){size.height=ViewGroup.LayoutParams.WRAP_CONTENT;text.setLayoutParams(size);}return view;}
-            @Override public View getView(int position,View convert,ViewGroup parent){return wrap(super.getView(position,convert,parent));}
-            @Override public View getDropDownView(int position,View convert,ViewGroup parent){return wrap(super.getDropDownView(position,convert,parent));}
+            private View row(int position,View reuse){JSONObject line=rows.optJSONObject(position);if(line==null)return text(getString(R.string.no_lines),14);LineStatusView view=reuse instanceof LineStatusView?(LineStatusView)reuse:new LineStatusView(MainActivity.this);view.bind(line,online,sms);return view;}
+            @Override public View getView(int position,View convert,ViewGroup parent){return row(position,convert);}
+            @Override public View getDropDownView(int position,View convert,ViewGroup parent){return row(position,convert);}
         };
     }
     private void styleAudioToggle(MaterialButton button,int icon){
@@ -617,7 +696,7 @@ public final class MainActivity extends Activity {
         ArrayList<JSONObject> found=new ArrayList<>();ArrayList<String> labels=new ArrayList<>();String[] after={""},searchText={""};long[] version={0};
         java.util.function.Consumer<Boolean> load=next->{long epoch=++version[0];if(!next){found.clear();labels.clear();after[0]="";searchText[0]=query.getText().toString();}
             search.setEnabled(false);more.setEnabled(false);AgentService owner=service;if(owner==null)return;
-            owner.directory(searchText[0],after[0],page->{if(!dialog.isShowing()||version[0]!=epoch)return;JSONArray rows=Json.array(page,"lines");for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null){found.add(row);labels.add(lineLabel(row));}}after[0]=page.optString("next_after");list.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_list_item_1,labels));search.setEnabled(true);more.setEnabled(!after[0].isEmpty());result.setText(getString(R.string.line_count,found.size()));},failure->{if(!dialog.isShowing()||version[0]!=epoch)return;search.setEnabled(true);result.setText(failure);});};
+            owner.directory(searchText[0],after[0],page->{if(!dialog.isShowing()||version[0]!=epoch)return;JSONArray rows=Json.array(page,"lines");for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null){found.add(row);labels.add(lineLabel(row));}}after[0]=page.optString("next_after");list.setAdapter(lineAdapter(labels,new JSONArray(found),owner.online(),tab==2));search.setEnabled(true);more.setEnabled(!after[0].isEmpty());result.setText(getString(R.string.line_count,found.size()));},failure->{if(!dialog.isShowing()||version[0]!=epoch)return;search.setEnabled(true);result.setText(failure);});};
         search.setOnClickListener(v->load.accept(false));more.setOnClickListener(v->load.accept(true));
         list.setOnItemClickListener((parent,view,index,rowID)->{JSONObject chosen=found.get(index);captureDraft();pinnedLine=chosen;selectedLine=chosen.optString("id");selectedCard=chosen.optString("card_id");lineChoice=null;dialog.dismiss();render();});
         dialog.show();load.accept(false);
@@ -723,10 +802,12 @@ public final class MainActivity extends Activity {
         button(R.string.logout,()->confirm(getString(R.string.logout_confirm),()->{cancelLogin();if(service!=null)service.logout(this::reloadStorage);})).setId(R.id.logout);button(R.string.help,()->error(getString(R.string.help_text)));}
     private void updateState(){if(status==null)return;if(!storageLoaded||!storageError.isEmpty())return;if(activeHistoryDialog!=null&&(service==null||service.accountEpoch()!=historyAccountEpoch))closeHistory();status.setText(service==null?getString(R.string.local_service_connecting):service.connection.render(this));notice.setText(service==null?"":service.notice.render(this));notice.setVisibility(notice.length()==0?View.GONE:View.VISIBLE);status.setTextColor(service==null?UiLabels.NEUTRAL:UiLabels.statusColor(service.connection));notice.setTextColor(service==null?UiLabels.NEUTRAL:UiLabels.statusColor(service.notice));updateDirectoryStatus();updateCapability();updateReaderPage();updateReaderBadge();updateHomePage();updateMessageOperations();if(service==null){callSurfaceKey="";callBox.removeAllViews();return;}
         int availabilityLabel=service.available()?R.string.pause:R.string.resume;
-        for(int id:new int[]{R.id.availability_toggle,R.id.home_availability_toggle}){
+        for(int id:new int[]{R.id.availability_toggle}){
             Button availability=findViewById(id);if(availability!=null){availability.setText(availabilityLabel);availability.setEnabled(!service.intentSaving());}
         }
-        if(lastData!=service.snapshot){lastData=service.snapshot;if(tab==0){updateHomePage();}else{updateSelection();updateMessages();}}
+        updateSelection();
+        if(lastData!=service.snapshot){lastData=service.snapshot;if(tab==0){updateHomePage();}else{updateMessages();}}
+        loadInbox(false);
         RemoteCall current=service.call;
         updateToneDialog();
         boolean hasAudio=current!=null&&current.audio!=null&&!current.audio.closed;

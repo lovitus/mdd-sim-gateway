@@ -29,6 +29,164 @@ authorized handset. This document is scope, not evidence that those checks passe
 
 ## Current cursor
 
+### September 29 Android communication UX (qualified; PR close-out)
+
+New owner request after the reviewed rollout: improve Home status/actions/colors,
+compact Calls device/SIM selection with separate VoWiFi and cellular indicators,
+complete Messages navigation and default reply selection. Android is also a
+standalone communication client: several phones may sign in without local readers.
+Reader sharing remains optional and independent of server-line communication.
+This is a new client-focused batch, not a reversal of PR #12/#13 acceptance.
+
+Baseline: `cc07e6d`, installed v91. Read-only production history contains 127
+events across 18 conversations (120 received, six submitted, one delivery).
+The mobile snapshot contains only the newest 50; 77 retained events are outside
+that window. All 127 are reachable with existing conversation/history APIs, and
+none carries historical `card_id`. Raw evidence remains private; receipt SHA-256
+`f64fd6e4111b629bc718293b33f7b96738daec97e9d867a92d19b961159b2b0b`.
+This proves retained history beyond the preview, not that every carrier message
+ever sent reached Core. No SMS/call/replay or configuration change was performed.
+
+Plan and failure checklist:
+- Home prioritizes connection and server communications, uses a persistent-intent
+  switch, actual operation-readiness counts, compact optional reader status and
+  recent events. Enabled configuration is not green business health. No reader or
+  unsupported OMAPI is not an error for a communication-only device.
+- Calls and Messages reuse one compact line-row component. VoWiFi and cellular
+  have separate colored dots plus text based on each page's operation readiness.
+  Missing/stale/offline facts must not stay green; selection must retain exact
+  line/card identity and never silently switch a user-selected transport.
+- Messages opens on all retained conversations, not a send form hiding a limited
+  event preview. Existing scoped, cursor-based history loads older pages on demand.
+  Show peer, body preview, SIM/line context, transport and localized time; preserve
+  unknown submission recovery and explicit send confirmation. Old account callbacks
+  must not populate the new account, and live snapshots must not discard old pages.
+- Reply preselects a unique exact original line/card match, from an explicit
+  historical card or Core's existing cellular event hash of card ID and message
+  fingerprint. Live readback verifies this existing contract for 110 cellular
+  received records; it does not apply to VoWiFi or legacy fingerprints. Unknown
+  historical identity still requires an active selection of a current SIM,
+  accurately labeled, and revalidation after all dialogs. Changed/removed or
+  ambiguous identity cannot fall back to the first list item.
+  Cancellation preserves the draft; reply prepares a draft and never sends.
+- Multi-client calls retain the existing Core/Provider/browser lease arbiter.
+  Exact start/answer rejection codes preserve a separate not-admitted fact even
+  when own-session cleanup fails. A shared incoming call ID is not ownership:
+  no `/end` before an exact accepted/active call-and-operation receipt. Unknown
+  answers stay unknown; late acceptance after cancellation cannot reopen audio.
+  Only this client's media lease is cleaned. No new server call owner or automatic
+  paid retry. No-reader communication, rejected/unknown admission and a normal
+  accepted incoming-call control are scoped non-paid hosted checks.
+
+Reuse the existing Material 1.14.0 Views dependency (current stable release),
+native Material switches, buttons and list rows; no Compose/framework migration.
+References: [Material release](https://github.com/material-components/material-components-android/releases/tag/1.14.0),
+[switch component](https://github.com/material-components/material-components-android/blob/master/docs/components/Switch.md),
+[Android accessibility](https://developer.android.com/guide/topics/ui/accessibility/views/apps-views).
+Keep 48dp touch targets and status text alongside color. Portrait is the target;
+landscape/endurance remain accepted deferrals. Reuse the original ChatGPT reviewer.
+
+First candidate `75d69d9` passed build/lint/unit/Core/WebUI jobs in hosted
+[36533452043](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36533452043).
+On both API 28 and 35 the unchanged baseline main sources executed four precise
+behavioral failures, while the normal accepted-call control passed. The candidate
+passed all five new native checks; the full suite had 22 passes and one failure
+on each API. That failure is the existing unauthenticated-tabs test expecting a
+write form immediately on Messages, now deliberately the conversation inbox.
+Its navigation is updated to enter Write; password retention, tab identity and
+security assertions remain unchanged. The run is failed, not an accepted release.
+
+The original reviewer confirmed the principal UI/identity/ownership implementation
+and found UX-R1: a shared failed/ended history row could override live Provider
+call ownership. The client now preserves active/pending observation and in-flight
+answers, and does not treat failed shared incoming history as terminal proof.
+UX-R2 strengthens the fixture to account for every mutation, including unexpected
+SMS/start/reject requests, and adds the late exact answer/cancellation interleaving.
+Both follow-up counterexamples use the existing TLS fixture; temporary verification
+now runs only these two new baseline cases, retaining the original four receipts.
+At that checkpoint the follow-up was not built and no new APK was installed;
+the subsequent qualification and native readback below supersede that status.
+
+The reviewer approved UX-R1/UX-R2 code at `e50f939`, pending execution. Follow-up
+[36535217963](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36535217963)
+built successfully but did not qualify: the late-receipt baseline test failed,
+then its resource cleanup interrupted a still-blocked HTTP callback; throwing an
+AssertionError from that background callback crashed instrumentation before the
+second baseline method ran. This is not valid red evidence and the fixed suite
+did not execute. Release the test barrier before Service/fixture teardown and
+report barrier errors on the test thread; product logic and assertions are not
+changed to make this pass. Both failed runs and their artifacts remain available.
+
+Qualification completed on candidate
+`f8a6a8ca09cc1d3993a79165d6431f7b815bccab`, tree
+`59e1617286f4ff08b81d40a80fddaccebd30a019`, in hosted
+[36536473242](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36536473242).
+API 28 and 35 each executed both additional baseline failures with the exact
+incorrect `/end` count and premature null-owner assertions, then passed all 25
+native tests with zero failures/errors/skips. The 21 JVM tests, build/lint,
+scoped Core/Agent race/contracts and WebUI checks passed. Lint reported zero
+errors and 45 warnings, not zero warnings. This Android workflow does not
+represent a new full-repository Go qualification. API 35 artifact `11019212075`
+digest `7e664d3aace27bb056f2c1e8cb0ebff0e8d9b505602649c2107464158e1ea655`;
+API 28 artifact `11018659090` digest
+`71801dd50c1c5c80db8c5af29a934ae841e2583a42ca2a90cc524f8a4ce422e5`.
+The exact late-receipt test no longer crashes during teardown. This is synthetic
+gateway/native-client behavior, not a new carrier or physical multi-phone test.
+
+Signed v95 APK SHA-256:
+`e1bcfaddcff29a7a6dd4645a0dd7c9f5cbf3e2a58da88bf65839145ac62ff40f`.
+Its certificate remains the existing stable preview identity. The old installed
+v91 APK was retained and its hash matches the earlier receipt. Final delivery
+removes the temporary workflow input/call/script, preserving permanent gates,
+product/test source and all hosted receipts. The original reviewer independently
+downloaded and hashed the artifacts, parsed baseline/candidate XML and formally
+closed UX-R1/UX-R2 and automatic acceptance on September 29. No new product or
+test-matrix expansion was requested.
+
+The authorized API 35 phone was updated with `install -r`, retaining the package
+UID, login, certificate pin, availability and reader-sharing intent. All five
+native pages were opened and inspected. Home showed actual operation-ready counts;
+Calls showed separate colored VoWiFi/cellular states and exact line context.
+Messages displayed all 18 retained conversations. A real 71-event conversation
+loaded its first 50 and then all 71 through Older messages, including older records.
+Reply to an existing received cellular event preselected the proven original SIM;
+the explicit SIM/recipient confirmations prepared the correct route and recipient
+with an empty body, without activating Send once. Readers retained the identified
+USB card and distinguished unavailable OMAPI. Settings displayed v95/source
+`f8a6a8ca09cc`. The installed APK was pulled back and its hash exactly matched the
+qualified artifact above. The test-only recipient was cleared and prior selection
+restored. There were no new calls, SMS sends, notification replays, permission
+resets, server changes or sharing/network intent changes.
+
+Private field-summary receipt SHA-256:
+`e36be8b76741b559543781919ff1b661c42b9be0f6aac1ea7b4fa1c59aea298b`.
+Raw screenshots, UI trees and message content remain outside Git. This is native
+navigation/history/reply acceptance, not a new carrier or two-physical-client
+contention test. Existing long-session and physical-network deferrals remain.
+Non-blocking visual follow-ups are retained in the existing postponed ledger:
+scroll the preselected reply row into view in long lists, and distinguish Home's
+partial-observation note from the ready-count color. The correct selection and
+warning text are present; these do not expand this qualified delivery.
+
+PR [#15](https://github.com/lovitus/mdd-sim-gateway/pull/15) contains this single
+complete batch. Integrated Android workflow
+[36539491925](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36539491925)
+and full Go workflow
+[36539492495](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36539492495)
+passed at head `d00575ed30c5208782159cba509bc86fb5e2e92a`. Their PR merge source
+`050760e345336f33e7851c532cc2a7006edd54a0` has the same tree
+`5f51e89d31ae09c1a35423931905b01407f74621`. Both final native XML reports again
+contain 25 tests and zero failures/errors/skips. The original reviewer approved
+normal merge subject to the existing gates and branch protection, finding only
+a stale Android README status/link. That text is now synchronized; README changes
+do not change app sources, tests, build inputs or the installed APK.
+
+Unique next step: complete the authorized normal PR merge, without bypassing
+branch protection. PR #15 is the authoritative merge receipt; do not infer merge
+from this pre-merge record. The final record-only head preserves the qualified
+runtime/test source and is not relabeled as either executed CI source or v95's
+build source. No new APK, carrier test or server deployment belongs to close-out.
+
 ### September 29 reviewed merge and rollout
 
 The owner authorized merge, deployment and updating the newly specified handset,

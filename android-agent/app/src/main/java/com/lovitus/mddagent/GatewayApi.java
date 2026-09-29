@@ -97,11 +97,12 @@ final class GatewayApi {
     }
     static final class Failure extends IOException {
         final int status;
+        final String code,layer;
         Failure(int status,JSONObject error){
             super("HTTP "+status+": "+error.optString("code","Request rejected")+
                 (error.optString("layer").isEmpty()?"":" ["+error.optString("layer")+"]")+
                 (error.optString("detail").isEmpty()?"":" · "+error.optString("detail")));
-            this.status=status;
+            this.status=status;this.code=error.optString("code");this.layer=error.optString("layer");
         }
     }
 }

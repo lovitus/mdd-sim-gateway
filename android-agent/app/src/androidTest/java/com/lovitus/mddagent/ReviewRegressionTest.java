@@ -94,15 +94,16 @@ public class ReviewRegressionTest {
             store.save(Json.obj("server",gateway.url("/").toString().replaceAll("/$",""),"pin",Json.sha(certificate.certificate().getEncoded()),"token","fixture-session","csrf","fixture-csrf","available",true));
             try(ActivityScenario<MainActivity> scene=ActivityScenario.launch(MainActivity.class)){
                 assertTrue(linked.await(10,TimeUnit.SECONDS));
-                click(scene,R.id.tab_messages);await(scene,a->a.findViewById(R.id.message_reply)!=null);
+                click(scene,R.id.tab_messages);scene.onActivity(a->{int id=context.getResources().getIdentifier("message_compose","id",context.getPackageName());if(id!=0&&a.findViewById(id)!=null)a.findViewById(id).performClick();});await(scene,a->a.findViewById(R.id.message_reply)!=null);
                 scene.onActivity(a->{TextView identity=a.findViewById(R.id.message_history_identity);assertNotNull("N2: historical identity must be distinguished from the current SIM",identity);assertTrue(identity.getText().toString().contains(context.getString(R.string.message_historical_card_unknown)));((EditText)a.findViewById(R.id.message_body)).setText("keep my draft");});
                 click(scene,R.id.message_reply);waitText(context.getString(R.string.message_reply_choose));clickText("Current fixture SIM");
+                confirmSelectionIfPresent();
                 // Rebind while the user is reading the first confirmation.
                 card.set("card-C");dialogButton(true);dialogButton(true);
                 waitText(context.getString(R.string.message_reply_unavailable));dialogButton(true);
                 scene.onActivity(a->assertEquals("keep my draft",((EditText)a.findViewById(R.id.message_body)).getText().toString()));
                 assertEquals(0,posts.get());
-                click(scene,R.id.message_reply);waitText(context.getString(R.string.message_reply_choose));clickText("Current fixture SIM");dialogButton(true);dialogButton(true);
+                click(scene,R.id.message_reply);waitText(context.getString(R.string.message_reply_choose));clickText("Current fixture SIM");confirmSelectionIfPresent();dialogButton(true);dialogButton(true);
                 await(scene,a->((EditText)a.findViewById(R.id.message_body)).getText().length()==0);
                 scene.onActivity(a->assertEquals("+15550100999",((EditText)a.findViewById(R.id.dial_number)).getText().toString()));
                 assertEquals("Reply only prepares a new intent; never sends",0,posts.get());
@@ -255,4 +256,8 @@ public class ReviewRegressionTest {
     private static void dialogButton(boolean positive)throws Exception{assertTrue(waitNode("android:id/button"+(positive?"1":"2"),true).performAction(AccessibilityNodeInfo.ACTION_CLICK));automation().waitForIdle(200,5000);}
     private static void clickText(String value)throws Exception{AccessibilityNodeInfo node=waitNode(value,false);while(node!=null&&!node.isClickable())node=node.getParent();assertNotNull(node);assertTrue(node.performAction(AccessibilityNodeInfo.ACTION_CLICK));automation().waitForIdle(200,5000);}
     private static void waitText(String value)throws Exception{assertNotNull(waitNode(value,false));}
+    private void confirmSelectionIfPresent()throws Exception{
+        int id=context.getResources().getIdentifier("reply_line_list","id",context.getPackageName());
+        if(id!=0)dialogButton(true);
+    }
 }
