@@ -27,6 +27,12 @@ Acceptance scope / remaining action: The original separate-report/durable-identi
 
 ## Accepted, deferred, excluded and separately prioritized work
 
+### BRANCH_RECONCILIATION
+
+**State: ongoing; release relevance: ongoing.** Owner-authorized September 29 branch reconciliation starts from main fa349d1. All 30 non-main remote heads have immutable archive tags; four dirty workspaces have verified private backups. The integration candidate reuses PR #14's four desktop Agent runtime files unchanged and selectively ports PR #10's encoded-recording wait correction. No old Android/Core architecture or production deployment is included.
+
+Acceptance scope / remaining action: Current exact-head inventory, selective-port map, exclusions and cleanup cursor are in docs/branches.md. Full existing hosted validation and the original reviewer's final disposition remain pending. Do not mistake this candidate for an executed merge or branch deletion. Existing Android, Provider, hardware and deferred-work acceptance remains intact.
+
 ### ANDROID_DIAL_PREFIX
 
 **State: completed; release relevance: current.** The owner reported a misleading standalone plus beside the Calls input. Remove that apparent fixed prefix and use the zero key's explicit long press to enter plus into the real number. The owner reaffirmed the existing international-prefix validation; do not infer a country or automatically add a prefix.
