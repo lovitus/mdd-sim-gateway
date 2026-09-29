@@ -41,6 +41,7 @@ type Client struct {
 	Events                 ModemEventSource
 	OperationTimeout       time.Duration
 	Connected              func()
+	Disconnected           func()
 	HealthReported         func()
 	Health                 func() TopologySnapshot
 	HealthEvery            time.Duration
@@ -208,6 +209,12 @@ func (client Client) Run(ctx context.Context) (result error) {
 		socket.CloseNow()
 		// Keep ownership until even non-cancellable native work has returned.
 		workers.Wait()
+	}()
+	// Publish the loss before waiting for in-flight hardware operations to drain.
+	defer func() {
+		if client.Disconnected != nil {
+			client.Disconnected()
+		}
 	}()
 	for {
 		message, err := readEnvelope(ctx, socket)

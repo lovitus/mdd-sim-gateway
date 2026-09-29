@@ -15,7 +15,10 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawcapture"
 )
 
-const minimumControlTokenBytes = 32
+const (
+	minimumControlTokenBytes = 32
+	coreConnectionHeader     = "X-MDD-Agent-Core-Connection"
+)
 
 type API struct {
 	controller       *Controller
@@ -145,25 +148,29 @@ func (api *API) health(response http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (api *API) status(response http.ResponseWriter, _ *http.Request) {
-	writeAPIJSON(response, http.StatusOK, api.controller.Status())
+func (api *API) status(response http.ResponseWriter, request *http.Request) {
+	writeTransition(response, request, api.controller.Status(), nil)
 }
 
 func (api *API) start(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), api.operationTimeout)
 	defer cancel()
 	snapshot, err := api.controller.Start(ctx)
-	writeTransition(response, snapshot, err)
+	writeTransition(response, request, snapshot, err)
 }
 
 func (api *API) stop(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), api.operationTimeout)
 	defer cancel()
 	snapshot, err := api.controller.Stop(ctx)
-	writeTransition(response, snapshot, err)
+	writeTransition(response, request, snapshot, err)
 }
 
-func writeTransition(response http.ResponseWriter, snapshot Snapshot, err error) {
+func writeTransition(response http.ResponseWriter, request *http.Request, snapshot Snapshot, err error) {
+	// Installed older clients strictly decode Snapshot, including transition results.
+	if request.Header.Get(coreConnectionHeader) != "1" {
+		snapshot.CoreConnection = nil
+	}
 	switch {
 	case err == nil:
 		writeAPIJSON(response, http.StatusOK, snapshot)

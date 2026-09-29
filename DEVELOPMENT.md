@@ -72,6 +72,34 @@ contract tests importing them. Literal worklet/dynamic imports are included; uns
 Use `node tools/repository-check.mjs --write` to regenerate TODO summaries after editing the acceptance ledger;
 CI checks the generated files, original-criterion preservation and evidence-path integrity.
 
+## Agent control-link status
+
+The owner's missing-connection-warning report is independent of Android and of
+the underlying transport fault. The Agent's authenticated local `/v1/status`
+includes `core_connection` from its existing WSS worker. `running` still means
+local hardware ownership; `connected` means Core acknowledged the Agent hello,
+not that any SIM, voice path or data session is healthy. CLI readers and the desktop
+GUI can distinguish connecting, connected, disconnected, retrying and stopped.
+Older services without this optional field display unknown, never connected.
+
+Failure boundaries: an offline Core must not stop local isolation; stopping the
+runtime must not leave a retained connected indication; a pending reconnect must
+show its existing retry deadline; status must not disclose tokens or raw transport
+errors. The GUI displays a persistent colored warning, not repeated modal dialogs.
+This change does not alter reconnect timing, TLS, Core endpoints, notifications,
+user switches or hardware policy. Original failure details remain in local logs.
+
+PR #14 source 38f1191 passed the full signed workflow 36088021096 and retained
+isolated macOS/Windows GUI connected, retrying and reconnected checks. This is
+not production rollout or repair of the underlying transport cause. The September
+29 integration retains those four runtime files byte-for-byte and repairs the
+local HTTP compatibility boundary: only requests with
+`X-MDD-Agent-Core-Connection: 1` receive the optional field. Older requests keep
+the strict pre-extension format on status, start/stop and transition errors.
+New clients request the field and tolerate its absence on older services without
+weakening strict decoding or authentication. The bounded mixed-version regression
+and exact hosted result are recorded separately in docs/branches.md.
+
 ## Source, artifact and running-instance identity
 
 Prefer verified immutable releases when a source rebuild is unnecessary. For a rebuild, record the reviewed commit,
