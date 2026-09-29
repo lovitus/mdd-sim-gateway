@@ -1415,6 +1415,26 @@
   ],
   "workstreams": [
     {
+      "id": "ANDROID_DIAL_PREFIX",
+      "state": "completed",
+      "releaseRelevance": "current",
+      "summary": "The owner reported a misleading standalone plus beside the Calls input. Remove that apparent fixed prefix and use the zero key's explicit long press to enter plus into the real number. The owner reaffirmed the existing international-prefix validation; do not infer a country or automatically add a prefix.",
+      "acceptance": "Hosted run36544499252 qualified 609c588: both API28/35 executed the precise old-MainActivity long-press failure and then passed all 25 native methods without failures/errors/skips. Existing build/lint/unit and scoped gates passed. Original reviewer approved the implementation/regression design. Signed v97 was installed with data/UID retained and installed-APK hash verified. Actual touchscreen long press/release entered exactly plus, short press added only zero, and the prior draft was restored; no paid action. Full-number/bare-number automation checks real EditText/CallPlan, not system clipboard or carrier dispatch. CallPlan, paid confirmation, service codes and server APIs remain unchanged. An incidental preinstall userspace_stack_failed followed by later readiness is retained in the cursor as unresolved observation, not a new outage diagnosis or recovery acceptance.",
+      "evidence": [
+        "docs/decisions/2026-09-24-android-client-scope.md",
+        "android-agent/app/src/main/java/com/lovitus/mddagent/MainActivity.java",
+        "android-agent/app/src/androidTest/java/com/lovitus/mddagent/NativeFlowTest.java"
+      ],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "The bounded input-ambiguity fix passed hosted pre-fix/fixed verification and non-paid native touch inspection while preserving explicit-prefix validation. Final record/temporary-entry cleanup does not relabel qualified CI or APK source.",
+        "evidence": [
+          "docs/decisions/2026-09-24-android-client-scope.md",
+          "android-agent/app/src/androidTest/java/com/lovitus/mddagent/NativeFlowTest.java"
+        ]
+      }
+    },
+    {
       "id": "ANDROID_COMMUNICATION_UX",
       "state": "completed",
       "releaseRelevance": "current",

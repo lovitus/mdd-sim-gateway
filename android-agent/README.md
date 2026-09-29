@@ -4,6 +4,12 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
+The subsequent dial-prefix correction is qualified at `609c588` in hosted
+`36544499252`; signed v97 is installed and actual zero-key long/short touches
+were checked without calling. The number row no longer has an apparent fixed
+`+`: users explicitly enter the prefix, including by long-pressing zero.
+Existing international, explicit `00` and service-code parsing is unchanged.
+
 The communication-UX batch is qualified: Home and separate call/SMS route status,
 complete retained conversations, provable original-card reply selection, and
 multiple Android communication clients without local readers. Sharing is optional.

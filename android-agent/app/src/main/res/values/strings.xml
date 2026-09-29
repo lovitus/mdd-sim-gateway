@@ -228,7 +228,7 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="transport_sms_ready">Selected message route is ready</string>
 <string name="transport_unavailable">Selected route is unavailable</string>
 <string name="connect_first">Connect to the gateway first</string>
-<string name="international_plus">International prefix</string>
+<string name="international_plus">0; long press for +</string>
 <string name="erase_digit">Delete a digit</string>
 <string name="system_dialer_unavailable">System dialer unavailable or number invalid</string>
 <string name="microphone_permission_needed">Allow microphone access, then try Call or Answer again.</string>

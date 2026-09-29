@@ -40,7 +40,8 @@ jobs:
           (github.ref == 'refs/heads/codex/android-v2' ||
           github.ref == 'refs/heads/codex/android-client-focused' ||
           github.ref == 'refs/heads/codex/android-production-adaptation' ||
-          github.ref == 'refs/heads/codex/android-status-messages-ux'))
+          github.ref == 'refs/heads/codex/android-status-messages-ux' ||
+          github.ref == 'refs/heads/codex/android-dial-prefix'))
         shell: bash
         env:
           PREVIEW_KEYSTORE: ${{ secrets.MDD_ANDROID_PREVIEW_KEYSTORE_BASE64 }}

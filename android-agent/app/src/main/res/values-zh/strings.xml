@@ -228,7 +228,7 @@
 <string name="transport_sms_ready">所选短信通道已就绪</string>
 <string name="transport_unavailable">所选通道暂不可用</string>
 <string name="connect_first">请先连接网关</string>
-<string name="international_plus">国际号码前缀</string>
+<string name="international_plus">0；长按输入 +</string>
 <string name="erase_digit">删除一个字符</string>
 <string name="system_dialer_unavailable">系统拨号器不可用或号码无效</string>
 <string name="microphone_permission_needed">请授权麦克风，再点击呼叫或接听。</string>

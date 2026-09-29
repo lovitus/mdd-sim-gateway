@@ -45,7 +45,19 @@ public class NativeFlowTest {
                 awaitView(scene,R.id.call_dial);
                 scene.onActivity(a->{View action=a.findViewById(R.id.call_dial);android.graphics.Rect visible=new android.graphics.Rect();assertTrue(action.getGlobalVisibleRect(visible));assertTrue("Primary call action must fit the first viewport",visible.height()>=action.getHeight());});
                 awaitCondition(scene,a->{Spinner choices=a.findViewById(R.id.line_selector);return choices!=null&&choices.getSelectedItem()!=null&&choices.getSelectedItem().toString().contains("Fixture line");});
-                scene.onActivity(a->{a.findViewById(R.id.dial_plus).performClick();EditText input=a.findViewById(R.id.dial_number);assertEquals("+",input.getText().toString());assertTrue("Landscape keyboard must not hide call controls",(input.getImeOptions()&android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI)!=0);});
+                scene.onActivity(a->{
+                    java.util.ArrayList<View> matches=new java.util.ArrayList<>();a.findViewById(android.R.id.content).findViewsWithText(matches,"0",View.FIND_VIEWS_WITH_TEXT);
+                    Button zero=null;for(View view:matches)if(view instanceof Button&&(((Button)view).getText().toString().equals("0")||((Button)view).getText().toString().equals("0 +")))zero=(Button)view;
+                    assertNotNull("The zero key must be present",zero);
+                    EditText input=a.findViewById(R.id.dial_number);
+                    assertTrue("Long press zero must enter the actual international prefix",zero.performLongClick());assertEquals("+",input.getText().toString());
+                    assertNull("No separate prefix may pretend to be part of the number",a.findViewById(R.id.dial_plus));
+                    zero.performClick();assertEquals("+0",input.getText().toString());
+                    input.setText("1001");input.setSelection(input.length());zero.performClick();assertEquals("10010",CallPlan.dialTarget(input.getText().toString()));
+                    input.setText("+15550100999");assertEquals(input.getText().toString(),CallPlan.dialTarget(input.getText().toString()));
+                    assertThrows(IllegalArgumentException.class,()->CallPlan.dialTarget("15550100999"));
+                    assertTrue("Phone input retains keyboard compatibility",(input.getImeOptions()&android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI)!=0);
+                });
                 capture(context,"calls");
                 scene.onActivity(a->{EditText input=a.findViewById(R.id.dial_number);input.setText("+15550100999");a.findViewById(R.id.tab_readers).performClick();});
                 awaitView(scene,R.id.reader_share);capture(context,"readers");
