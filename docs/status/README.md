@@ -72,6 +72,14 @@ Acceptance scope / remaining action: The original separate-report/durable-identi
 
 ## Accepted, deferred, excluded and separately prioritized work
 
+### ANDROID_DIAL_PREFIX
+
+**State: completed; release relevance: current.** The owner reported a misleading standalone plus beside the Calls input. Remove that apparent fixed prefix and use the zero key's explicit long press to enter plus into the real number. The owner reaffirmed the existing international-prefix validation; do not infer a country or automatically add a prefix.
+
+Acceptance scope / remaining action: Hosted run36544499252 qualified 609c588: both API28/35 executed the precise old-MainActivity long-press failure and then passed all 25 native methods without failures/errors/skips. Existing build/lint/unit and scoped gates passed. Original reviewer approved the implementation/regression design. Signed v97 was installed with data/UID retained and installed-APK hash verified. Actual touchscreen long press/release entered exactly plus, short press added only zero, and the prior draft was restored; no paid action. Full-number/bare-number automation checks real EditText/CallPlan, not system clipboard or carrier dispatch. CallPlan, paid confirmation, service codes and server APIs remain unchanged. An incidental preinstall userspace_stack_failed followed by later readiness is retained in the cursor as unresolved observation, not a new outage diagnosis or recovery acceptance.
+
+Resolution (implementation_evidence): The bounded input-ambiguity fix passed hosted pre-fix/fixed verification and non-paid native touch inspection while preserving explicit-prefix validation. Final record/temporary-entry cleanup does not relabel qualified CI or APK source.
+
 ### ANDROID_COMMUNICATION_UX
 
 **State: completed; release relevance: current.** Client-only Home/Calls/Messages usability and multi-client call ownership batch on cc07e6d is qualified at f8a6a8c. Existing history APIs expose all 18 conversations and retained records beyond the recent 50-event preview. Signed v95 is installed and its pulled-back hash matches the qualified artifact. All five native pages, real 71-event history pagination and proven original-card reply were inspected. Several Android devices may communicate without a local reader; sharing stays optional and existing server call arbiters are reused. No Core or Provider source changed.

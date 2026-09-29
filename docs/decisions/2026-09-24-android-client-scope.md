@@ -29,6 +29,56 @@ authorized handset. This document is scope, not evidence that those checks passe
 
 ## Current cursor
 
+### September 29 dial-prefix correction (qualified; delivery close-out)
+
+PR #15 is merged at `67aedcb`; signed v95 remains installed. The owner reported
+that the Calls row appears to have a fixed `+` prefix, although it is only an
+insertion button and absent from the actual number. Native screen inspection
+confirmed the misleading separate icon beside an already-prefixed value.
+
+Scope: remove only that misleading row button; the keypad's zero key shows a
+secondary `+` and long press inserts it into the real editable number. Reuse the
+existing native button/long-click behavior. Short press still inserts zero;
+selection replacement and draft retention follow the existing input widget.
+No country-code inference, automatic prefix, parser/short-code, call ownership,
+SMS, service or server change. Existing paid confirmations remain unchanged.
+The owner explicitly reaffirmed the existing international-prefix requirement:
+the user must enter the prefix; never infer a country or prepend it silently.
+Failure checklist: long press must insert `+` without an extra zero, short press
+must preserve service codes, complete international input must remain unchanged,
+bare full-length numbers must still be rejected, and the field must be the sole
+displayed number. Validate the existing native
+flow against pre-fix MainActivity and the candidate in one hosted run, then check
+the signed handset UI without calling. Keep the owner's current draft intact.
+Qualification: hosted workflow
+[36544499252](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36544499252)
+passed at `609c588d47a121bc3d714ab81d3c5419bacdafd3`, tree
+`066d1d88bd1a6c6d9918ff10b8cb14d903029ec5`. API 28 and 35 each executed the
+single old-MainActivity counterexample with the expected long-press assertion
+failure, then passed all 25 native methods with zero failures/errors/skips.
+This reverts only MainActivity, not the entire baseline application. The complete
+input and bare-number checks use EditText/CallPlan, not a system clipboard or a
+paid call dispatch. Existing workflow build/lint/unit and scoped Core/WebUI gates
+also passed. The original reviewer approved implementation and regression scope.
+
+Signed v97 APK SHA-256:
+`829e0356ab1fcda88a83a844fa3a2d718813dca910fb253fb7dfafc0687b0405`.
+The authorized phone retained its UID, login, pin and availability/sharing through
+`install -r`; pulling the installed APK back produced the same hash. Actual
+stationary touchscreen long press and release on zero left exactly `+`; a short
+tap then produced `+0`. The separate apparent prefix is absent. The original
+number and selected line/transport were restored and compared to preinstall UI.
+No Call/Send action, SIM operation or server change occurred. Private field-summary
+SHA-256: `69dccfc146cf1b14a458f39f9a4bdce4f8d5cfcab4da1bc91af404f6ef124a92`.
+Before installation the old app transiently showed `userspace_stack_failed`;
+later route readiness returned. That retained observation is not a diagnosed
+cause or carrier recovery claim, and must not be credited to this input fix.
+
+Unique next step: final record review and authorized normal PR merge. Close-out
+removes the temporary baseline entry only; qualified product/test source is
+unchanged. The PR merge receipt, not this pre-merge record, establishes delivery.
+No duplicate APK build, paid test or server deployment belongs to close-out.
+
 ### September 29 Android communication UX (qualified; PR close-out)
 
 New owner request after the reviewed rollout: improve Home status/actions/colors,

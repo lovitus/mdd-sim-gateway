@@ -357,7 +357,6 @@ public final class MainActivity extends Activity {
             return;
         }
         selectors();LinearLayout entry=new LinearLayout(this);entry.setGravity(Gravity.CENTER_VERTICAL);
-        ImageButton plus=tool(R.drawable.ic_mdd_add,getString(R.string.international_plus),()->{if(number!=null)number.getText().insert(Math.max(0,number.getSelectionStart()),"+");});plus.setId(R.id.dial_plus);entry.addView(plus,new LinearLayout.LayoutParams(dp(48),dp(48)));
         number=new EditText(this);number.setId(R.id.dial_number);number.setHint(R.string.number);number.setSingleLine(true);number.setInputType(InputType.TYPE_CLASS_PHONE);number.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI|android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN);number.setTextSize(18);number.setMinHeight(dp(52));number.setText(draftNumber);entry.addView(number,new LinearLayout.LayoutParams(0,-2,1));
         ImageButton erase=tool(R.drawable.ic_mdd_backspace,getString(R.string.erase_digit),()->{int end=number.getSelectionEnd();if(end>0)number.getText().delete(end-1,end);});erase.setId(R.id.dial_backspace);entry.addView(erase,new LinearLayout.LayoutParams(dp(48),dp(48)));content.addView(entry);
         dialPad();button(R.string.dial,()->{JSONObject l=selected();String mode=route(),target=number.getText().toString();confirm(getString(R.string.call_confirm)+"\n\n"+lineLabel(l)+" · "+UiLabels.transport(this,mode)+"\n"+target,()->startCall(l,mode,target,null));});
@@ -398,6 +397,12 @@ public final class MainActivity extends Activity {
         GridLayout grid=new GridLayout(this);grid.setColumnCount(3);
         for(String digit:new String[]{"1","2","3","4","5","6","7","8","9","*","0","#"}){
             MaterialButton key=command(digit);key.setTextSize(22);key.setContentDescription(digit);key.setStrokeWidth(0);key.setBackgroundTintList(ColorStateList.valueOf(0xffeaf0f3));
+            if(digit.equals("0")){
+                android.text.SpannableString label=new android.text.SpannableString("0 +");
+                label.setSpan(new android.text.style.RelativeSizeSpan(0.55f),2,3,android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                key.setText(label);key.setContentDescription(getString(R.string.international_plus));key.setTooltipText(getString(R.string.international_plus));
+                key.setOnLongClickListener(v->{if(number!=null){int start=Math.max(0,number.getSelectionStart()),end=Math.max(0,number.getSelectionEnd());number.getText().replace(Math.min(start,end),Math.max(start,end),"+");}return true;});
+            }
             key.setPadding(dp(8),dp(4),dp(8),dp(4));key.setInsetTop(dp(2));key.setInsetBottom(dp(2));
             android.graphics.Paint.FontMetrics metrics=key.getPaint().getFontMetrics();
             GridLayout.LayoutParams lp=new GridLayout.LayoutParams();lp.width=0;lp.height=Math.max(dp(50),(int)Math.ceil(metrics.bottom-metrics.top)+dp(20));lp.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);lp.setMargins(dp(2),0,dp(2),0);key.setLayoutParams(lp);
