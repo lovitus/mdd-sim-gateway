@@ -126,6 +126,10 @@ func (client *Client) requestBody(ctx context.Context, method, path string, body
 		return Snapshot{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+client.token)
+	switch path {
+	case "/v1/status", "/v1/runtime/start", "/v1/runtime/stop":
+		request.Header.Set(coreConnectionHeader, "1")
+	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

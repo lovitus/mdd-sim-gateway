@@ -27,6 +27,14 @@ Acceptance scope / remaining action: The original separate-report/durable-identi
 
 ## Accepted, deferred, excluded and separately prioritized work
 
+### BRANCH_RECONCILIATION
+
+**State: completed; release relevance: current.** Qualified branch-reconciliation implementation and disposition register in PR #17, based on fa349d1. All 30 original non-main remote heads have verified immutable archive tags; four dirty workspaces have private backups. Reuses PR #14 runtime files with a small explicit local-control extension negotiation fix and PR #10's encoded-recording-progress hunk. Old #7-#10 are closed unmerged; #14 closure and exact-SHA branch deletion follow #17 integration and are recorded in its final receipt. No excluded Android/Core architecture or production rollout.
+
+Acceptance scope / remaining action: Complete signed hosted run36584798641 passed at 2e45bab. Original JSONL/stderr and artifact digest establish four compiled old-API unknown-field failures, then eight fixed compatibility subcases passing with race detection and no fail/skip/race report in that scoped evidence. The original reviewer approved the implementation, regression and branch-disposition plan. The final record-only/temporary-entry cleanup preserves qualified runtime/tests and restores the long-term workflow; it is not a new execution or artifact source. Actual merge/ref deletion remain separate PR #17 receipts. Existing Android, Provider, scoped hardware acceptance and deferrals are unchanged.
+
+Resolution (implementation_evidence): Exact-source hosted qualification, original-reviewer implementation approval, verified archival preservation and explicit selective-port/exclusion mapping complete the integration batch. Merge and administrative cleanup are traceable separately, not inferred from this source record.
+
 ### ANDROID_DIAL_PREFIX
 
 **State: completed; release relevance: current.** The owner reported a misleading standalone plus beside the Calls input. Remove that apparent fixed prefix and use the zero key's explicit long press to enter plus into the real number. The owner reaffirmed the existing international-prefix validation; do not infer a country or automatically add a prefix.
@@ -114,6 +122,14 @@ Resolution (user_decision): The owner directed meaningful non-Android work into 
 Acceptance scope / remaining action: Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.
 
 Resolution (user_decision): The owner directed meaningful non-Android work into the existing postponed ledger rather than extending this Android PR. Existing implementation, unknown causes and earlier evidence are retained; this is scheduling deferral, not a safety waiver or completed validation.
+
+### RECORDING_NAVIGATION_FIXTURE
+
+**State: deferred; release relevance: deferred.** PR #10's recording navigationBarrier is unique test-side improvement, retained at archived 4e600f1 / webui/tests/recordingBrowser.mjs. It is not part of the selected encoded-progress wait patch and is not claimed absorbed.
+
+Acceptance scope / remaining action: The reviewer accepts retaining it as non-blocking evidence-only follow-up absent a current navigation failure. Existing timeouts, evaluation errors and decoded-audio assertions still fail the gate. Resume from the archived source if the real navigation race is reproduced; no new product recording or paid test scope.
+
+Resolution (user_decision): The owner's branch-reconciliation task preserves useful excluded fragments with traceable disposition rather than merging every historical test and architecture. The existing reviewer accepts this bounded deferral; no claim that the race is absent.
 
 ### FORK_MAINTENANCE
 
