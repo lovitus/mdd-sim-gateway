@@ -1246,7 +1246,7 @@
       "requirement": "验证在线、正在连接、离线、不可用和冲突状态，以及离线 SIM 可配置、删除依赖警告和\n      跨页面状态一致性。",
       "implementation": "needs_verification",
       "acceptance": "evidence_review_pending",
-      "rationale": "The September 17 Chrome report covers real pages/selectors/diagnostics and is retained. Reconcile exact transition coverage before adding missing offline/conflict/dependency-prompt scenarios.",
+      "rationale": "The September 17 Chrome report covers real pages/selectors/diagnostics and is retained. The separately reported desktop Agent warning gap now has a local control-link status and GUI warning candidate; runtime running is not treated as connected. This does not resolve the field transport fault or change the historical WebUI acceptance.",
       "evidence": [
         "go-runtime/internal/linecatalog/deletion_test.go",
         "go-runtime/internal/linecatalog/store.go",
@@ -1414,6 +1414,18 @@
     }
   ],
   "workstreams": [
+    {
+      "id": "BRANCH_RECONCILIATION",
+      "state": "ongoing",
+      "releaseRelevance": "ongoing",
+      "summary": "Owner-authorized September 29 branch reconciliation starts from main fa349d1. All 30 non-main remote heads have immutable archive tags; four dirty workspaces have verified private backups. The integration candidate reuses PR #14's four desktop Agent runtime files unchanged and selectively ports PR #10's encoded-recording wait correction. No old Android/Core architecture or production deployment is included.",
+      "acceptance": "Current inventory, selective-port map and cleanup cursor are in docs/branches.md. Initial same-version hosted run36582298475 passed at e51d97d, but the reviewer identified a mixed-version local-control compatibility defect. The correction makes connection metadata explicitly requested on every Snapshot response while retaining strict decoding/authentication; its bounded contract regression requires hosted pre-fix/fixed evidence. The reviewer approved archive-backed disposition and deferring the old recording navigationBarrier, not an uncorrected merge. Corrected qualification and final review remain pending. Existing Android, Provider, hardware and deferred-work acceptance remains intact.",
+      "evidence": [
+        "docs/branches.md",
+        "go-runtime/internal/agenthost/worker.go",
+        "webui/tests/recordingBrowser.mjs"
+      ]
+    },
     {
       "id": "ANDROID_DIAL_PREFIX",
       "state": "completed",
@@ -1713,6 +1725,20 @@
       }
     },
     {
+      "id": "RECORDING_NAVIGATION_FIXTURE",
+      "state": "deferred",
+      "releaseRelevance": "deferred",
+      "summary": "PR #10's recording navigationBarrier is unique test-side improvement, retained at archived 4e600f1 / webui/tests/recordingBrowser.mjs. It is not part of the selected encoded-progress wait patch and is not claimed absorbed.",
+      "acceptance": "The reviewer accepts retaining it as non-blocking evidence-only follow-up absent a current navigation failure. Existing timeouts, evaluation errors and decoded-audio assertions still fail the gate. Resume from the archived source if the real navigation race is reproduced; no new product recording or paid test scope.",
+      "evidence": ["docs/branches.md", "webui/tests/recordingBrowser.mjs"],
+      "resolution": {
+        "basis": "user_decision",
+        "reason": "The owner's branch-reconciliation task preserves useful excluded fragments with traceable disposition rather than merging every historical test and architecture. The existing reviewer accepts this bounded deferral; no claim that the race is absent.",
+        "decisionRefs": ["BRANCH_RECONCILIATION"],
+        "evidence": ["docs/branches.md"]
+      }
+    },
+    {
       "id": "FORK_MAINTENANCE",
       "state": "ongoing",
       "summary": "Large files and a maintained upstream fork create maintenance cost, not proof of functional failure.",
@@ -1758,6 +1784,13 @@
     }
   ],
   "decisions": [
+    {
+      "id": "BRANCH_RECONCILIATION",
+      "date": "2026-09-29",
+      "authority": "project_owner",
+      "summary": "Coordinate with the existing reviewer, integrate useful completed work or selective ports, retire superseded branches with traceable preservation, and continue from clean main. Do not reopen excluded architecture or accepted hardware matrices; no new deployment or paid operation is authorized by branch cleanup.",
+      "sourcePath": "docs/branches.md"
+    },
     {
       "id": "ANDROID_COMMUNICATION_UX",
       "date": "2026-09-29",

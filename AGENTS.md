@@ -1,5 +1,9 @@
 # Repository work, current decisions and acceptance
 
+Before merging, cherry-picking, restoring or cleaning branches, read docs/branches.md.
+Its exact-head dispositions govern historical branches; archive tags preserve evidence,
+not approval to restore superseded implementations. Start subsequent work from current main.
+
 Current Android work must follow docs/decisions/2026-09-24-android-client-scope.md.
 Keep server changes at the PR #7 baseline; recover networking and authentication
 in the Android client. Do not add pairing or durable server call recovery here.

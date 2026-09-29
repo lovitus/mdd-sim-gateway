@@ -27,6 +27,12 @@ Acceptance scope / remaining action: The original separate-report/durable-identi
 
 ## Accepted, deferred, excluded and separately prioritized work
 
+### BRANCH_RECONCILIATION
+
+**State: ongoing; release relevance: ongoing.** Owner-authorized September 29 branch reconciliation starts from main fa349d1. All 30 non-main remote heads have immutable archive tags; four dirty workspaces have verified private backups. The integration candidate reuses PR #14's four desktop Agent runtime files unchanged and selectively ports PR #10's encoded-recording wait correction. No old Android/Core architecture or production deployment is included.
+
+Acceptance scope / remaining action: Current inventory, selective-port map and cleanup cursor are in docs/branches.md. Initial same-version hosted run36582298475 passed at e51d97d, but the reviewer identified a mixed-version local-control compatibility defect. The correction makes connection metadata explicitly requested on every Snapshot response while retaining strict decoding/authentication; its bounded contract regression requires hosted pre-fix/fixed evidence. The reviewer approved archive-backed disposition and deferring the old recording navigationBarrier, not an uncorrected merge. Corrected qualification and final review remain pending. Existing Android, Provider, hardware and deferred-work acceptance remains intact.
+
 ### ANDROID_DIAL_PREFIX
 
 **State: completed; release relevance: current.** The owner reported a misleading standalone plus beside the Calls input. Remove that apparent fixed prefix and use the zero key's explicit long press to enter plus into the real number. The owner reaffirmed the existing international-prefix validation; do not infer a country or automatically add a prefix.
@@ -114,6 +120,14 @@ Resolution (user_decision): The owner directed meaningful non-Android work into 
 Acceptance scope / remaining action: Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Reproduce with sanitized field-level validation evidence on the exact artifact/Agent generation.
 
 Resolution (user_decision): The owner directed meaningful non-Android work into the existing postponed ledger rather than extending this Android PR. Existing implementation, unknown causes and earlier evidence are retained; this is scheduling deferral, not a safety waiver or completed validation.
+
+### RECORDING_NAVIGATION_FIXTURE
+
+**State: deferred; release relevance: deferred.** PR #10's recording navigationBarrier is unique test-side improvement, retained at archived 4e600f1 / webui/tests/recordingBrowser.mjs. It is not part of the selected encoded-progress wait patch and is not claimed absorbed.
+
+Acceptance scope / remaining action: The reviewer accepts retaining it as non-blocking evidence-only follow-up absent a current navigation failure. Existing timeouts, evaluation errors and decoded-audio assertions still fail the gate. Resume from the archived source if the real navigation race is reproduced; no new product recording or paid test scope.
+
+Resolution (user_decision): The owner's branch-reconciliation task preserves useful excluded fragments with traceable disposition rather than merging every historical test and architecture. The existing reviewer accepts this bounded deferral; no claim that the race is absent.
 
 ### FORK_MAINTENANCE
 

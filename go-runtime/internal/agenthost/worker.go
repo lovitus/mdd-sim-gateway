@@ -16,6 +16,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentevents"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
@@ -73,14 +74,15 @@ type PINCredentialStore interface {
 }
 
 type Worker struct {
-	config       Config
-	mu           sync.RWMutex
-	topology     *topologyState
-	modems       *modemTopologyState
-	manager      *agentsim.Manager
-	modemCycleMu sync.Mutex
-	staleAfter   time.Duration
-	eventScanner *agentevents.Scanner
+	config         Config
+	mu             sync.RWMutex
+	topology       *topologyState
+	modems         *modemTopologyState
+	manager        *agentsim.Manager
+	modemCycleMu   sync.Mutex
+	staleAfter     time.Duration
+	coreConnection agentcontrol.CoreConnection
+	eventScanner   *agentevents.Scanner
 }
 
 func New(config Config) (*Worker, error) {
@@ -365,11 +367,13 @@ func (worker *Worker) runModemWorkers(ctx context.Context) error {
 }
 
 func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manager, generation string) error {
+	defer worker.setCoreConnection("stopped", time.Time{})
 	attempt := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		worker.setCoreConnection("connecting", time.Time{})
 		var media *agentmedia.Manager
 		var data *agentdata.Manager
 		var rawUSB *agentrawusb.Manager
@@ -514,10 +518,13 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Downloads: manager, Discovery: manager, Notifications: manager,
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
+			Connected:        func() { worker.setCoreConnection("connected", time.Time{}) },
+			Disconnected:     func() { worker.setCoreConnection("disconnected", time.Time{}) },
 			HealthReported:   func() { healthySince.CompareAndSwap(0, time.Now().UnixNano()) }, Health: health,
 			PrepareRestart:         prepareRestart,
 			ReaderMetadataRecovery: true,
 		}).Run(ctx)
+		worker.setCoreConnection("disconnected", time.Time{})
 		if rawUSB != nil {
 			_ = rawUSB.Close()
 		}
@@ -547,6 +554,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			return errors.Join(err, policyErr)
 		}
 		log.Printf("mdd-agent: Core WSS disconnected: %v; retrying in %s", err, decision.After)
+		worker.setCoreConnection("retrying", time.Now().Add(decision.After).UTC())
 		timer := time.NewTimer(decision.After)
 		select {
 		case <-ctx.Done():
@@ -554,6 +562,24 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			return ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+func (worker *Worker) CoreConnection() agentcontrol.CoreConnection {
+	worker.mu.RLock()
+	defer worker.mu.RUnlock()
+	connection := worker.coreConnection
+	if connection.State == "" {
+		connection.State = "unknown"
+	}
+	return connection
+}
+
+func (worker *Worker) setCoreConnection(state string, retryAt time.Time) {
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	worker.coreConnection = agentcontrol.CoreConnection{
+		State: state, ChangedAt: time.Now().UTC(), RetryAt: retryAt,
 	}
 }
 

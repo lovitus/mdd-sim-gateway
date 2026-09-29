@@ -176,6 +176,22 @@ jobs:
         working-directory: go-runtime
         run: go mod verify
 
+      - name: Temporary Agent control mixed-version counterexample
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/branch-reconciliation'
+        run: bash tools/verify-agent-control-compat.sh
+
+      - name: Retain Agent control compatibility evidence
+        if: always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/branch-reconciliation'
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-control-compat-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/agent-control-compat/*.jsonl
+            ${{ runner.temp }}/agent-control-compat/*.stderr
+            ${{ runner.temp }}/agent-control-compat/summary.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Test Core runtime
         working-directory: go-runtime
         run: go test -timeout 2m ./...
