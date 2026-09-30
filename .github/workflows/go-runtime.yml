@@ -176,6 +176,19 @@ jobs:
         working-directory: go-runtime
         run: go mod verify
 
+      - name: Prove same-owner call capability recovery
+        if: github.event_name == 'workflow_dispatch'
+        run: node tools/verify-at-call-capability.mjs
+
+      - name: Retain call capability counterexample
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: at-call-capability-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/at-call-capability-evidence
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Test Core runtime
         working-directory: go-runtime
         run: go test -timeout 2m ./...

@@ -1,0 +1,12 @@
+diff --git a/go-runtime/internal/agentat/manager.go b/go-runtime/internal/agentat/manager.go
+--- a/go-runtime/internal/agentat/manager.go
++++ b/go-runtime/internal/agentat/manager.go
+@@ -140,7 +140,7 @@
+ 				owned.lastHealthAt = now
+ 				// An optional discovery failure must not disable calls for this
+ 				// healthy owner's entire lifetime. Keep its handle and identity.
+-				if !owned.owner.Capabilities().CallSignalling && !now.Before(owned.callProbeAfter) && ctx.Err() == nil {
++				if false && !owned.owner.Capabilities().CallSignalling && !now.Before(owned.callProbeAfter) && ctx.Err() == nil {
+ 					probeContext, stopProbe := context.WithTimeout(ctx, 3*time.Second)
+ 					probeErr := owned.owner.refreshCallSignalling(probeContext)
+ 					stopProbe()

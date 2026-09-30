@@ -175,7 +175,24 @@ func (owner *Owner) EquipmentID() string { return owner.equipmentID }
 
 func (owner *Owner) PhysicalID() string { return owner.candidate.PhysicalID }
 
-func (owner *Owner) Capabilities() Capabilities { return owner.capabilities }
+func (owner *Owner) Capabilities() Capabilities {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return owner.capabilities
+}
+
+func (owner *Owner) refreshCallSignalling(ctx context.Context) error {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if _, err := owner.exchangeLocked(ctx, "AT+CLCC", 3*time.Second); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	owner.capabilities.CallSignalling = true
+	return nil
+}
 
 func (owner *Owner) Healthy(ctx context.Context) error {
 	_, err := owner.Exchange(ctx, "AT", 2*time.Second)
