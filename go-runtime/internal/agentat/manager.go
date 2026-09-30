@@ -29,11 +29,14 @@ type Snapshot struct {
 type Enumerator func() ([]Candidate, error)
 
 type managedOwner struct {
-	owner        *Owner
-	generation   uint64
-	lastHealthAt time.Time
-	pinStatus    SIMPINStatus
-	pinStatusAt  time.Time
+	owner          *Owner
+	generation     uint64
+	lastHealthAt   time.Time
+	callProbeAfter time.Time
+	callProbeDelay time.Duration
+	callProbeCode  string
+	pinStatus      SIMPINStatus
+	pinStatusAt    time.Time
 }
 
 // Manager reconciles currently observed MBN equipment to exactly one retained
@@ -45,6 +48,7 @@ type Manager struct {
 	enumerate      Enumerator
 	open           Opener
 	healthEvery    time.Duration
+	now            func() time.Time
 	simAPDU        bool
 	probeSIMAPDU   bool
 	owners         map[string]*managedOwner
@@ -68,7 +72,7 @@ func newManager(enumerate Enumerator, open Opener, simAPDU, probeSIMAPDU bool) (
 		return nil, errors.New("invalid AT ownership manager configuration")
 	}
 	return &Manager{
-		enumerate: enumerate, open: open, healthEvery: 10 * time.Second,
+		enumerate: enumerate, open: open, healthEvery: 10 * time.Second, now: time.Now,
 		simAPDU: simAPDU, probeSIMAPDU: probeSIMAPDU,
 		owners: make(map[string]*managedOwner),
 	}, nil
@@ -112,7 +116,7 @@ func (manager *Manager) Reconcile(ctx context.Context, targets []Target) map[str
 	for _, owned := range manager.owners {
 		claimed[strings.ToLower(owned.owner.Name())] = struct{}{}
 	}
-	now := time.Now()
+	now := manager.now()
 	for equipmentID, attachmentID := range desired {
 		if _, duplicate := duplicates[attachmentID]; duplicate {
 			continue
@@ -129,6 +133,27 @@ func (manager *Manager) Reconcile(ctx context.Context, targets []Target) map[str
 				owned = nil
 			} else {
 				owned.lastHealthAt = now
+				// An optional discovery failure must not disable calls for this
+				// healthy owner's entire lifetime. Keep its handle and identity.
+				if !owned.owner.Capabilities().CallSignalling && !now.Before(owned.callProbeAfter) && ctx.Err() == nil {
+					probeContext, stopProbe := context.WithTimeout(ctx, 3*time.Second)
+					probeErr := owned.owner.refreshCallSignalling(probeContext)
+					stopProbe()
+					if probeErr != nil {
+						owned.callProbeCode = "call_signalling_probe_failed"
+						if errors.Is(probeErr, context.DeadlineExceeded) {
+							owned.callProbeCode = "call_signalling_probe_timeout"
+						} else if errors.Is(probeErr, context.Canceled) {
+							owned.callProbeCode = "call_signalling_probe_cancelled"
+						}
+						if owned.callProbeDelay == 0 {
+							owned.callProbeDelay = 30 * time.Second
+						} else {
+							owned.callProbeDelay = min(2*owned.callProbeDelay, 5*time.Minute)
+						}
+						owned.callProbeAfter = now.Add(owned.callProbeDelay)
+					}
+				}
 			}
 		}
 		if owned == nil {
@@ -152,8 +177,12 @@ func (manager *Manager) Reconcile(ctx context.Context, targets []Target) map[str
 			claimed[strings.ToLower(owner.Name())] = struct{}{}
 		}
 		capabilities := owned.owner.Capabilities()
+		detail := ""
+		if !capabilities.CallSignalling && owned.callProbeCode != "" {
+			detail = owned.callProbeCode + "; retry_at=" + owned.callProbeAfter.UTC().Format(time.RFC3339)
+		}
 		result[attachmentID] = Snapshot{
-			State: "ready", Port: owned.owner.Name(), OwnerGeneration: owned.generation,
+			State: "ready", Port: owned.owner.Name(), OwnerGeneration: owned.generation, Detail: detail,
 			CallSignalling: capabilities.CallSignalling, SMS: capabilities.SMS,
 			SIMAPDU: capabilities.SIMAPDU, SIMAPDUOnDemand: manager.simAPDU && !manager.probeSIMAPDU,
 		}

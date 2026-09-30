@@ -4,7 +4,7 @@
   "baselineTree": "f0f6b038519bdce6520ea805c4c77c5aecd0535a",
   "reviewDate": "2026-09-20",
   "issue": "https://github.com/lovitus/mdd-sim-gateway/issues/3",
-  "scope": "September 29 Android communication UX is implemented and qualified at f8a6a8c by hosted CI36536473242 and the original reviewer: communication-first Home, separate route indicators, full retained conversations, proven original-card reply selection and client-only incoming-call contention protection. Reader sharing is optional for multiple communication-only devices. Signed v95 is installed with data retained; all five native pages, older history pagination and original-card reply were inspected without paid operations. PR #15 Android/Go gates36539491925/36539492495 passed at d00575e and the reviewer approved normal merge; the PR is the authoritative merge receipt, not this pre-merge record. Final record-only edits preserve qualified runtime/test source. PR #12 and Provider PR #13 acceptance remain intact; the reviewed Provider artifact is already deployed. Core b6f3a4c and user configuration are unchanged. Earlier feature acceptance and endurance deferrals remain intact.",
+  "scope": "September 30 owner-authorized fleet binaries are aligned against main9f9953f using qualified signed source2e45bab/run36584798641; Android v97 already matches qualified609c588 and current Android inputs. Linux used one existing Core-controlled restart without changing user intent. The former host-idle/certificate whole-task blockers were corrected. Final comparison exposed an existing permanent negative call-capability cache. Same-owner recovery source bca3dce has now passed complete signed run36660466342 with compiled withdrawn-fix failures and fixed passes; implementation/regression design is approved by the original reviewer. Temporary qualification entry cleanup preserves the exact runtime/tests. FLEET_MAIN_ALIGNMENT remains the active cursor until the five affected Agents are updated and Linux capability/readiness, identities, policy and isolation are read back. Core/Provider/egress and Android have no affected implementation and are not redeployed. Browser pages were not freshly reverified; no new paid/carrier, acoustic or endurance acceptance is claimed.",
   "archives": [
     {
       "original": "TODO.md",
@@ -1415,6 +1415,25 @@
   ],
   "workstreams": [
     {
+      "id": "FLEET_MAIN_ALIGNMENT",
+      "state": "ongoing",
+      "releaseRelevance": "current",
+      "summary": "Owner-authorized September 30 fleet deployment reused qualified signed source2e45bab with product trees identical to main9f9953f. Server, seven Providers and five macOS/Windows/Linux Agents are updated; Android v97 already matched and was retained. Final Linux comparison exposed an existing negative call-capability cache. Same-owner recovery source bca3dce passed complete signed CI36660466342 and original-reviewer implementation/regression design review. It only retries failed CLCC capability in normal Reconcile, with bounded requests, capped backoff and synchronized publication. The final cleanup retains exact qualified runtime/tests. Agent rollout and field capability/readiness verification remain pending; unaffected Core/Provider/egress and Android are retained.",
+      "acceptance": "Actual executable, service/launchd owner, signing, configuration and card readbacks are retained privately. Six Agents reconnected, both previous IMS-ready lines remain ready, catalog/notification settings are unchanged and all Provider drains released. Fourteen authenticated read-only API routes returned real data. Offline backups, installation refusal and verified code rollback are retained without database restoration. Linux Agent SHA-256 6092b9f28d66790819eb705c766d3091fb9448b238cc86d0854a4c122f2e5617, new process generation, original modem/card, desired policy revision and unchanged config/guard hashes were read back after one controlled restart. First empty topology resolved with a bounded follow-up, not another restart. Two 60-second passive windows had zero RX/TX deltas and captured packets; cgroup/mark/forward isolation and no cellular main-table default remained. This is window-scoped evidence only. The strict host-idle 409 was valid for its contract; choosing it as the only upgrade entry was wrong. Reviewer reply was missed by a same-turn filter, not absent. Controlled HTTPS pins the existing certificate before credentials, retaining TLS checks. Nine line projections matched; Linux cellular_call changed to blocked while SMS/data remained ready. One identity-checked CLCC transaction succeeded with mode1 data entries, not voice calls; the initial probe failure cause is unknown. Run36660466342 at bca3dced5c8c2d8dc6cb90fc6c5d778cc3b4378b passed. Artifact11074347146 ZIP SHA-256 39680f51cf423d9e3d71452bd12cc06d1542c1291e0c220b975b108f789d619c and raw JSONL/stderr were verified: withdrawing the refresh branch produces exactly three compiled failures because recovery, a due probe and cancellation diagnostics are absent; this is not evidence of old excessive retries or old cancellation mispublication. Restored code passes three new methods plus two existing MM methods under race detection, zero skips and empty stderr. The full signed workflow also passed. Manager Snapshot retains retry categories/time; Linux dataFact still drops Detail, recorded as nonblocking deferred diagnostics. Remaining: reviewed integration, deploy the five affected Agents, read back Linux capability/readiness and unchanged identity/policy/isolation. Browser, paid-call/SMS, replay, SIM/PIN, acoustic and endurance acceptance are not extended.",
+      "evidence": [
+        "DEPLOYMENT.md",
+        "go-runtime/internal/core/host_modem_idle.go",
+        "go-runtime/internal/core/agent_restart.go",
+        "go-runtime/internal/core/agent_restart_guard.go",
+        "go-runtime/internal/agentat/manager.go",
+        "go-runtime/internal/agentat/owner.go",
+        "go-runtime/internal/agentat/call_capability_recovery_test.go",
+        "go-runtime/agentlink/maintenance.go",
+        "go-runtime/release/install-macos-agent.sh",
+        "go-runtime/release/install-windows-agent.ps1"
+      ]
+    },
+    {
       "id": "BRANCH_RECONCILIATION",
       "state": "completed",
       "releaseRelevance": "current",
@@ -1640,7 +1659,7 @@
       "id": "INSTALLER_WAIT",
       "state": "deferred",
       "summary": "Exact service/launchd ownership, captured-process waiting, bounded immediate readiness and rollback-stop protection are implemented. Fully event-driven service waiting and least-privilege service architecture are still partial.",
-      "acceptance": "Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Verify exact polling paths on Windows/macOS before changing them; retain bounded waits and error diagnostics.",
+      "acceptance": "Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Verify exact polling paths on Windows/macOS before changing them; retain bounded waits and error diagnostics. September 30 deployment also exposed releaseinstall copying public artifact modes under an inherited private umask: manifest validation correctly rejected the staged files. A scoped public-installer umask allowed the unchanged qualified artifact to install after a verified rollback. Preserve that refusal and private evidence; making the installer independent of restrictive caller umask is a later bounded improvement, not new fleet-rollout development. See DEPLOYMENT.md.",
       "evidence": [
         "go-runtime/release/install-windows-agent.ps1",
         "go-runtime/release/install-macos-agent.sh",
@@ -1686,10 +1705,11 @@
     {
       "id": "INCIDENT_MM_CLOSE",
       "state": "deferred",
-      "summary": "Historical forced-close root cause remains unknown. Current Linux ModemManager access is private D-Bus, not an mmcli subprocess whose stderr can simply be recovered.",
-      "acceptance": "Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Collect bounded redacted evidence at the real current transport boundary when authorized; do not invent carrier/port causes from generic symptoms.",
+      "summary": "Historical forced-close root cause remains unknown. Current Linux ModemManager access is private D-Bus, not an mmcli subprocess whose stderr can simply be recovered. Separate September 30 review observation: dataFact drops AT Manager retry Detail when rebuilding a ready ATControlFact; capability booleans still propagate, so this does not block the qualified call-capability recovery fix.",
+      "acceptance": "Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Collect bounded redacted evidence at the real current transport boundary when authorized; do not invent carrier/port causes from generic symptoms. Preserve the bounded retry category/time through Linux dataFact in a later relevant batch; do not claim the current data-mode final topology/UI displays it. This diagnostic wiring gap is separate from, and does not explain, the historical forced close.",
       "evidence": [
         "go-runtime/internal/linuxmodem/mm_linux.go",
+        "go-runtime/internal/linuxmodem/data_linux.go",
         "go-runtime/internal/agentpolicy/connection_recovery_test.go"
       ],
       "releaseRelevance": "deferred",
@@ -1790,6 +1810,13 @@
     }
   ],
   "decisions": [
+    {
+      "id": "FLEET_MAIN_ALIGNMENT",
+      "date": "2026-09-30",
+      "authority": "project_owner",
+      "summary": "Check all currently running clients and server against current main, update outdated deployments and verify them, and continue discussing issues with the existing ChatGPT reviewer. The owner clarified that no Agent was intentionally using cellular traffic: diagnose actual transmission/isolation instead of stopping on a connected bearer, and pin the existing certificate instead of treating certificate trust as a whole-task blocker. Preserve stored user intent, isolation, credentials, previous acceptance and scoped paid-operation limits; do not infer new product scope or bypass a real active-work safety gate.",
+      "sourcePath": "DEPLOYMENT.md"
+    },
     {
       "id": "BRANCH_RECONCILIATION",
       "date": "2026-09-29",
