@@ -10,17 +10,21 @@ import (
 )
 
 type fakePort struct {
-	mu        sync.Mutex
-	responses map[string][]byte
-	command   string
-	commands  []string
-	delivered bool
-	closed    int
+	mu         sync.Mutex
+	responses  map[string][]byte
+	command    string
+	commands   []string
+	delivered  bool
+	closed     int
+	beforeRead func(string)
 }
 
 func (port *fakePort) Read(buffer []byte) (int, error) {
 	port.mu.Lock()
 	defer port.mu.Unlock()
+	if port.beforeRead != nil {
+		port.beforeRead(port.command)
+	}
 	if port.closed != 0 {
 		return 0, io.ErrClosedPipe
 	}
