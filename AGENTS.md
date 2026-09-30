@@ -4,22 +4,29 @@ Before merging, cherry-picking, restoring or cleaning branches, read docs/branch
 Its exact-head dispositions govern historical branches; archive tags preserve evidence,
 not approval to restore superseded implementations. Start subsequent work from current main.
 
-Current Android work must follow docs/decisions/2026-09-24-android-client-scope.md.
-Keep server changes at the PR #7 baseline; recover networking and authentication
-in the Android client. Do not add pairing or durable server call recovery here.
-Work alone without subagents. Preserve the separate recovery branch and dirty tree.
+The September 24 Android batch followed docs/decisions/2026-09-24-android-client-scope.md:
+client-first recovery, with its server scope initially held at the PR #7 baseline.
+Current main includes the later reviewed minimal integration; do not reset it to
+that old baseline or restore excluded pairing/durable server call recovery.
+Work alone without subagents. Preserve historical recovery worktrees and archived
+evidence as directed by docs/branches.md; they are not active merge queues.
 The owner subsequently authorized a temporary isolated Core and minimal mainline
-integration after successful validation. This does not authorize production
-deployment or the excluded PR #8 server expansion.
+integration after successful validation. That earlier authorization alone did not
+include production deployment; the later reviewed-rollout authorization and actual
+deployment receipts are in the current ledger. Those past approvals do not authorize
+future deployments. The excluded PR #8 server expansion remains excluded.
 
 Read docs/decisions/2026-09-20-current-scope.md, docs/status/README.md and acceptance.json before changing scope.
 Latest explicit owner decisions govern requirements; a stale ledger or historical checklist must be corrected,
 not used to override those decisions. Root TODO summaries are generated; original plans remain historical.
 
 Final eSIM direction is physical deletion + retained deletion notifications + multiply-confirmed manual replay.
-Do not reopen abandoned soft deletion/customization. Android is reprioritized by the owner as a draft native app / preview APK;
-read docs/decisions/2026-09-21-android-agent.md. The owner authorized reviewed merge
-and deployment on September 29; PR #12 is merged and signed v91 is installed.
+Do not reopen abandoned soft deletion/customization. The native Android preview
+supersedes the initial draft delivery in docs/decisions/2026-09-21-android-agent.md.
+The owner authorized reviewed merge
+and deployment on September 29. The Android preview and subsequent client corrections
+are merged and installed; use the current ledger/DEPLOYMENT receipt for exact
+source and installed artifact, not an earlier draft PR or historical version note.
 This does not authorize merging unrelated drafts or claiming physical acceptance from emulator tests.
 The September 27 ANDROID_PREVIEW_CLOSE decision in the Android decision document
 now closes this Android preview milestone for owner review. Endurance validation
@@ -35,6 +42,12 @@ requesting new tests. Local reports can supply traceable evidence or newer decis
 into the ledger instead of rejecting them merely because they are local. Unavailable evidence remains explicitly
 unverified, not fabricated or silently erased. Repository merge/CI, workspace synchronization and production
 version are separate facts. CI checks metadata and consistency, not the physical truth of field reports.
+
+README, issue #3 and ledger current summaries must agree about implementation,
+acceptance and deployment. Pending evidence counts are not bug counts. A historical
+transient state is not a current incident: check exact identity and observation time
+read-only before declaring it stuck. Preserve original decisions/reports as history
+and annotate their superseding current record instead of silently rewriting them.
 
 Use one authoritative owner per credential, hardware attachment, paid operation and call lifetime. Preserve exact
 SIM/Agent/equipment/generation identity, unknown outcomes, active-call/maintenance guards, disabled rekey choices

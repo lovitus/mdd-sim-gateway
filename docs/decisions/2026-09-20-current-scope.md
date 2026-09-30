@@ -46,3 +46,12 @@ neither automatically true nor automatically invalid. CI verifies record structu
 The supplied handoff reports that the local checkout was fast-forwarded to `19f966f` with no source diff;
 it separately identifies `7f2e129` as the latest recorded production version. This session has not inspected
 that machine or its running binaries. A repository merge and green CI do **not** change production evidence.
+
+## Reading This Historical Decision on September 30
+
+The Android deferral above was superseded by the
+[September 21 Android decision](2026-09-21-android-agent.md) and subsequent owner
+preview closure/rollout decisions. Android is now implemented and installed as a
+preview. The old baseline/deployment observations describe September 20, not today's
+HEAD or fleet. Use the [current ledger](../status/README.md) and
+[deployment receipts](../../DEPLOYMENT.md); the remaining safety decisions still apply.
