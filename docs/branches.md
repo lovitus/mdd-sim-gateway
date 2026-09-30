@@ -70,6 +70,16 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+September 30 follow-up: [PR #18](https://github.com/lovitus/mdd-sim-gateway/pull/18)
+normally merged the reviewed call-capability recovery at
+`e30a45fb666fa2f2ec5eba7596df4fecb331513a`, from exact head
+`b71b81c507d21f0b9be853c5998dde58e7783c6d`. Its tree equals that merge.
+The qualified signed source and temporary behavioral proof remain at immutable
+`archive/2026-09-30/agent-call-capability-qualified` ->
+`bca3dced5c8c2d8dc6cb90fc6c5d778cc3b4378b`. The delivery branch is retired
+after its matched-head merge; current main includes the fix, so do not restore or
+remerge the archived qualification entry. Deployment evidence is in DEPLOYMENT.md.
+
 - Start new product work from current `origin/main`, not an archived branch or old worktree.
 - Non-ancestry does not prove a missing feature. Reconcile squashes, selective ports
   and current architecture before proposing a merge.

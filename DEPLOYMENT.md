@@ -12,6 +12,10 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 ## 2026-09-30 版本对齐记录
 
+最终结果：PR #18 已正常合并，五个 Agent 已更新至已验 `bca3dce` 工件，Linux 通话能力及对应
+readiness 已恢复。Core/Provider/egress 保持下述 `2e45bab` 工件，Android 保持 v97；
+本批修复没有改变这些角色的运行行为。下文先保留首次对齐证据，再记录修复后的最终读回。
+
 用户授权核对现有客户端和服务器，更新落后版本并验证，问题继续交由原 ChatGPT 评审会话协作。
 这不是新功能、额外付费测试、长期耐久验收或改变用户 4G/借用意图的授权。
 
@@ -74,7 +78,7 @@ Linux modem 已重新识别，AT、短信、数据正常，但 `CallSignalling` 
 原 `a10d970` 与当前版本的 AT owner/manager 源码相同；初次探测的错误未保留，具体原因未知。
 已确认的既有缺陷是可选 CLCC 首次失败后一直缓存 false，后续 AT 健康并不会重新验证该能力。
 
-当前修复候选仅在既有 Reconcile 健康检查后，通过同一 owner 有界重探 CLCC；成功才更新能力。
+本批修复仅在既有 Reconcile 健康检查后，通过同一 owner 有界重探 CLCC；成功才更新能力。
 失败不关闭健康 owner，按 30/60/120/240/300 秒封顶退避，之后仍有恢复机会；不新建后台循环。
 能力读写同步，取消后的响应不能发布成功。沿用 Linux MM 精确 SIM/设备身份门禁及独占通道，
 不直接开 tty，不动 SMS/PCM/APDU、承载、APN、radio、通话生命周期或持久策略。
@@ -94,11 +98,30 @@ Linux 数据模式的 `dataFact` 仍丢弃这一 Detail，但正常传递能力�
 恢复代码后，三个新增方法及两个既有 MM 方法全部通过，零跳过、stderr 为空，无 race/编译/panic 报告。
 常规完整 CI 门禁也通过，不将未实际运行的 opt-in 硬件项目算作验收。
 
-原评审已认可实现和回归设计。临时验证入口现已移除，长期 workflow 恢复原样；
-永久源码及测试与已验候选逐字相同，记录收口不改变实际工件来源。
-下一步仅升级五个受影响的 Windows/macOS/Linux Agent，并读回 Linux 能力及对应 readiness、
-原身份/策略/隔离；该现场恢复仍待完成。Core/Provider/egress 和 Android 没有对应运行实现变化，
-不重复部署，不追加真实通话。
+原评审已独立核对实现、原始红绿工件和清理等价，批准最终 `b71b81c`。
+临时入口移除后，永久源码及测试仍与已验候选逐字相同，长期 workflow 恢复原样；
+正常 PR [run 36662189390](https://github.com/lovitus/mdd-sim-gateway/actions/runs/36662189390) 也通过。
+[PR #18](https://github.com/lovitus/mdd-sim-gateway/pull/18) 按精确 head 正常合并为
+`e30a45fb666fa2f2ec5eba7596df4fecb331513a`，未绕过保护；实际部署来源仍是 `bca3dce`。
+
+### 修复后的最终读回
+
+五个 Agent 已更新。两台 Mac 保留原 GUI/CLI 模式与 Developer ID，launchd 实际 PID 的执行映像
+与启动项、已验候选一致；两台 Windows 的 SCM 实际进程 SHA-256 均为
+`a3e7df9e67f10f275ade2b452a8c8a63fbe0aacf0d57efe1b0c4a399ab4c42b3`。
+Linux 的 `/proc/PID/exe` SHA-256 为 `96a30301faf367645eeb4f1ead592ccfbe95e9492bbe37962b1dae1fe0a496ca`。
+它仅收到一次匹配操作与代际的 Core 受控重启；此前完整包传输超时没有触及运行时，
+压缩传输及完整清单/哈希校验成功后才开始切换。旧工件及失败证据保留。
+
+Linux `CallSignalling=true`，对应 Core `cellular_call`、`cellular_sms`、`cellular_data` 均 ready。
+原卡/设备身份、持久策略 revision/desired、配置及隔离文件哈希不变；nft 规则结构不变，
+守卫启用且活动，IPv4/IPv6 主路由表均无蜂窝默认路由，Core PID 未变，维护租约已释放。
+其余九条线路的操作就绪/阻断投影与基线一致，两条原 IMS-ready 线路仍 ready。
+catalog 和通知配置不变，没有借用流量会话。最终快照另见一条 `preparing` 媒体会话，
+没有新增通话记录；本批没有创建或终止它，不将其当作泄漏或换版故障，也不宣称所有客户端空闲。
+
+本次现场关闭的是工件对齐和已发现的能力/readiness 异常，不是新的实际语音、浏览器或耐久验收。
+没有拨号、发短信、通知重放、SIM/PIN 操作或用户开关修改。非阻断 Detail 接线延期保持不变。
 
 ---
 
