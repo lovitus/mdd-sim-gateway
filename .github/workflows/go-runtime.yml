@@ -176,6 +176,27 @@ jobs:
         working-directory: go-runtime
         run: go mod verify
 
+      - name: Check out temporary default-policy counterexample baseline
+        uses: actions/checkout@v7
+        with:
+          ref: f847b033e3e3e5dd97bd22fec7fd2b0df19af02b
+          path: default-policy-baseline
+          persist-credentials: false
+
+      - name: Prove default-policy behavioral counterexamples and repair
+        run: bash tools/verify-default-data-baseline.sh "$GITHUB_WORKSPACE/default-policy-baseline"
+
+      - name: Retain default-policy red and green evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: default-data-evidence-${{ github.sha }}
+          path: |
+            default-data-*.jsonl
+            default-data-*.stderr
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Test Core runtime
         working-directory: go-runtime
         run: go test -timeout 2m ./...

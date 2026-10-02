@@ -10,6 +10,54 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-02 Windows 换机接入排查（未完成）
+
+最新观测覆盖下述历史过程：用户随后授权完全停止 VMware；其用户进程、相关服务及可停止
+USB 驱动已停，原生 Quectel 接口一度恢复，但 AT 打开报设备无法正常工作。用户再次插拔后
+曾出现原生 USB 描述符失败/Code 43；第二次插拔同一端口后恢复 AT/Modem 枚举，AT 打开变为
+资源占用。尚无证据确认占用者，不能把枚举成功当作读卡恢复。Core 新鲜快照仍缺少目标 Agent，
+其原进程仅有本地控制监听、没有 WSS 连接；Windows 现场故障仍未解决。其他两条读卡器线路
+仍有读卡和 IMS 注册证据，不扩展为通话验收。没有重启 Agent、改用户策略或进行付费测试。
+最新模块检查只在诊断 PowerShell 观察到 Proxifier 模块，未在 Agent 找到对应模块；此前
+“Agent 内存在 Proxifier”的表述不能作为当前事实或根因结论。临时退出 Proxifier 的独立
+对照仍待授权，不因 VMware 停止授权而操作。两条本次遗留诊断进程已按 PID/路径/启动时刻
+核实并清理，原 Agent 未动。以下按发生顺序保留早期尝试，不是当前待执行步骤。
+
+当前主任务仍是 EC20 移入另一台已有 Agent 的 Windows 主机后不能自动发现、注册。
+新增备用管理地址和下文嵌入式手动部署说明不能代替这一验收；备用地址属于同一主机，
+不应创建第二个 Agent 身份。具体地址和原始证据仅保存在工作区外的私有游标。
+
+已验工件仍在运行，但 Windows 尚未生成该 EC20 的 modem/AT 接口。首次只读枚举只能看到
+VMware USB Code 43；一次精确节点重枚举后，底层描述符与当前 VMware 日志同时确认
+`VID 2C7C / PID 0125` 的 Quectel 身份。没有发现该设备的 VM 自动连接规则，也没有正常
+连接至 guest 的证据；日志中的 `Found device` 不能作为 guest 已接管的证据。
+
+用户明确授权后，短停 VMware Workstation Server 与 USB 仲裁服务，并在确认停止后对
+该故障节点重枚举一次。最终读回已从 `vmusb.sys` 转为 Windows 原生 `usb.inf`，但仍是
+`Device Descriptor Request Failed / Code 43`，没有 modem/AT 接口。因此设备已回到宿主
+USB 栈，不等于恢复可用，也不能据此断言是硬件损坏或 MDD 自动配卡缺陷。
+两个 VMware 服务已恢复原运行状态及启动配置，两台 VM 的进程未变，读卡器仍 Started，
+MDD 持久蜂窝隔离规则逐项不变，一次性独立回滚任务已移除。临时工具与远端诊断文件在
+私有归档哈希核对后已移除，无残留诊断进程。服务在显式恢复前已自行运行，
+故不声称整个采样窗口持续排除了 VMware。另一次按设备 ID 的端口复位工具调用因找不到
+可操作端口而在执行前退出，不能把它记录成已经完成断电复位。
+
+另一个独立问题是原生套接字客户端在连接本机控制端口时就卡住，尚未进入 MDD HTTP 处理。
+早期报告把 Proxifier LSP 归到 Agent，最新模块核对已在本节开头纠正；加载拦截模块
+本身也不证明因果。处置后一次 Core 读回仍未见目标 Agent，SCM Running 不能代替注册。
+
+没有重启 Agent、关闭 VM、改驱动/VM 自动连接配置、修改用户开关、放松隔离或产生付费操作。
+随后用户要求完全停止 VMware。官方控制工具在 SSH 与已有登录会话中均于只读 VM 枚举
+阶段超时，尚未发出 guest 关机或挂起，不能声称两台 VM 已停机；临时控制客户端和任务
+已清理。当前下一步是通过已发起的远程桌面、在主机接受连接后安全关机/保留状态挂起 VM，
+再完整退出 VMware 并读回 EC20。没有强杀 VM，也不修改其启动设置或卸载软件。
+原生 USB 仍失败时再接续 EC20/转接板完整断电后的枚举对照。Proxifier 的短时退出/恢复
+另行请求具体授权，不将 VMware 停机授权扩大成网络软件授权。
+原始报告及逐文件哈希仅保存在私有目录，不发布主机身份或日志。安全处置依据为
+[VMware 自动连接语义](https://knowledge.broadcom.com/external/article/343950/automatically-connecting-usb-devices-at.html)
+和 [Windows 精确节点重启](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/pnputil-command-syntax)。
+以下九月三十日记录保留其当时部署验收范围，不是十月二日实时健康证明。
+
 ## 2026-09-30 版本对齐记录
 
 最终结果：PR #18 已正常合并，五个 Agent 已更新至已验 `bca3dce` 工件，Linux 通话能力及对应
@@ -367,6 +415,10 @@ nohup ./mdd-agent run >mdd-agent.out 2>&1 &
 Mac 蜂窝隔离/通话验收；当前支持边界以 PC/SC-only 和正式发布矩阵为准。
 
 ### 3. Linux / 树莓派 / NAS 客户端
+
+嵌入式设备可另选[手动部署与 crontab 保活](agent/MODEM_AGENT.md#嵌入式设备手动部署)：自行下载、
+核对、放置程序并配置连接，不要求 reader Agent 使用 systemd。现有运行/隔离逻辑不改，
+ARM64/其他 libc 工件及无 systemd modem 支持不能从该说明推定。下面仍是原 systemd 安装方式。
 
 当前 Linux release 已包含统一 Go `mdd-agent` 与 `mdd-agent.service`，支持 PC/SC／eUICC
 读卡器的远程高层协议。服务端安装只放置二进制和 unit，不会自动启用 endpoint Agent；先在设备上

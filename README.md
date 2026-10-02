@@ -67,7 +67,7 @@ hostname 及回环地址 SAN 的自签 TLS 身份，但不会启动服务；重�
 fallback；签发响应只显示新 token 一次，状态列表不回显秘密。
 本机可打开 `https://localhost:8443/`；远程浏览器应使用证书 SAN 中的 hostname（并保证解析可达），
 同时在受控的系统/浏览器信任存储中信任这张精确自签证书，或使用带匹配受信任证书的 HTTPS/WSS
-反向代理。Agent 继续使用 SPKI pin。系统不会要求用户确认或固定某个网卡 IP。证书固定和离线
+反向代理。Agent 固定服务端叶证书 DER 的 SHA-256，不是 SPKI 哈希。系统不会要求用户确认或固定某个网卡 IP。证书固定和离线
 artifact 安装见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 仓库根 `install.sh` 只转发到同一个 Go 安装器；在线与离线安装没有第二套运行时。
@@ -85,6 +85,10 @@ Windows、macOS 和 Linux 只使用 release 中的统一 `mdd-agent`（macOS 也
 稳定 Agent ID 签发独立 token，再通过 stdin 写入 owner-only 配置。平台安装、服务管理、证书 pin 和
 当前实机支持边界见 [DEPLOYMENT.md](DEPLOYMENT.md#三客户端部署与支持边界) 与
 [统一 Agent 手册](agent/MODEM_AGENT.md)。
+
+嵌入式 Linux 用户可选择[手动下载、放置、配置及 crontab 保活流程](agent/MODEM_AGENT.md#嵌入式设备手动部署)，
+不必为 reader Agent 安装 systemd。现有安装器及 modem 隔离逻辑不变；架构/运行库需匹配，
+目前没有已验证的 Linux ARM64 发布工件，也不宣称无 systemd modem 已适配。
 
 Android 使用独立的[原生预览客户端](android-agent/README.md)，复用 Core 线路和现有通话仲裁；
 读卡器共享是可选用途，不是使用远程通话/短信的前提。预览交付不等于所有手机和运营商均已验收。

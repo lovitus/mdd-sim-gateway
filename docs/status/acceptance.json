@@ -1421,6 +1421,34 @@
   ],
   "workstreams": [
     {
+      "id": "MODEM_DEFAULT_DATA",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "The owner narrowed the change to Agent-local safe defaults when neither stored policy nor an existing authorized initialization template produces a policy. Existing local equipment+card intent remains authoritative, including offline; Core transport, template freezing, enrollment and cross-host behavior are unchanged. The candidate reconciles a pre-existing connected/connecting bearer through the existing lifecycle and exact-target gates, rechecks stored intent inside the lock, and requires an observed disconnected state before reporting ready. Unknown, no-op, unavailable and failed stops remain visible with existing backoff; no default policy is persisted.",
+      "acceptance": "Devin completed the pre-implementation review. After its quota ended, the owner authorized one reusable GPT-6 reviewer; its first whole-diff read-only review found no blocking issue. New state/concurrency behavioral regressions are written but not yet run; hosted pre-fix failures and green full-batch evidence are pending. The old stale-SIM test now explicitly supplies disconnected instead of treating an omitted/unknown data state as ready. No local build/test, deployment, paid operation, Core change, radio/APN mutation or automatic enabling occurred. Linux no-owner StopData remains a no-op and cannot establish physical disconnection; existing isolation is preserved, not newly qualified. Optimization of repeated stops for an already persisted disabled policy is deferred outside this batch. The separate Windows USB/control-link incident remains unresolved.",
+      "evidence": [
+        "agent/MODEM_AGENT.md",
+        "go-runtime/internal/agentpolicy/manager.go",
+        "go-runtime/internal/agentpolicy/default_data_test.go",
+        "go-runtime/internal/agentpolicy/manager_test.go",
+        "go-runtime/internal/agentconnection/manager.go",
+        "go-runtime/internal/linuxmodem/data_linux.go"
+      ]
+    },
+    {
+      "id": "WINDOWS_MODEM_RELOCATION",
+      "state": "unresolved_cause",
+      "releaseRelevance": "current",
+      "summary": "October 2 EC20 relocation remains unresolved. Authorized full VMware shutdown and one exact-node restart restored native interfaces, but AT open failed with a device-not-functioning error. Owner replug first produced a native descriptor/Code43 failure; a second replug on the same port restored AT/Modem enumeration, with AT open then reporting resource-in-use. The occupant is unconfirmed. The same Agent process remains Running but is absent from a fresh Core snapshot and has only a local control listener, no WSS connection. Other two reader lines retain card/IMS registration evidence, not fresh call acceptance. Port enumeration and the separate default-policy candidate do not establish incident recovery. The latest module check found Proxifier in diagnostic PowerShell, not the Agent; older attribution is corrected, with no proven cause or proxy change.",
+      "acceptance": "Preserve the earlier unsuccessful comparisons and private 27-member archive. The new force-stop authorization superseded the earlier no-hard-guest-stop restriction. The first full-stop attempt restarted through service recovery; a subsequent ordered stop and final readback confirm zero VMware user processes, all five VMware services Stopped, and hcmon/vmusb/vmx86 Stopped. vmci and VMnetAdapter remain loaded because SCM rejects stopping them; no uninstall, host reboot, startup/recovery-setting or VM-disk/configuration change occurred. The recovered network interface is WWAN type243, Down, with no gateway and only link-local IPv6; existing persistent type243 quarantine rules cover it, and all12 MDD filter definitions remain unchanged. This is not enabled-data leak or VMware coexistence acceptance. All10 new remote evidence files were size/SHA256 verified privately, then the exact temporary files and empty directory were removed. No Agent restart, SIM/PIN/APN/radio or user-switch change, paid operation or deployment occurred. Next isolate the remaining target-local socket and WWAN-registration failures without repeating USB resets or relaunching VMware. Proxifier is untouched and not a proven cause; its separately requested reversible comparison is not authorized by VMware instructions. September 30 rollout evidence retains only its original scope.",
+      "evidence": [
+        "DEPLOYMENT.md",
+        "go-runtime/internal/windowsmbn/prober_windows.go",
+        "go-runtime/internal/agenthost/worker.go",
+        "go-runtime/internal/agentcontrol/api.go"
+      ]
+    },
+    {
       "id": "FLEET_MAIN_ALIGNMENT",
       "state": "completed",
       "releaseRelevance": "current",
@@ -1841,6 +1869,13 @@
     }
   ],
   "decisions": [
+    {
+      "id": "EMBEDDED_MANUAL_DEPLOYMENT",
+      "date": "2026-10-02",
+      "authority": "project_owner",
+      "summary": "Keep current runtime, installer and isolation logic unchanged. Add an embedded Linux manual deployment procedure: users download and verify a matching artifact, place it, configure their Agent and optionally maintain their own crontab keepalive. This documents the existing reader CLI without requiring systemd; it does not qualify ARM64 artifacts or bypass the existing systemd-dependent managed modem guard. Android local modem support remains out of scope.",
+      "sourcePath": "agent/MODEM_AGENT.md"
+    },
     {
       "id": "FLEET_MAIN_ALIGNMENT",
       "date": "2026-09-30",
