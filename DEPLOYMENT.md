@@ -10,6 +10,100 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-02 Windows 换机接入恢复（根因与默认断流验收仍待收口）
+
+当前结果（07:23 UTC）：目标 Windows Agent 已重新连接 Core，原读卡器和移入的 EC20
+均按原卡片身份投影到既有线路。Core 新鲜事实为 `agent_connected`、`card_present`、
+`hardware_ready`；modem 的 AT、短信和蜂窝语音能力就绪。没有活动通话、借用数据会话或
+raw 会话。本次没有拨号、发短信、修改 PIN/APN/用户开关，也没有安装新 MDD 工件。
+这些是接入和能力读回，不是实际通话、短信投递或长期稳定性验收。
+
+恢复时间线与因果边界：
+- Tailscale 单独停启释放大量端点，但当时本机连接仍卡住、服务恢复失败。
+- 经用户单独授权，正常退出 Proxifier 后，原 Agent 的本机接口和 modem 读回恢复，
+  Tailscale 服务恢复 Running。随后按原配置重新启动 Proxifier，三个有界采样的本机 API
+  均正常，但 WSS 当时仍重试；配置内容逐字相同。这支持 Proxifier 参与本机套接字故障，
+  不证明谁造成长期端点积累。
+- 用户随后主动卸载 Proxifier，并明确要求保持卸载；这不是本助手执行的卸载。
+  旧 Agent 持续报 `connectex: not a socket`，而新启动客户端可连接同一 Core 端口。
+  保留原进程和错误证据、核对受影响线路无活动操作后，仅重启一次现有 Agent 服务。
+  首个 30 秒读回为 WSS connected，随后 Core 确认原卡与既有线路恢复；Agent 配置哈希未变。
+- Tailscale 服务及界面仍运行，后续原生 CLI 确认 BackendState=Running、Self.Online=true、
+  Health 为空；VMware 保持用户要求的停止状态。未修改 Mihomo、EasyTier、
+  动态端口范围或持久蜂窝隔离。不能把用户卸载后的恢复写成原代理组合已通过共存验收，
+  也没有证据把长期积累归因于 Mihomo 循环。
+
+仍存在一个独立产品缺口：现网旧 Agent 没有该 equipment/card 的持久策略，却报告
+`data=connected`、`data_guard=protected`，同时展示默认关闭意图。隔离报告不等于已断流，
+更不等于已完成物理防泄漏验收。SIM/APDU 的 `card_route` 仍报 `sim_apdu_data_active`，
+VoWiFi 未就绪；不是全部业务已恢复。
+这张中国大陆卡不启用 VoWiFi，遵守既有用户决定，不将其扩成新的 VoWiFi 验收任务。
+PR #19 的无本地策略兜底修复已通过候选 hosted 验证，
+但尚未合并或部署；不能用本次旧工件的恢复为该修复签收。下一步是审阅并授权该候选的
+定向部署，验证真实 bearer 断开且既有用户策略不变，不再重复重插或扩展付费测试。
+
+以下按发生顺序保留恢复前的证据；其中“未恢复”“下一步”是历史状态，由上文覆盖。
+
+最新观测覆盖下述历史过程：用户随后授权完全停止 VMware；其用户进程、相关服务及可停止
+USB 驱动已停，原生 Quectel 接口一度恢复，但 AT 打开报设备无法正常工作。用户再次插拔后
+曾出现原生 USB 描述符失败/Code 43；第二次插拔同一端口后恢复 AT/Modem 枚举，AT 打开变为
+资源占用。尚无证据确认占用者，不能把枚举成功当作读卡恢复。Core 新鲜快照仍缺少目标 Agent，
+其原进程仅有本地控制监听、没有 WSS 连接；Windows 现场故障仍未解决。其他两条读卡器线路
+仍有读卡和 IMS 注册证据，不扩展为通话验收。没有重启 Agent、改用户策略或进行付费测试。
+
+后续原生客户端报 `WSAENOBUFS`，系统事件 4231 与大量 `BOUND` 端点相互印证。
+Tailscale 服务和界面累计约一万个 TCP 端点，Mihomo 另有约两千四百个；不能把累计占用
+直接叫作当前连接风暴。用户授权 Tailscale 停启对照后，全机 `BOUND` 从 12,758 降至约
+2,739，证明这两个进程确实占用了大量端点，但 Agent 回环连接仍卡住，不能宣称主故障修复。
+恢复 Tailscale 时服务报 1053/启动超时，当前服务未恢复；原配置及登录身份未删除，
+界面已回到原用户会话，一次性界面恢复任务已移除。没有重启主机、扩大动态端口范围、
+重置 Winsock，或修改 Mihomo、EasyTier、Proxifier 和 MDD 隔离规则。
+
+更正模块检查方法：早先按 `prox` 筛选漏掉实际名为 `PrxerDrv.dll`/`PrxerNsp.dll` 的模块。
+精确名称读回确认 Agent 和 Tailscale 均加载了 Proxifier LSP；这推翻“未加载”的负面结论，
+但加载本身仍不证明因果。独立原生回环探测在连接调用返回异步任务之前卡住，尚未到达
+MDD HTTP。Mihomo 配置有 Tailscale 守护进程直连规则，仍需区分 TUN、系统代理和 LSP
+各层；没有证据认定某一个已是根因。Proxifier 短停恢复对照已单独请求，尚未执行。
+下一步只做这一有依据的对照和恢复，不重复 USB 复位或修改用户卡片策略。
+排查依据：[Microsoft 端口耗尽诊断](https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/tcp-ip-port-exhaustion-troubleshooting)
+和 [Tailscale Windows 服务与日志](https://tailscale.com/docs/reference/tailscaled)。
+以下按发生顺序保留早期尝试，不是当前待执行步骤。
+
+本次主任务起因是 EC20 移入另一台已有 Agent 的 Windows 主机后不能自动发现、注册。
+新增备用管理地址和下文嵌入式手动部署说明不能代替这一验收；备用地址属于同一主机，
+不应创建第二个 Agent 身份。具体地址和原始证据仅保存在工作区外的私有游标。
+
+已验工件仍在运行，但 Windows 尚未生成该 EC20 的 modem/AT 接口。首次只读枚举只能看到
+VMware USB Code 43；一次精确节点重枚举后，底层描述符与当前 VMware 日志同时确认
+`VID 2C7C / PID 0125` 的 Quectel 身份。没有发现该设备的 VM 自动连接规则，也没有正常
+连接至 guest 的证据；日志中的 `Found device` 不能作为 guest 已接管的证据。
+
+用户明确授权后，短停 VMware Workstation Server 与 USB 仲裁服务，并在确认停止后对
+该故障节点重枚举一次。最终读回已从 `vmusb.sys` 转为 Windows 原生 `usb.inf`，但仍是
+`Device Descriptor Request Failed / Code 43`，没有 modem/AT 接口。因此设备已回到宿主
+USB 栈，不等于恢复可用，也不能据此断言是硬件损坏或 MDD 自动配卡缺陷。
+两个 VMware 服务已恢复原运行状态及启动配置，两台 VM 的进程未变，读卡器仍 Started，
+MDD 持久蜂窝隔离规则逐项不变，一次性独立回滚任务已移除。临时工具与远端诊断文件在
+私有归档哈希核对后已移除，无残留诊断进程。服务在显式恢复前已自行运行，
+故不声称整个采样窗口持续排除了 VMware。另一次按设备 ID 的端口复位工具调用因找不到
+可操作端口而在执行前退出，不能把它记录成已经完成断电复位。
+
+另一个独立问题是原生套接字客户端在连接本机控制端口时就卡住，尚未进入 MDD HTTP 处理。
+Proxifier 模块归属已经过本节开头的精确文件名核对；加载拦截模块本身不证明因果。
+处置后一次 Core 读回仍未见目标 Agent，SCM Running 不能代替注册。
+
+没有重启 Agent、关闭 VM、改驱动/VM 自动连接配置、修改用户开关、放松隔离或产生付费操作。
+随后用户要求完全停止 VMware。官方控制工具在 SSH 与已有登录会话中均于只读 VM 枚举
+阶段超时，尚未发出 guest 关机或挂起，不能声称两台 VM 已停机；临时控制客户端和任务
+已清理。当前下一步是通过已发起的远程桌面、在主机接受连接后安全关机/保留状态挂起 VM，
+再完整退出 VMware 并读回 EC20。没有强杀 VM，也不修改其启动设置或卸载软件。
+原生 USB 仍失败时再接续 EC20/转接板完整断电后的枚举对照。Proxifier 的短时退出/恢复
+另行请求具体授权，不将 VMware 停机授权扩大成网络软件授权。
+原始报告及逐文件哈希仅保存在私有目录，不发布主机身份或日志。安全处置依据为
+[VMware 自动连接语义](https://knowledge.broadcom.com/external/article/343950/automatically-connecting-usb-devices-at.html)
+和 [Windows 精确节点重启](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/pnputil-command-syntax)。
+以下九月三十日记录保留其当时部署验收范围，不是十月二日实时健康证明。
+
 ## 2026-09-30 版本对齐记录
 
 最终结果：PR #18 已正常合并，五个 Agent 已更新至已验 `bca3dce` 工件，Linux 通话能力及对应
@@ -367,6 +461,10 @@ nohup ./mdd-agent run >mdd-agent.out 2>&1 &
 Mac 蜂窝隔离/通话验收；当前支持边界以 PC/SC-only 和正式发布矩阵为准。
 
 ### 3. Linux / 树莓派 / NAS 客户端
+
+嵌入式设备可另选[手动部署与 crontab 保活](agent/MODEM_AGENT.md#嵌入式设备手动部署)：自行下载、
+核对、放置程序并配置连接，不要求 reader Agent 使用 systemd。现有运行/隔离逻辑不改，
+ARM64/其他 libc 工件及无 systemd modem 支持不能从该说明推定。下面仍是原 systemd 安装方式。
 
 当前 Linux release 已包含统一 Go `mdd-agent` 与 `mdd-agent.service`，支持 PC/SC／eUICC
 读卡器的远程高层协议。服务端安装只放置二进制和 unit，不会自动启用 endpoint Agent；先在设备上

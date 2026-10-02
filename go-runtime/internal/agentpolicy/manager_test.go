@@ -257,6 +257,7 @@ func TestPolicyReconcileReleasesStaleConnectionBeforeNewSIMIsReady(t *testing.T)
 	}
 	newFact := oldFact
 	newFact.SIM.ICCID, newFact.SIM.SessionGeneration = "8985200000000000002", "session-b"
+	newFact.Network.Data = agentmodem.DataDisconnected
 	manager.ReconcilePolicies(context.Background(), []agentmodem.Fact{newFact})
 	connection.mu.Lock()
 	releases, owners := connection.releases, len(connection.owned)
