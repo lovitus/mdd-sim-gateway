@@ -613,7 +613,7 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 				continue
 			}
 			if !found {
-				manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
+				manager.reconcileDefaultData(ctx, fact)
 				continue
 			}
 		}
@@ -678,6 +678,59 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 		}
 		manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
 	}
+}
+
+func (manager *Manager) reconcileDefaultData(ctx context.Context, fact agentmodem.Fact) {
+	switch fact.Network.Data {
+	case agentmodem.DataDisconnected:
+		manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
+		return
+	case agentmodem.DataConnected, agentmodem.DataConnecting:
+	default:
+		manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "cellular_bearer_unconfirmed")
+		return
+	}
+	target := Target{AttachmentID: fact.AttachmentID, EquipmentID: fact.EquipmentID,
+		CardID: fact.SIM.ICCID, SIMSessionGeneration: fact.SIM.SessionGeneration}
+	code := "default_data_disconnect_failed"
+	err := manager.coordinatorNow().DoAuxiliary(ctx, fact.EquipmentID, func(operationContext context.Context) error {
+		// A user policy may have been saved while this reconcile waited for the lock.
+		_, found, err := manager.config.Store.Get(target.EquipmentID, target.CardID)
+		if err != nil {
+			code = "policy_store_unavailable"
+			return err
+		}
+		if found {
+			return ErrRevision
+		}
+		if target.SIMSessionGeneration == "" {
+			return agentmodem.ErrOperationTargetReplaced
+		}
+		if err := manager.requireFresh(operationContext, target); err != nil {
+			return err
+		}
+		manager.mu.RLock()
+		available := manager.config.Connection != nil
+		manager.mu.RUnlock()
+		if !available {
+			code = "default_data_disconnect_unavailable"
+			return agentmodem.ErrOperationUnavailable
+		}
+		return manager.setPersistentConnection(operationContext, target, Default(target.EquipmentID, target.CardID), false)
+	})
+	if errors.Is(err, ErrRevision) {
+		return
+	}
+	switch {
+	case err == nil:
+		// A successful stop (including a backend no-op) is not a disconnected observation.
+		code = "default_data_disconnect_unconfirmed"
+	case errors.Is(err, agentdata.ErrSessionActive):
+		code = "data_lease_active"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		code = "policy_timeout"
+	}
+	manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, code)
 }
 
 func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []agentmodem.Fact) map[string]error {
