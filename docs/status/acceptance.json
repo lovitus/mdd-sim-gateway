@@ -1421,6 +1421,19 @@
   ],
   "workstreams": [
     {
+      "id": "LINUX_MODEM_ACQUISITION",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "October 3 follow-up fixes three reviewed Linux acquisition counterexamples: reject duplicate equipment before cleanup, require authoritative idle MM voice before Disconnect/Inhibit, and invalidate retained AT/cached disconnected readiness when connected inventory reappears without a dataClaim. Normal inhibited absence, existing data/raw owners, serial-only service ownership and stored user intent retain their existing paths. No Core, protocol or user-interface expansion.",
+      "acceptance": "Candidate implementation and behavior fixtures are written but not yet built, tested, merged or deployed. The three top-level Prober regressions must fail behaviorally on pre-fix ef2479c and pass under race detection on the candidate in GitHub-hosted CI. The pre-fix harness changes only the guard field's concrete type to the identical-method platform interface needed by the fixture, not acquisition behavior. Existing Windows MODEM_DEFAULT_DATA acceptance is unchanged; Linux physical disconnection/isolation remains unverified by this batch.",
+      "evidence": [
+        "agent/MODEM_AGENT.md",
+        "go-runtime/internal/linuxmodem/prober_linux.go",
+        "go-runtime/internal/linuxmodem/acquisition_linux.go",
+        "go-runtime/internal/linuxmodem/acquisition_linux_test.go"
+      ]
+    },
+    {
       "id": "MODEM_DEFAULT_DATA",
       "state": "completed",
       "releaseRelevance": "current",

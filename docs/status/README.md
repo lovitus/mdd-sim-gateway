@@ -67,6 +67,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### LINUX_MODEM_ACQUISITION
+
+**State: needs_verification; release relevance: current.** October 3 follow-up fixes three reviewed Linux acquisition counterexamples: reject duplicate equipment before cleanup, require authoritative idle MM voice before Disconnect/Inhibit, and invalidate retained AT/cached disconnected readiness when connected inventory reappears without a dataClaim. Normal inhibited absence, existing data/raw owners, serial-only service ownership and stored user intent retain their existing paths. No Core, protocol or user-interface expansion.
+
+Acceptance scope / remaining action: Candidate implementation and behavior fixtures are written but not yet built, tested, merged or deployed. The three top-level Prober regressions must fail behaviorally on pre-fix ef2479c and pass under race detection on the candidate in GitHub-hosted CI. The pre-fix harness changes only the guard field's concrete type to the identical-method platform interface needed by the fixture, not acquisition behavior. Existing Windows MODEM_DEFAULT_DATA acceptance is unchanged; Linux physical disconnection/isolation remains unverified by this batch.
+
 ### WINDOWS_MODEM_RELOCATION
 
 **State: unresolved_cause; release relevance: current.** October 2 at 07:23 UTC, Windows Agent WSS, the original reader card and relocated EC20 card are restored in fresh Core projections, with hardware/AT/cellular voice/SMS readiness. Authorized Proxifier exit recovered original-process local control and Tailscale startup; same-profile restoration passed three bounded local-API samples while WSS still retried. The owner then independently uninstalled Proxifier and requested that it remain absent. After preserving repeated old-Agent connectex/not-a-socket errors and verifying scoped idle state, one same-binary Agent service restart restored WSS and exact-card projection. Configuration hash is unchanged. Tailscale service and GUI are running; native CLI reports BackendState Running, Self.Online true and empty Health. The earlier WSAENOBUFS/4231 evidence and roughly ten thousand Tailscale-held endpoints remain real, but their accumulation cause and a Mihomo loop are unproven. SIM/APDU card_route still reports sim_apdu_data_active; CN VoWiFi remains excluded by owner rather than a new acceptance gate. Incident recovery is established at the stated readback boundary, not full root-cause closure or proxy coexistence qualification.

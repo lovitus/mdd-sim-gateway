@@ -1,0 +1,47 @@
+name: Temporary Linux acquisition counterexamples
+
+on:
+  push:
+    branches: [codex/linux-modem-acquisition-safety]
+
+permissions:
+  contents: read
+
+jobs:
+  counterexamples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ef2479c3a69ee5fd2169ec8e6f9eeb80b3cd1e12
+          path: baseline
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install platform build dependencies
+        run: |
+          set -euo pipefail
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libpcsclite-dev pkg-config
+      - name: Verify compiled pre-fix failures and candidate recovery
+        run: node tools/linux-acquisition-counterexamples.mjs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-acquisition-evidence-${{ github.sha }}
+          path: linux-acquisition-evidence/*
+          if-no-files-found: error
+          retention-days: 7

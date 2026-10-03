@@ -245,8 +245,9 @@ Agent 的命令通道。不新增 Core 按卡持久化、跨主机配置迁移�
 活动通话/租约、身份改变、状态未知或平台操作失败时保留非就绪状态并退避，不盲目复位。
 
 只有新鲜观察到 `disconnected` 才把这个兜底记为就绪；停止调用返回成功也不等于已断开。
-Linux 当前未持有 bearer 时的停止接口可能不执行操作，不能从返回值推断承载已关闭；
-原 NM/nft 隔离仍保留，实际断开未确认会继续显示异常。Windows 复用现有精确 SIM 的 MBN
+Linux 未持有 dataClaim 时的 `StopData` 本身不执行操作；初始遗留 bearer 清理由 `acquire`
+负责，不能仅凭停止调用返回值推断承载已关闭。原 NM/nft 隔离仍保留，实际断开未确认会
+继续显示异常。Windows 复用现有精确 SIM 的 MBN
 断开操作，不另造驱动或改系统全局网络配置。本批不是所有平台实际断开的验收声明。
 
 本批失败方式：未执行默认关闭却显示就绪、把 unknown/no-op 当成功、无节制重复断开、
@@ -273,6 +274,27 @@ race 检测下通过， scoped JSONL 没有 fail/skip，两份 stderr 为空。�
 [部署回执](../DEPLOYMENT.md#2026-10-03-单机默认断流部署回执)。不扩展为跨主机恢复、
 Linux 无 owner 断流、长期或全平台物理防泄漏验收。
 已有关闭策略每轮重复 reconcile 的优化另记延期，不扩大本批。
+
+### Linux 接管安全修复（October 3，候选未验）
+
+走读确认三个接管缺口：重复 equipment 检查晚于断开操作；取得 MM ownership 前缺少
+现有 VoiceIdle 门禁；已有 owner、没有 dataClaim，却重新看到 connected MM 对象时，
+旧缓存仍可能报告 ready/disconnected。这是源码反例，不是已确认的现场流量泄漏。
+
+候选先拒绝歧义身份、校验精确 USB 和持久隔离，再复用 MM VoiceIdle。忙、未知或读取
+失败只阻止对应设备的 Disconnect/Inhibit，不重启 MM、不改 APN、无线开关或用户策略。
+serial-only 仍使用原有 MM 已停止的前提，不要求不存在的 MM Voice 对象。
+
+新出现的冲突使该 owner 的缓存事实和 AT 操作资格失效；关闭其旧 AT 句柄不发送挂断或
+无线指令。再次短暂不在 MM inventory 中不会清除这个标记。只有同一设备的新鲜断开读回
+及成功 Inhibit 后，才重新发现 AT、建立新的 SIM 会话资格。普通已 inhibit 的设备缺席、
+现有 dataClaim 和 raw USB owner 不走这条冲突清理。Disconnect 返回 nil 仍须等待读回。
+
+失败清单：歧义设备被断开、振铃/活动/未知通话被接管、失效缓存再次发布、一次停止应答
+被误当作断开、串口路径被误封，以及正常数据 owner 被接管。回归直接运行真实 Prober，
+只替换 D-Bus、隔离和 AT 端口这些平台边界；不替换被测接管逻辑。
+当前未构建、未运行测试、未部署，Linux 物理验收仍未扩展。待 GitHub-hosted 行为红→绿
+和整批 CI 后补确切源码、结果及证据摘要；既有 Windows 验收不重开。
 
 ## 配置与状态核对
 
