@@ -245,8 +245,9 @@ Agent 的命令通道。不新增 Core 按卡持久化、跨主机配置迁移�
 活动通话/租约、身份改变、状态未知或平台操作失败时保留非就绪状态并退避，不盲目复位。
 
 只有新鲜观察到 `disconnected` 才把这个兜底记为就绪；停止调用返回成功也不等于已断开。
-Linux 当前未持有 bearer 时的停止接口可能不执行操作，不能从返回值推断承载已关闭；
-原 NM/nft 隔离仍保留，实际断开未确认会继续显示异常。Windows 复用现有精确 SIM 的 MBN
+Linux 未持有 dataClaim 时的 `StopData` 本身不执行操作；初始遗留 bearer 清理由 `acquire`
+负责，不能仅凭停止调用返回值推断承载已关闭。原 NM/nft 隔离仍保留，实际断开未确认会
+继续显示异常。Windows 复用现有精确 SIM 的 MBN
 断开操作，不另造驱动或改系统全局网络配置。本批不是所有平台实际断开的验收声明。
 
 本批失败方式：未执行默认关闭却显示就绪、把 unknown/no-op 当成功、无节制重复断开、
@@ -273,6 +274,43 @@ race 检测下通过， scoped JSONL 没有 fail/skip，两份 stderr 为空。�
 [部署回执](../DEPLOYMENT.md#2026-10-03-单机默认断流部署回执)。不扩展为跨主机恢复、
 Linux 无 owner 断流、长期或全平台物理防泄漏验收。
 已有关闭策略每轮重复 reconcile 的优化另记延期，不扩大本批。
+
+### Linux 接管安全修复（October 3，候选复验中）
+
+走读确认三个接管缺口：重复 equipment 检查晚于断开操作；取得 MM ownership 前缺少
+现有 VoiceIdle 门禁；已有 owner、没有 dataClaim，却重新看到 connected MM 对象时，
+旧缓存仍可能报告 ready/disconnected。这是源码反例，不是已确认的现场流量泄漏。
+
+候选先拒绝歧义身份、校验精确 USB 和持久隔离，再复用 MM VoiceIdle。忙、未知或读取
+失败只阻止对应设备的 Disconnect/Inhibit，不重启 MM、不改 APN、无线开关或用户策略。
+serial-only 仍使用原有 MM 已停止的前提，不要求不存在的 MM Voice 对象。
+Voice 未导出时，仅同一次完整 inventory 证实 LOCKED 且 SIM PIN/PUK，或 DISABLED，
+并且全部 bearer 明确未连接，才允许接管以保留 PIN/AT 恢复路径。字段缺失、类型错误、
+活动/过渡状态，或 Voice 存在但查询失败都不使用此例外。启用状态却没有 Voice 的设备
+仍缺少安全空闲证据，不借助需要 MM debug 支持的 Command/CLCC 回退。
+探测超时后的迟到成功不授予许可；取消后不继续处理下一个 bearer。
+
+新出现的冲突使该 owner 的缓存事实和 AT 操作资格失效；关闭其旧 AT 句柄不发送挂断或
+无线指令，但这不等于所有驱动上的物理通话无影响证明。歧义 equipment 也会使已保留且
+未出现在本轮 inventory 的普通 owner 失效。再次短暂不在 MM inventory 中不会清除这个标记。只有同一设备的新鲜断开读回
+及成功 Inhibit 后，才重新发现 AT、建立新的 SIM 会话资格。普通已 inhibit 的设备缺席、
+现有 dataClaim 和 raw USB owner 不走这条冲突清理。Disconnect 返回 nil 仍须等待读回。
+
+失败清单：歧义设备被断开、振铃/活动/未知通话被接管、失效缓存再次发布、一次停止应答
+被误当作断开、串口路径被误封，以及正常数据 owner 被接管。回归直接运行真实 Prober，
+只替换 D-Bus、隔离和 AT 端口这些平台边界；不替换被测接管逻辑。
+[首轮 hosted 37101427715](https://github.com/lovitus/mdd-sim-gateway/actions/runs/37101427715)
+在精确候选 `446b910dc6910baadb266349bb183b6ed04e4aea` 通过：基线 `ef2479c` 的三个
+顶层反例编译后按预期行为失败，六个通话子例失败，两个正常对照通过；候选整包 race 的
+49 个测试/子例通过，无 fail/skip。逐项解析原始 JSONL 未发现额外失败、race 或 panic。
+红/绿 JSONL SHA-256 为 `d62ef72d70e28c5f876f2bde00f1725de0fec2e8aa2a2df3f865f6f24015859b`、
+`61b1834774d3e9922908e6770b8e77a0d18ba19c4ecbc77b9a3f6e2b71e02dcc`。
+评审随后要求补齐保留 owner 的歧义、迟到空闲结果和无 Voice 的锁卡恢复；这些修正未被
+上述首轮结果覆盖，正以 `446b910` 不改生产源码的反例基线统一复验。未合并或部署，
+Linux 物理验收仍未扩展；既有 Windows 验收不重开。
+复验 `37102420417` 在临时统计脚本失败：十个实际子例和三个顶层恰按行为失败，但脚本
+把单层 `t.Run` 名称中的斜杠误当成另有两层父测试，错误预期 15 而非 13 个失败事件。
+只修正事件集合计算，保留原始失败工件；该次未执行绿色阶段，不能算修复版本通过。
 
 ## 配置与状态核对
 
