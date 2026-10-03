@@ -39,27 +39,29 @@ const (
 type managedObjects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 
 type modemSnapshot struct {
-	ObjectPath    dbus.ObjectPath
-	UID           string
-	EquipmentID   string
-	Manufacturer  string
-	Model         string
-	Firmware      string
-	ATPorts       []string
-	NetPorts      []string
-	AudioPorts    []string
-	Bearers       []dbus.ObjectPath
-	BearerStates  map[dbus.ObjectPath]bool
-	Connected     bool
-	SIMState      agentmodem.SIMState
-	ICCID         string
-	IMSI          string
-	MSISDNs       []string
-	OperatorID    string
-	OperatorName  string
-	Registration  agentmodem.RegistrationState
-	SignalPercent *uint32
-	SIMPath       dbus.ObjectPath
+	ObjectPath   dbus.ObjectPath
+	UID          string
+	EquipmentID  string
+	Manufacturer string
+	Model        string
+	Firmware     string
+	ATPorts      []string
+	NetPorts     []string
+	AudioPorts   []string
+	Bearers      []dbus.ObjectPath
+	BearerStates map[dbus.ObjectPath]bool
+	Connected    bool
+	// Set only by a complete typed inventory of an inactive, Voice-less modem.
+	VoiceNotApplicable bool
+	SIMState           agentmodem.SIMState
+	ICCID              string
+	IMSI               string
+	MSISDNs            []string
+	OperatorID         string
+	OperatorName       string
+	Registration       agentmodem.RegistrationState
+	SignalPercent      *uint32
+	SIMPath            dbus.ObjectPath
 }
 
 type modemManager interface {
@@ -525,6 +527,11 @@ func parseManagedObjects(objects managedObjects) ([]modemSnapshot, error) {
 			}
 		}
 		unlockRequired := uint32Property(properties, "UnlockRequired")
+		_, voicePresent := interfaces[mmModem+".Voice"]
+		state, stateKnown := variantValue[int32](properties, "State")
+		lock, lockKnown := variantValue[uint32](properties, "UnlockRequired")
+		value.VoiceNotApplicable = !voicePresent && stateKnown && !value.Connected && value.BearerStates != nil &&
+			(state == 3 || state == 2 && lockKnown && (lock == 2 || lock == 4))
 		switch {
 		// Match ModemManager set_lock_status: PIN2/PUK2 do not prevent
 		// ordinary operation. Never attempt to unlock these ancillary codes.

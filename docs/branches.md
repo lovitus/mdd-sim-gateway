@@ -70,6 +70,16 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October 3 Linux acquisition batch: immutable evidence tags
+`archive/2026-10-03/linux-acquisition-initial-counterexamples` ->
+`446b910dc6910baadb266349bb183b6ed04e4aea` and
+`archive/2026-10-03/linux-acquisition-qualified` ->
+`91947fc993d708f72649ecaceae5c2c61cb07207` preserve the hosted behavioral
+counterexamples and temporary verification entry. Final delivery excludes that
+entry. Neither tag is a release, production qualification, or future merge queue;
+do not restore the initial rejected candidate or reintroduce temporary CI tools.
+The batch PR records its final exact-head review and merge disposition.
+
 September 30 follow-up: [PR #18](https://github.com/lovitus/mdd-sim-gateway/pull/18)
 normally merged the reviewed call-capability recovery at
 `e30a45fb666fa2f2ec5eba7596df4fecb331513a`, from exact head

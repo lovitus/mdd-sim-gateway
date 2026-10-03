@@ -39,7 +39,7 @@ type Prober struct {
 	sysRoot       string
 	simAPDU       bool
 	devices       map[string]*ownedDevice
-	guard         *linuxdataguard.Guard
+	guard         cellularGuard
 	raw           map[string]rawClaim
 	localCapture  map[string]bool
 	data          map[string]*dataClaim
@@ -63,6 +63,7 @@ type ownedDevice struct {
 	lastFactAt     time.Time
 	probeError     string
 	releasePending bool
+	ownershipIssue *agentmodem.Fact
 }
 
 type rawClaim struct {
@@ -310,6 +311,11 @@ func (prober *Prober) acquire(ctx context.Context, inventory []modemSnapshot) []
 	equipmentOwners := make(map[string]string, len(prober.devices)+len(inventory))
 	for uid, current := range prober.devices {
 		equipmentOwners[current.snapshot.EquipmentID] = uid
+		if current.ownershipIssue != nil {
+			// Absence normally means inhibition, but cannot prove recovery of
+			// an ownership conflict already observed on this attachment.
+			current.ownershipIssue.Network.Data = agentmodem.DataUnknown
+		}
 	}
 	duplicates := make(map[string]struct{})
 	for _, snapshot := range inventory {
@@ -319,18 +325,71 @@ func (prober *Prober) acquire(ctx context.Context, inventory []modemSnapshot) []
 			equipmentOwners[snapshot.EquipmentID] = snapshot.UID
 		}
 	}
+	// An inhibited owner may be absent from MM inventory. Identity ambiguity
+	// must also revoke that retained owner's qualification, not only reject B.
+	for _, current := range prober.devices {
+		if _, exported := prober.raw[current.snapshot.EquipmentID]; exported {
+			continue
+		}
+		if prober.data[current.snapshot.EquipmentID] != nil || current.releasePending || !hasKey(duplicates, current.snapshot.EquipmentID) {
+			continue
+		}
+		issue := unavailableFact(current.snapshot, current.usb,
+			"multiple physical modems reported the same equipment identity", false)
+		issue.Network.Data = agentmodem.DataUnknown
+		current.ownershipIssue = &issue
+		current.lastFact, current.lastFactAt = agentmodem.Fact{}, time.Time{}
+	}
 	for _, snapshot := range inventory {
-		if prober.devices[snapshot.UID] != nil {
+		current := prober.devices[snapshot.UID]
+		if current != nil {
+			if _, exported := prober.raw[current.snapshot.EquipmentID]; exported {
+				continue
+			}
+			if prober.data[current.snapshot.EquipmentID] != nil || current.releasePending {
+				continue
+			}
+			if !snapshot.Connected && current.ownershipIssue == nil {
+				continue
+			}
+			issue := unavailableFact(current.snapshot, current.usb,
+				"ModemManager ownership lost; re-proving exclusive control", snapshot.Connected)
+			current.ownershipIssue = &issue
+			current.lastFact, current.lastFactAt = agentmodem.Fact{}, time.Time{}
+		}
+		block := func(generation usbGeneration, detail string) {
+			fact := unavailableFact(snapshot, generation, detail, snapshot.Connected)
+			if current != nil {
+				// Keep the old attachment fenced until exact re-acquisition;
+				// do not publish a second fact for the same retained owner.
+				fact.AttachmentID, fact.EquipmentID = current.usb.AttachmentID, current.snapshot.EquipmentID
+				current.ownershipIssue = &fact
+			} else {
+				blocked = append(blocked, fact)
+			}
+		}
+		if hasKey(duplicates, snapshot.EquipmentID) {
+			block(usbGeneration{}, "multiple physical modems reported the same equipment identity")
 			continue
 		}
 		generation, err := resolveUSBGeneration(prober.sysRoot, snapshot.ATPorts)
 		if err != nil {
-			blocked = append(blocked, unavailableFact(snapshot, usbGeneration{}, "exact USB/AT ownership is unavailable: "+err.Error(), false))
+			block(usbGeneration{}, "exact USB/AT ownership is unavailable: "+err.Error())
+			continue
+		}
+		if current != nil && (snapshot.EquipmentID != current.snapshot.EquipmentID || generation != current.usb) {
+			block(generation, "modem identity changed during ownership recovery")
 			continue
 		}
 		if prober.guard != nil {
 			if guardErr := prober.guard.VerifyProtected(ctx, generation.PhysicalID, snapshot.NetPorts); guardErr != nil {
-				blocked = append(blocked, unavailableFact(snapshot, generation, "persistent cellular data guard is unavailable: "+guardErr.Error(), snapshot.Connected))
+				block(generation, "persistent cellular data guard is unavailable: "+guardErr.Error())
+				continue
+			}
+		}
+		if !snapshot.Connected || prober.guard != nil && len(snapshot.Bearers) != 0 {
+			if err := prober.acquisitionIdle(ctx, snapshot); err != nil {
+				block(generation, "modem call state does not permit ownership handoff: "+err.Error())
 				continue
 			}
 		}
@@ -339,23 +398,27 @@ func (prober *Prober) acquire(ctx context.Context, inventory []modemSnapshot) []
 			if prober.guard != nil && len(snapshot.Bearers) != 0 {
 				var failures []error
 				for _, bearer := range snapshot.Bearers {
+					if err := ctx.Err(); err != nil {
+						failures = append(failures, err)
+						break
+					}
 					failures = append(failures, prober.manager.Disconnect(ctx, bearer))
 				}
 				if cleanupErr := errors.Join(failures...); cleanupErr != nil {
-					blocked = append(blocked, unavailableFact(snapshot, generation,
-						"stale cellular bearer cleanup failed: "+cleanupErr.Error(), true))
+					block(generation, "stale cellular bearer cleanup failed: "+cleanupErr.Error())
 				} else {
-					blocked = append(blocked, unavailableFact(snapshot, generation,
-						"stale cellular bearer was disconnected; re-probing ownership", false))
+					block(generation, "stale cellular bearer disconnect requested; awaiting fresh inventory")
 				}
 				continue
 			}
-			blocked = append(blocked, unavailableFact(snapshot, generation, "an existing cellular data bearer prevents ownership handoff", true))
-		case hasKey(duplicates, snapshot.EquipmentID):
-			blocked = append(blocked, unavailableFact(snapshot, generation, "multiple physical modems reported the same equipment identity", false))
+			block(generation, "an existing cellular data bearer prevents ownership handoff")
 		default:
+			if err := ctx.Err(); err != nil {
+				block(generation, "ModemManager ownership handoff cancelled: "+err.Error())
+				continue
+			}
 			if err := prober.manager.Inhibit(ctx, snapshot.UID, true); err != nil {
-				blocked = append(blocked, unavailableFact(snapshot, generation, "ModemManager ownership handoff failed: "+err.Error(), false))
+				block(generation, "ModemManager ownership handoff failed: "+err.Error())
 				continue
 			}
 			prober.devices[snapshot.UID] = &ownedDevice{snapshot: snapshot, usb: generation}
@@ -367,7 +430,7 @@ func (prober *Prober) acquire(ctx context.Context, inventory []modemSnapshot) []
 func (prober *Prober) enumerateAT() ([]agentat.Candidate, error) {
 	result := make([]agentat.Candidate, 0)
 	for _, current := range prober.devices {
-		if current.releasePending {
+		if current.releasePending || current.ownershipIssue != nil {
 			continue
 		}
 		if _, exported := prober.raw[current.snapshot.EquipmentID]; exported {
@@ -391,7 +454,7 @@ func (prober *Prober) enumerateAT() ([]agentat.Candidate, error) {
 func (prober *Prober) targetsExcept(excluded map[string]struct{}) []agentat.Target {
 	result := make([]agentat.Target, 0, len(prober.devices))
 	for _, current := range prober.devices {
-		if current.releasePending {
+		if current.releasePending || current.ownershipIssue != nil {
 			continue
 		}
 		if _, exported := prober.raw[current.snapshot.EquipmentID]; exported {
@@ -408,6 +471,9 @@ func (prober *Prober) targetsExcept(excluded map[string]struct{}) []agentat.Targ
 }
 
 func (prober *Prober) fact(ctx context.Context, current *ownedDevice, at agentat.Snapshot, fresh bool) (agentmodem.Fact, error) {
+	if current.ownershipIssue != nil {
+		return cloneFact(*current.ownershipIssue), nil
+	}
 	now := time.Now()
 	if !fresh && !current.lastFactAt.IsZero() && now.Sub(current.lastFactAt) < 5*time.Second && current.probeError == "" {
 		return cloneFact(current.lastFact), nil

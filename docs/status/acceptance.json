@@ -1421,6 +1421,19 @@
   ],
   "workstreams": [
     {
+      "id": "LINUX_MODEM_ACQUISITION",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "October 3 follow-up fixes three reviewed Linux acquisition counterexamples: reject duplicate equipment before cleanup, require authoritative idle MM voice before Disconnect/Inhibit, and invalidate retained AT/cached disconnected readiness when connected inventory reappears without a dataClaim. Normal inhibited absence, existing data/raw owners, serial-only service ownership and stored user intent retain their existing paths. No Core, protocol or user-interface expansion.",
+      "acceptance": "Hosted37101427715 passed at446b910: three compiled original counterexamples on ef2479c, then49 fixed package tests/subtests passed under race. Review corrections for retained-owner duplicates, expired idle permission and typed inactive Voice-less PIN recovery passed hosted37102575007 at91947fc: exactly10 failing counterexample subcases on unchanged production446b910,21 other tests/subtests passed, then72 fixed package tests/subtests passed under race with no skips/race/panic/build errors. Failed interim37102420417 was only an incorrect temporary event-count expectation; retained and corrected without changing product behavior or test assertions. Hashes and immutable archive refs are in agent/MODEM_AGENT.md. Final runtime/permanent tests match91947fc; temporary verification files are removed and long-term CI is unchanged. Whole-batch CI and final three-party merge disposition belong to the PR receipt. No CLCC/debug fallback or enabled Voice-less admission. Not deployed; existing Windows MODEM_DEFAULT_DATA acceptance is unchanged and Linux physical disconnection/isolation remains unverified by this batch.",
+      "evidence": [
+        "agent/MODEM_AGENT.md",
+        "go-runtime/internal/linuxmodem/prober_linux.go",
+        "go-runtime/internal/linuxmodem/acquisition_linux.go",
+        "go-runtime/internal/linuxmodem/acquisition_linux_test.go"
+      ]
+    },
+    {
       "id": "MODEM_DEFAULT_DATA",
       "state": "completed",
       "releaseRelevance": "current",
