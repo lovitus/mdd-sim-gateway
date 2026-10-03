@@ -10,7 +10,46 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
-## 2026-10-02 Windows 换机接入恢复（根因与默认断流验收仍待收口）
+## 2026-10-03 单机默认断流部署回执
+
+[PR #19](https://github.com/lovitus/mdd-sim-gateway/pull/19) 经实施方、固定 Codex reviewer
+和既有 ChatGPT reviewer 对同一 `f236872` 通过后，正常合并为
+`cab01c7bbc79b9ea09c710c7fd06e395095eb7f5`；最终 head 的 hosted run `36979155244`
+通过。用户随后单独授权原受影响 Windows Agent 的升级、验证和必要回退。
+
+本次只部署已资格化的 Windows amd64 工件，来源
+`c57131fe07b4d02523ab2d0144c3638e8387dad4`，运行代码与合并版本一致。
+这是 Windows `unsigned-development` 包，不能把 workflow 的 macOS 签名门禁当作 Windows 签名。
+tar SHA-256 为 `0aa7fef882257f12ad6474daf203dd5eafe9736aaedf753da4ea319e34bd21f4`；
+实际运行 CLI SHA-256 为 `848aa53013f0d89429dbb339fa2364a1944019e62afdae62bc436e347289362e`。
+全部 128 项 manifest 校验及候选目录权限检查通过，旧 release 和配置备份保留；没有复制运行中
+策略库冒充一致性备份，也没有倒灌数据库。
+
+执行方式为预置 SCM 的下次启动路径，再通过现有 Core 受保护 restart 完成唯一一次停启。
+首次 `sc.exe` 调用剥掉双引号，精确路径断言在 POST 前拒绝继续；核对旧进程、代际和当前目标后
+只恢复原路径，未发生重启。改用 `Win32_Service.Change` 仅传 `PathName`，精确读回后发送一次
+受保护请求。没有裸 `Stop-Service`、安装器自动回退或重复 POST；没有改变账户、启动方式或
+SCM 恢复策略。预置路径与 Core 维护门禁并非原子切换，不能据此声称所有时序均被覆盖。
+
+真实读回（UTC）：
+- 升级前 02:59:46，Windows MBN 为 `Connected`，有一条连接；Agent 的无持久策略默认意图为关闭。
+- 换版后 03:04:43，Core 收到新 Agent 代际及原两张卡，modem 为 `data=disconnected`，
+  `data_guard=protected`；默认策略仍未持久化、revision 仍为 0，用户意图和配置哈希不变。
+- 03:05:23，Windows MBN 独立读回 `Not connected`；旧进程已退出，实际新进程摘要匹配候选。
+  12 条持久 WFP 规则的 XML 与升级前逐项相同。旧二进制、配置备份和 SCM 恢复配置均核对一致。
+- Core 二进制、线路目录、通知配置以及其他 Agent 的版本和进程代际未变；受影响线路无通话、
+  借用数据或 raw 会话，维护已释放。未拨号、发短信、改 PIN/APN/radio/用户开关或强制开启流量。
+
+**该 Windows EC20、无本地策略的默认断流场景通过。** 不扩大为全平台、长期无泄漏、
+跨主机卡片配置迁移、真实语音/SMS 或代理组合共存验收。Linux 无 owner 的 `StopData` 限制及
+长期套接字积累根因仍未关闭；中国大陆卡 VoWiFi 继续排除。本次没有触发新 CI 或升级其他设备。
+
+原始证据仅保留在私有目录，公开以下摘要用于追溯：
+- `oct03-pr19-after-restart.json`: `92d42bac2d28f86e4ad3a59d0cbd1a76c76bffd78933025d5f0de8cd2bf6a259`。
+- `oct03-pr19-host-after.json`: `ccce1634ce3647564681b5678fbed4b61c9eb7fb578931482385462744710659`。
+- `oct03-pr19-wfp-mbn-after.json`: `ef86b431bdd7570f9845e129b0c11b4bb93bca4eaf24f6a96be1ab89182721e0`。
+
+## 2026-10-02 Windows 换机接入恢复（历史；长期根因未关闭）
 
 当前结果（07:23 UTC）：目标 Windows Agent 已重新连接 Core，原读卡器和移入的 EC20
 均按原卡片身份投影到既有线路。Core 新鲜事实为 `agent_connected`、`card_present`、
@@ -33,14 +72,13 @@ raw 会话。本次没有拨号、发短信、修改 PIN/APN/用户开关，也�
   动态端口范围或持久蜂窝隔离。不能把用户卸载后的恢复写成原代理组合已通过共存验收，
   也没有证据把长期积累归因于 Mihomo 循环。
 
-仍存在一个独立产品缺口：现网旧 Agent 没有该 equipment/card 的持久策略，却报告
+当时存在一个独立产品缺口：旧 Agent 没有该 equipment/card 的持久策略，却报告
 `data=connected`、`data_guard=protected`，同时展示默认关闭意图。隔离报告不等于已断流，
 更不等于已完成物理防泄漏验收。SIM/APDU 的 `card_route` 仍报 `sim_apdu_data_active`，
 VoWiFi 未就绪；不是全部业务已恢复。
 这张中国大陆卡不启用 VoWiFi，遵守既有用户决定，不将其扩成新的 VoWiFi 验收任务。
-PR #19 的无本地策略兜底修复已通过候选 hosted 验证，
-但尚未合并或部署；不能用本次旧工件的恢复为该修复签收。下一步是审阅并授权该候选的
-定向部署，验证真实 bearer 断开且既有用户策略不变，不再重复重插或扩展付费测试。
+当时 PR #19 尚未合并或部署，旧工件恢复不为该修复签收；后续合并、授权及实际 bearer
+断开结果见上方 October 3 回执，不再把这里的历史下一步当作待执行任务。
 
 以下按发生顺序保留恢复前的证据；其中“未恢复”“下一步”是历史状态，由上文覆盖。
 
