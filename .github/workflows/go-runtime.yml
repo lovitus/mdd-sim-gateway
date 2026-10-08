@@ -80,6 +80,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Verify Go-only source installation surface
         run: |
@@ -176,6 +177,18 @@ jobs:
         working-directory: go-runtime
         run: go mod verify
 
+      - name: Prove stored-off transition counterexamples once
+        run: bash tools/stored-off-counterexamples.sh
+
+      - name: Preserve stored-off counterexamples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: stored-off-linux
+          path: counterexample-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Test Core runtime
         working-directory: go-runtime
         run: go test -timeout 2m ./...
@@ -236,6 +249,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -269,6 +283,19 @@ jobs:
           [void][scriptblock]::Create($script)
           Write-Output 'install-windows-agent.ps1 syntax parsed'
           & ./go-runtime/release/test-deployment-waits.ps1
+
+      - name: Prove stored-off transition counterexamples once
+        shell: bash
+        run: bash tools/stored-off-counterexamples.sh
+
+      - name: Preserve stored-off counterexamples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: stored-off-windows
+          path: counterexample-evidence/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Test Windows Agent ownership and raw USB boundaries
         working-directory: go-runtime
