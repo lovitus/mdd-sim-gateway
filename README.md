@@ -42,7 +42,14 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 
 ### 1. 服务端部署（默认 Go artifact）
 
-从 [Releases 页面](https://github.com/lovitus/mdd-sim-gateway/releases/latest) 下载 Linux tar，并先按同一
+**当前下载限制（2026-10-08）：** 最新正式 Release `v1.3.14` 是重构前产物，不含下述 Go Linux tar
+及 `SHA256SUMS`，不能用于本节安装。当前新版尚无面向新用户的正式发布包，请勿用旧 Card Agent
+或 APK 替代。维护者可从已完成验证的 [Go Runtime workflow](https://github.com/lovitus/mdd-sim-gateway/actions/workflows/go-runtime.yml)
+取得精确提交的 `mdd-release-linux-amd64-<commit>` 工件用于受控验收；这些有保留期限的 CI 工件不是正式 Release，
+不可据此宣称新用户发布已完成。已有部署继续按其已验证产物维护。
+
+下面的安装步骤适用于已取得并核对过的新版 Go release bundle。正式包发布后，从对应版本的
+[Releases 页面](https://github.com/lovitus/mdd-sim-gateway/releases) 下载 Linux tar，并先按同一
 Release 的 `SHA256SUMS` 核对文件。普通 main push 的 workflow artifact 只用于 CI 内部验收；只有精确
 `v*` tag 在全部平台门禁通过后才发布可长期下载的 Release。Linux tar 外层只包含安装脚本和一个经过严格 manifest
 描述的 `mdd-<revision>` release 目录；不要从源码目录现场构建或回退到 Docker。

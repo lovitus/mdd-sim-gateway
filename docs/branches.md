@@ -70,6 +70,18 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October 8 incoming-media/modem-facts candidate: immutable evidence tag
+`archive/2026-10-08/inbound-policy-qualified` ->
+`cc7b5b5af2bb02ff1928aca3d55a69d1750722b8` preserves the one-time hosted
+counterexamples and exact green runtime/tests. Final delivery removes only the
+temporary workflow/script and records qualification; do not restore those tools
+or treat this evidence tag as a release. Full CI/review and merge are separate.
+`archive/2026-10-08/inbound-policy-reviewed` retains14524a09e7e84728b2e30bdcfae32270c9bcb16a:
+full CI37724548919 passed, but independent AMR review rejected that head.
+It is the compiled behavioral baseline for the review correction, not a merge
+candidate. Preserve the Linux/readiness evidence without treating its AMR
+contract as approved.
+
 October 3 Linux acquisition batch: immutable evidence tags
 `archive/2026-10-03/linux-acquisition-initial-counterexamples` ->
 `446b910dc6910baadb266349bb183b6ed04e4aea` and
