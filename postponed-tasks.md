@@ -39,6 +39,14 @@ Acceptance scope / remaining action: The original separate-report/durable-identi
 
 ## Accepted, deferred, excluded and separately prioritized work
 
+### INBOUND_HOLD_CONTINUITY
+
+**State: completed; release relevance: current.** Owner-requested PR23 follow-up: Provider-only live WebSocket silence padding preserves held-call transport without changing Android, Core, protocol, real carrier evidence or client-heartbeat hangup protection.
+
+Acceptance scope / remaining action: Qualified80e8c42, full CI37767495996; tag archive/2026-10-08/hold-continuity-qualified. Two compiled baseline downlink-timeout reds; four fixed race passes,0fail/skip. Covers16s hold, actual nonzero PCM before/after, resumed connection and exact-call guard termination without client messages. Initial37765592425 failed an incorrect close1000 expectation: existing EndStream cancellation permits EOF; corrected test requires deadline and exact end receipt instead. Final runtime/tests match qualified tag; temporary proof removed. Final-head CI/reviews and merge are recorded on PR24, not implied here. No deployment or Android/carrier/paid acceptance. Incoming16kHz-only telephone-event without INFO fallback remains deferred.
+
+Resolution (implementation_evidence): Provider-only correction and hosted behavioral qualification complete; production and physical acceptance remain separate.
+
 ### INBOUND_HOLD_DTMF
 
 **State: completed; release relevance: current.** PR23 implementation/hosted qualification complete: incoming hold/resume retains audio mapping and media owner; negotiated telephone-event uses the same Bridge. No-op refresh preserves media, distinct short keys retain distinct timestamps, and restricted AMR lowest-mode/CMR15 policy is unchanged. No AMR-WB or quality expansion.
