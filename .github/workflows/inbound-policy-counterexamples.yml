@@ -1,0 +1,54 @@
+name: Incoming media and modem fact counterexamples
+
+on:
+  push:
+    branches: ['codex/inbound-media-policy-facts']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  counterexamples:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            scope: provider
+          - os: ubuntu-latest
+            scope: linux
+          - os: windows-latest
+            scope: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            providers/vowifi-go/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pkg-config xorg-dev
+      - name: One-time compiled behavioral red and green
+        shell: bash
+        run: bash tools/inbound-policy-counterexamples.sh '${{ matrix.scope }}'
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: inbound-policy-${{ matrix.scope }}-${{ github.sha }}
+          path: counterexample-evidence/
+          if-no-files-found: error
+          retention-days: 14

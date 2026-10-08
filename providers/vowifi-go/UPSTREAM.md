@@ -1,5 +1,28 @@
 # Upstream source and MDD patch
 
+## Incoming offer negotiation (October 8 candidate)
+
+Reuse the pinned upstream `SelectSDPAnswerCodecs` and AMR FMTP classifier;
+no upstream source or dependency version is changed. The incoming adapter now
+selects by encoding/rate/channels instead of the local offer's fixed payload.
+It retains the selected mapping in the answer and both RTP directions. Outgoing
+answer validation remains tied to its original offer. Re-INVITE retains the
+established codec/mapping and updates only compatible endpoints.
+
+Optional RTCP mux is declined using the original non-mux RTCP address/port,
+not the parser's substituted mux endpoint. Mux-only, octet-aligned AMR, unsupported
+packetization and encrypted RTP remain rejected. No AMR-WB/EVS implementation,
+paid retries, carrier configuration or call-owner changes are included.
+
+Failure checklist: dynamic AMR rejected or incorrectly falling back to PCMU;
+answer/TX/RX mappings disagreeing; wrong PT accepted; PCMU regression; optional
+mux sent to the wrong RTCP port; unsupported format admitted; re-INVITE reverting
+to PT 96. The userspace SIP/RTP regression covers non-96 AMR alone and with PCMU,
+PCMU alone, AMR-WB plus AMR, optional mux with default/explicit RTCP, and rejects
+unsupported formats. These are synthetic peers, not carrier/audio acceptance.
+Hosted red/green and full qualification are pending; historical 488 causality
+is still unproven without the original offer.
+
 ## SMS receive-report network context
 
 The `524bd33` affected-line trial received six carrier redeliveries whose separate

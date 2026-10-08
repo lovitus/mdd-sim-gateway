@@ -41,6 +41,7 @@ type IncomingCarrierDTMFSender interface {
 type pendingIncomingCall struct {
 	info       IncomingCallInfo
 	codec      media.Codec
+	negotiated voicehost.SDPCodec
 	remoteRTP  string
 	remoteRTCP string
 	decision   chan voiceclient.SIPResponse
@@ -141,7 +142,7 @@ func (controller *IncomingCallController) RoundTripInvite(ctx context.Context, r
 	if available == nil || !available() {
 		return sipResponse(486, "Busy Here"), nil
 	}
-	codec, remoteRTP, remoteRTCP, err := inboundOfferEndpoints(request.Body)
+	codec, negotiated, remoteRTP, remoteRTCP, err := inboundOfferEndpoints(request.Body)
 	if err != nil {
 		return sipResponse(488, "Not Acceptable Here"), nil
 	}
@@ -150,7 +151,7 @@ func (controller *IncomingCallController) RoundTripInvite(ctx context.Context, r
 			CallID: callID, Caller: requestHeaderURI(request.Headers, "From"),
 			Callee: requestHeaderURI(request.Headers, "To"), ReceivedAt: controller.now().UTC(),
 		},
-		codec: codec, remoteRTP: remoteRTP, remoteRTCP: remoteRTCP,
+		codec: codec, negotiated: negotiated, remoteRTP: remoteRTP, remoteRTCP: remoteRTCP,
 		decision: make(chan voiceclient.SIPResponse, 1),
 	}
 	controller.mu.Lock()
@@ -250,10 +251,11 @@ func (controller *IncomingCallController) Answer(ctx context.Context, callID str
 	stack, localIP, terminator := controller.stack, controller.localIP, controller.terminator
 	controller.mu.Unlock()
 
+	payload := uint8(pending.negotiated.Payload)
 	bridge, err := media.Open(context.Background(), stack, media.Config{
 		LocalRTP: net.JoinHostPort(localIP, "0"), LocalRTCP: net.JoinHostPort(localIP, "0"),
 		RemoteRTP: pending.remoteRTP, RemoteRTCP: pending.remoteRTCP,
-		Codec: pending.codec, BufferMS: bufferMS,
+		Codec: pending.codec, PayloadType: &payload, BufferMS: bufferMS,
 	})
 	if err != nil {
 		controller.releaseAnswer(pending)
@@ -266,13 +268,14 @@ func (controller *IncomingCallController) Answer(ctx context.Context, callID str
 		return nil, err
 	}
 	call := newInboundMediaCall(callID, pending.codec, bridge, terminator, controller.clearActive)
+	call.negotiated = pending.negotiated
 	response := sipResponse(200, "OK")
 	response.Headers = map[string][]string{
 		"To":      {withHeaderTag("<"+pending.info.Callee+">", controller.localTag)},
 		"Contact": {"<" + controller.contactURI + ">"},
 	}
 	response.Body = voicehost.BuildSDPAnswerWithOptions(localSDP, voicehost.SDPAnswerOptions{
-		Codecs: []voicehost.SDPCodec{sdpCodec(pending.codec)}, PTimeMS: 20, MaxPTimeMS: 20,
+		Codecs: []voicehost.SDPCodec{pending.negotiated}, PTimeMS: 20, MaxPTimeMS: 20,
 	})
 
 	controller.mu.Lock()
@@ -377,6 +380,7 @@ func (controller *IncomingCallController) clearActive(call *InboundMediaCall) {
 type InboundMediaCall struct {
 	callID     string
 	codec      media.Codec
+	negotiated voicehost.SDPCodec
 	bridge     *media.Bridge
 	terminator IncomingCarrierTerminator
 	onEnded    func(*InboundMediaCall)
@@ -476,8 +480,9 @@ func (call *InboundMediaCall) answerReinvite(request voiceclient.SIPRequestMessa
 	if len(request.Body) == 0 {
 		return sipResponse(200, "OK"), nil
 	}
-	codec, remoteRTP, remoteRTCP, err := inboundOfferEndpointsForCodec(request.Body, call.codec)
-	if err != nil || codec != call.codec {
+	negotiated, remoteRTP, remoteRTCP, err := inboundOfferEndpointsForCodec(request.Body, call.codec)
+	// Keep the established RTP mapping and format for this media lifetime.
+	if err != nil || negotiated.Payload != call.negotiated.Payload || negotiated.FMTP != call.negotiated.FMTP {
 		return sipResponse(488, "Not Acceptable Here"), nil
 	}
 	if err := call.bridge.SetRemote(remoteRTP, remoteRTCP); err != nil {
@@ -489,7 +494,7 @@ func (call *InboundMediaCall) answerReinvite(request voiceclient.SIPRequestMessa
 	}
 	response := sipResponse(200, "OK")
 	response.Body = voicehost.BuildSDPAnswerWithOptions(localSDP, voicehost.SDPAnswerOptions{
-		Codecs: []voicehost.SDPCodec{sdpCodec(call.codec)}, PTimeMS: 20, MaxPTimeMS: 20,
+		Codecs: []voicehost.SDPCodec{call.negotiated}, PTimeMS: 20, MaxPTimeMS: 20,
 	})
 	return response, nil
 }
@@ -520,18 +525,42 @@ func (call *InboundMediaCall) publishError(err error) {
 	}
 }
 
-func inboundOfferEndpoints(body []byte) (media.Codec, string, string, error) {
+func inboundOfferEndpoints(body []byte) (media.Codec, voicehost.SDPCodec, string, string, error) {
 	for _, codec := range []media.Codec{media.CodecAMR, media.CodecPCMU, media.CodecPCMA} {
 		if selected, rtp, rtcp, err := inboundOfferEndpointsForCodec(body, codec); err == nil {
-			return selected, rtp, rtcp, nil
+			return codec, selected, rtp, rtcp, nil
 		}
 	}
-	return "", "", "", fmt.Errorf("%w: offer has no supported AMR, PCMU, or PCMA media", ErrMediaNegotiation)
+	return "", voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: offer has no supported AMR, PCMU, or PCMA media", ErrMediaNegotiation)
 }
 
-func inboundOfferEndpointsForCodec(body []byte, codec media.Codec) (media.Codec, string, string, error) {
-	rtp, rtcp, err := acceptedMediaEndpoints(voicehost.OutboundCallResult{RawSDP: append([]byte(nil), body...)}, codec)
-	return codec, rtp, rtcp, err
+func inboundOfferEndpointsForCodec(body []byte, codec media.Codec) (voicehost.SDPCodec, string, string, error) {
+	description, err := voicehost.ParseSDPMediaDescription(body)
+	if err != nil {
+		return voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: invalid SDP offer: %v", ErrMediaNegotiation, err)
+	}
+	info, security, err := voicehost.ParseSDPWithSecurity(body)
+	if err != nil || security.RTCPMuxOnly || !strings.EqualFold(security.RTPProfile, "RTP/AVP") || security.HasSecurityAttributes() {
+		return voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: unsupported offer transport", ErrMediaNegotiation)
+	}
+	// Decline optional mux using the original a=rtcp (or RTP+1), not the
+	// mux endpoint substituted by ParseSDPMediaDescription.
+	description.Info, description.RTCPMux = info, false
+	want := sdpCodec(codec)
+	if codec == media.CodecAMR {
+		want.FMTP = amrNBBandwidthEfficientFMTP
+	}
+	selected := voicehost.SelectSDPAnswerCodecs(description.Codecs, []voicehost.SDPCodec{want})
+	if len(selected) == 0 {
+		return voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: no compatible %s offer", ErrMediaNegotiation, codec)
+	}
+	chosen := selected[0]
+	if chosen.ClockRate != media.SampleRate || chosen.Channels > 1 ||
+		(chosen.Payload != int(codec.PayloadType()) && (chosen.Payload < 96 || chosen.Payload > 127)) {
+		return voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: unsupported offer codec mapping", ErrMediaNegotiation)
+	}
+	rtp, rtcp, err := mediaDescriptionEndpoints(description, codec, chosen.Payload)
+	return chosen, rtp, rtcp, err
 }
 
 func sipResponse(status int, reason string) voiceclient.SIPResponse {

@@ -349,3 +349,27 @@ Agent 离线或 generation 变化时，Core 保持 unknown/blocked，不回退�
 
 实现与真实平台／设备／运营商验收分别记录在 [版本化台账](../docs/status/README.md)。历史私有报告、旧
 artifact、capability 字符串和进程存在均不能扩大支持声明；无可审计证据时保留待验收。
+
+## October 8 candidate: retained modem facts and policy readiness
+
+The reviewed scope is limited to complete Linux data-mode AT projection and
+existing-policy convergence. Preserve all public AT fields, including retry
+Detail, SIMAPDU and SIMAPDUOnDemand; do not invent a ready capability. A Linux
+connected-data projection must still yield Core's typed `sim_apdu_data_active`
+when only on-demand APDU is available, retaining the saved VoWiFi intent.
+
+An empty SIM session generation cannot be policy-ready. For stored policies
+requiring data off, a connected/connecting observation cannot become ready just
+because StopData returned nil; retain bounded backoff until a later disconnected
+observation. This shared policy path also applies on Windows. Do not change the
+existing no-claim Linux `disconnected` projection to unknown, change user intent,
+override active-call/data-lease gates, or extend the physical isolation claim.
+
+Failure checklist: missing APDU capability hides the actionable Core blocker;
+ready AT loses retry detail; unowned SIM is ready or mutated; a no-op stop is
+reported as disconnected; ordinary observations postpone retry forever; Windows
+fails to converge after disconnect. Hosted behavioral counterexamples and full
+CI are pending. No hardware, user switch, production binary or credentials were
+changed. The old default-data test's missing-generation expectation is updated
+to the earlier identity gate; its recovery now requires a generation as well as
+a disconnected observation, as explicitly required by the owner.

@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### INBOUND_MEDIA_POLICY_FACTS
+
+**State: needs_verification; release relevance: current.** October 8 current cursor: owner accepted the corrected review and narrowed its follow-up. Candidate reuses upstream incoming codec selection, preserves negotiated payloads in SDP and RTP TX/RX, retains PCMU and rejects unsupported mux-only/AMR formats. Linux dataFact now retains Detail and both APDU flags. Shared stored-policy reconciliation requires SIM generation and does not treat a nil stop as a disconnected observation; no-claim Linux Data semantics and stored user intent remain unchanged. README no longer directs new Go users to nonexistent legacy Release files.
+
+Acceptance scope / remaining action: Source baseline is main154947b. Implementation and synthetic regression cases are prepared; no local build/test or production/paid action was performed. Next step is the single GitHub-hosted red/green candidate, followed by whole-batch qualification and review. No merge or deployment is claimed. Existing deployment receipts remain authoritative. Original 488/USB/Winsock/forced-close causes and deferred Android endurance remain unresolved or deferred; this batch does not reopen them. Official new-user Go Release publication remains pending, not solved by the documentation correction.
+
 ### LINUX_MODEM_ACQUISITION
 
 **State: needs_verification; release relevance: current.** October 3 follow-up fixes three reviewed Linux acquisition counterexamples: reject duplicate equipment before cleanup, require authoritative idle MM voice before Disconnect/Inhibit, and invalidate retained AT/cached disconnected readiness when connected inventory reappears without a dataClaim. Normal inhibited absence, existing data/raw owners, serial-only service ownership and stored user intent retain their existing paths. No Core, protocol or user-interface expansion.
@@ -137,7 +143,7 @@ Resolution (user_decision): The owner directed meaningful non-Android work into 
 
 ### INCIDENT_MM_CLOSE
 
-**State: deferred; release relevance: deferred.** Historical forced-close root cause remains unknown. Current Linux ModemManager access is private D-Bus, not an mmcli subprocess whose stderr can simply be recovered. Separate September 30 review observation: dataFact drops AT Manager retry Detail when rebuilding a ready ATControlFact; capability booleans still propagate, so this does not block the qualified call-capability recovery fix.
+**State: deferred; release relevance: deferred.** Historical forced-close root cause remains unknown. Current Linux ModemManager access is private D-Bus, not an mmcli subprocess whose stderr can simply be recovered. October 8 correction: dataFact dropped retry Detail and SIMAPDU/SIMAPDUOnDemand when rebuilding ready AT; only CallSignalling/SMS propagated. The bounded projection repair is now tracked in INBOUND_MEDIA_POLICY_FACTS, not a claimed explanation or recovery of the historical forced close.
 
 Acceptance scope / remaining action: Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Collect bounded redacted evidence at the real current transport boundary when authorized; do not invent carrier/port causes from generic symptoms. Preserve the bounded retry category/time through Linux dataFact in a later relevant batch; do not claim the current data-mode final topology/UI displays it. This diagnostic wiring gap is separate from, and does not explain, the historical forced close.
 

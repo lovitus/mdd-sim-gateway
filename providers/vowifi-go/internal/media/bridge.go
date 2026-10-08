@@ -60,7 +60,9 @@ type Config struct {
 	RemoteRTP  string
 	RemoteRTCP string
 	Codec      Codec
-	BufferMS   int
+	// Nil preserves the local offer's default. Incoming calls use the negotiated mapping.
+	PayloadType *uint8
+	BufferMS    int
 
 	SSRC             uint32
 	InitialSequence  uint16
@@ -89,14 +91,15 @@ type Stats struct {
 }
 
 type Bridge struct {
-	rtpConn  net.PacketConn
-	rtcpConn net.PacketConn
-	rtpPeer  *net.UDPAddr
-	rtcpPeer *net.UDPAddr
-	codec    Codec
-	frames   frameCodec
-	buffer   time.Duration
-	ssrc     uint32
+	rtpConn     net.PacketConn
+	rtcpConn    net.PacketConn
+	rtpPeer     *net.UDPAddr
+	rtcpPeer    *net.UDPAddr
+	codec       Codec
+	payloadType uint8
+	frames      frameCodec
+	buffer      time.Duration
+	ssrc        uint32
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -138,6 +141,13 @@ func Open(ctx context.Context, stack *usernet.Stack, config Config) (*Bridge, er
 	}
 	if config.Codec != CodecPCMU && config.Codec != CodecPCMA && config.Codec != CodecAMR {
 		return nil, fmt.Errorf("%w: codec must be PCMU, PCMA, or AMR", ErrInvalidConfig)
+	}
+	payloadType := config.Codec.PayloadType()
+	if config.PayloadType != nil {
+		payloadType = *config.PayloadType
+		if payloadType != config.Codec.PayloadType() && (payloadType < 96 || payloadType > 127) {
+			return nil, fmt.Errorf("%w: invalid negotiated audio payload", ErrInvalidConfig)
+		}
 	}
 	if config.BufferMS < 100 || config.BufferMS > 2000 {
 		return nil, fmt.Errorf("%w: buffer must be between 100 and 2000 ms", ErrInvalidConfig)
@@ -192,7 +202,7 @@ func Open(ctx context.Context, stack *usernet.Stack, config Config) (*Bridge, er
 	capacity := (config.BufferMS + 19) / 20
 	bridge := &Bridge{
 		rtpConn: rtpConn, rtcpConn: rtcpConn, rtpPeer: rtpPeer, rtcpPeer: rtcpPeer,
-		codec: config.Codec, frames: frames, buffer: time.Duration(config.BufferMS) * time.Millisecond,
+		codec: config.Codec, payloadType: payloadType, frames: frames, buffer: time.Duration(config.BufferMS) * time.Millisecond,
 		ssrc: config.SSRC, sequence: config.InitialSequence,
 		timestamp: config.InitialTimestamp, rtcpGap: config.RTCPInterval,
 		ctx: runContext, cancel: cancel, in: make(chan PCMFrame, capacity),
@@ -397,7 +407,7 @@ func (bridge *Bridge) writeRTP(pcm []byte, silence bool) bool {
 	peer := bridge.rtpPeer
 	bridge.mu.Unlock()
 	packet := rtp.Packet{Header: rtp.Header{
-		Version: 2, Marker: marker, PayloadType: bridge.codec.PayloadType(), SequenceNumber: sequence,
+		Version: 2, Marker: marker, PayloadType: bridge.payloadType, SequenceNumber: sequence,
 		Timestamp: timestamp, SSRC: bridge.ssrc,
 	}, Payload: payload}
 	wire, err := packet.Marshal()
@@ -430,7 +440,7 @@ func (bridge *Bridge) SendDTMF(ctx context.Context, signal string, durationMS in
 	if bridge == nil || bridge.ctx.Err() != nil {
 		return ErrClosed
 	}
-	if payload < 96 || payload > 127 || payload == bridge.codec.PayloadType() {
+	if payload < 96 || payload > 127 || payload == bridge.payloadType {
 		return fmt.Errorf("%w: invalid negotiated telephone-event payload", ErrInvalidConfig)
 	}
 	if ctx == nil {
@@ -512,7 +522,7 @@ func (bridge *Bridge) receiveRTP() {
 		}
 		var packet rtp.Packet
 		if err := packet.Unmarshal(buffer[:size]); err != nil || packet.Version != 2 ||
-			packet.PayloadType != bridge.codec.PayloadType() || bridge.frames.ValidateRTP(packet.Payload) != nil {
+			packet.PayloadType != bridge.payloadType || bridge.frames.ValidateRTP(packet.Payload) != nil {
 			bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
 			continue
 		}
