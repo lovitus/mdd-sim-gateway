@@ -2,6 +2,7 @@ package voicehost
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"strconv"
@@ -42,12 +43,14 @@ type SDPMediaDescription struct {
 }
 
 type SDPAnswerOptions struct {
-	RTPProfile string
-	RTCPMux    bool
-	Codecs     []SDPCodec
-	Security   SDPSecurityInfo
-	PTimeMS    int
-	MaxPTimeMS int
+	SessionID      uint64
+	SessionVersion uint64
+	RTPProfile     string
+	RTCPMux        bool
+	Codecs         []SDPCodec
+	Security       SDPSecurityInfo
+	PTimeMS        int
+	MaxPTimeMS     int
 }
 
 type SDPMediaRewriteOptions struct {
@@ -433,7 +436,7 @@ func SDPInfoWithCodecs(info SDPInfo, codecs []SDPCodec) SDPInfo {
 }
 
 func BuildSDPAnswerWithOptions(info SDPInfo, options SDPAnswerOptions) []byte {
-	if options.RTPProfile == "" && !options.RTCPMux && len(options.Codecs) == 0 && options.Security.IsZero() && options.PTimeMS <= 0 && options.MaxPTimeMS <= 0 {
+	if options.SessionID == 0 && options.SessionVersion == 0 && options.RTPProfile == "" && !options.RTCPMux && len(options.Codecs) == 0 && options.Security.IsZero() && options.PTimeMS <= 0 && options.MaxPTimeMS <= 0 {
 		return BuildSDPAnswer(info)
 	}
 	if len(options.Codecs) > 0 {
@@ -477,7 +480,7 @@ func BuildSDPAnswerWithOptions(info SDPInfo, options SDPAnswerOptions) []byte {
 	timingLines := sdpPacketizationTimeAttributeLines(ptime, maxptime)
 	var b strings.Builder
 	b.WriteString("v=0\r\n")
-	b.WriteString("o=vowifi-go 0 0 IN " + ipVersion + " " + ip + "\r\n")
+	b.WriteString(fmt.Sprintf("o=vowifi-go %d %d IN %s %s\r\n", options.SessionID, options.SessionVersion, ipVersion, ip))
 	b.WriteString("s=VoWiFi\r\n")
 	b.WriteString("c=IN " + ipVersion + " " + ip + "\r\n")
 	b.WriteString("t=0 0\r\n")

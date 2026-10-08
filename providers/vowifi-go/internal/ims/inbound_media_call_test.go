@@ -101,11 +101,13 @@ func TestIncomingCallAnswerCarriesBidirectionalUserspaceMediaAndEndsCarrierDialo
 	if answered.err != nil || answered.response.StatusCode != 200 {
 		t.Fatalf("answer = %+v, %v", answered.response, answered.err)
 	}
-	if route, err := call.SendDTMF(ctx, "5", 160); err != nil || route != voicehost.DialogDTMFRouteRTP {
-		t.Fatalf("SendDTMF() route=%q err=%v", route, err)
+	// This PCMU-only offer never negotiated events. A fake relay accepting a
+	// digit is not evidence that the carrier agreed to its RTP mapping.
+	if route, err := call.SendDTMF(ctx, "5", 160); err == nil || route != "" {
+		t.Fatalf("unnegotiated SendDTMF() route=%q err=%v", route, err)
 	}
 	terminator.mu.Lock()
-	if len(terminator.dtmfCalls) != 1 || terminator.dtmfCalls[0] != pending.CallID || terminator.dtmfSignal != "5" {
+	if len(terminator.dtmfCalls) != 0 {
 		terminator.mu.Unlock()
 		t.Fatalf("DTMF calls=%v signal=%q", terminator.dtmfCalls, terminator.dtmfSignal)
 	}

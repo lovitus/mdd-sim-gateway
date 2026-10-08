@@ -56,7 +56,9 @@ func openAMRNBCodec(config AMRNBConfig) (*amrNBCodec, error) {
 	if config.ModeSet == 0 {
 		config.ModeSet = 0xff
 	} else {
-		// Start conservatively inside the negotiated set until a peer CMR arrives.
+		// Deliberate low-bandwidth policy: start at the lowest negotiated mode.
+		// CMR=15 means no request, not an instruction to increase the bitrate.
+		// Keep this mode unless the peer requests a valid mode from the set.
 		for mode = 0; config.ModeSet&(1<<mode) == 0; mode++ {
 		}
 	}

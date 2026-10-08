@@ -3,6 +3,7 @@
 package ims
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,14 +35,13 @@ type IncomingCarrierTerminator interface {
 	EndCarrierCallWithResult(context.Context, string) (voicehost.DialogInfoResult, error)
 }
 
-type IncomingCarrierDTMFSender interface {
-	SendCarrierRTPDTMF(context.Context, string, string, int) (voicehost.DialogRTPDTMFResult, error)
-}
-
 type pendingIncomingCall struct {
 	info       IncomingCallInfo
 	codec      media.Codec
 	negotiated voicehost.SDPCodec
+	dtmf       voicehost.SDPCodec
+	dtmfEvents uint16
+	offer      string
 	remoteRTP  string
 	remoteRTCP string
 	decision   chan voiceclient.SIPResponse
@@ -146,12 +146,17 @@ func (controller *IncomingCallController) RoundTripInvite(ctx context.Context, r
 	if err != nil {
 		return sipResponse(488, "Not Acceptable Here"), nil
 	}
+	dtmf, events, err := inboundDTMF(request.Body, negotiated.Payload, nil)
+	if err != nil {
+		return sipResponse(488, "Not Acceptable Here"), nil
+	}
 	pending := &pendingIncomingCall{
 		info: IncomingCallInfo{
 			CallID: callID, Caller: requestHeaderURI(request.Headers, "From"),
 			Callee: requestHeaderURI(request.Headers, "To"), ReceivedAt: controller.now().UTC(),
 		},
 		codec: codec, negotiated: negotiated, remoteRTP: remoteRTP, remoteRTCP: remoteRTCP,
+		dtmf: dtmf, dtmfEvents: events, offer: string(request.Body),
 		decision: make(chan voiceclient.SIPResponse, 1),
 	}
 	controller.mu.Lock()
@@ -278,14 +283,16 @@ func (controller *IncomingCallController) Answer(ctx context.Context, callID str
 	}
 	call := newInboundMediaCall(callID, pending.codec, bridge, terminator, controller.clearActive)
 	call.negotiated = pending.negotiated
+	call.dtmf, call.dtmfEvents = pending.dtmf, pending.dtmfEvents
+	call.remoteRTP, call.remoteRTCP, call.direction = pending.remoteRTP, pending.remoteRTCP, "sendrecv"
+	call.sessionID, call.sessionVersion = uint64(controller.now().UnixNano()), 1
 	response := sipResponse(200, "OK")
 	response.Headers = map[string][]string{
 		"To":      {withHeaderTag("<"+pending.info.Callee+">", controller.localTag)},
 		"Contact": {"<" + controller.contactURI + ">"},
 	}
-	response.Body = voicehost.BuildSDPAnswerWithOptions(localSDP, voicehost.SDPAnswerOptions{
-		Codecs: []voicehost.SDPCodec{pending.negotiated}, PTimeMS: 20, MaxPTimeMS: 20,
-	})
+	response.Body = call.mediaAnswer(localSDP, call.dtmfEvents, call.sessionVersion)
+	call.lastOffer, call.lastAnswer = pending.offer, append([]byte(nil), response.Body...)
 
 	controller.mu.Lock()
 	if controller.closed || controller.pending != pending || controller.active != nil {
@@ -387,14 +394,21 @@ func (controller *IncomingCallController) clearActive(call *InboundMediaCall) {
 }
 
 type InboundMediaCall struct {
-	callID     string
-	codec      media.Codec
-	negotiated voicehost.SDPCodec
-	bridge     *media.Bridge
-	terminator IncomingCarrierTerminator
-	onEnded    func(*InboundMediaCall)
-	errors     chan error
-	remoteDone chan struct{}
+	callID                    string
+	codec                     media.Codec
+	negotiated                voicehost.SDPCodec
+	dtmf                      voicehost.SDPCodec
+	dtmfEvents                uint16
+	remoteRTP, remoteRTCP     string
+	direction                 string
+	sessionID, sessionVersion uint64
+	lastOffer                 string
+	lastAnswer                []byte
+	bridge                    *media.Bridge
+	terminator                IncomingCarrierTerminator
+	onEnded                   func(*InboundMediaCall)
+	errors                    chan error
+	remoteDone                chan struct{}
 
 	mu          sync.Mutex
 	remoteEnded bool
@@ -443,16 +457,24 @@ func (call *InboundMediaCall) SendDTMF(ctx context.Context, signal string, durat
 	if call == nil {
 		return "", errors.New("incoming IMS call is unavailable")
 	}
-	sender, ok := call.terminator.(IncomingCarrierDTMFSender)
-	if !ok {
-		return "", errors.New("incoming IMS DTMF is unavailable")
-	}
-	result, err := sender.SendCarrierRTPDTMF(ctx, call.callID, signal, durationMS)
+	event, err := voicehost.RTPDTMFEventCode(signal)
 	if err != nil {
 		return "", err
 	}
-	if !result.Accepted {
-		return "", fmt.Errorf("IMS rejected inbound-call DTMF with %d %s", result.StatusCode, result.Reason)
+	call.mu.Lock()
+	if call.ended || call.remoteEnded {
+		call.mu.Unlock()
+		return "", ErrIncomingCallEnded
+	}
+	if call.dtmfEvents&(uint16(1)<<event) == 0 {
+		call.mu.Unlock()
+		return "", errors.New("incoming IMS telephone-event was not negotiated")
+	}
+	payload, revision := uint8(call.dtmf.Payload), call.bridge.MediaRevision()
+	call.mu.Unlock()
+	// No INFO/relay fallback after a partial or failed RTP event.
+	if err := call.bridge.SendDTMF(ctx, signal, durationMS, payload, revision); err != nil {
+		return "", err
 	}
 	return voicehost.DialogDTMFRouteRTP, nil
 }
@@ -486,26 +508,72 @@ func (call *InboundMediaCall) RemoteEnded() <-chan struct{} {
 }
 
 func (call *InboundMediaCall) answerReinvite(request voiceclient.SIPRequestMessage) (voiceclient.SIPResponse, error) {
+	call.mu.Lock()
+	defer call.mu.Unlock()
+	if call.ended || call.remoteEnded {
+		return sipResponse(481, "Call Does Not Exist"), nil
+	}
 	if len(request.Body) == 0 {
 		return sipResponse(200, "OK"), nil
 	}
-	negotiated, remoteRTP, remoteRTCP, err := inboundOfferEndpointsForCodec(request.Body, call.codec)
+	if string(request.Body) == call.lastOffer {
+		response := sipResponse(200, "OK")
+		response.Body = append([]byte(nil), call.lastAnswer...)
+		return response, nil
+	}
+	negotiated, remoteRTP, remoteRTCP, direction, err := inboundOfferEndpointsForCodec(request.Body, call.codec, &call.negotiated)
 	// Keep the established RTP mapping and format for this media lifetime.
 	if err != nil || negotiated.Payload != call.negotiated.Payload || negotiated.FMTP != call.negotiated.FMTP {
 		return sipResponse(488, "Not Acceptable Here"), nil
 	}
-	if err := call.bridge.SetRemote(remoteRTP, remoteRTCP); err != nil {
-		return sipResponse(503, "Media Update Failed"), nil
+	_, events, err := inboundDTMF(request.Body, negotiated.Payload, &call.dtmf)
+	if err != nil {
+		return sipResponse(488, "Not Acceptable Here"), nil
+	}
+	if remoteRTP == call.remoteRTP && remoteRTCP == call.remoteRTCP &&
+		direction == call.direction && events == call.dtmfEvents {
+		// A session refresh is not a media transition, even with a new offer
+		// version. Preserve admitted audio/DTMF and the unchanged answer origin.
+		call.lastOffer = string(request.Body)
+		response := sipResponse(200, "OK")
+		response.Body = append([]byte(nil), call.lastAnswer...)
+		return response, nil
 	}
 	localSDP, err := mediaOffer(call.bridge, call.codec)
 	if err != nil {
 		return sipResponse(503, "Media Update Failed"), nil
 	}
+	localSDP.Direction = direction
+	version := call.sessionVersion
+	answer := call.mediaAnswer(localSDP, events, version)
+	if !bytes.Equal(answer, call.lastAnswer) {
+		version++
+		answer = call.mediaAnswer(localSDP, events, version)
+	}
+	// Validate the entire offer before changing either endpoint or direction.
+	if err := call.bridge.SetRemoteDirection(remoteRTP, remoteRTCP,
+		direction == "sendrecv" || direction == "sendonly",
+		direction == "sendrecv" || direction == "recvonly"); err != nil {
+		return sipResponse(503, "Media Update Failed"), nil
+	}
+	call.sessionVersion = version
+	call.remoteRTP, call.remoteRTCP, call.direction = remoteRTP, remoteRTCP, direction
+	call.dtmfEvents = events
 	response := sipResponse(200, "OK")
-	response.Body = voicehost.BuildSDPAnswerWithOptions(localSDP, voicehost.SDPAnswerOptions{
-		Codecs: []voicehost.SDPCodec{call.negotiated}, PTimeMS: 20, MaxPTimeMS: 20,
-	})
+	response.Body = answer
+	call.lastOffer, call.lastAnswer = string(request.Body), append([]byte(nil), response.Body...)
 	return response, nil
+}
+
+func (call *InboundMediaCall) mediaAnswer(info voicehost.SDPInfo, events uint16, version uint64) []byte {
+	codecs := []voicehost.SDPCodec{call.negotiated}
+	if events != 0 {
+		codecs = append(codecs, call.dtmf)
+	}
+	return voicehost.BuildSDPAnswerWithOptions(info, voicehost.SDPAnswerOptions{
+		SessionID: call.sessionID, SessionVersion: version,
+		Codecs: codecs, PTimeMS: 20, MaxPTimeMS: 20,
+	})
 }
 
 func (call *InboundMediaCall) endFromCarrier() {
@@ -536,25 +604,33 @@ func (call *InboundMediaCall) publishError(err error) {
 
 func inboundOfferEndpoints(body []byte) (media.Codec, voicehost.SDPCodec, string, string, error) {
 	for _, codec := range []media.Codec{media.CodecAMR, media.CodecPCMU, media.CodecPCMA} {
-		if selected, rtp, rtcp, err := inboundOfferEndpointsForCodec(body, codec); err == nil {
+		if selected, rtp, rtcp, _, err := inboundOfferEndpointsForCodec(body, codec, nil); err == nil {
 			return codec, selected, rtp, rtcp, nil
 		}
 	}
 	return "", voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: offer has no supported AMR, PCMU, or PCMA media", ErrMediaNegotiation)
 }
 
-func inboundOfferEndpointsForCodec(body []byte, codec media.Codec) (voicehost.SDPCodec, string, string, error) {
+func inboundOfferEndpointsForCodec(body []byte, codec media.Codec, established *voicehost.SDPCodec) (voicehost.SDPCodec, string, string, string, error) {
 	description, err := voicehost.ParseSDPMediaDescription(body)
 	if err != nil {
-		return voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: invalid SDP offer: %v", ErrMediaNegotiation, err)
+		return voicehost.SDPCodec{}, "", "", "", fmt.Errorf("%w: invalid SDP offer: %v", ErrMediaNegotiation, err)
 	}
 	info, security, err := voicehost.ParseSDPWithSecurity(body)
 	if err != nil || security.RTCPMuxOnly || !strings.EqualFold(security.RTPProfile, "RTP/AVP") || security.HasSecurityAttributes() {
-		return voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: unsupported offer transport", ErrMediaNegotiation)
+		return voicehost.SDPCodec{}, "", "", "", fmt.Errorf("%w: unsupported offer transport", ErrMediaNegotiation)
 	}
 	// Decline optional mux using the original a=rtcp (or RTP+1), not the
 	// mux endpoint substituted by ParseSDPMediaDescription.
 	description.Info, description.RTCPMux = info, false
+	direction, err := voicehost.SelectSDPAnswerDirection(info.Direction, "sendrecv")
+	if err != nil {
+		return voicehost.SDPCodec{}, "", "", "", err
+	}
+	if established != nil {
+		// Direction is enforced by the existing Bridge, not endpoint validation.
+		description.Info.Direction = "sendrecv"
+	}
 	want := sdpCodec(codec)
 	for _, offered := range description.Codecs {
 		selected := voicehost.SelectSDPAnswerCodecs([]voicehost.SDPCodec{offered}, []voicehost.SDPCodec{want})
@@ -572,12 +648,15 @@ func inboundOfferEndpointsForCodec(body []byte, codec media.Codec) (voicehost.SD
 				continue
 			}
 		}
+		if established != nil && (chosen.Payload != established.Payload || chosen.FMTP != established.FMTP) {
+			continue
+		}
 		rtp, rtcp, err := mediaDescriptionEndpoints(description, codec, chosen.Payload)
 		if err == nil {
-			return chosen, rtp, rtcp, nil
+			return chosen, rtp, rtcp, direction, nil
 		}
 	}
-	return voicehost.SDPCodec{}, "", "", fmt.Errorf("%w: no compatible %s offer", ErrMediaNegotiation, codec)
+	return voicehost.SDPCodec{}, "", "", "", fmt.Errorf("%w: no compatible %s offer", ErrMediaNegotiation, codec)
 }
 
 func sipResponse(status int, reason string) voiceclient.SIPResponse {
