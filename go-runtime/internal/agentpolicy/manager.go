@@ -587,6 +587,15 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 		if fact.EquipmentID == "" || fact.SIM.ICCID == "" || fact.SIM.State != agentmodem.SIMReady {
 			continue
 		}
+		if fact.SIM.SessionGeneration == "" {
+			manager.mu.RLock()
+			status := manager.status[pair(fact.EquipmentID, fact.SIM.ICCID)]
+			manager.mu.RUnlock()
+			if status.Code != "modem_target_replaced" || !manager.config.Now().Before(status.RetryAt) {
+				manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "modem_target_replaced")
+			}
+			continue
+		}
 		policy, found, err := manager.config.Store.Get(fact.EquipmentID, fact.SIM.ICCID)
 		if err != nil {
 			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "policy_store_unavailable")
@@ -674,6 +683,12 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 				code = "cellular_connection_reconcile_failed"
 			}
 			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, code)
+			continue
+		}
+		if (!policy.Desired.ConnectionEnabled || policy.Desired.FlightMode) &&
+			(fact.Network.Data == agentmodem.DataConnected || fact.Network.Data == agentmodem.DataConnecting) {
+			// StopData may be a no-op. Retain intent and await the next topology observation.
+			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "cellular_data_disconnect_unconfirmed")
 			continue
 		}
 		manager.setReady(fact.EquipmentID, fact.SIM.ICCID)

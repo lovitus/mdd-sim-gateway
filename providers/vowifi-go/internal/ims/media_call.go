@@ -305,6 +305,10 @@ func acceptedMediaEndpoints(result voicehost.OutboundCallResult, codec media.Cod
 	if err != nil {
 		return "", "", fmt.Errorf("%w: invalid SDP answer: %v", ErrMediaNegotiation, err)
 	}
+	return mediaDescriptionEndpoints(description, codec, int(codec.PayloadType()))
+}
+
+func mediaDescriptionEndpoints(description voicehost.SDPMediaDescription, codec media.Codec, payload int) (string, string, error) {
 	if description.RTCPMux {
 		return "", "", fmt.Errorf("%w: RTCP mux is not supported", ErrMediaNegotiation)
 	}
@@ -316,6 +320,7 @@ func acceptedMediaEndpoints(result voicehost.OutboundCallResult, codec media.Cod
 		return "", "", fmt.Errorf("%w: remote audio direction %q is not bidirectional", ErrMediaNegotiation, direction)
 	}
 	want := sdpCodec(codec)
+	want.Payload = payload
 	found := false
 	for _, candidate := range description.Codecs {
 		if candidate.Payload == want.Payload && strings.EqualFold(candidate.EncodingName, want.EncodingName) &&

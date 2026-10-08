@@ -1,5 +1,40 @@
 # Upstream source and MDD patch
 
+## Incoming offer negotiation (October 8 candidate)
+
+Reuse the pinned upstream `SelectSDPAnswerCodecs` and AMR FMTP classifier;
+no upstream source or dependency version is changed. The incoming adapter now
+selects by encoding/rate/channels instead of the local offer's fixed payload.
+It retains the selected mapping in the answer and both RTP directions. Outgoing
+answer validation remains tied to its original offer. Re-INVITE retains the
+established codec/mapping and updates only compatible endpoints.
+
+Optional RTCP mux is declined using the original non-mux RTCP address/port,
+not the parser's substituted mux endpoint. Mux-only, octet-aligned AMR, unsupported
+packetization and encrypted RTP remain rejected. No AMR-WB/EVS implementation,
+paid retries, carrier configuration or call-owner changes are included.
+
+Failure checklist: dynamic AMR rejected or incorrectly falling back to PCMU;
+answer/TX/RX mappings disagreeing; wrong PT accepted; PCMU regression; optional
+mux sent to the wrong RTCP port; unsupported format admitted; re-INVITE reverting
+to PT 96. The userspace SIP/RTP regression covers non-96 AMR alone and with PCMU,
+PCMU alone, AMR-WB plus AMR, optional mux with default/explicit RTCP, and rejects
+unsupported formats. These are synthetic peers, not carrier/audio acceptance.
+Hosted run [37724071647](https://github.com/lovitus/mdd-sim-gateway/actions/runs/37724071647)
+passed at `cc7b5b5af2bb02ff1928aca3d55a69d1750722b8` (tree
+`97276e04f63aa7aed8bb63bf7b4bbf01d744a421`). The unchanged `154947b` production
+files compiled and failed in exactly four dynamic-AMR subcases; PCMU and the
+unsupported-format controls passed. The fixed IMS/media packages passed 38
+test/subtest results under race detection, zero failures/skips. Red stderr contains
+dependency downloads only; green stderr is empty. JSONL SHA-256:
+
+- Red: `f2f61b0746ce288eef280691adce587706ed64a9b727a7d2f598f8e70cdd3bf2`
+- Green: `54a5931f69692de26ade974481c1c6b7d1fc214be1ffa790af1b63fca4bea66b`
+
+The one-time verification entry is retained at the immutable archive ref recorded
+in docs/branches.md and removed from final delivery. Full qualification/review
+are pending; historical 488 causality is still unproven without the original offer.
+
 ## SMS receive-report network context
 
 The `524bd33` affected-line trial received six carrier redeliveries whose separate

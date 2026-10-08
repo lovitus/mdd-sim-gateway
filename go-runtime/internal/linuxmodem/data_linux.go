@@ -402,7 +402,11 @@ func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmode
 		if at, ok := prober.atSnapshot[current.usb.AttachmentID]; ok {
 			fact.AT.Detail = at.Detail
 			if at.State == "ready" {
-				fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: at.Port, CallSignalling: at.CallSignalling, SMS: at.SMS}
+				fact.AT = agentmodem.ATControlFact{
+					State: agentmodem.ATControlReady, Port: at.Port, Detail: at.Detail,
+					CallSignalling: at.CallSignalling, SMS: at.SMS,
+					SIMAPDU: at.SIMAPDU, SIMAPDUOnDemand: at.SIMAPDUOnDemand,
+				}
 			}
 		}
 	}

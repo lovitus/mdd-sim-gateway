@@ -70,6 +70,13 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October 8 incoming-media/modem-facts candidate: immutable evidence tag
+`archive/2026-10-08/inbound-policy-qualified` ->
+`cc7b5b5af2bb02ff1928aca3d55a69d1750722b8` preserves the one-time hosted
+counterexamples and exact green runtime/tests. Final delivery removes only the
+temporary workflow/script and records qualification; do not restore those tools
+or treat this evidence tag as a release. Full CI/review and merge are separate.
+
 October 3 Linux acquisition batch: immutable evidence tags
 `archive/2026-10-03/linux-acquisition-initial-counterexamples` ->
 `446b910dc6910baadb266349bb183b6ed04e4aea` and
