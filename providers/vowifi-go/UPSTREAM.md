@@ -1,5 +1,25 @@
 # Upstream source and MDD patch
 
+## Incoming hold and DTMF (October 8 follow-up)
+
+Reuse upstream direction negotiation and RFC4733 encoding, not a new call owner.
+In-dialog sendonly/inactive hold and sendrecv resume keep the audio PT/FMTP,
+codec, sockets and SSRC. RTP directions change atomically with the peer; RTCP
+stays live. Optional 8 kHz telephone-event uses the offered PT and event subset
+on the same Bridge, with no unnegotiated relay/INFO fallback. A media update
+invalidates an in-flight or queued key event. The upstream answer builder gains
+optional origin session/version fields; existing callers retain their defaults.
+Unchanged effective media in a new offer preserves PCM/DTMF and the answer;
+the existing wire transaction cache, not this SDP comparison, owns retransmission.
+
+Restricted AMR deliberately starts at the lowest mode; repeated CMR=15 does
+not raise it. The new codec regression freezes existing behavior, not a defect.
+Failure checklist: hold rejected; resume stuck in hold; audio mapping changes;
+rejected offer mutates media; stale PCM/DTMF crosses updates; RTCP stops; missing
+event negotiation or wrong socket; unstable SDP origin. Tests use synthetic
+SIP/RTP/RTCP peers. Hosted evidence is recorded in the ledger, not carrier proof.
+No AMR-WB, quality tuning, deployment or paid acceptance is included.
+
 ## Incoming offer negotiation (October 8 candidate)
 
 Reuse the pinned upstream `SelectSDPAnswerCodecs` and structured FMTP parser;
@@ -71,10 +91,9 @@ temporary proof entry; runtime/permanent tests stay identical to the qualified
 archive. The normal workflow is restored unchanged. Final exact-head CI/review
 disposition is recorded on PR22; this is not merge or production acceptance.
 
-Separate existing finding: inbound DTMF still uses the carrier dialog relay,
-which is absent in the production inbound-agent assembly. Bridge PT collision
-checks do not qualify that production DTMF route. Follow-up stays in the existing
-incident/postponed ledger, outside this AMR/Linux batch.
+PR22 left inbound DTMF's missing carrier relay as a separate follow-up. The
+incoming hold/DTMF batch above replaces that path with the call's existing Bridge;
+its qualification is separate from PR22's audio-mapping evidence.
 
 ## SMS receive-report network context
 

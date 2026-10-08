@@ -33,6 +33,7 @@ const (
 var (
 	ErrInvalidConfig = errors.New("invalid IMS media config")
 	ErrClosed        = errors.New("IMS media bridge is closed")
+	ErrMediaChanged  = errors.New("IMS media direction or peer changed")
 )
 
 type Codec string
@@ -111,13 +112,20 @@ type Bridge struct {
 	peerReady chan struct{}
 	wait      sync.WaitGroup
 
-	sequence  uint16
-	timestamp uint32
-	rtcpGap   time.Duration
+	sequence   uint16
+	timestamp  uint32
+	rtcpGap    time.Duration
+	clockStart time.Time
+	clockBase  uint32
 
 	mu              sync.Mutex
 	rtpWriteMu      sync.Mutex
+	rtpReadMu       sync.Mutex
 	dtmfMu          sync.Mutex
+	sendEnabled     bool
+	receiveEnabled  bool
+	mediaRevision   uint64
+	sendAfter       time.Time
 	stats           Stats
 	remoteSeen      bool
 	remoteSequence  uint16
@@ -210,6 +218,7 @@ func Open(ctx context.Context, stack *usernet.Stack, config Config) (*Bridge, er
 		out: make(chan PCMFrame, capacity), errors: make(chan error, 1), done: make(chan struct{}),
 		peerReady:       make(chan struct{}),
 		previousSilence: true,
+		sendEnabled:     true, receiveEnabled: true,
 	}
 	if rtpPeer != nil {
 		bridge.peerReadyOnce.Do(func() { close(bridge.peerReady) })
@@ -248,6 +257,13 @@ func (bridge *Bridge) LocalEndpoints() (rtpAddress, rtcpAddress net.Addr, err er
 // SetRemote applies an SDP answer without reopening local sockets. Re-INVITE
 // endpoint updates are atomic; packets from the previous endpoint are rejected.
 func (bridge *Bridge) SetRemote(rtpAddress, rtcpAddress string) error {
+	return bridge.SetRemoteDirection(rtpAddress, rtcpAddress, true, true)
+}
+
+// SetRemoteDirection commits peer and local RTP direction as one media update.
+// RTCP and the codec/socket lifetime are independent of hold. All packet paths
+// observe this boundary; partial DTMF cannot resume after a later unhold.
+func (bridge *Bridge) SetRemoteDirection(rtpAddress, rtcpAddress string, send, receive bool) error {
 	if bridge == nil || bridge.ctx.Err() != nil {
 		return ErrClosed
 	}
@@ -259,9 +275,34 @@ func (bridge *Bridge) SetRemote(rtpAddress, rtcpAddress string) error {
 	if err != nil {
 		return fmt.Errorf("%w: remote RTCP: %v", ErrInvalidConfig, err)
 	}
+	bridge.rtpWriteMu.Lock()
+	defer bridge.rtpWriteMu.Unlock()
+	bridge.rtpReadMu.Lock()
+	defer bridge.rtpReadMu.Unlock()
 	bridge.mu.Lock()
+	if bridge.ctx.Err() != nil {
+		bridge.mu.Unlock()
+		return ErrClosed
+	}
+	if bridge.rtpPeer != nil {
+		bridge.sendAfter = time.Now()
+		for len(bridge.in) > 0 {
+			select {
+			case <-bridge.in:
+			default:
+			}
+		}
+		for len(bridge.out) > 0 {
+			select {
+			case <-bridge.out:
+			default:
+			}
+		}
+	}
 	bridge.rtpPeer, bridge.rtcpPeer = rtpPeer, rtcpPeer
 	bridge.remoteSeen, bridge.remoteCycles = false, 0
+	bridge.sendEnabled, bridge.receiveEnabled = send, receive
+	bridge.mediaRevision++
 	bridge.mu.Unlock()
 	bridge.peerReadyOnce.Do(func() { close(bridge.peerReady) })
 	return nil
@@ -302,14 +343,20 @@ func (bridge *Bridge) WritePCM(frame []byte, capturedAt time.Time) (bool, error)
 		return false, nil
 	}
 	owned := PCMFrame{Data: append([]byte(nil), frame...), CapturedAt: capturedAt}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if !bridge.sendEnabled {
+		bridge.stats.BrowserFramesDropped++
+		return false, nil
+	}
 	select {
 	case <-bridge.ctx.Done():
 		return false, ErrClosed
 	case bridge.in <- owned:
-		bridge.changeStats(func(stats *Stats) { stats.BrowserFramesAccepted++ })
+		bridge.stats.BrowserFramesAccepted++
 		return true, nil
 	default:
-		bridge.changeStats(func(stats *Stats) { stats.BrowserFramesDropped++ })
+		bridge.stats.BrowserFramesDropped++
 		return false, nil
 	}
 }
@@ -360,7 +407,7 @@ waitForFreshFrame:
 			bridge.changeStats(func(stats *Stats) { stats.BrowserFramesStale++ })
 		}
 	}
-	if !bridge.writeRTP(frame.Data, false) {
+	if !bridge.writeRTP(frame, false) {
 		return
 	}
 	ticker := time.NewTicker(FrameDuration)
@@ -382,14 +429,14 @@ waitForFreshFrame:
 				}
 			default:
 			}
-			if !bridge.writeRTP(frame.Data, underflow) {
+			if !bridge.writeRTP(frame, underflow) {
 				return
 			}
 		}
 	}
 }
 
-func (bridge *Bridge) writeRTP(pcm []byte, silence bool) bool {
+func (bridge *Bridge) writeRTP(frame PCMFrame, silence bool) bool {
 	bridge.rtpWriteMu.Lock()
 	defer bridge.rtpWriteMu.Unlock()
 	select {
@@ -397,7 +444,15 @@ func (bridge *Bridge) writeRTP(pcm []byte, silence bool) bool {
 		return false
 	case <-bridge.peerReady:
 	}
-	payload, err := bridge.frames.EncodePCM(pcm)
+	bridge.mu.Lock()
+	bridge.advanceClockLocked()
+	if !bridge.sendEnabled || (!silence && frame.CapturedAt.Before(bridge.sendAfter)) {
+		bridge.timestamp += FrameSamples
+		bridge.mu.Unlock()
+		return true
+	}
+	bridge.mu.Unlock()
+	payload, err := bridge.frames.EncodePCM(frame.Data)
 	if err != nil {
 		bridge.fail(fmt.Errorf("encode RTP audio: %w", err))
 		return false
@@ -434,10 +489,30 @@ func (bridge *Bridge) writeRTP(pcm []byte, silence bool) bool {
 	return true
 }
 
-// SendDTMF reuses the upstream RFC 4733 encoder, but sends on the socket that
-// actually owns this call's media. Audio and events share SSRC/sequence space.
-// The caller must supply the payload negotiated in the SIP answer.
-func (bridge *Bridge) SendDTMF(ctx context.Context, signal string, durationMS int, payload uint8) error {
+// Audio and telephone events share a monotonic 8 kHz timeline even before PCM
+// starts. Retain the next audio sample and catch up after silent/held intervals.
+func (bridge *Bridge) advanceClockLocked() {
+	if bridge.clockStart.IsZero() {
+		bridge.clockStart, bridge.clockBase = time.Now(), bridge.timestamp
+		return
+	}
+	current := bridge.clockBase + uint32(time.Since(bridge.clockStart)/FrameDuration)*FrameSamples
+	if int32(current-bridge.timestamp) > 0 {
+		bridge.timestamp = current
+	}
+}
+
+// MediaRevision binds an event admission to the current negotiated media.
+func (bridge *Bridge) MediaRevision() uint64 {
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	return bridge.mediaRevision
+}
+
+// SendDTMF reuses the upstream RFC 4733 encoder on the call's actual socket.
+// Audio and events share SSRC/sequence space. The caller supplies the negotiated
+// payload and revision; a media update invalidates this event, including queued ones.
+func (bridge *Bridge) SendDTMF(ctx context.Context, signal string, durationMS int, payload uint8, revision uint64) error {
 	if bridge == nil || bridge.ctx.Err() != nil {
 		return ErrClosed
 	}
@@ -450,8 +525,13 @@ func (bridge *Bridge) SendDTMF(ctx context.Context, signal string, durationMS in
 	bridge.dtmfMu.Lock()
 	defer bridge.dtmfMu.Unlock()
 	bridge.mu.Lock()
+	bridge.advanceClockLocked()
 	peer, timestamp := bridge.rtpPeer, bridge.timestamp
+	enabled := bridge.mediaRevision == revision && bridge.sendEnabled
 	bridge.mu.Unlock()
+	if !enabled {
+		return ErrMediaChanged
+	}
 	if peer == nil {
 		return fmt.Errorf("%w: remote RTP is not negotiated", ErrInvalidConfig)
 	}
@@ -488,6 +568,11 @@ func (bridge *Bridge) SendDTMF(ctx context.Context, signal string, durationMS in
 			return ErrClosed
 		}
 		bridge.mu.Lock()
+		if bridge.mediaRevision != revision || !bridge.sendEnabled {
+			bridge.mu.Unlock()
+			bridge.rtpWriteMu.Unlock()
+			return ErrMediaChanged
+		}
 		binary.BigEndian.PutUint16(packet[2:4], bridge.sequence)
 		bridge.mu.Unlock()
 		_, err = bridge.rtpConn.WriteTo(packet, peer)
@@ -517,49 +602,61 @@ func (bridge *Bridge) receiveRTP() {
 			}
 			return
 		}
-		if !bridge.sameRTPPeer(source) {
-			bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
-			continue
-		}
-		var packet rtp.Packet
-		if err := packet.Unmarshal(buffer[:size]); err != nil || packet.Version != 2 ||
-			packet.PayloadType != bridge.payloadType || bridge.frames.ValidateRTP(packet.Payload) != nil {
-			bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
-			continue
-		}
-		if !bridge.acceptSequence(packet.SequenceNumber, packet.SSRC) {
-			continue
-		}
-		pcm, err := bridge.frames.DecodeRTP(packet.Payload)
-		if err != nil {
-			bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
-			continue
-		}
-		frame := PCMFrame{Data: pcm, CapturedAt: time.Now()}
+		bridge.receivePacket(buffer[:size], source)
+	}
+}
+
+func (bridge *Bridge) receivePacket(wire []byte, source net.Addr) {
+	bridge.rtpReadMu.Lock()
+	defer bridge.rtpReadMu.Unlock()
+	bridge.mu.Lock()
+	enabled := bridge.receiveEnabled
+	bridge.mu.Unlock()
+	if !enabled {
+		return
+	}
+	if !bridge.sameRTPPeer(source) {
+		bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
+		return
+	}
+	var packet rtp.Packet
+	if err := packet.Unmarshal(wire); err != nil || packet.Version != 2 ||
+		packet.PayloadType != bridge.payloadType || bridge.frames.ValidateRTP(packet.Payload) != nil {
+		bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
+		return
+	}
+	if !bridge.acceptSequence(packet.SequenceNumber, packet.SSRC) {
+		return
+	}
+	pcm, err := bridge.frames.DecodeRTP(packet.Payload)
+	if err != nil {
+		bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
+		return
+	}
+	frame := PCMFrame{Data: pcm, CapturedAt: time.Now()}
+	select {
+	case <-bridge.ctx.Done():
+		return
+	case bridge.out <- frame:
+		bridge.changeStats(func(stats *Stats) {
+			stats.RTPPacketsReceived++
+			stats.PCMFramesDelivered++
+		})
+	default:
+		// Match the browser AudioWorklet: discard oldest audio so playback catches up.
 		select {
-		case <-bridge.ctx.Done():
-			return
+		case <-bridge.out:
+		default:
+		}
+		select {
 		case bridge.out <- frame:
 			bridge.changeStats(func(stats *Stats) {
 				stats.RTPPacketsReceived++
 				stats.PCMFramesDelivered++
+				stats.PCMFramesDropped++
 			})
-		default:
-			// Match the browser AudioWorklet: discard oldest audio so playback catches up.
-			select {
-			case <-bridge.out:
-			default:
-			}
-			select {
-			case bridge.out <- frame:
-				bridge.changeStats(func(stats *Stats) {
-					stats.RTPPacketsReceived++
-					stats.PCMFramesDelivered++
-					stats.PCMFramesDropped++
-				})
-			case <-bridge.ctx.Done():
-				return
-			}
+		case <-bridge.ctx.Done():
+			return
 		}
 	}
 }

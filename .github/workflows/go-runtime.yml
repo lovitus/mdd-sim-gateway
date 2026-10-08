@@ -376,6 +376,17 @@ jobs:
         working-directory: providers/vowifi-go
         run: go mod verify
 
+      - name: Prove no-op incoming refresh counterexample (temporary)
+        run: bash tools/inbound-hold-counterexamples.sh
+
+      - name: Retain incoming media proof (temporary)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: incoming-media-counterexamples
+          path: counterexample-evidence
+          if-no-files-found: error
+
       - name: Test optional-IMEI eUICC compatibility
         run: GOWORK=off go -C go-runtime/third_party/euicc-go test -race ./lpa ./v2 ./http -run TestMDD
 

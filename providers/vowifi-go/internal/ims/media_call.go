@@ -168,7 +168,7 @@ func (call *MediaCall) SendDTMF(ctx context.Context, signal string, durationMS i
 	if call.dtmfEvents&(uint16(1)<<event) != 0 {
 		// A failed/partial RTP send is unknown, never a reason to send the same
 		// digit again through INFO. Only an unnegotiated event takes the fallback.
-		if err := call.bridge.SendDTMF(ctx, signal, durationMS, voicehost.DefaultRTPDTMFPayloadType); err != nil {
+		if err := call.bridge.SendDTMF(ctx, signal, durationMS, voicehost.DefaultRTPDTMFPayloadType, call.bridge.MediaRevision()); err != nil {
 			return "", err
 		}
 		return voicehost.DialogDTMFRouteRTP, nil
@@ -271,33 +271,37 @@ func acceptedDTMFEvents(rawSDP []byte) uint16 {
 			!strings.EqualFold(codec.EncodingName, voicehost.SDPCodecTelephoneEvent) {
 			continue
 		}
-		if strings.TrimSpace(codec.FMTP) == "" {
-			return 0xffff
-		}
-		var events uint16
-		for _, part := range strings.Split(codec.FMTP, ",") {
-			bounds := strings.Split(strings.TrimSpace(part), "-")
-			if len(bounds) > 2 {
-				return 0
-			}
-			first, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
-			if err != nil || first < 0 || first > 255 {
-				return 0
-			}
-			last := first
-			if len(bounds) == 2 {
-				last, err = strconv.Atoi(strings.TrimSpace(bounds[1]))
-				if err != nil || last < first || last > 255 {
-					return 0
-				}
-			}
-			for event := first; event <= min(last, 15); event++ {
-				events |= uint16(1) << event
-			}
-		}
-		return events
+		return dtmfCodecEvents(codec)
 	}
 	return 0
+}
+
+func dtmfCodecEvents(codec voicehost.SDPCodec) uint16 {
+	if strings.TrimSpace(codec.FMTP) == "" {
+		return 0xffff
+	}
+	var events uint16
+	for _, part := range strings.Split(codec.FMTP, ",") {
+		bounds := strings.Split(strings.TrimSpace(part), "-")
+		if len(bounds) > 2 {
+			return 0
+		}
+		first, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
+		if err != nil || first < 0 || first > 255 {
+			return 0
+		}
+		last := first
+		if len(bounds) == 2 {
+			last, err = strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err != nil || last < first || last > 255 {
+				return 0
+			}
+		}
+		for event := first; event <= min(last, 15); event++ {
+			events |= uint16(1) << event
+		}
+	}
+	return events
 }
 
 func acceptedMediaEndpoints(result voicehost.OutboundCallResult, codec media.Codec) (string, string, error) {
