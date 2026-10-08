@@ -11,6 +11,50 @@ import (
 	"github.com/pion/rtp"
 )
 
+func TestAMRNBRestrictedModeRemainsLowestWithNoRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		modes  uint8
+		lowest int
+	}{
+		{"zero_two_seven", 1<<0 | 1<<2 | 1<<7, 0},
+		{"two_seven", 1<<2 | 1<<7, 2},
+		{"seven", 1 << 7, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codec, err := openAMRNBCodec(AMRNBConfig{ModeSet: tc.modes})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer codec.Close()
+			peer, err := openAMRNBCodec(AMRNBConfig{ModeSet: tc.modes})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer peer.Close()
+			for frame := 0; frame < 24; frame++ {
+				incoming, err := peer.EncodePCM(nonSilentPCM(9000))
+				if err != nil {
+					t.Fatal(err)
+				}
+				incoming[0] = incoming[0]&15 | 15<<4
+				if _, err := codec.DecodeRTP(incoming); err != nil {
+					t.Fatal(err)
+				}
+				outgoing, err := codec.EncodePCM(nonSilentPCM(7000))
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Inspect the actual bandwidth-efficient ToC, not codec state.
+				mode := int(outgoing[0]&7)<<1 | int(outgoing[1]>>7)
+				if mode != tc.lowest {
+					t.Fatalf("CMR15 frame%d mode%d, want lowest%d", frame, mode, tc.lowest)
+				}
+			}
+		})
+	}
+}
+
 func TestAMRNBBandwidthEfficientSingleFrameRoundTrip(t *testing.T) {
 	for frameType, bits := range amrNBFrameBits {
 		storage := make([]byte, 1+(bits+7)/8)

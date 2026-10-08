@@ -70,6 +70,13 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+PR23 immutable evidence tags (not releases or future merge candidates):
+`archive/2026-10-08/inbound-hold-initial-qualified` = `7f605d0b1de567adaedc1c1202045d42de3da19a`, CI37753859505;
+`archive/2026-10-08/inbound-refresh-qualified` = `e56e470e954cbfb5fb9fe01ed025236005dfd2fe`, CI37755633663;
+`archive/2026-10-08/inbound-hold-qualified` = `a2cce0ac7fc73c9f091344e606ab8067f445a625`, CI37757483079.
+Final runtime/permanent tests match the last tag; temporary proof entries are
+removed. Final-head CI/reviews, normal merge and deployment remain separate.
+
 October 8 incoming-media/modem-facts candidate: immutable evidence tag
 `archive/2026-10-08/inbound-policy-qualified` ->
 `cc7b5b5af2bb02ff1928aca3d55a69d1750722b8` preserves the one-time hosted

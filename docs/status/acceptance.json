@@ -1421,11 +1421,32 @@
   ],
   "workstreams": [
     {
-      "id": "INBOUND_MEDIA_POLICY_FACTS",
-      "state": "needs_verification",
+      "id": "INBOUND_HOLD_DTMF",
+      "state": "completed",
       "releaseRelevance": "current",
-      "summary": "October 8 current cursor: PR22 retains the scoped incoming dynamic-PT, Linux AT-field and shared policy-readiness fixes and corrects the independent review's two AMR blockers. Incoming SDP no longer declares unsupported interleaving. Negotiated mode-set, mode-change-period and neighbor constraints reach the real opencore encoder; G.711 alternatives and outgoing default behavior remain. Linux no-claim Data semantics, stored user intent and active-work guards are unchanged. README corrects the missing legacy Release assets without claiming a new release.",
-      "acceptance": "Baseline main154947b; hosted37724071647 passed atcc7b5b5 with compiled baseline failures and fixed Provider38/Linux126/Windows53 race passes. Full CI37724548919 succeeded at14524a0, but AMR review rejected that head. Correction fbe7882 passed full37734542838; exact-source artifact shows13 expected compiled failure events on unchanged14524a0 (11 subcases,2 parents), then46 IMS/media race passes, zero failure/skip and empty stderr. Actual baseline mode7 under mode-set0 is captured; later CMR/period assertions are green coverage, not separately proven baseline failures. Cleanup8e4b9e5 passed full37736073811, but the fixed Codex reviewer identified the remaining stored-off unknown/missing/disconnecting transition gap. Corrected98a0831 requires DataDisconnected, preserving no-claim projection, intent and owner guards. Full37738205318 succeeded after one unchanged failed-job retry for Chrome startup. Each Linux/Windows proof produced exactly five compiled failing transition subcases plus parent on8e4b9e5, five passing controls, then58 restored policy race passes, zero fails/skips and empty stderr. Both original reviewers approved the bounded implementation. Hashes and fixture rationale are in MODEM_AGENT.md/UPSTREAM.md; immutable sources in docs/branches.md. Final cleanup preserves qualified runtime/permanent tests, removes temporary proof entries and restores normal CI. Unique next step: final exact-head CI and both reviewers' evidence/cleanup equivalence before normal merge gates. No local build/test, merge, deployment or paid action. Existing deployment receipts remain authoritative. Historical488/USB/Winsock/forced-close causes remain unproven/deferred. Existing inbound DTMF carrier-relay assembly lacks a relay and remains separate follow-up in UPSTREAM.md; Bridge PT tests do not qualify it. Official new-user Go Release publication remains pending.",
+      "summary": "PR23 implementation/hosted qualification complete: incoming hold/resume retains audio mapping and media owner; negotiated telephone-event uses the same Bridge. No-op refresh preserves media, distinct short keys retain distinct timestamps, and restricted AMR lowest-mode/CMR15 policy is unchanged. No AMR-WB or quality expansion.",
+      "acceptance": "Qualified a2cce0a/tree f5ca912e, tag archive/2026-10-08/inbound-hold-qualified; full CI37757483079 succeeded after one unchanged failed-job retry for Chrome startup15s timeout. Actual proof checkout ab67e0b1 has the same tree: one short-key compiled red,54 restored IMS/media race passes,0fail/skip,empty stderr. Earlier hold/CMR15 proof37753859505 and no-op refresh proof37755633663 remain at initial-qualified/refresh-qualified tags. Both fixed reviewers approved exact implementation. Final cleanup preserves runtime/tests and restores normal CI; final-head CI/review and normal merge execution are recorded on PR23, not implied by this frozen qualification receipt. No deployment or carrier/paid acceptance. Queued-second-event and wire retransmission are not separately exercised. Minor modem reason codes, Chinese policy descriptions and pre-existing RTCP SR clock mapping remain follow-up, not new blockers.",
+      "evidence": [
+        "providers/vowifi-go/UPSTREAM.md",
+        "providers/vowifi-go/internal/ims/inbound_hold_test.go",
+        "providers/vowifi-go/internal/ims/inbound_media_call.go",
+        "providers/vowifi-go/internal/ims/inbound_dtmf.go",
+        "providers/vowifi-go/internal/media/bridge.go",
+        "providers/vowifi-go/internal/media/amrnb_test.go"
+      ],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Bounded implementation and hosted behavioral qualification completed; exact final-head merge and field deployment are distinct, not asserted by this record.",
+        "decisionRefs": [],
+        "evidence": ["providers/vowifi-go/UPSTREAM.md", "docs/branches.md"]
+      }
+    },
+    {
+      "id": "INBOUND_MEDIA_POLICY_FACTS",
+      "state": "completed",
+      "releaseRelevance": "current",
+      "summary": "PR22 completed and owner-accepted: incoming dynamic audio PT, AMR format/mode constraints, complete Linux AT facts and stored-off policy readiness. Linux no-claim semantics, stored intent and active-work guards are unchanged.",
+      "acceptance": "PR22 merged192e63b from approvedb757c2b. Final CI37740274669 and main CI37741674362 succeeded; tag archive/2026-10-08/inbound-policy-delivery retains the final head. Hosted behavioral proofs37724071647,37734542838,37738205318 and immutable sources remain in docs/branches.md. Three-party exact-head approval and normal merge receipt: PR22 comment6054793686. No deployment, new Release or fresh paid/carrier acceptance. Historical488 causality remains unproven; incoming DTMF follow-up is now INBOUND_HOLD_DTMF.",
       "evidence": [
         "providers/vowifi-go/UPSTREAM.md",
         "providers/vowifi-go/internal/ims/inbound_media_call.go",
@@ -1437,7 +1458,13 @@
         "go-runtime/internal/linuxmodem/data_projection_linux_test.go",
         "go-runtime/internal/agentpolicy/stored_data_test.go",
         "README.md"
-      ]
+      ],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Owner accepted PR22 after matched-head CI and three-party review; normal merge is complete. Production and carrier acceptance remain separate.",
+        "decisionRefs": [],
+        "evidence": ["docs/branches.md", "providers/vowifi-go/UPSTREAM.md", "agent/MODEM_AGENT.md"]
+      }
     },
     {
       "id": "LINUX_MODEM_ACQUISITION",
