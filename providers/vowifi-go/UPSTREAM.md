@@ -1,5 +1,16 @@
 # Upstream source and MDD patch
 
+## Held-call client continuity
+
+Provider WebSocket PCM padding starts after one second without live downlink,
+at the existing 20 ms frame cadence. It never refreshes client lastSeen, canary
+evidence or carrier RTP statistics. No client, Core, protocol or codec change.
+Failure checklist: Android's 5s idle deadline during hold; forged liveness;
+padding after stream end/reconnect; resumed real audio lost behind padding.
+The real incoming/Bridge/WebSocket/Backend regression holds for16s, resumes
+nonzero two-way PCM, then stops all client messages to check the original guard.
+These are synthetic peers, not Android hardware or carrier acceptance.
+
 ## Incoming hold and DTMF (October 8 follow-up)
 
 Reuse upstream direction negotiation and RFC4733 encoding, not a new call owner.

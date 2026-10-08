@@ -70,6 +70,12 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+PR24 evidence only, not releases: `archive/2026-10-08/hold-continuity-initial`
+retains cde59de (CI37765592425, incorrect test close-code expectation);
+`archive/2026-10-08/hold-continuity-qualified` retains80e8c42 (CI37767495996,
+two compiled red/four race green). Final runtime/tests match the latter;
+temporary proof removed. Final CI/review/normal merge are in the PR24 receipt.
+
 PR23 immutable evidence tags (not releases or future merge candidates):
 `archive/2026-10-08/inbound-hold-initial-qualified` = `7f605d0b1de567adaedc1c1202045d42de3da19a`, CI37753859505;
 `archive/2026-10-08/inbound-refresh-qualified` = `e56e470e954cbfb5fb9fe01ed025236005dfd2fe`, CI37755633663;

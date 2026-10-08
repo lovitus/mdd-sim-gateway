@@ -322,25 +322,53 @@ func (session *Session) startStreamPumpLocked() {
 }
 
 func (session *Session) pumpDownlink(ctx context.Context, stream Stream, socket *websocket.Conn, epoch uint64) {
+	ticker := time.NewTicker(media.FrameDuration)
+	defer ticker.Stop()
+	lastPCM := time.Now()
+	silence := make([]byte, PCMFrameBytes)
+	pcm, failures := stream.PCM(), stream.Errors()
 	for {
+		// A silent live stream is not a lost client. Only client messages may
+		// refresh lastSeen; padding must never qualify the initial canary.
 		select {
 		case <-ctx.Done():
 			return
-		case err, ok := <-stream.Errors():
+		case err, ok := <-failures:
 			if ok && err != nil {
 				closeSocket(socket, websocket.StatusInternalError, "operator media failed")
 			}
 			return
-		case frame, ok := <-stream.PCM():
-			if !ok {
-				return
+		default:
+		}
+		var frame media.PCMFrame
+		ok, padding := true, false
+		select {
+		case <-ctx.Done():
+			return
+		case frame, ok = <-pcm:
+		case <-ticker.C:
+			// Prefer waiting audio (or stream closure) over a silence tick.
+			// Missed ticks are not queued or replayed after a blocked write.
+			select {
+			case frame, ok = <-pcm:
+			default:
+				if time.Since(lastPCM) < time.Second {
+					continue
+				}
+				frame.Data, padding = silence, true
 			}
-			if len(frame.Data) != PCMFrameBytes || !session.currentSocket(socket, epoch) {
-				continue
-			}
-			if err := socket.Write(ctx, websocket.MessageBinary, frame.Data); err != nil {
-				return
-			}
+		}
+		if !ok || ctx.Err() != nil || !session.currentSocket(socket, epoch) {
+			return
+		}
+		if len(frame.Data) != PCMFrameBytes {
+			continue
+		}
+		if !padding {
+			lastPCM = time.Now()
+		}
+		if err := socket.Write(ctx, websocket.MessageBinary, frame.Data); err != nil {
+			return
 		}
 	}
 }

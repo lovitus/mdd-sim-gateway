@@ -1421,6 +1421,20 @@
   ],
   "workstreams": [
     {
+      "id": "INBOUND_HOLD_CONTINUITY",
+      "state": "completed",
+      "releaseRelevance": "current",
+      "summary": "Owner-requested PR23 follow-up: Provider-only live WebSocket silence padding preserves held-call transport without changing Android, Core, protocol, real carrier evidence or client-heartbeat hangup protection.",
+      "acceptance": "Qualified80e8c42, full CI37767495996; tag archive/2026-10-08/hold-continuity-qualified. Two compiled baseline downlink-timeout reds; four fixed race passes,0fail/skip. Covers16s hold, actual nonzero PCM before/after, resumed connection and exact-call guard termination without client messages. Initial37765592425 failed an incorrect close1000 expectation: existing EndStream cancellation permits EOF; corrected test requires deadline and exact end receipt instead. Final runtime/tests match qualified tag; temporary proof removed. Final-head CI/reviews and merge are recorded on PR24, not implied here. No deployment or Android/carrier/paid acceptance. Incoming16kHz-only telephone-event without INFO fallback remains deferred.",
+      "evidence": ["providers/vowifi-go/UPSTREAM.md", "providers/vowifi-go/internal/service/inbound_hold_continuity_test.go", "providers/vowifi-go/internal/browsermedia/handler_test.go", "docs/branches.md"],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Provider-only correction and hosted behavioral qualification complete; production and physical acceptance remain separate.",
+        "decisionRefs": [],
+        "evidence": ["docs/branches.md", "providers/vowifi-go/internal/service/inbound_hold_continuity_test.go"]
+      }
+    },
+    {
       "id": "INBOUND_HOLD_DTMF",
       "state": "completed",
       "releaseRelevance": "current",
