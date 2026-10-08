@@ -349,3 +349,72 @@ Agent 离线或 generation 变化时，Core 保持 unknown/blocked，不回退�
 
 实现与真实平台／设备／运营商验收分别记录在 [版本化台账](../docs/status/README.md)。历史私有报告、旧
 artifact、capability 字符串和进程存在均不能扩大支持声明；无可审计证据时保留待验收。
+
+## October 8 candidate: retained modem facts and policy readiness
+
+The reviewed scope is limited to complete Linux data-mode AT projection and
+existing-policy convergence. Preserve all public AT fields, including retry
+Detail, SIMAPDU and SIMAPDUOnDemand; do not invent a ready capability. A Linux
+connected-data projection must still yield Core's typed `sim_apdu_data_active`
+when only on-demand APDU is available, retaining the saved VoWiFi intent.
+
+An empty SIM session generation cannot be policy-ready. For stored policies
+requiring data off, a connected/connecting observation cannot become ready just
+because StopData returned nil; retain bounded backoff until a later disconnected
+observation. This shared policy path also applies on Windows. Do not change the
+existing no-claim Linux `disconnected` projection to unknown, change user intent,
+override active-call/data-lease gates, or extend the physical isolation claim.
+
+Failure checklist: missing APDU capability hides the actionable Core blocker;
+ready AT loses retry detail; unowned SIM is ready or mutated; a no-op stop is
+reported as disconnected; ordinary observations postpone retry forever; Windows
+fails to converge after disconnect. Hosted behavioral counterexamples passed;
+full CI and review remain pending. No hardware, user switch, production binary or credentials were
+changed. The old default-data test's missing-generation expectation is updated
+to the earlier identity gate; its recovery now requires a generation as well as
+a disconnected observation, as explicitly required by the owner.
+
+Hosted [37724071647](https://github.com/lovitus/mdd-sim-gateway/actions/runs/37724071647)
+at `cc7b5b5af2bb02ff1928aca3d55a69d1750722b8` reverted production files to
+unchanged `154947b` while retaining the new behavioral tests. Linux reproduced
+five stored-policy subcase failures plus the AT-to-Core blocker failure; Windows
+reproduced the same five shared-policy subcases. Post-fix Linux policy/modem
+packages passed 126 test/subtest results and Windows policy passed 53, all under
+race detection with zero failures/skips. Dependency download messages account
+for red stderr; green stderr is empty. This is not physical Windows/Linux modem
+or isolation acceptance. The temporary verification entry is absent from delivery.
+
+| Evidence | JSONL SHA-256 |
+| --- | --- |
+| Linux red | `50883228ee095f9a45ceabfcd74220ed364f3f07be7e4b4e87c124eb9cc7dd7e` |
+| Linux green | `8460d715e82bdb954bd15c1f9201c4eceea0a0d432dd7d93ae610c864921f2a9` |
+| Windows red | `e13a8908a60b298110265b4a78f0035aa17267f5222a69fc306c97ade6e718b0` |
+| Windows green | `09ebf353ec2315bdcf8178ccc18fd2b18b0f4564ab63bdd3d0e567969d2b6920` |
+
+The final independent review of `8e4b9e5` found a remaining transition gap:
+after a successful stop while connected, a later unknown, missing or disconnecting
+observation could still become ready. The stored-off/flight-mode path now requires
+`DataDisconnected`; Linux's existing no-claim projection is unchanged. Five added
+table cases exercise the intermediate observation, unchanged retry deadline during
+backoff, final disconnected convergence and preserved user intent. The existing
+profile-retry test now explicitly supplies a disconnected bearer because it tests
+profile application, not missing bearer evidence; its assertions are unchanged.
+Hosted run37738205318 at `98a0831d0f4b9800d1ab061bb2fdc95aaa6a9b73`
+(tree797b4a15e6cf6822f2d1dba3d439c192716c0de7) reproduced exactly five failing
+transition subcases plus their parent on unchanged `8e4b9e5`, independently on
+Linux and Windows. Each restored policy package produced 58 test/subtest race
+passes, zero failures/skips and empty red/green stderr. The first run attempt
+failed at Chrome startup before Linux proof; one failed-job retry produced the
+Linux evidence. No browser gate or timeout was weakened. Full run37738205318
+subsequently succeeded at that exact head. The temporary proof entry is retained
+only in `archive/2026-10-08/inbound-policy-transition-qualified`; delivery restores
+normal CI and preserves the qualified production/permanent tests unchanged.
+The old full CI37736073811 is not evidence for the new condition. No hardware or
+isolation acceptance is implied.
+
+| Transition evidence | JSONL SHA-256 |
+| --- | --- |
+| Linux red | `def8bf5717b72b35df50a24b80b5322132b8a95d5755c9b05f4ed6cd6e740c8f` |
+| Linux green | `41d85c50fd3a563d426cabfde4c1583d3ccabfe69c2a212d83394bf2200c0047` |
+| Windows red | `ca114689211b53a1a804afc7e1ec11712a9fc87e28ebbb47bfdd7f0719fcce5e` |
+| Windows green | `9e2e6f7a4d85064faf58a2aa4d3d83081349d11f3e8d2ba0e2010457d69ab9dc` |

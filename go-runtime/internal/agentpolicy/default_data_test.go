@@ -52,7 +52,7 @@ func TestDefaultDataReconcileRequiresObservedDisconnect(t *testing.T) {
 		{name: "busy", data: agentmodem.DataConnected, busy: true, code: "data_lease_active"},
 		{name: "no runtime", data: agentmodem.DataConnected, missing: true, code: "default_data_disconnect_unavailable"},
 		{name: "replaced", data: agentmodem.DataConnected, replaced: true, code: "default_data_disconnect_failed"},
-		{name: "no generation", data: agentmodem.DataConnected, generation: "missing", code: "default_data_disconnect_failed"},
+		{name: "no generation", data: agentmodem.DataConnected, generation: "missing", code: "modem_target_replaced"},
 		{name: "backend error", data: agentmodem.DataConnected, stopErr: errors.New("platform stop failed"), stops: 1, code: "default_data_disconnect_failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -125,6 +125,9 @@ func TestDefaultDataReconcileRequiresObservedDisconnect(t *testing.T) {
 			}
 			now = next.RetryAt
 			fact.Network.Data = agentmodem.DataDisconnected
+			if test.generation == "missing" {
+				fact.SIM.SessionGeneration = "reacquired-session"
+			}
 			manager.ReconcilePolicies(context.Background(), []agentmodem.Fact{fact})
 			if final := manager.View(fact.EquipmentID, fact.SIM.ICCID); final.State != "ready" || !final.RetryAt.IsZero() || len(backend.stops) != 2*test.stops {
 				t.Fatalf("fresh disconnect did not settle default: %+v stops=%d", final, len(backend.stops))

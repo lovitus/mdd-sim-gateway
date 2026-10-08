@@ -33,28 +33,57 @@ const (
 // RFC 4867 section 3.6, AMR speech bits for frame types 0 through 8.
 var amrNBFrameBits = [...]int{95, 103, 118, 134, 148, 159, 204, 244, 39}
 
-type amrNBCodec struct {
-	encoder unsafe.Pointer
-	decoder unsafe.Pointer
-	mode    atomic.Int32
-	close   sync.Once
+// AMRNBConfig constrains the existing encoder, not the RTP packing format.
+// Its zero value preserves unrestricted, single-frame bandwidth-efficient AMR.
+type AMRNBConfig struct {
+	ModeSet      uint8
+	ChangePeriod int
+	NeighborOnly bool
 }
 
-func openAMRNBCodec() (*amrNBCodec, error) {
+type amrNBCodec struct {
+	encoder       unsafe.Pointer
+	decoder       unsafe.Pointer
+	requestedMode atomic.Int32
+	config        AMRNBConfig
+	mode          int // Only the encoder goroutine advances the mode and frame phase.
+	frame         uint64
+	close         sync.Once
+}
+
+func openAMRNBCodec(config AMRNBConfig) (*amrNBCodec, error) {
+	mode := amrNBDefaultMode
+	if config.ModeSet == 0 {
+		config.ModeSet = 0xff
+	} else {
+		// Start conservatively inside the negotiated set until a peer CMR arrives.
+		for mode = 0; config.ModeSet&(1<<mode) == 0; mode++ {
+		}
+	}
+	if config.ChangePeriod == 0 {
+		config.ChangePeriod = 1
+	}
+	if config.ChangePeriod != 1 && config.ChangePeriod != 2 {
+		return nil, fmt.Errorf("%w: unsupported AMR mode change period", ErrInvalidConfig)
+	}
 	codec := &amrNBCodec{
 		encoder: C.Encoder_Interface_init(0), // Continuous media; do not create DTX gaps.
 		decoder: C.Decoder_Interface_init(),
+		config:  config, mode: mode,
 	}
 	if codec.encoder == nil || codec.decoder == nil {
 		codec.Close()
 		return nil, fmt.Errorf("initialize opencore-amrnb codec")
 	}
-	codec.mode.Store(amrNBDefaultMode)
+	codec.requestedMode.Store(int32(mode))
 	return codec, nil
 }
 
 func (codec *amrNBCodec) ValidateRTP(payload []byte) error {
-	_, _, _, err := unpackAMRNBFrame(payload)
+	_, _, frameType, err := unpackAMRNBFrame(payload)
+	if err == nil && frameType < 8 && codec.config.ModeSet&(1<<frameType) == 0 {
+		return fmt.Errorf("%w: AMR frame outside negotiated mode set", ErrInvalidPayload)
+	}
 	return err
 }
 
@@ -70,9 +99,21 @@ func (codec *amrNBCodec) EncodePCM(pcm []byte) ([]byte, error) {
 		samples[index] = C.short(int16(binary.LittleEndian.Uint16(pcm[index*2:])))
 	}
 	var storage [64]C.uchar
-	mode := int(codec.mode.Load())
-	if mode < 0 || mode > 7 {
-		mode = amrNBDefaultMode
+	mode := codec.mode
+	if codec.frame%uint64(codec.config.ChangePeriod) == 0 {
+		requested := int(codec.requestedMode.Load())
+		if requested != mode {
+			if codec.config.NeighborOnly {
+				step := 1
+				if requested < mode {
+					step = -1
+				}
+				for mode += step; codec.config.ModeSet&(1<<mode) == 0; mode += step {
+				}
+			} else {
+				mode = requested
+			}
+		}
 	}
 	length := int(C.mdd_amrnb_encode(
 		codec.encoder,
@@ -83,6 +124,8 @@ func (codec *amrNBCodec) EncodePCM(pcm []byte) ([]byte, error) {
 	if length <= 0 || length > len(storage) {
 		return nil, fmt.Errorf("opencore-amrnb encode returned %d bytes", length)
 	}
+	codec.mode = mode
+	codec.frame++
 	encoded := C.GoBytes(unsafe.Pointer(&storage[0]), C.int(length))
 	return packAMRNBFrame(encoded)
 }
@@ -91,12 +134,15 @@ func (codec *amrNBCodec) DecodeRTP(payload []byte) ([]byte, error) {
 	if codec == nil || codec.decoder == nil {
 		return nil, ErrClosed
 	}
+	if err := codec.ValidateRTP(payload); err != nil {
+		return nil, err
+	}
 	storage, cmr, _, err := unpackAMRNBFrame(payload)
 	if err != nil {
 		return nil, err
 	}
-	if cmr >= 0 && cmr <= 7 {
-		codec.mode.Store(int32(cmr))
+	if cmr >= 0 && cmr <= 7 && codec.config.ModeSet&(1<<cmr) != 0 {
+		codec.requestedMode.Store(int32(cmr))
 	}
 	var input [64]C.uchar
 	for index, value := range storage {

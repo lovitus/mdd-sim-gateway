@@ -479,6 +479,9 @@ func TestProfileFailureStaysRecoveringUntilFreshReconcileAppliesIt(t *testing.T)
 	}
 	runtime.mu.Lock()
 	runtime.saveFailures = 2
+	// This profile-retry case starts with a confirmed idle bearer. Missing data
+	// observation is covered by the stored-policy readiness regression.
+	runtime.facts[0].Network.Data = agentmodem.DataDisconnected
 	facts := append([]agentmodem.Fact(nil), runtime.facts...)
 	runtime.mu.Unlock()
 
