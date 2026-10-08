@@ -67,6 +67,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### INBOUND_HOLD_CONTINUITY
+
+**State: needs_verification; release relevance: current.** Owner-requested PR23 follow-up: Provider-only live WebSocket silence padding preserves held-call transport without changing Android, Core, protocol, real carrier evidence or client-heartbeat hangup protection.
+
+Acceptance scope / remaining action: Candidate only; hosted baseline red/fixed green and exact-head review pending. Regression covers16s hold, same connected session, actual nonzero PCM before/after and guard termination after all client messages stop. No deployment or paid/hardware acceptance. Incoming 16kHz-only telephone-event without INFO fallback is deferred by owner; no new codec scope.
+
 ### LINUX_MODEM_ACQUISITION
 
 **State: needs_verification; release relevance: current.** October 3 follow-up fixes three reviewed Linux acquisition counterexamples: reject duplicate equipment before cleanup, require authoritative idle MM voice before Disconnect/Inhibit, and invalidate retained AT/cached disconnected readiness when connected inventory reappears without a dataClaim. Normal inhibited absence, existing data/raw owners, serial-only service ownership and stored user intent retain their existing paths. No Core, protocol or user-interface expansion.

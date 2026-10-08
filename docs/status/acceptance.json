@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "INBOUND_HOLD_CONTINUITY",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Owner-requested PR23 follow-up: Provider-only live WebSocket silence padding preserves held-call transport without changing Android, Core, protocol, real carrier evidence or client-heartbeat hangup protection.",
+      "acceptance": "Candidate only; hosted baseline red/fixed green and exact-head review pending. Regression covers16s hold, same connected session, actual nonzero PCM before/after and guard termination after all client messages stop. No deployment or paid/hardware acceptance. Incoming 16kHz-only telephone-event without INFO fallback is deferred by owner; no new codec scope.",
+      "evidence": ["providers/vowifi-go/UPSTREAM.md", "providers/vowifi-go/internal/service/inbound_hold_continuity_test.go", "providers/vowifi-go/internal/browsermedia/handler_test.go"]
+    },
+    {
       "id": "INBOUND_HOLD_DTMF",
       "state": "completed",
       "releaseRelevance": "current",

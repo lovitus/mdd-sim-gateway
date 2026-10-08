@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -192,6 +193,20 @@ func TestReadySessionCarriesLivePCMAndResumes(t *testing.T) {
 	if kind, got, err := socket.Read(context.Background()); err != nil || kind != websocket.MessageBinary || string(got) != string(downlink) {
 		t.Fatalf("live downlink kind=%v len=%d err=%v", kind, len(got), err)
 	}
+	seen, status := session.LastSeen(), session.status()
+	readSilence := func(connection *websocket.Conn) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		kind, frame, err := connection.Read(ctx)
+		if err != nil || kind != websocket.MessageBinary || string(frame) != string(make([]byte, PCMFrameBytes)) {
+			t.Fatalf("missing silent live frame: kind=%v err=%v", kind, err)
+		}
+	}
+	readSilence(socket)
+	if session.LastSeen() != seen || !maps.Equal(session.status()["evidence"].(map[string]uint64), status["evidence"].(map[string]uint64)) {
+		t.Fatal("live padding changed client/canary evidence")
+	}
 	_ = socket.Close(websocket.StatusNormalClosure, "network changed")
 	waitFor(t, time.Second, func() bool { return !session.Connected() })
 
@@ -214,6 +229,7 @@ func TestReadySessionCarriesLivePCMAndResumes(t *testing.T) {
 	if kind, _, err := resumed.Read(context.Background()); err != nil || kind != websocket.MessageBinary {
 		t.Fatalf("resumed downlink kind=%v err=%v", kind, err)
 	}
+	readSilence(resumed)
 	session.EndStream("call ended")
 	waitFor(t, time.Second, func() bool {
 		_, found := registry.Session("session-live")
