@@ -1,5 +1,81 @@
 # Upstream source and MDD patch
 
+## Incoming offer negotiation (October 8 candidate)
+
+Reuse the pinned upstream `SelectSDPAnswerCodecs` and structured FMTP parser;
+no upstream source or dependency version is changed. The incoming adapter now
+selects by encoding/rate/channels instead of the local offer's fixed payload.
+It retains the selected mapping in the answer and both RTP directions. Outgoing
+answer validation remains tied to its original offer. Re-INVITE retains the
+established codec/mapping and updates only compatible endpoints.
+
+Optional RTCP mux is declined using the original non-mux RTCP address/port,
+not the parser's substituted mux endpoint. Mux-only, octet-aligned AMR, unsupported
+packetization and encrypted RTP remain rejected. No AMR-WB/EVS implementation,
+paid retries, carrier configuration or call-owner changes are included.
+
+Failure checklist: dynamic AMR rejected or incorrectly falling back to PCMU;
+answer/TX/RX mappings disagreeing; wrong PT accepted; PCMU regression; optional
+mux sent to the wrong RTCP port; unsupported format admitted; re-INVITE reverting
+to PT 96. The userspace SIP/RTP regression covers non-96 AMR alone and with PCMU,
+PCMU alone, AMR-WB plus AMR, optional mux with default/explicit RTCP, and rejects
+unsupported formats. These are synthetic peers, not carrier/audio acceptance.
+Hosted run [37724071647](https://github.com/lovitus/mdd-sim-gateway/actions/runs/37724071647)
+passed at `cc7b5b5af2bb02ff1928aca3d55a69d1750722b8` (tree
+`97276e04f63aa7aed8bb63bf7b4bbf01d744a421`). The unchanged `154947b` production
+files compiled and failed in exactly four dynamic-AMR subcases; PCMU and the
+unsupported-format controls passed. The fixed IMS/media packages passed 38
+test/subtest results under race detection, zero failures/skips. Red stderr contains
+dependency downloads only; green stderr is empty. JSONL SHA-256:
+
+- Red: `f2f61b0746ce288eef280691adce587706ed64a9b727a7d2f598f8e70cdd3bf2`
+- Green: `54a5931f69692de26ade974481c1c6b7d1fc214be1ffa790af1b63fca4bea66b`
+
+The first one-time verification entry is retained at the immutable archive ref
+recorded in docs/branches.md. Full workflow37724548919 passed at14524a0, but the
+independent review rejected that head's AMR FMTP/encoder contract, not its Linux
+projection/readiness fixes. Historical488 causality is still unproven without
+the original offer.
+
+Review correction follows [RFC4867 sections8.1/8.3.1](https://www.rfc-editor.org/rfc/rfc4867.html#section-8.3.1):
+interleaving presence (including0) is rejected per payload; the next supported
+AMR or G.711 alternative is considered. Unknown FMTP is not echoed. Offered
+mode-set is retained unchanged, passed into the existing opencore encoder, and
+limits the initial frame and incoming CMR. Encoder mode changes keep the
+negotiated one/two-frame phase and traverse neighboring allowed modes when
+requested. Outgoing/default configuration retains the original unrestricted
+MR122 start. No new codec or upstream fork is introduced.
+
+Additional failure cases: answer declares a packing layout not sent; initial
+frame or CMR escapes mode-set; successive changes violate period/neighbor;
+unsupported first AMR hides another valid AMR/G.711; rejected re-INVITE changes
+the established peer. The same incoming SIP/RTP test reads actual BE ToC bits,
+frame lengths and sequence gaps independently of our unpacker, and exercises
+the original peer after rejected mapping/format changes. The one-time hosted
+entry checks these cases on unchanged14524a0 production, then the fixed packages.
+Hosted [37734542838](https://github.com/lovitus/mdd-sim-gateway/actions/runs/37734542838)
+completed successfully at `fbe7882f970a0a73644d1f8b79a36a67600dd992`, tree
+`36698db177db13f19a1a896d9e02481d845bbc1b`. On unchanged14524a0, the updated
+tests compiled and produced exactly13 expected failures (11 subcases,2 parents),
+including actual mode7 under mode-set0 and the restricted-mode initial-frame
+violation. Six controls passed. This does not mean each later CMR/period assertion
+independently failed on the baseline. Restored IMS/media race results:46 test/subtest
+passes, zero failures/skips; both stderr files empty. JSONL SHA-256:
+
+- Red: `7fdb3816f6efe587868e640d4532522d5ee498673f0c1a6cba11e738d63f7a93`
+- Green: `671e1ffc3b62a077dce46dff047d1cf7911d59fae7587dbbc86d8b92a4bb93e3`
+
+The fixed independent reviewer approved this exact implementation/test design
+and closed both AMR blockers. Final cleanup changes only records and removes the
+temporary proof entry; runtime/permanent tests stay identical to the qualified
+archive. The normal workflow is restored unchanged. Final exact-head CI/review
+disposition is recorded on PR22; this is not merge or production acceptance.
+
+Separate existing finding: inbound DTMF still uses the carrier dialog relay,
+which is absent in the production inbound-agent assembly. Bridge PT collision
+checks do not qualify that production DTMF route. Follow-up stays in the existing
+incident/postponed ledger, outside this AMR/Linux batch.
+
 ## SMS receive-report network context
 
 The `524bd33` affected-line trial received six carrier redeliveries whose separate

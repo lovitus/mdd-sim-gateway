@@ -110,7 +110,7 @@ func TestAMRNBCodecCarriesBidirectionalNonSilentAudioOverUserspaceStack(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
-	peerCodec, err := openAMRNBCodec()
+	peerCodec, err := openAMRNBCodec(AMRNBConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

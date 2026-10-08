@@ -21,12 +21,12 @@ type frameCodec interface {
 	Close()
 }
 
-func openFrameCodec(codec Codec) (frameCodec, error) {
+func openFrameCodec(codec Codec, amr AMRNBConfig) (frameCodec, error) {
 	switch codec {
 	case CodecPCMU, CodecPCMA:
 		return g711FrameCodec{codec: codec}, nil
 	case CodecAMR:
-		return openAMRNBCodec()
+		return openAMRNBCodec(amr)
 	default:
 		return nil, fmt.Errorf("%w: unsupported codec %q", ErrInvalidConfig, codec)
 	}

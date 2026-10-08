@@ -1421,6 +1421,25 @@
   ],
   "workstreams": [
     {
+      "id": "INBOUND_MEDIA_POLICY_FACTS",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "October 8 current cursor: PR22 retains the scoped incoming dynamic-PT, Linux AT-field and shared policy-readiness fixes and corrects the independent review's two AMR blockers. Incoming SDP no longer declares unsupported interleaving. Negotiated mode-set, mode-change-period and neighbor constraints reach the real opencore encoder; G.711 alternatives and outgoing default behavior remain. Linux no-claim Data semantics, stored user intent and active-work guards are unchanged. README corrects the missing legacy Release assets without claiming a new release.",
+      "acceptance": "Baseline main154947b; hosted37724071647 passed atcc7b5b5 with compiled baseline failures and fixed Provider38/Linux126/Windows53 race passes. Full CI37724548919 succeeded at14524a0, but AMR review rejected that head. Correction fbe7882 passed full37734542838; exact-source artifact shows13 expected compiled failure events on unchanged14524a0 (11 subcases,2 parents), then46 IMS/media race passes, zero failure/skip and empty stderr. Actual baseline mode7 under mode-set0 is captured; later CMR/period assertions are green coverage, not separately proven baseline failures. The fixed independent reviewer approved the correction and retained Linux/readiness approval. Evidence hashes are in UPSTREAM.md; immutable sources in docs/branches.md. Final cleanup leaves qualified runtime/permanent tests unchanged and removes temporary proof entries, restoring normal CI. Unique next step: final-cleanup exact-head CI and review-equivalence receipt on PR22 before normal merge gates. No local build/test, merge, deployment or paid action. Existing deployment receipts remain authoritative. Historical488/USB/Winsock/forced-close causes remain unproven/deferred. Existing inbound DTMF carrier-relay assembly lacks a relay and remains separate follow-up in UPSTREAM.md; Bridge PT tests do not qualify it. Official new-user Go Release publication remains pending.",
+      "evidence": [
+        "providers/vowifi-go/UPSTREAM.md",
+        "providers/vowifi-go/internal/ims/inbound_media_call.go",
+        "providers/vowifi-go/internal/ims/inbound_amr.go",
+        "providers/vowifi-go/internal/ims/inbound_negotiation_test.go",
+        "providers/vowifi-go/internal/media/bridge.go",
+        "providers/vowifi-go/internal/media/amrnb.go",
+        "agent/MODEM_AGENT.md",
+        "go-runtime/internal/linuxmodem/data_projection_linux_test.go",
+        "go-runtime/internal/agentpolicy/stored_data_test.go",
+        "README.md"
+      ]
+    },
+    {
       "id": "LINUX_MODEM_ACQUISITION",
       "state": "needs_verification",
       "releaseRelevance": "current",
@@ -1777,7 +1796,7 @@
     {
       "id": "INCIDENT_MM_CLOSE",
       "state": "deferred",
-      "summary": "Historical forced-close root cause remains unknown. Current Linux ModemManager access is private D-Bus, not an mmcli subprocess whose stderr can simply be recovered. Separate September 30 review observation: dataFact drops AT Manager retry Detail when rebuilding a ready ATControlFact; capability booleans still propagate, so this does not block the qualified call-capability recovery fix.",
+      "summary": "Historical forced-close root cause remains unknown. Current Linux ModemManager access is private D-Bus, not an mmcli subprocess whose stderr can simply be recovered. October 8 correction: dataFact dropped retry Detail and SIMAPDU/SIMAPDUOnDemand when rebuilding ready AT; only CallSignalling/SMS propagated. The bounded projection repair is now tracked in INBOUND_MEDIA_POLICY_FACTS, not a claimed explanation or recovery of the historical forced close.",
       "acceptance": "Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Collect bounded redacted evidence at the real current transport boundary when authorized; do not invent carrier/port causes from generic symptoms. Preserve the bounded retry category/time through Linux dataFact in a later relevant batch; do not claim the current data-mode final topology/UI displays it. This diagnostic wiring gap is separate from, and does not explain, the historical forced close.",
       "evidence": [
         "go-runtime/internal/linuxmodem/mm_linux.go",
