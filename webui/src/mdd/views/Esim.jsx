@@ -2,7 +2,7 @@ import { dialogs } from '../../dialogs.js'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import DeletionNotifications from './DeletionNotifications.jsx'
-import { euiccReaderKey, downloadView, downloadFailureLabel, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch, profileInventoryAvailable } from '../esimAdapter.js'
+import { esimReaders, relatedSIMReaders, downloadView, downloadFailureLabel, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch, profileInventoryAvailable } from '../esimAdapter.js'
 import { useI18n } from '../i18n.jsx'
 import { compactReaderName } from '../linePresentation.js'
 import { mergeReportedProfiles } from '../esimAdapter.js'
@@ -494,13 +494,8 @@ function isLineRunning(inst) {
 
 export default function Esim({ cards, instances, refresh, subscribe, showToast }) {
   const { t } = useI18n()
-  const readers = useMemo(
-    () => [...cards].map(card => ({...card,name:euiccReaderKey(card),displayName:card.name}))
-      .filter((c) => c.present || (c.remote && (c.eid || c.iccid)))
-      .sort((a, b) => (a.index ?? a.vpcd_slot ?? 999) - (b.index ?? b.vpcd_slot ?? 999)),
-    [cards],
-  )
-  const [reader, setReader] = useState('')
+  const readers = useMemo(() => esimReaders(cards), [cards])
+  const [reader, setReader] = useState(() => readers[0]?.name || '')
   const [status, setStatus] = useState(null)
   const [ses, setSes] = useState([])
   const [meta, setMeta] = useState({ imei: '' })
@@ -541,13 +536,16 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   const selectedCard = readers.find((c) => c.name === reader)
   const reportedProfiles = JSON.stringify([selectedCard?.present,selectedCard?.stale,selectedCard?.euicc,selectedCard?.secure_elements])
   useEffect(()=>{setSes(previous=>mergeReportedProfiles(previous,selectedCard))},[reportedProfiles])
-  const readerPresenceUnknown = selectedCard?.card_presence === 'unknown'
   const readerOnline = selectedCard?.present === true && !selectedCard?.stale
+  const relatedReaders = relatedSIMReaders(selectedCard, readers)
+  const currentLocations = relatedReaders.filter(card=>card.online)
+  const historicalInventories = relatedReaders.filter(card=>!card.online && (card.euicc || card.secure_elements?.length))
+  const reportedEuicc = selectedCard?.euicc || selectedCard?.secure_elements?.some(slot=>slot.euicc)
   const matchedInst = useMemo(
     () => instanceForCard(selectedCard, instances),
     [selectedCard, instances],
   )
-  const lineRunning = isLineRunning(matchedInst)
+  const lineRunning = readerOnline && isLineRunning(matchedInst)
   const imeiDefault = meta.imei || matchedInst?.imei || ''
   const dual = ses.length > 1
   const profiles = useMemo(
@@ -655,7 +653,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
 
   const switchProfile = async (profile, se) => {
     if ((profile.profileNickname || '').includes('[MDD-DELETED]')) { setErr('请先手动重命名，删除 [MDD-DELETED] 标识；系统不会自动移除标识或启用。'); return }
-    if (selectedCard?.stale) { setErr(t('Snapshot unavailable')); return }
+    if (!readerOnline) { setErr(t('Snapshot unavailable')); return }
     if (operationBusy.current || !(await dialogs.confirm(t('Enable profile {name} on EID {eid}?', {name:profileDisplayName(profile),eid:se.eid})))) return
     operationBusy.current = true
     setBusyOp('Enable'); setErr('')
@@ -703,7 +701,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     return () => { stopped = true; clearTimeout(timer) }
   }, [downloadReceipt?.eid, downloadReceipt?.operation_id, applyDownload, loadAll, refresh, t])
   const stopLine = async () => {
-    if (!matchedInst) return
+    if (!readerOnline || !matchedInst) return
     setBusyOp('stop')
     try {
       await api.stop(matchedInst.id)
@@ -716,7 +714,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   }
 
   const runProfileOp = async (label, fn) => {
-    if (selectedCard?.stale) { setErr(t('Snapshot unavailable')); return }
+    if (!readerOnline) { setErr(t('Snapshot unavailable')); return }
     if (operationBusy.current) return
     operationBusy.current = true
     setBusyOp(label)
@@ -748,11 +746,15 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600 }}>
           {t('Reader')}
-          <select value={reader} onChange={(e) => setReader(e.target.value)} style={{ minWidth: 220 }}>
-            {readers.map((c) => (
+          <select aria-label={t('Reader')} value={reader} onChange={(e) => setReader(e.target.value)} style={{ minWidth: 220, maxWidth: '100%' }}>
+            {[true,false].map(online => readers.some(card=>card.online===online) && (
+              <optgroup key={String(online)} label={t(online ? 'Connected readers' : 'Previous reader snapshots')}>
+              {readers.filter(card=>card.online===online).map((c) => (
               <option key={c.name} value={c.name}>
-                #{c.index ?? c.vpcd_slot} · {compactReaderName(c.displayName)} · {c.agent_id}{c.iccid ? ` · ${c.iccid}` : ''}{c.card_presence === 'unknown' ? ` · ${t('SIM state unknown')}` : c.present ? '' : ` · ${t('Offline')}`}
+                #{c.index ?? c.vpcd_slot} · {compactReaderName(c.displayName)} · {c.agent_id}{c.iccid ? ` · ${c.iccid}` : ''} · {t(online ? 'Online' : 'Historical record')}
               </option>
+              ))}
+              </optgroup>
             ))}
           </select>
         </label>
@@ -768,10 +770,25 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
       </div>
 
       {!readerOnline && (
-        <div className="card" style={{ padding: 14, color: 'var(--text-dim)', opacity: 0.82 }}>
-          {t(readerPresenceUnknown
-            ? 'The live SIM state is unknown because the Agent or reader transport is unavailable. Showing cached eSIM information; no profile operation will run until live state returns.'
-            : 'This reader is offline. Showing the last cached eSIM information; live reads and downloads resume after reconnect.')}
+        <div role="status" style={{ padding: 14, color: 'var(--text-dim)', borderLeft: '3px solid var(--border)' }}>
+          <strong>{t('Reader/profile history: read-only')}</strong>
+          <div>{t('Cached profiles do not establish current card location or state. Chip deletion records below are independent: recovery checks the current EID connection; confirmed replay contacts the operator.')}</div>
+          {selectedCard?.last_observed_at && <div>{t('Last observed: {time}', {time:new Date(selectedCard.last_observed_at).toLocaleString()})}</div>}
+          {currentLocations.map(current=><div key={current.name} style={{marginTop:8}}>
+            {t('This SIM is currently connected on {agent}: {reader}.', {agent:current.agent_id,reader:current.displayName})}{' '}
+            <button className="btn btn-ghost" onClick={()=>setReader(current.name)}>{t('Open current connection')}</button>
+          </div>)}
+          {!currentLocations.length && <div>{t('No current connection for this SIM is confirmed.')}</div>}
+        </div>
+      )}
+
+      {readerOnline && !reportedEuicc && (
+        <div role="status" style={{ padding: 14, color: 'var(--text-dim)', borderLeft: '3px solid var(--border)' }}>
+          {t('SIM connected; this Agent has not reported eUICC management information. Profile management is not confirmed.')}
+          {historicalInventories.map(previous=><div key={previous.name} style={{marginTop:8}}>
+            {t('Historical eSIM information for this SIM: {agent}.', {agent:previous.agent_id})}{' '}
+            <button className="btn btn-ghost" onClick={()=>setReader(previous.name)}>{t('View reader history')}</button>
+          </div>)}
         </div>
       )}
 
@@ -906,7 +923,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         </div>
         {cachedAt > 0 && !loaded && (
           <div style={{ fontSize: 12, color: 'var(--text-mute)', marginBottom: 10 }}>
-            {t('Cached view from {time} — switching works from here; click Load for a live read.', { time: new Date(cachedAt).toLocaleString() })}
+            {t(readerOnline ? 'Cached view from {time}; actions require current Agent capabilities.' : 'Historical snapshot from {time}; profile states are not live and actions are unavailable.', { time: new Date(cachedAt).toLocaleString() })}
           </div>
         )}
         {!profiles.length ? (

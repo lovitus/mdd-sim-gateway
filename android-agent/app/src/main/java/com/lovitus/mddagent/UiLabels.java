@@ -24,10 +24,10 @@ final class UiLabels {
         return R.string.route_unavailable;
     }
     static int routeColor(int state){
-        if(state==R.string.route_ready)return OK;
+        if(state==R.string.route_ready)return 0xff137333;
         if(state==R.string.route_unavailable)return ERROR;
         if(state==R.string.route_busy||state==R.string.route_unknown||state==R.string.route_connecting)return WARNING;
-        return NEUTRAL;
+        return 0xff616161;
     }
     static String messageTime(Context context,JSONObject event){
         String value=event.optString("received_at",event.optString("observed_at"));

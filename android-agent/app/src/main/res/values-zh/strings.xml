@@ -1,4 +1,7 @@
 <resources>
+    <string name="line_vowifi_available">VoWiFi 可用</string>
+    <string name="line_cellular_available">蜂窝可用</string>
+    <string name="line_both_available">VoWiFi / 蜂窝均可用</string>
     <string name="route_ready">可用</string>
     <string name="route_unavailable">不可用</string>
     <string name="route_disabled">已关闭</string>
