@@ -14,6 +14,33 @@ of every platform, hardware combination or failure branch.
 
 ## Delivery And Acceptance
 
+### Reader Relocation Presentation
+
+October 9 read-only production diagnosis reproduced a previous desktop attachment
+and an obsolete Android attachment beside the current Android SIM. The previous
+desktop entry supplied cached profiles, not live ownership. Android preview v97
+still has no eUICC profile-management implementation; AKA/SIM sharing is separate.
+This WebUI-only correction separates current and historical connections, retains
+the observation time, and links matching SIM locations without copying EIDs,
+profile states or capabilities between attachments. Known conflicting EIDs are
+not associated. A previous attachment no longer exposes a running-line stop action.
+Review clarification: read-only describes reader/profile snapshots, not the whole
+management page. EID-scoped deletion recovery/replay and existing download-job
+cancellation remain explicit independent operations, with their original identity,
+confirmation and server guards. The history banner names that distinction; do not
+disable retained notification replay merely because a reader has moved.
+Failure boundaries: stale whole snapshots, unknown chip identity, changed SIM,
+multiple possible locations, and confusing old enabled state with current state.
+Hosted37916088950 at ca59961 reproduced the rendered-page assertion on unchanged
+baseline38af2d4, then passed the fixed regression. Full CI rejected stale embedded
+assets; its generated UI is retained and copied into the delivery candidate.
+Tag archive/2026-10-09/esim-location-proof preserves the temporary proof source.
+Final full CI/review remains separate. No profile operation, physical interaction
+or production UI deployment is claimed; this is not Android eUICC implementation.
+Both reviewers approved the scoped snapshot/archive wording at6dce49e. Its
+CI37920856346 rejected manually synchronized compiled literals because minification
+renamed symbols; the delivery uses that run's actual generated bundle instead.
+
 ### Retired Incident Branch
 
 The 22 commits unique to `incident/vpcd-multislot-2633d7e` were checked by

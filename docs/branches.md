@@ -70,6 +70,14 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October9 presentation evidence, not releases or a merge queue:
+`archive/2026-10-09/esim-location-proof` retains ca59961/CI37916088950
+(rendered baseline red/fixed green; full run failed stale embedded assets).
+`archive/2026-10-09/line-visibility-qualified` retains fb7dd44,
+full Go37917549682 and Android37917541611 success with API28/35 red/green.
+Final runtime/tests match the qualified source; temporary proof is removed.
+Review, final-head CI, actual UI inspection and rollout remain separate receipts.
+
 PR24 evidence only, not releases: `archive/2026-10-08/hold-continuity-initial`
 retains cde59de (CI37765592425, incorrect test close-code expectation);
 `archive/2026-10-08/hold-continuity-qualified` retains80e8c42 (CI37767495996,
