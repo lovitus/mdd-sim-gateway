@@ -131,8 +131,17 @@ jobs:
         working-directory: webui
         run: |
           npm ci
+          git fetch --no-tags origin 38af2d406dd8925750c3bf4d946d8bec0350c422
+          bash ../tools/verify-esim-relocation-baseline.sh
           npm run test:all
           MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+
+      - name: Retain eSIM relocation counterexample
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: esim-relocation-evidence-${{ github.sha }}
+          path: esim-relocation-evidence/
 
       - name: Real browser local recording with synthetic audio
         working-directory: webui

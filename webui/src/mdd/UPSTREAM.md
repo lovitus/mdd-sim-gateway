@@ -14,6 +14,21 @@ of every platform, hardware combination or failure branch.
 
 ## Delivery And Acceptance
 
+### Reader Relocation Presentation
+
+October 9 read-only production diagnosis reproduced a previous desktop attachment
+and an obsolete Android attachment beside the current Android SIM. The previous
+desktop entry supplied cached profiles, not live ownership. Android preview v97
+still has no eUICC profile-management implementation; AKA/SIM sharing is separate.
+This WebUI-only correction separates current and historical connections, retains
+the observation time, and links matching SIM locations without copying EIDs,
+profile states or capabilities between attachments. Known conflicting EIDs are
+not associated. A previous attachment no longer exposes a running-line stop action.
+Failure boundaries: stale whole snapshots, unknown chip identity, changed SIM,
+multiple possible locations, and confusing old enabled state with current state.
+Hosted rendered-page counterexample and final delivery are pending; no profile
+operation, hardware mutation or production UI deployment is claimed.
+
 ### Retired Incident Branch
 
 The 22 commits unique to `incident/vpcd-multislot-2633d7e` were checked by

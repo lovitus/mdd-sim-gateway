@@ -315,6 +315,7 @@ export function mapReaderCards(devices) {
       agent_id: device.agent_id || '',
       process_generation: device.process_generation || '',
       session_generation: reader.session_generation || '',
+      last_observed_at: device.last_observed_at || '',
     })
   }
   return result
