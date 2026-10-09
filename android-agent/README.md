@@ -4,6 +4,16 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
+October 9 presentation correction (candidate, not yet installed): the shared
+Calls/Messages line row shows a bold availability summary beside the SIM name.
+Entire route labels are colored: green ready, gray off/offline, red unavailable,
+amber connecting/unknown/busy. Calls and Messages reuse their existing separate
+readiness facts; a color/summary is not permission or proof of a completed call.
+Failure checklist: off must not look ready; stale/busy/unknown cannot become green;
+recycled rows must clear old styles; portrait names, numbers and state must fit.
+The instrumented regression checks the real view with mixed call/SMS facts and
+state rebinding. Hosted pre-fix/fixed evidence and handset inspection are pending.
+
 The subsequent dial-prefix correction is qualified at `609c588` in hosted
 `36544499252`; signed v97 is installed and actual zero-key long/short touches
 were checked without calling. The number row no longer has an apparent fixed

@@ -1,4 +1,7 @@
 <resources>
+    <string name="line_vowifi_available">VoWiFi available</string>
+    <string name="line_cellular_available">Cellular available</string>
+    <string name="line_both_available">VoWiFi + cellular available</string>
     <string name="route_ready">Ready</string>
     <string name="route_unavailable">Unavailable</string>
     <string name="route_disabled">Off</string>

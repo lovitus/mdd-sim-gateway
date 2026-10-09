@@ -10,6 +10,56 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-09 PR22–24 授权部署完成（保留回退记录）
+
+**最终状态 09:22 UTC：Linux 服务端/Provider 及全部五台 Windows/macOS/Linux Agent 已对齐
+`38af2d4`。** 用户重新插拔后，原 eSIM 的 EID、卡身份及 ATR 恢复，Agent 无需重启即可重新识别。
+用户现场确认只有一只 eSIM 读卡器；此前两个 USB/PCSC 枚举条目不能等同两只实体 eSIM 读卡器。
+接续部署第一次因 SSH 跳转握手超时触发回退，Core 启动后的 API 短暂拒绝连接也已恢复并释放租约。
+核对主机密钥及实际 Core 摘要后改用既有 Mesh 直连，再按同一 RPC 屏障完成两台 Mac 升级。
+最终实际 Mac 进程摘要与原签名工件匹配，原卡、eSIM profiles、目录、通知和用户意图不变；
+全部租约为零，FreeFR 身份及 IMS 注册恢复，原停用线路保持停用。没有新构建、Android 更新或付费操作。
+最终私有摘要 SHA-256：`e4c52a7f197ae4f3e2b7957c43181d8484dac4ef2d6fb4338a861ac6b28c1fe1`。
+公开 [最终部署回执](https://github.com/lovitus/mdd-sim-gateway/pull/24#issuecomment-6078158307) 取代此前部分部署状态。
+以下首次部署、回退和诊断记录保留为历史，不再代表 Mac 待升级或读卡器仍失联。
+
+用户明确授权部署。复用已通过的 main workflow `37771205410`，实际工件源码为
+`38af2d406dd8925750c3bf4d946d8bec0350c422`；三平台下载 ZIP 与 GitHub artifact digest 一致，
+macOS 保留原 Developer ID Team。没有本地构建、重新触发 CI、更新 Android 或付费操作。
+
+- Linux Core、apply、egress、7 个运行中的 Provider、Linux Agent 和两台 Windows Agent 已更新；
+  核验实际 PID 映像摘要、新 Agent 代际、配置、卡身份及持久策略，不以软链接或 Running 代替。
+- Linux Agent 和两台 Windows 分别只发送一次 Core 受控重启；Linux guard 保持启用/活动，
+  main 路由表无蜂窝默认路由，两台 Windows 持久 WFP 规则逐项不变。
+- Linux 安装前两次分别被旧 Agent 固定入口和未完成安装事务拒绝，均回退并核验旧进程；
+  随后在旧 Agent 启动保护下使用现有显式恢复入口完成安装，没有修改或放宽安装器门禁。
+- 两台 reader-only Mac 在全局 Provider 租约及 Core/apply 停止屏障内安装了新包。
+  确认旧 RPC workers 排空后才换版；新进程映像/签名正确，但 CLI Mac 第二读卡器持续
+  `discovering`、PC/SC 返回 `No smart card inserted`，未通过原卡身份读回，因此两台均回退。
+  原版 `bca3dce` 下该读卡器仍有相同错误；这不证明物理原因，也不证明新版本导致。
+- 回退末次观测遇到 SSH banner 超时；后续已核验原版 Mac 进程，恢复 Core/apply 并释放全部租约。
+  最终配置/通知设置与部署前一致，原已注册线路恢复注册。原有 apply pending 未改变，未自动 apply。
+- 14 个只读 API 返回 200，但不计为读卡、通话、Android 或运营商现场验收。Mac 升级未完成；
+  已请用户重新插拔指定读卡器，不继续盲目重启、修改 PIN 或操作 eSIM。
+
+离线状态备份仅保留在私有目录，复制后 SHA-256 核验为
+`acb8ef753b69cd9c2e0e0a9a47433afa4461f74cafdb136cb23d51fb8b8ce828`；没有倒灌业务数据库。
+实际 Linux Provider SHA-256 为 `aff07ad712b2769558abca5c44db7cad34ba919539ed0c42e621dca6bbbb83a6`。
+部署范围、回退及剩余项见 [PR #24 执行回执](https://github.com/lovitus/mdd-sim-gateway/pull/24#issuecomment-6077130105)；
+原始日志、主机和凭据不进入 Git。
+
+同日跟进诊断（08:30 UTC）：独立 PC/SC 客户端取得 `PRESENT|MUTE`、ATR 长度 0，
+共享连接返回 `0x8010000c`；系统智能卡报告亦为无卡。切换窗口的系统 CCID 日志先报
+`kIOReturnNotResponding`，再报 `kUSBHostReturnPipeStalled`，最后上电/复位失败。
+故障定位到本机 USB/智能卡层；驱动残留、设备/供电/接触及重连触发原因仍未区分，不能归咎物理故障。
+新旧版本的 PC/SC、reader worker、SIM session、Agent host、macOS 安装器和 Go 依赖输入无差异。
+另发现正常 Mac 的 SIM 元数据仍保留启动时 `pin_required`；状态读取显示保存的 PIN 配置存在、
+剩余次数为 3（不是已验证结论），一次原会话读卡刷新即读出 IMSI 并恢复 `ready`，没有提交 PIN。
+软件后续应区分 MUTE 与卡缺失/monitor-ready，并在已有认证成功路径同步元数据；本轮只诊断，未改运行代码。
+最终进程代际/配置不变、租约为零；故障读卡器仍未恢复，其他 Mac 卡身份可读。
+私有最终诊断摘要 SHA-256：`a0039b20c40e298f9ccb8781f0a1ab05a1adba4ca5a80db08461b65f863b7597`。
+完整脱敏诊断见 [PR #24 跟进回执](https://github.com/lovitus/mdd-sim-gateway/pull/24#issuecomment-6077392380)。
+
 ## 2026-10-03 单机默认断流部署回执
 
 [PR #19](https://github.com/lovitus/mdd-sim-gateway/pull/19) 经实施方、固定 Codex reviewer

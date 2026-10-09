@@ -43,14 +43,51 @@ public class CommunicationUxTest {
                 TextView wifi=a.findViewById(id("line_vowifi_state")),cell=a.findViewById(id("line_cellular_state"));
                 assertNotNull("Calls needs an independent VoWiFi state",wifi);assertNotNull("Calls needs an independent cellular state",cell);
                 assertTrue(wifi.getText().toString().contains("Unavailable"));assertTrue(cell.getText().toString().contains("Ready"));
-                android.text.Spanned ws=(android.text.Spanned)wifi.getText(),cs=(android.text.Spanned)cell.getText();
-                assertNotEquals(ws.getSpans(0,1,android.text.style.ForegroundColorSpan.class)[0].getForegroundColor(),cs.getSpans(0,1,android.text.style.ForegroundColorSpan.class)[0].getForegroundColor());
+                assertEquals(UiLabels.routeColor(R.string.route_unavailable),wifi.getCurrentTextColor());
+                assertEquals(UiLabels.routeColor(R.string.route_ready),cell.getCurrentTextColor());
                 a.findViewById(R.id.route_cellular).performClick();assertTrue(a.findViewById(R.id.call_dial).isEnabled());
             });
             fixture.service.pause();await(scene,a->!a.findViewById(R.id.call_dial).isEnabled());
             scene.onActivity(a->{assertTrue(((TextView)a.findViewById(id("line_cellular_state"))).getText().toString().contains("Offline"));});
             fixture.assertOnlyMutations();
         }
+    }
+
+    @Test public void lineAvailabilitySummaryAndFullTextFollowCallAndSmsStates(){
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(()->{
+            LineStatusView row=new LineStatusView(context);
+            JSONObject item=line();
+            row.bind(item,true,false);
+            TextView wifi=row.findViewById(R.id.line_vowifi_state),cell=row.findViewById(R.id.line_cellular_state);
+            assertEquals("Entire ready status must be colored, not only a tiny dot",UiLabels.routeColor(R.string.route_ready),cell.getCurrentTextColor());
+            TextView summary=row.findViewById(R.id.line_availability_summary);
+            assertNotNull("Line title needs a visible availability summary",summary);
+            assertEquals(context.getString(R.string.line_cellular_available),summary.getText().toString());
+            assertTrue(summary.getTypeface().isBold());
+            row.bind(item,true,true);
+            assertEquals(context.getString(R.string.line_both_available),summary.getText().toString());
+            Json.object(item,"operations").remove("cellular_sms");
+            row.bind(item,true,true);
+            assertEquals(context.getString(R.string.line_vowifi_available),summary.getText().toString());
+            assertEquals(UiLabels.routeColor(R.string.route_unknown),cell.getCurrentTextColor());
+            for(int state:new int[]{R.string.route_disabled,R.string.route_unknown,R.string.route_connecting,R.string.route_unavailable,R.string.route_busy}){
+                JSONObject readiness=Json.obj("ready",false);
+                if(state==R.string.route_unknown)readiness=new JSONObject();
+                if(state==R.string.route_disabled)readiness=Json.obj("ready",false,"facts",new JSONArray().put(Json.obj("code","vowifi_disabled")));
+                if(state==R.string.route_connecting)readiness=Json.obj("ready",false,"facts",new JSONArray().put(Json.obj("code","registering")));
+                JSONObject blocked=Json.obj("name","Test SIM","enabled",state!=R.string.route_disabled,
+                    "operations",Json.obj("vowifi_call",readiness,"cellular_call",readiness));
+                if(state==R.string.route_busy)try{blocked.put("active",Json.obj("call_id","existing-call"));}catch(JSONException e){throw new AssertionError(e);}
+                row.bind(blocked,true,false);
+                assertEquals(context.getString(state),summary.getText().toString());
+                assertEquals(UiLabels.routeColor(state),wifi.getCurrentTextColor());
+                assertEquals(UiLabels.routeColor(state),summary.getCurrentTextColor());
+            }
+            row.bind(item,false,false);
+            assertEquals(context.getString(R.string.route_offline),summary.getText().toString());
+            assertEquals(UiLabels.routeColor(R.string.route_offline),wifi.getCurrentTextColor());
+            assertNotEquals(UiLabels.routeColor(R.string.route_disabled),UiLabels.routeColor(R.string.route_ready));
+        });
     }
 
     @Test public void completeInboxPagesOlderMessagesAndPreselectsProvenOriginalCard()throws Exception{

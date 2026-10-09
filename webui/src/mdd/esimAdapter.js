@@ -3,6 +3,26 @@ import { operationID } from '../goV1Adapter.js'
 
 export function euiccReaderKey(card) { return JSON.stringify([card.agent_id || '', card.reader || card.name]) }
 
+export function esimReaders(cards) {
+  return cards.filter(card => card.present || (card.remote && (card.eid || card.iccid)))
+    .map(card => ({...card,name:euiccReaderKey(card),displayName:card.name,
+      online:card.present === true && !card.stale}))
+    .sort((a,b) => Number(b.online)-Number(a.online) || (a.index ?? 999)-(b.index ?? 999))
+}
+
+export function relatedSIMReaders(card, readers) {
+  if (!card?.iccid) return []
+  const eids = value => (value.secure_elements?.length
+    ? value.secure_elements.map(slot=>slot.euicc?.eid) : [value.euicc?.eid || value.eid]).filter(Boolean)
+  const known = eids(card)
+  return readers.filter(other => {
+    if (other.name === card.name || other.iccid !== card.iccid) return false
+    const candidate = eids(other)
+    // ICCID identifies the active SIM, not the chip or its other profiles.
+    return !known.length || !candidate.length || known.some(eid=>candidate.includes(eid))
+  })
+}
+
 const downloadPointerKey = reader => `mdd_euicc_download_${reader}`
 export function rememberDownload(reader, receipt) {
   if (!reader || !/^\d{32}$/.test(receipt.eid || '') || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(receipt.operation_id || '')) throw new Error('euicc_download_identity_required')

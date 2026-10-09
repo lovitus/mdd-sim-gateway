@@ -5,6 +5,11 @@ on:
   pull_request:
     branches: [main, codex/android-v2]
   workflow_dispatch:
+    inputs:
+      verify_line_status:
+        description: Temporary line-status presentation counterexample
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -41,7 +46,8 @@ jobs:
           github.ref == 'refs/heads/codex/android-client-focused' ||
           github.ref == 'refs/heads/codex/android-production-adaptation' ||
           github.ref == 'refs/heads/codex/android-status-messages-ux' ||
-          github.ref == 'refs/heads/codex/android-dial-prefix'))
+          github.ref == 'refs/heads/codex/android-dial-prefix' ||
+          github.ref == 'refs/heads/codex/esim-reader-location'))
         shell: bash
         env:
           PREVIEW_KEYSTORE: ${{ secrets.MDD_ANDROID_PREVIEW_KEYSTORE_BASE64 }}
@@ -81,6 +87,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      VERIFY_LINE_STATUS: ${{ inputs.verify_line_status || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +97,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -118,6 +127,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           script: |
+            if [ "$VERIFY_LINE_STATUS" = true ]; then bash tools/android-line-status-baseline.sh; fi
             gradle -p android-agent --no-daemon connectedDebugAndroidTest
             mkdir -p android-screens
             if [ -f release-bundle/android-evidence/mdd-agent-preview.apk ]; then adb -P 5037 -s emulator-5554 install -r release-bundle/android-evidence/mdd-agent-preview.apk; adb -P 5037 -s emulator-5554 shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity; adb -P 5037 -s emulator-5554 exec-out screencap -p > android-screens/setup.png; fi
@@ -129,6 +139,7 @@ jobs:
             android-screens/
             android-agent/app/build/reports/androidTests/
             android-agent/app/build/outputs/androidTest-results/
+            android-line-status-evidence/
           retention-days: 14
   core:
     runs-on: ubuntu-latest
