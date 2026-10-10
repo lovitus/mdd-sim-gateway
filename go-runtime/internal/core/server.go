@@ -610,6 +610,8 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("DELETE /v1/imei-pool/{entryID}", server.protect(server.imeiPool))
 		server.mux.Handle("PUT /v1/imei-pool/{entryID}/bindings/{lineID}", server.protect(server.imeiPool))
 		server.mux.Handle("DELETE /v1/imei-pool/{entryID}/bindings/{lineID}", server.protect(server.imeiPool))
+		server.mux.Handle("PUT /v1/imei-pool/{entryID}/cards/{cardID}", server.protect(server.imeiPool))
+		server.mux.Handle("DELETE /v1/imei-pool/{entryID}/cards/{cardID}", server.protect(server.imeiPool))
 	}
 	if server.lineBootstrap != nil {
 		server.mux.Handle("GET /v1/line-candidates", server.protect(server.lineBootstrap))

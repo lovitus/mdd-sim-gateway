@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "IMEI_UNCONFIGURED_CARD",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Restore legacy pre-line ICCID-to-pool binding in the existing catalog database. New-card binding no longer requires a configured line; explicit line creation atomically inherits and consumes pending identity. No automatic claim, activation, APDU, hardware IMEI or Agent changes.",
+      "acceptance": "CI38074031050/72afaff: 14 subcases reach the old missing-card-binding rejection, fixed14 pass under race; frontend reproduces owner error then saves/unbinds. Full run failed only stale embedded UI in the recovery job; actual hosted bundle is included. Archive/2026-10-11/imei-initial-proof preserves evidence. Review found a post-claim provision overwrite: candidate now checks current pooled identity transactionally before dispatch and preserves it at finalization/reconcile. Two conflict regressions plus matching control await hosted proof/final CI and re-review. Not deployed; no real-card binding changed.",
+      "evidence": ["go-runtime/internal/linecatalog/imei_pool.go", "go-runtime/internal/linecatalog/imei_card_binding_test.go", "webui/tests/mddHardwareAdapter.mjs", "webui/src/mdd/UPSTREAM.md"]
+    },
+    {
       "id": "ANDROID_LINE_VISIBILITY",
       "state": "needs_verification",
       "releaseRelevance": "current",

@@ -67,6 +67,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### IMEI_UNCONFIGURED_CARD
+
+**State: needs_verification; release relevance: current.** Restore legacy pre-line ICCID-to-pool binding in the existing catalog database. New-card binding no longer requires a configured line; explicit line creation atomically inherits and consumes pending identity. No automatic claim, activation, APDU, hardware IMEI or Agent changes.
+
+Acceptance scope / remaining action: CI38074031050/72afaff: 14 subcases reach the old missing-card-binding rejection, fixed14 pass under race; frontend reproduces owner error then saves/unbinds. Full run failed only stale embedded UI in the recovery job; actual hosted bundle is included. Archive/2026-10-11/imei-initial-proof preserves evidence. Review found a post-claim provision overwrite: candidate now checks current pooled identity transactionally before dispatch and preserves it at finalization/reconcile. Two conflict regressions plus matching control await hosted proof/final CI and re-review. Not deployed; no real-card binding changed.
+
 ### ANDROID_LINE_VISIBILITY
 
 **State: needs_verification; release relevance: current.** Owner-reported tiny-dot ambiguity: the existing shared line row now colors entire route labels and shows a bold title-adjacent availability summary. Green ready, gray off/offline, red unavailable and amber connecting/unknown/busy; call/SMS readiness remains independent. No routing, paid-operation, Core or protocol changes.
