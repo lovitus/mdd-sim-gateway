@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### IMEI_UNCONFIGURED_CARD
+
+**State: needs_verification; release relevance: current.** Restore legacy pre-line ICCID-to-pool binding in the existing catalog database. New-card binding no longer requires a configured line; explicit line creation atomically inherits and consumes pending identity. No automatic claim, activation, APDU, hardware IMEI or Agent changes.
+
+Acceptance scope / remaining action: Full hosted CI38075676057 passed at8f02c8b; archive/2026-10-11/imei-qualified retains source/proof. Downloaded Core evidence: two compiled conflicting-command dispatch failures on the old implementation plus one matching control pass, then all3 fixed race subcases pass without skips. Initial CI38074031050/72afaff separately reproduces the missing binding entry in14 subcases, fixed14 race passes and adapter red/green; its full run failed stale embedded assets, now corrected. CI38075143335 was an invalid fixture failure, not a behavioral counterexample. Final cleanup preserves qualified runtime/permanent tests and restores normal CI. Final-head CI/review and production acceptance remain separate; not deployed, no real-card binding changed.
+
 ### ANDROID_LINE_VISIBILITY
 
 **State: needs_verification; release relevance: current.** Owner-reported tiny-dot ambiguity: the existing shared line row now colors entire route labels and shows a bold title-adjacent availability summary. Green ready, gray off/offline, red unavailable and amber connecting/unknown/busy; call/SMS readiness remains independent. No routing, paid-operation, Core or protocol changes.

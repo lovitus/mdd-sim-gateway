@@ -32,7 +32,7 @@ type IMEIPoolEntry struct {
 
 type IMEILineBinding struct {
 	EntryID  string `json:"entry_id,omitempty"`
-	LineID   string `json:"line_id"`
+	LineID   string `json:"line_id,omitempty"`
 	LineName string `json:"line_name,omitempty"`
 	CardID   string `json:"card_id"`
 	IMEI     string `json:"imei"`
@@ -112,6 +112,19 @@ func (store *Store) IMEIPoolSnapshot() (IMEIPoolSnapshot, error) {
 		}); err != nil {
 			return err
 		}
+		if err := tx.Bucket(pendingIMEIBindingsBucket).ForEach(func(cardID, entryID []byte) error {
+			entry, err := pendingIMEIEntry(tx, string(cardID))
+			if err != nil {
+				return err
+			}
+			if tx.Bucket(cardsBucket).Get(cardID) != nil {
+				return errors.New("stored IMEI binding has two owners")
+			}
+			result.Bindings = append(result.Bindings, IMEILineBinding{EntryID: string(entryID), CardID: string(cardID), IMEI: entry.IMEI})
+			return nil
+		}); err != nil {
+			return err
+		}
 		return tx.Bucket(linesBucket).ForEach(func(_, payload []byte) error {
 			line, err := decodeCatalogLine(payload)
 			if err != nil {
@@ -142,6 +155,9 @@ func sortIMEILineBindings(values []IMEILineBinding) {
 	sort.Slice(values, func(i, j int) bool {
 		if values[i].LineID != values[j].LineID {
 			return values[i].LineID < values[j].LineID
+		}
+		if values[i].CardID != values[j].CardID {
+			return values[i].CardID < values[j].CardID
 		}
 		return values[i].IMEI < values[j].IMEI
 	})
@@ -268,20 +284,32 @@ func (store *Store) DeleteIMEIPoolEntryExpected(entryID string,
 func (store *Store) BindIMEIExpected(entryID, lineID, expectedCardID string,
 	expectedPoolRevision, expectedCatalogRevision uint64) (Line, uint64, uint64, bool, error) {
 	return store.changeIMEIBinding(entryID, lineID, expectedCardID,
-		expectedPoolRevision, expectedCatalogRevision, true)
+		expectedPoolRevision, expectedCatalogRevision, true, false)
 }
 
 func (store *Store) UnbindIMEIExpected(entryID, lineID, expectedCardID string,
 	expectedPoolRevision, expectedCatalogRevision uint64) (Line, uint64, uint64, bool, error) {
 	return store.changeIMEIBinding(entryID, lineID, expectedCardID,
-		expectedPoolRevision, expectedCatalogRevision, false)
+		expectedPoolRevision, expectedCatalogRevision, false, false)
+}
+
+// Card bindings do not create a line or perform hardware work. The card index
+// resolves an existing line inside the same revision-checked transaction.
+// Restores ec620942 config.py's pre-line ICCID binding, without draft activation.
+func (store *Store) BindIMEICardExpected(entryID, cardID string,
+	expectedPoolRevision, expectedCatalogRevision uint64) (Line, uint64, uint64, bool, error) {
+	return store.changeIMEIBinding(entryID, "", cardID, expectedPoolRevision, expectedCatalogRevision, true, true)
+}
+
+func (store *Store) UnbindIMEICardExpected(entryID, cardID string,
+	expectedPoolRevision, expectedCatalogRevision uint64) (Line, uint64, uint64, bool, error) {
+	return store.changeIMEIBinding(entryID, "", cardID, expectedPoolRevision, expectedCatalogRevision, false, true)
 }
 
 func (store *Store) changeIMEIBinding(entryID, lineID, expectedCardID string,
-	expectedPoolRevision, expectedCatalogRevision uint64, bind bool) (Line, uint64, uint64, bool, error) {
+	expectedPoolRevision, expectedCatalogRevision uint64, bind, byCard bool) (Line, uint64, uint64, bool, error) {
 	entryID, lineID = strings.TrimSpace(entryID), strings.TrimSpace(lineID)
-	expectedCardID = digitsOnly(expectedCardID)
-	if !validIdentifier(entryID) || !validIdentifier(lineID) || !digitsBetween(expectedCardID, 4, 32) {
+	if !validIdentifier(entryID) || (!byCard && !validIdentifier(lineID)) || !digitsBetween(expectedCardID, 4, 32) {
 		return Line{}, 0, 0, false, errors.New("IMEI binding identity is invalid")
 	}
 	result, poolRevision, catalogRevision, changed := Line{}, uint64(0), uint64(0), false
@@ -306,6 +334,54 @@ func (store *Store) changeIMEIBinding(entryID, lineID, expectedCardID string,
 		if indexed := tx.Bucket(imeiPoolValuesBucket).Get([]byte(entry.IMEI)); indexed == nil || string(indexed) != entry.ID {
 			return errors.New("stored IMEI pool index is corrupt")
 		}
+		if byCard {
+			lineID = string(tx.Bucket(cardsBucket).Get([]byte(expectedCardID)))
+		}
+		if byCard && lineID == "" {
+			if err := tx.Bucket(operationBucket).ForEach(func(_, payload []byte) error {
+				var receipt OperationReceipt
+				if json.Unmarshal(payload, &receipt) != nil || receipt.Validate() != nil {
+					return errors.New("stored operation receipt is corrupt")
+				}
+				if receipt.CardID == expectedCardID && (receipt.Kind == OperationProvision || receipt.Kind == OperationReprovision) {
+					switch receipt.State {
+					case OperationPrepared, OperationCatalogCommitted, OperationInProgress, OperationUnknown:
+						return ErrLineOperationActive
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			pending := tx.Bucket(pendingIMEIBindingsBucket)
+			prior := string(pending.Get([]byte(expectedCardID)))
+			if prior != "" {
+				if _, err := pendingIMEIEntry(tx, expectedCardID); err != nil {
+					return err
+				}
+			}
+			if !bind && prior != "" && prior != entryID {
+				return ErrIMEIBinding
+			}
+			if bind && prior == entryID || !bind && prior == "" {
+				return nil
+			}
+			if bind {
+				err = pending.Put([]byte(expectedCardID), []byte(entryID))
+			} else {
+				err = pending.Delete([]byte(expectedCardID))
+			}
+			if err != nil {
+				return err
+			}
+			poolRevision++
+			catalogRevision++
+			changed = true
+			if err := metadata.Put(imeiPoolRevisionKey, uint64Bytes(poolRevision)); err != nil {
+				return err
+			}
+			return metadata.Put(revisionKey, uint64Bytes(catalogRevision))
+		}
 		linePayload := tx.Bucket(linesBucket).Get([]byte(lineID))
 		if linePayload == nil {
 			return ErrNotFound
@@ -316,6 +392,20 @@ func (store *Store) changeIMEIBinding(entryID, lineID, expectedCardID string,
 		}
 		if line.CardID != expectedCardID {
 			return ErrCardInUse
+		}
+		if tx.Bucket(pendingIMEIBindingsBucket).Get([]byte(expectedCardID)) != nil {
+			return errors.New("stored IMEI binding has two owners")
+		}
+		active, err := activeProvisionOperation(tx.Bucket(operationBucket), lineID, "")
+		if err != nil {
+			return err
+		}
+		deleting, err := activeDeletionOperation(tx.Bucket(deletionOperationBucket), lineID)
+		if err != nil {
+			return err
+		}
+		if active || deleting {
+			return ErrLineOperationActive
 		}
 		desired := entry.IMEI
 		if !bind {
@@ -368,6 +458,16 @@ func decodeCatalogLine(payload []byte) (Line, error) {
 
 func imeiUsedByLine(tx *bolt.Tx, imei string) (bool, error) {
 	used := false
+	if err := tx.Bucket(pendingIMEIBindingsBucket).ForEach(func(cardID, _ []byte) error {
+		entry, err := pendingIMEIEntry(tx, string(cardID))
+		if err != nil {
+			return err
+		}
+		used = used || entry.IMEI == imei
+		return nil
+	}); err != nil || used {
+		return used, err
+	}
 	err := tx.Bucket(linesBucket).ForEach(func(_, payload []byte) error {
 		line, err := decodeCatalogLine(payload)
 		if err != nil {
@@ -383,4 +483,41 @@ func imeiUsedByLine(tx *bolt.Tx, imei string) (bool, error) {
 		return false, err
 	}
 	return used, nil
+}
+
+func pendingIMEIEntry(tx *bolt.Tx, cardID string) (IMEIPoolEntry, error) {
+	entryID := tx.Bucket(pendingIMEIBindingsBucket).Get([]byte(cardID))
+	if entryID == nil {
+		return IMEIPoolEntry{}, nil
+	}
+	entry, err := decodeIMEIPoolEntry(tx.Bucket(imeiPoolEntriesBucket).Get(entryID))
+	if err != nil || entry.ID != string(entryID) || !digitsBetween(cardID, 4, 32) ||
+		string(tx.Bucket(imeiPoolValuesBucket).Get([]byte(entry.IMEI))) != entry.ID {
+		return IMEIPoolEntry{}, errors.New("stored pending IMEI binding is corrupt")
+	}
+	return entry, nil
+}
+
+// Consume only while publishing the line in this transaction. Hardware provision
+// must already carry the same IMEI: never silently change an admitted command.
+func consumePendingIMEI(tx *bolt.Tx, line *Line, hardwareProvision bool) error {
+	entry, err := pendingIMEIEntry(tx, line.CardID)
+	if err != nil || entry.ID == "" {
+		return err
+	}
+	if hardwareProvision && line.SIM.IMEI != entry.IMEI {
+		return ErrIMEIBinding
+	}
+	line.SIM.IMEI = entry.IMEI
+	return tx.Bucket(pendingIMEIBindingsBucket).Delete([]byte(line.CardID))
+}
+
+// Claim consumes pending identity, but later provision must not overwrite the
+// resulting pool binding. Unpooled imported/default identities keep their path.
+func checkProvisionIMEI(tx *bolt.Tx, current Line, cardID, imei string) error {
+	if current.CardID == cardID && current.SIM.IMEI != imei &&
+		tx.Bucket(imeiPoolValuesBucket).Get([]byte(current.SIM.IMEI)) != nil {
+		return ErrIMEIBinding
+	}
+	return nil
 }

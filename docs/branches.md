@@ -70,6 +70,16 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October11 IMEI card-binding evidence, not releases or merge candidates:
+`archive/2026-10-11/imei-initial-proof` retains72afaff/CI38074031050
+(missing binding entry red/fixed green; full run failed stale embedded assets).
+`archive/2026-10-11/imei-provision-fixture` retains41627ef/CI38075143335
+(invalid operation-ID fixture; not a behavioral counterexample).
+`archive/2026-10-11/imei-qualified` retains8f02c8b/full CI38075676057 success,
+including two compiled conflicting-command dispatch failures, a passing control
+and all three corrected race passes. Final runtime/permanent tests are identical;
+temporary proof is removed. Final-head review/CI and deployment remain separate.
+
 October9 presentation evidence, not releases or a merge queue:
 `archive/2026-10-09/esim-location-proof` retains ca59961/CI37916088950
 (rendered baseline red/fixed green; full run failed stale embedded assets).
