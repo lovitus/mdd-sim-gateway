@@ -26,6 +26,7 @@ var (
 	rawModemBindingsBucket           = []byte("raw_modem_bindings")
 	imeiPoolEntriesBucket            = []byte("imei_pool_entries")
 	imeiPoolValuesBucket             = []byte("imei_pool_values")
+	pendingIMEIBindingsBucket        = []byte("imei_pending_card_bindings")
 	lifecycleBucket                  = []byte("line_lifecycle")
 	operationBucket                  = []byte("provision_operations_v1")
 	deletionOperationBucket          = []byte("line_deletion_operations_v1")
@@ -119,6 +120,9 @@ func (store *Store) initialize() error {
 			return err
 		}
 		if _, err := transaction.CreateBucketIfNotExists(imeiPoolValuesBucket); err != nil {
+			return err
+		}
+		if _, err := transaction.CreateBucketIfNotExists(pendingIMEIBindingsBucket); err != nil {
 			return err
 		}
 		if _, err := transaction.CreateBucketIfNotExists(lifecycleBucket); err != nil {
@@ -223,12 +227,8 @@ func (store *Store) CreateExpected(input Line, expectedRevision uint64) (Line, u
 	if err := line.normalizeAndValidate(); err != nil {
 		return Line{}, 0, err
 	}
-	payload, err := json.Marshal(line)
-	if err != nil {
-		return Line{}, 0, err
-	}
 	var revision uint64
-	err = store.db.Update(func(transaction *bolt.Tx) error {
+	err := store.db.Update(func(transaction *bolt.Tx) error {
 		lines, cards := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
 		metadata := transaction.Bucket(metadataBucket)
 		revision = bytesUint64(metadata.Get(revisionKey))
@@ -245,6 +245,13 @@ func (store *Store) CreateExpected(input Line, expectedRevision uint64) (Line, u
 		}
 		if cards.Get([]byte(line.CardID)) != nil {
 			return ErrCardInUse
+		}
+		if err := consumePendingIMEI(transaction, &line, false); err != nil {
+			return err
+		}
+		payload, err := json.Marshal(line)
+		if err != nil {
+			return err
 		}
 		if err := lines.Put([]byte(line.ID), payload); err != nil {
 			return err
@@ -273,12 +280,8 @@ func (store *Store) CreateExpectedWithOperation(input Line, expectedRevision uin
 	if err := receipt.Validate(); err != nil {
 		return Line{}, OperationReceipt{}, err
 	}
-	linePayload, err := json.Marshal(line)
-	if err != nil {
-		return Line{}, OperationReceipt{}, err
-	}
 	var revision uint64
-	err = store.db.Update(func(transaction *bolt.Tx) error {
+	err := store.db.Update(func(transaction *bolt.Tx) error {
 		metadata := transaction.Bucket(metadataBucket)
 		revision = bytesUint64(metadata.Get(revisionKey))
 		if revision != expectedRevision {
@@ -294,6 +297,13 @@ func (store *Store) CreateExpectedWithOperation(input Line, expectedRevision uin
 		}
 		if cards.Get([]byte(line.CardID)) != nil {
 			return ErrCardInUse
+		}
+		if err := consumePendingIMEI(transaction, &line, receipt.Kind != OperationClaim); err != nil {
+			return err
+		}
+		linePayload, err := json.Marshal(line)
+		if err != nil {
+			return err
 		}
 		if err := lines.Put([]byte(line.ID), linePayload); err != nil {
 			return err
@@ -408,6 +418,11 @@ func (store *Store) BeginExistingProvisionOperation(lineID string, expectedRevis
 		if revision != expectedRevision {
 			return ErrRevision
 		}
+		// A different, not-yet-configured card must first be claimed so its
+		// saved presentation identity is included in the provision command.
+		if transaction.Bucket(pendingIMEIBindingsBucket).Get([]byte(receipt.CardID)) != nil {
+			return ErrIMEIBinding
+		}
 		operations := transaction.Bucket(operationBucket)
 		if operations.Get([]byte(receipt.OperationID)) != nil {
 			return ErrOperationExists
@@ -486,6 +501,9 @@ func (store *Store) FinalizeExistingProvision(input Line, operationID, requestDi
 		if current.CardID != line.CardID {
 			if owner := cards.Get([]byte(line.CardID)); owner != nil && string(owner) != line.ID {
 				return ErrCardInUse
+			}
+			if err := consumePendingIMEI(transaction, &line, true); err != nil {
+				return err
 			}
 			if err := cards.Delete([]byte(current.CardID)); err != nil {
 				return err
@@ -659,12 +677,8 @@ func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) 
 	if err := line.normalizeAndValidate(); err != nil {
 		return Line{}, 0, err
 	}
-	payload, err := json.Marshal(line)
-	if err != nil {
-		return Line{}, 0, err
-	}
 	var revision uint64
-	err = store.db.Update(func(transaction *bolt.Tx) error {
+	err := store.db.Update(func(transaction *bolt.Tx) error {
 		lines, cards := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
 		metadata := transaction.Bucket(metadataBucket)
 		operations := transaction.Bucket(operationBucket)
@@ -711,6 +725,13 @@ func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) 
 			return err
 		} else if deleted {
 			return ErrAlreadyExists
+		}
+		if err := consumePendingIMEI(transaction, &line, false); err != nil {
+			return err
+		}
+		payload, err := json.Marshal(line)
+		if err != nil {
+			return err
 		}
 		if err := lines.Put([]byte(line.ID), payload); err != nil {
 			return err
@@ -937,7 +958,8 @@ func (store *Store) ImportEmpty(inputs []Line, receipt ImportReceipt) error {
 	return store.db.Update(func(transaction *bolt.Tx) error {
 		lineBucket, cardBucket := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
 		key, _ := lineBucket.Cursor().First()
-		if key != nil || transaction.Bucket(metadataBucket).Get(importKey) != nil {
+		pendingKey, _ := transaction.Bucket(pendingIMEIBindingsBucket).Cursor().First()
+		if key != nil || pendingKey != nil || transaction.Bucket(metadataBucket).Get(importKey) != nil {
 			return ErrNotEmpty
 		}
 		for _, line := range lines {

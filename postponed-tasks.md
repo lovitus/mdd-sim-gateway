@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### IMEI_UNCONFIGURED_CARD
+
+**State: needs_verification; release relevance: current.** Restore legacy pre-line ICCID-to-pool binding in the existing catalog database. New-card binding no longer requires a configured line; explicit line creation atomically inherits and consumes pending identity. No automatic claim, activation, APDU, hardware IMEI or Agent changes.
+
+Acceptance scope / remaining action: Pinned read-only diagnosis confirmed an identified new SIM and existing pool entry without a catalog line. Complete candidate includes double-revision CAS, durable restart, pending unbind, entry-use protection, all creation paths and active lifecycle conflicts. Hosted behavioral red/green, whole-batch CI and review pending; not deployed and no production binding changed.
+
 ### ANDROID_LINE_VISIBILITY
 
 **State: needs_verification; release relevance: current.** Owner-reported tiny-dot ambiguity: the existing shared line row now colors entire route labels and shows a bold title-adjacent availability summary. Green ready, gray off/offline, red unavailable and amber connecting/unknown/busy; call/SMS readiness remains independent. No routing, paid-operation, Core or protocol changes.

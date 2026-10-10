@@ -55,6 +55,10 @@ on:
       - '.github/workflows/go-runtime.yml'
   workflow_dispatch:
     inputs:
+      verify_imei_card:
+        description: One-time pre-line IMEI binding counterexample proof
+        type: boolean
+        default: false
       require_macos_signing:
         description: Require the production Developer ID instead of a development signature
         type: boolean
@@ -159,6 +163,7 @@ jobs:
           include-hidden-files: true
 
       - name: Verify embedded React WebUI matches Linux build
+        if: ${{ !inputs.verify_imei_card }}
         working-directory: webui
         run: |
           git diff --exit-code -- ../go-runtime/internal/webui/assets
@@ -175,6 +180,26 @@ jobs:
       - name: Verify Core module
         working-directory: go-runtime
         run: go mod verify
+
+      - name: Check out IMEI binding baseline
+        if: ${{ inputs.verify_imei_card }}
+        uses: actions/checkout@v7
+        with:
+          ref: 0fc0ba17f09a85b189aa4d4a229dcd3443d0b92a
+          path: imei-card-baseline
+          persist-credentials: false
+
+      - name: Prove new-card binding regression
+        if: ${{ inputs.verify_imei_card }}
+        run: bash tools/verify-imei-card-baseline.sh "$GITHUB_WORKSPACE/imei-card-baseline"
+
+      - name: Retain IMEI behavior evidence
+        if: ${{ always() && inputs.verify_imei_card }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: imei-card-proof-${{ github.sha }}
+          path: ${{ runner.temp }}/imei-card-proof
+          retention-days: 7
 
       - name: Test Core runtime
         working-directory: go-runtime

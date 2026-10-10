@@ -14,6 +14,22 @@ of every platform, hardware combination or failure branch.
 
 ## Delivery And Acceptance
 
+### IMEI Binding Before Line Creation
+
+Restore ec620942 `config.py::set_iccid_imei_binding`'s independent ICCID binding,
+not its automatic draft activation. The IMEI pool page previously displayed
+newly observed SIMs but rejected saving until a catalog line already existed.
+Pending entry references now live in the same catalog database and transfer to
+`Line.SIM.IMEI` atomically during explicit creation. Existing line bindings and
+legacy unpooled values remain unchanged. Binding never claims or starts a line,
+issues APDU commands, changes a physical modem identity or edits user switches.
+Failure boundaries: stale pool/catalog revisions, changed binding during unbind,
+entry deletion while referenced, restart loss, provision/deletion in progress,
+and hardware commands inconsistent with saved presentation identity. Pending
+bindings also fence legacy empty-catalog import; rollback must retain the paired
+database backup. Hosted qualification and review are pending; no deployment or
+real-card binding is claimed.
+
 ### Reader Relocation Presentation
 
 October 9 read-only production diagnosis reproduced a previous desktop attachment

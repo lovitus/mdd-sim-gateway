@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "IMEI_UNCONFIGURED_CARD",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Restore legacy pre-line ICCID-to-pool binding in the existing catalog database. New-card binding no longer requires a configured line; explicit line creation atomically inherits and consumes pending identity. No automatic claim, activation, APDU, hardware IMEI or Agent changes.",
+      "acceptance": "Pinned read-only diagnosis confirmed an identified new SIM and existing pool entry without a catalog line. Complete candidate includes double-revision CAS, durable restart, pending unbind, entry-use protection, all creation paths and active lifecycle conflicts. Hosted behavioral red/green, whole-batch CI and review pending; not deployed and no production binding changed.",
+      "evidence": ["go-runtime/internal/linecatalog/imei_pool.go", "go-runtime/internal/linecatalog/imei_card_binding_test.go", "webui/tests/mddHardwareAdapter.mjs", "webui/src/mdd/UPSTREAM.md"]
+    },
+    {
       "id": "ANDROID_LINE_VISIBILITY",
       "state": "needs_verification",
       "releaseRelevance": "current",
