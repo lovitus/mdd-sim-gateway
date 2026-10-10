@@ -29,6 +29,15 @@ func (handler *IMEIPoolHandler) ServeHTTP(response http.ResponseWriter, request 
 	}
 	entryID := strings.TrimSpace(request.PathValue("entryID"))
 	lineID := strings.TrimSpace(request.PathValue("lineID"))
+	cardID := request.PathValue("cardID")
+	if cardID != "" {
+		if entryID == "" || (request.Method != http.MethodPut && request.Method != http.MethodDelete) {
+			writeCatalogJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+			return
+		}
+		handler.changeBinding(response, request, entryID, "", request.Method == http.MethodPut)
+		return
+	}
 	switch {
 	case entryID == "" && lineID == "" && request.Method == http.MethodGet:
 		handler.read(response)
@@ -117,15 +126,22 @@ func (handler *IMEIPoolHandler) changeBinding(response http.ResponseWriter, requ
 		writeCatalogJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_imei_binding"})
 		return
 	}
-	if !validIdentifier(entryID) || !validIdentifier(lineID) ||
-		!digitsBetween(digitsOnly(input.ExpectedCardID), 4, 32) {
+	cardID := request.PathValue("cardID")
+	if !validIdentifier(entryID) || (cardID == "" && !validIdentifier(lineID)) ||
+		!digitsBetween(input.ExpectedCardID, 4, 32) || (cardID != "" && cardID != input.ExpectedCardID) {
 		writeCatalogJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_imei_binding"})
 		return
 	}
 	var line Line
 	var poolRevision, catalogRevision uint64
 	var changed bool
-	if bind {
+	if cardID != "" && bind {
+		line, poolRevision, catalogRevision, changed, err = handler.store.BindIMEICardExpected(
+			entryID, cardID, expectedPool, input.ExpectedCatalogRevision)
+	} else if cardID != "" {
+		line, poolRevision, catalogRevision, changed, err = handler.store.UnbindIMEICardExpected(
+			entryID, cardID, expectedPool, input.ExpectedCatalogRevision)
+	} else if bind {
 		line, poolRevision, catalogRevision, changed, err = handler.store.BindIMEIExpected(
 			entryID, lineID, input.ExpectedCardID, expectedPool, input.ExpectedCatalogRevision)
 	} else {
@@ -137,10 +153,14 @@ func (handler *IMEIPoolHandler) changeBinding(response http.ResponseWriter, requ
 		return
 	}
 	response.Header().Set("ETag", revisionETag(poolRevision))
-	writeCatalogJSON(response, http.StatusOK, map[string]any{
+	result := map[string]any{
 		"schema_version": IMEIPoolSchemaVersion, "revision": poolRevision,
-		"catalog_revision": catalogRevision, "changed": changed, "line": line,
-	})
+		"catalog_revision": catalogRevision, "changed": changed,
+	}
+	if line.ID != "" {
+		result["line"] = line
+	}
+	writeCatalogJSON(response, http.StatusOK, result)
 }
 
 func (handler *IMEIPoolHandler) writeError(response http.ResponseWriter, err error, revision uint64) {
@@ -179,6 +199,8 @@ func (handler *IMEIPoolHandler) writeBindingError(response http.ResponseWriter, 
 		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "imei_binding_card_changed"})
 	case errors.Is(err, ErrIMEIBinding):
 		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "imei_binding_changed"})
+	case errors.Is(err, ErrLineOperationActive):
+		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "line_operation_active"})
 	default:
 		writeCatalogJSON(response, http.StatusInternalServerError, map[string]string{"code": "imei_binding_failed"})
 	}

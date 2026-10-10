@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "IMEI_UNCONFIGURED_CARD",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Restore legacy pre-line ICCID-to-pool binding in the existing catalog database. New-card binding no longer requires a configured line; explicit line creation atomically inherits and consumes pending identity. No automatic claim, activation, APDU, hardware IMEI or Agent changes.",
+      "acceptance": "Full hosted CI38075676057 passed at8f02c8b; archive/2026-10-11/imei-qualified retains source/proof. Downloaded Core evidence: two compiled conflicting-command dispatch failures on the old implementation plus one matching control pass, then all3 fixed race subcases pass without skips. Initial CI38074031050/72afaff separately reproduces the missing binding entry in14 subcases, fixed14 race passes and adapter red/green; its full run failed stale embedded assets, now corrected. CI38075143335 was an invalid fixture failure, not a behavioral counterexample. Final cleanup preserves qualified runtime/permanent tests and restores normal CI. Final-head CI/review and production acceptance remain separate; not deployed, no real-card binding changed.",
+      "evidence": ["go-runtime/internal/linecatalog/imei_pool.go", "go-runtime/internal/linecatalog/imei_card_binding_test.go", "go-runtime/internal/core/provision_imei_binding_test.go", "webui/tests/mddHardwareAdapter.mjs", "webui/src/mdd/UPSTREAM.md"]
+    },
+    {
       "id": "ANDROID_LINE_VISIBILITY",
       "state": "needs_verification",
       "releaseRelevance": "current",

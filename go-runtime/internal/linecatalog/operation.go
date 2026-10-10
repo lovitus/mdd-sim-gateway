@@ -304,6 +304,9 @@ func (store *Store) ReconcileProvisionOperation(input Line, operationID, request
 		if err := json.Unmarshal(linePayload, &prior); err != nil || prior.normalizeAndValidate() != nil {
 			return errors.New("stored line is corrupt")
 		}
+		if err := checkProvisionIMEI(transaction, prior, line.CardID, line.SIM.IMEI); err != nil {
+			return err
+		}
 		line.Enabled = *current.EnableAfterSuccess
 		if current.Kind == OperationProvision {
 			line.HardwareProvisionState = "provisioned"
@@ -311,6 +314,9 @@ func (store *Store) ReconcileProvisionOperation(input Line, operationID, request
 		if prior.CardID != line.CardID {
 			if owner := cards.Get([]byte(line.CardID)); owner != nil && string(owner) != line.ID {
 				return ErrCardInUse
+			}
+			if err := consumePendingIMEI(transaction, &line, true); err != nil {
+				return err
 			}
 			if err := cards.Delete([]byte(prior.CardID)); err != nil {
 				return err

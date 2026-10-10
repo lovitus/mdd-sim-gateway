@@ -199,7 +199,7 @@ func TestBeginReprovisionLocksOneLineUntilTerminalState(t *testing.T) {
 	first.OperationID, first.Kind, first.LineID, first.CardID = "reprovision-first", OperationReprovision, line.ID, line.CardID
 	first.ExpectedCatalogRevision, first.EnableAfterSuccess = 2, &enabled
 	first.ExistingLine = true
-	if _, _, err := store.BeginExistingProvisionOperation(line.ID, 2, first); err != nil {
+	if _, _, err := store.BeginExistingProvisionOperation(line.ID, 2, first, line.SIM.IMEI); err != nil {
 		t.Fatal(err)
 	}
 	line.Name = "concurrent edit"
@@ -209,7 +209,7 @@ func TestBeginReprovisionLocksOneLineUntilTerminalState(t *testing.T) {
 	second := first
 	second.OperationID = "reprovision-second"
 	second.ExpectedCatalogRevision = 3
-	if _, _, err := store.BeginExistingProvisionOperation(line.ID, 3, second); !errors.Is(err, ErrLineOperationActive) {
+	if _, _, err := store.BeginExistingProvisionOperation(line.ID, 3, second, line.SIM.IMEI); !errors.Is(err, ErrLineOperationActive) {
 		t.Fatalf("concurrent reprovision err=%v", err)
 	}
 }

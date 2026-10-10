@@ -381,12 +381,9 @@ async function deleteGoIMEIEntry(id, expected) {
 
 async function bindGoIMEI(input, expected) {
   const snapshot = requireIMEISnapshot(expected)
-  const catalog = await j('GET', '/v1/catalog/lines')
-  const line = (catalog.lines || []).find(value => String(value.card_id) === String(input.iccid))
-  if (!line) throw new Error('no configured line owns this ICCID')
-  return j('PUT', `/v1/imei-pool/${encodeURIComponent(input.imei_id)}/bindings/${encodeURIComponent(line.id)}`, {
+  return j('PUT', `/v1/imei-pool/${encodeURIComponent(input.imei_id)}/cards/${encodeURIComponent(input.iccid)}`, {
     expected_catalog_revision: snapshot.catalog_revision,
-    expected_card_id: line.card_id,
+    expected_card_id: String(input.iccid),
   }, { 'If-Match': `"${snapshot.revision}"` })
 }
 
@@ -394,7 +391,7 @@ async function unbindGoIMEI(iccid, expected) {
   const snapshot = requireIMEISnapshot(expected)
   const binding = snapshot.bindings?.[String(iccid)]
   if (!binding) throw new Error('IMEI binding not found')
-  return j('DELETE', `/v1/imei-pool/${encodeURIComponent(binding.imei_id)}/bindings/${encodeURIComponent(binding.line_id)}`, {
+  return j('DELETE', `/v1/imei-pool/${encodeURIComponent(binding.imei_id)}/cards/${encodeURIComponent(iccid)}`, {
     expected_catalog_revision: snapshot.catalog_revision,
     expected_card_id: String(iccid),
   }, { 'If-Match': `"${snapshot.revision}"` })

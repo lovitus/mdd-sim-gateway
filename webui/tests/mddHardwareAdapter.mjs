@@ -36,10 +36,26 @@ for(const mutate of [
   ()=>go.unbindImeiFromIccid('fixture-card',observed),
 ])await assert.rejects(mutate,error=>error.status===409)
 assert.equal(poolRequests.filter(x=>x.options.method!=='GET').length,4)
-for(const request of poolRequests.filter(x=>x.url.includes('/bindings/'))){
+for(const request of poolRequests.filter(x=>x.url.includes('/cards/'))){
   assert.equal(JSON.parse(request.options.body).expected_catalog_revision,7)
   assert.equal(JSON.parse(request.options.body).expected_card_id,'fixture-card')
 }
 const count=poolRequests.length
 await assert.rejects(go.saveImeiPoolEntry(input),/imei_pool_revision_missing/)
 assert.equal(poolRequests.length,count)
+
+// Newly observed SIMs can be bound without creating or starting a line.
+const newCard='8944100000000002420'
+const pendingRequests=[]
+globalThis.fetch=async (url,options={})=>{
+  pendingRequests.push({url,options})
+  if(url==='/v1/catalog/lines') return new Response(JSON.stringify({revision:7,lines:[]}),{status:200})
+  assert.equal(url,`/v1/imei-pool/entry/cards/${newCard}`)
+  assert.equal(options.headers['If-Match'],'"3"')
+  assert.deepEqual(JSON.parse(options.body),{expected_catalog_revision:7,expected_card_id:newCard})
+  return new Response(JSON.stringify({changed:true,revision:4,catalog_revision:8}),{status:200})
+}
+assert.equal((await go.bindImeiToIccid({iccid:newCard,imei_id:'entry'},observed)).changed,true)
+await go.unbindImeiFromIccid(newCard,{...observed,bindings:{[newCard]:{imei_id:'entry'}}})
+assert.deepEqual(pendingRequests.map(x=>x.options.method),['PUT','DELETE'])
+console.log('New-card IMEI binding and unbinding use exact ICCID without provisioning')
