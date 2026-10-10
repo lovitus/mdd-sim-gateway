@@ -188,11 +188,14 @@ func (handler *ProvisionHandler) executeProvision(ctx context.Context, input pro
 			receipt.Kind = linecatalog.OperationReprovision
 		}
 		if existingLineFound {
-			_, committed, err = handler.store.BeginExistingProvisionOperation(command.LineID, snapshot.Revision, receipt)
+			_, committed, err = handler.store.BeginExistingProvisionOperation(command.LineID, snapshot.Revision, receipt, command.IMEI)
 		} else {
 			_, committed, err = handler.store.CreateExpectedWithOperation(candidateLine, snapshot.Revision, receipt)
 		}
 		if err != nil {
+			if errors.Is(err, linecatalog.ErrIMEIBinding) {
+				return http.StatusConflict, map[string]string{"code": "provision_imei_binding_conflict"}
+			}
 			return http.StatusConflict, map[string]string{"code": "provision_catalog_conflict"}
 		}
 		receipt = committed
