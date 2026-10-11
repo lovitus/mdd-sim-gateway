@@ -16,6 +16,19 @@ of every platform, hardware combination or failure branch.
 
 ### IMEI Binding Before Line Creation
 
+October 11 follow-up: the Devices/Hardware save entry still required a line and
+raised `reader_imei_binding_identity_required`. It now shares the pool page's
+ICCID endpoint, preserving reader presence, selection validation, both revisions
+and partial-save errors. A pool write advances only the pool revision used by
+the binding request; conflicts are not retried. No Core or Agent change. The
+adapter regression uses the real API/fetch boundary for new/existing lines,
+rejected identity, empty pool creation, rename and either write failing.
+CI38112281345 at7c54b26 reproduces the exact old identity rejection and passes
+the fixed adapter; full CI fails only stale embedded assets. Final review also
+freezes the original ICCID/catalog revision across the pool write, preserves the
+positive catalog revision guard and checks invalid save revisions. Hosted final
+qualification and the regenerated embedded UI remain pending.
+
 Restore ec620942 `config.py::set_iccid_imei_binding`'s independent ICCID binding,
 not its automatic draft activation. The IMEI pool page previously displayed
 newly observed SIMs but rejected saving until a catalog line already existed.
