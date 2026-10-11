@@ -127,6 +127,31 @@ jobs:
           node tools/repository-check.test.mjs
           node tools/installer-waits.test.mjs
 
+      - name: Prove pre-fix reader IMEI save rejection
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin ffffb49d31eab85fcd553461ee4495bbd3b2c214
+          adapter=webui/src/mdd/hardwareAdapter.js
+          cp "$adapter" "$RUNNER_TEMP/reader-imei-fixed.js"
+          trap 'cp "$RUNNER_TEMP/reader-imei-fixed.js" "$adapter"' EXIT
+          git show ffffb49d31eab85fcd553461ee4495bbd3b2c214:"$adapter" > "$adapter"
+          if node webui/tests/mddHardwareAdapter.mjs > "$RUNNER_TEMP/reader-imei-before.log" 2>&1; then
+            echo 'Pre-fix reader save unexpectedly passed' >&2
+            exit 1
+          fi
+          grep -F 'Error: reader_imei_binding_identity_required' "$RUNNER_TEMP/reader-imei-before.log"
+          cp "$RUNNER_TEMP/reader-imei-fixed.js" "$adapter"
+          node webui/tests/mddHardwareAdapter.mjs > "$RUNNER_TEMP/reader-imei-after.log" 2>&1
+
+      - name: Retain reader IMEI counterexample
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-imei-proof-${{ github.sha }}
+          path: ${{ runner.temp }}/reader-imei-*.log
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Rebuild and verify embedded React WebUI
         working-directory: webui
         run: |

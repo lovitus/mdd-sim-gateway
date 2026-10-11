@@ -4,18 +4,74 @@ const {saveReaderIMEI}=await import('../src/mdd/hardwareAdapter.js')
 const {api:go}=await import('../src/api.js')
 assert.throws(() => go.hideOfflineDevice({id:'device',present:null,observed_only:true,observation_version:'version'}),/device_not_proven_offline/)
 assert.throws(() => go.hideOfflineDevice({id:'device',present:true,observed_only:false,observation_version:'version'}),/device_not_proven_offline/)
-const device={device_type:'reader',instance_id:'line-a',present:true,sim:{iccid:'fixture-card'}}
+const cardID='8944100000000002420'
+const device={device_type:'reader',present:true,sim:{iccid:cardID}}
 const input={id:'entry',imei:'123456789012347',name:'fixture'}
 const snapshot={revision:3,catalog_revision:7,pool:[input]}
 const calls=[]
-go.bindIMEIExpected=async (...args)=>{calls.push(args);return {changed:true}}
+globalThis.fetch=async (url,options)=>{
+  calls.push({url,options})
+  assert.equal(url,`/v1/imei-pool/entry/cards/${cardID}`)
+  assert.equal(options.method,'PUT')
+  assert.equal(options.headers['If-Match'],'"3"')
+  assert.deepEqual(JSON.parse(options.body),{expected_catalog_revision:7,expected_card_id:cardID})
+  return Response.json({changed:true,revision:4,catalog_revision:8})
+}
+// Hardware-page saving must work before the user creates a line.
 assert.equal((await saveReaderIMEI(device,input,snapshot)).changed,true)
-assert.deepEqual(calls,[['entry','line-a','fixture-card',3,7]])
-await assert.rejects(saveReaderIMEI({...device,device_type:'modem'},input,snapshot),/reader_imei_binding_identity_required/)
-assert.equal(calls.length,1)
-go.saveIMEIEntryExpected=async (entry,revision)=>{assert.equal(revision,3);return {entry,revision:4}}
-go.bindIMEIExpected=async ()=>{throw new Error('catalog changed')}
-await assert.rejects(saveReaderIMEI(device,{...input,name:'renamed'},snapshot),/IMEI pool entry saved; SIM binding failed: catalog changed/)
+assert.equal((await saveReaderIMEI({...device,instance_id:'line-a'},input,snapshot)).changed,true)
+assert.equal(calls.length,2)
+for(const invalid of [
+  {...device,device_type:'modem'},
+  {...device,present:false},
+  {...device,present:null},
+  {...device,present:undefined},
+  {...device,sim:{}},
+  {...device,sim:undefined},
+])await assert.rejects(saveReaderIMEI(invalid,input,snapshot),/reader_imei_binding_identity_required/)
+await assert.rejects(saveReaderIMEI(device,{...input,id:'missing'},snapshot),/imei_pool_selection_changed/)
+await assert.rejects(saveReaderIMEI(device,{...input,imei:'123456789012354'},snapshot),/imei_pool_selection_changed/)
+for(const invalid of [undefined,{...snapshot,revision:-1},{...snapshot,revision:'3'},{...snapshot,catalog_revision:NaN}]){
+  await assert.rejects(saveReaderIMEI(device,input,invalid),/imei_binding_revision_required/)
+}
+assert.equal(calls.length,2,'rejected identities and revisions must not issue requests')
+
+// Exercise the actual adapter/API boundary, including both CAS values after a pool write.
+for(const create of [false,true]){
+  for(const failAt of ['', 'pool', 'binding']){
+    const requests=[]
+    const edited={...input,name:'renamed',...(create?{id:undefined}:{})}
+    const before={...snapshot,...(create?{revision:0,pool:[]}:{})}
+    let savedID
+    globalThis.fetch=async (url,options)=>{
+      requests.push({url,options})
+      assert.equal(options.method,'PUT')
+      if(requests.length===1){
+        const entry=JSON.parse(options.body)
+        savedID=entry.id
+        assert.ok(savedID)
+        assert.equal(url,`/v1/imei-pool/${savedID}`)
+        assert.equal(options.headers['If-Match'],`"${before.revision}"`)
+        assert.deepEqual(entry,{schema_version:1,id:savedID,imei:input.imei,name:'renamed',notes:''})
+        return failAt==='pool' ? Response.json({code:'pool_conflict'},{status:409}) : Response.json({revision:before.revision+1})
+      }
+      assert.equal(requests.length,2,'no automatic conflict retries or implicit provisioning')
+      assert.equal(url,`/v1/imei-pool/${savedID}/cards/${cardID}`)
+      assert.equal(options.headers['If-Match'],`"${before.revision+1}"`)
+      assert.deepEqual(JSON.parse(options.body),{expected_catalog_revision:7,expected_card_id:cardID})
+      return failAt==='binding' ? Response.json({code:'catalog_changed'},{status:409}) : Response.json({changed:true})
+    }
+    if(failAt){
+      await assert.rejects(saveReaderIMEI(device,edited,before),error=>{
+        assert.equal(error.status,409)
+        assert.equal(error.code,failAt==='pool'?'pool_conflict':'catalog_changed')
+        assert.equal(error.message,failAt==='pool'?'pool_conflict':'IMEI pool entry saved; SIM binding failed: catalog_changed')
+        return true
+      })
+    }else assert.equal((await saveReaderIMEI(device,edited,before)).changed,true)
+    assert.equal(requests.length,failAt==='pool'?1:2)
+  }
+}
 console.log('Customized MDD reader IMEI scope and partial-save reporting contracts passed')
 
 const poolRequests=[]
