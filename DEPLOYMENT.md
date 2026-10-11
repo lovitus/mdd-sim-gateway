@@ -10,6 +10,20 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-11 PR26 Core 部署与绑定验收
+
+用户授权后仅更新 Core。复用完整 CI `38076747031` 的 `4d57296` PR test-merge 工件，
+完整 tree 与合并 main `ffffb49` 相同；实际进程 SHA-256 为
+`07b3c0b980d577b375e48b21b3b1072743e3789fe5df601b473a8aa63aeb103d`。
+先前传输中断未切换服务；首次切换因私有部署脚本无法解析纳秒时间戳而回退，旧版和租约均恢复。
+修正脚本后成功：7 个 Agent 原进程代际重连，其他服务 PID、原线路及通知不变，全部维护租约释放。
+只切换 Core 的稳定程序入口，共享 release 链接及运行中的 apply/egress/Provider/Agent 保持原状；
+未把本次 Core 更新描述为整机所有组件更新。旧程序、配置及离线 catalog 备份保留，没有倒灌数据库。
+离线 catalog 备份 SHA-256：`b85d077b1b6bc323e7df995fc6011007826aea156f9d35e6ed443e7cb3c60f1f`。
+真实新卡按用户指定池条目绑定返回 200，退出并重新登录后读回一致；未创建或启用线路、
+未下发硬件命令或产生费用。线上 WebUI 资源与已审版本一致；浏览器仍有证书警告，未绕过，
+不把 API 验收冒充页面点击验收。完整脱敏执行回执保留在 [PR26](https://github.com/lovitus/mdd-sim-gateway/pull/26)。
+
 ## 2026-10-09 PR22–24 授权部署完成（保留回退记录）
 
 **最终状态 09:22 UTC：Linux 服务端/Provider 及全部五台 Windows/macOS/Linux Agent 已对齐

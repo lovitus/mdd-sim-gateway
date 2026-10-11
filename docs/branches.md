@@ -70,6 +70,11 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October11 Devices/Hardware follow-up evidence only: `archive/2026-10-11/reader-imei-proof`
+retains68fc85d/CI38112817108 (old reader identity rejection, fixed adapter passes;
+full run failed stale embed). `reader-imei-initial-proof` retains7c54b26/CI38112281345.
+Final source/tests match68fc85d; generated UI included and temporary workflow removed.
+
 October11 IMEI card-binding evidence, not releases or merge candidates:
 `archive/2026-10-11/imei-initial-proof` retains72afaff/CI38074031050
 (missing binding entry red/fixed green; full run failed stale embedded assets).
