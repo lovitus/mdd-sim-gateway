@@ -28,7 +28,8 @@
     "test:source-graph": "node tests/sourceGraph.mjs && node scripts/source-graph.mjs --check",
     "test:shared-i18n": "node tests/sharedI18n.mjs",
     "test:recording": "node tests/callRecording.mjs",
-    "test:recording-browser": "node tests/recordingBrowser.mjs"
+    "test:recording-browser": "node tests/recordingBrowser.mjs",
+    "test:hardware-imei-browser": "node tests/hardwareImeiBrowser.mjs"
   },
   "dependencies": {
     "jsqr": "^1.4.0",
@@ -41,6 +42,7 @@
     "tailwindcss": "^4.3.3",
     "vite": "^6.0.7",
     "@babel/parser": "7.29.7",
-    "@babel/traverse": "7.29.7"
+    "@babel/traverse": "7.29.7",
+    "playwright-core": "1.64.0"
   }
 }
