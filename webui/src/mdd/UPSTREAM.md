@@ -16,6 +16,24 @@ of every platform, hardware combination or failure branch.
 
 ### IMEI Binding Before Line Creation
 
+October 12 readback follow-up: HardwarePanel now resolves its existing pool
+snapshot by the current ICCID for the confirmed label and form initialization.
+Pending, configured and unpooled identities share this read path. Draft edits
+survive heartbeats; card replacement remounts the editor and ignores late replies.
+Loading/read failures are not unbound state; a successful write followed by a
+failed read is explicit and never retried. Scoped Chromium DevicesPage regression
+covers save, tab/page return and reload plus these state boundaries. Hosted
+38197352338/6afc927 reproduced the old-page display assertion and passed the fixed
+browser flow; both screenshots inspected. Full CI rejected stale embedded assets,
+now synchronized from that run. Tag archive/2026-10-12/hardware-imei-readback-proof
+retains the removed one-time proof; runtime/tests are unchanged. Final CI/rollout
+remain separate; Core, Agent and write contracts are unchanged. Synthetic API
+browser evidence is not production card interaction.
+Review correction: invalid successful snapshots are rejected before hydration,
+preserving the draft; valid revision-zero empty pools and legacy unpooled14–16
+digits remain readable, while new writes still require15. The same browser flow
+covers malformed HTTP200 readback; latest qualification remains pending.
+
 October 11 follow-up: the Devices/Hardware save entry still required a line and
 raised `reader_imei_binding_identity_required`. It now shares the pool page's
 ICCID endpoint, preserving reader presence, selection validation, both revisions
