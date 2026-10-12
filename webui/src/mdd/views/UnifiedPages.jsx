@@ -664,27 +664,61 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
   const { t, language } = useI18n()
   const isZh = language === 'zh'
   const isReader = device.device_type === 'reader'
-  const [imei, setImei] = useState(device.imei || device.bound_imei?.imei || '')
-  const [name, setName] = useState(device.bound_imei?.name || '')
-  const [pool, setPool] = useState([])
-  const [selectedPoolId, setSelectedPoolId] = useState(device.bound_imei?.imei_id || '')
+  const cardID = device.sim?.iccid || ''
+  const [imei, setImei] = useState('')
+  const [name, setName] = useState('')
+  const [selectedPoolId, setSelectedPoolId] = useState('')
+  const [savedIMEI, setSavedIMEI] = useState(null)
   const [saving, setSaving] = useState(false)
   const [poolSnapshot, setPoolSnapshot] = useState(null)
+  const [loadingPool, setLoadingPool] = useState(isReader)
+  const [poolError, setPoolError] = useState('')
   const saveBusy = useRef(false)
+  const poolRequest = useRef(0)
+  const mounted = useRef(false)
+  const pool = poolSnapshot?.pool || []
 
-  const loadPool = () => {
-    api.imeiPool().then(data => {
-      setPool(data?.pool || [])
+  const loadPool = useCallback(async () => {
+    if (!mounted.current) return false
+    const request = ++poolRequest.current
+    setLoadingPool(true)
+    setPoolError('')
+    try {
+      const data = await api.imeiPool()
+      if (!mounted.current || request !== poolRequest.current) return false
+      if (!Number.isSafeInteger(data.revision) || data.revision < 0 ||
+          !Number.isSafeInteger(data.catalog_revision) || data.catalog_revision <= 0 ||
+          !Array.isArray(data.pool) || !Array.isArray(data.unpooled) ||
+          !data.bindings || typeof data.bindings !== 'object' || Array.isArray(data.bindings)) {
+        throw new Error('imei_pool_snapshot_invalid')
+      }
+      const binding = data.bindings?.[cardID]
+      const entry = binding && data.pool.find(item => item.id === binding.imei_id)
+      if (binding && (!entry || entry.imei !== binding.imei)) throw new Error('imei_binding_entry_mismatch')
+      const saved = entry || data.unpooled?.find(item => item.card_id === cardID) || null
+      const validIMEI = entry ? /^\d{15}$/ : /^\d{14,16}$/
+      if (saved && (typeof saved.imei !== 'string' || !validIMEI.test(saved.imei))) throw new Error('imei_binding_value_invalid')
       setPoolSnapshot(data)
-    }).catch(error => { setPoolSnapshot(null); showToast(error.message) })
-  }
+      setSavedIMEI(saved)
+      setImei(saved?.imei || '')
+      setName(entry?.name || '')
+      setSelectedPoolId(entry?.id || '')
+      return true
+    } catch (error) {
+      if (!mounted.current || request !== poolRequest.current) return false
+      setPoolSnapshot(null)
+      setPoolError(error.message)
+      return false
+    } finally {
+      if (mounted.current && request === poolRequest.current) setLoadingPool(false)
+    }
+  }, [cardID])
 
   useEffect(() => {
-    setImei(device.imei || device.bound_imei?.imei || '')
-    setName(device.bound_imei?.name || '')
-    setSelectedPoolId(device.bound_imei?.imei_id || '')
-    loadPool()
-  }, [device.id, device.imei, device.bound_imei])
+    mounted.current = true
+    if (isReader) loadPool()
+    return () => { mounted.current = false; poolRequest.current++ }
+  }, [isReader, loadPool])
 
   const handleSelectPool = (poolId) => {
     setSelectedPoolId(poolId)
@@ -697,7 +731,7 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
   }
 
   const save = async () => {
-    if (saveBusy.current) return
+    if (saveBusy.current || loadingPool || poolError) return
     const digits = String(imei || '').replace(/\D/g, '')
     if (digits.length !== 15) {
       showToast(t('IMEI must contain exactly 15 digits'))
@@ -707,14 +741,19 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
     saveBusy.current = true
     try {
       await saveReaderIMEI(device, { id:selectedPoolId, imei: digits, name: name.trim() },poolSnapshot)
-      await refreshDevices()
-      loadPool()
-      showToast(t('SIM presentation IMEI saved; physical modem identity is unchanged.'))
+      if (!mounted.current) return
+      const loaded = await loadPool()
+      if (!mounted.current) return
+      showToast(loaded ? t('SIM presentation IMEI saved; physical modem identity is unchanged.')
+        : (isZh ? 'IMEI 已保存，但读取失败，请重新读取；无需重复保存。' : 'IMEI saved, but readback failed. Reload the binding; do not save again.'))
+      try { await refreshDevices() } catch (error) {
+        if (mounted.current) showToast(`${isZh ? 'IMEI 已保存，设备刷新失败' : 'IMEI saved; device refresh failed'}: ${error.message}`)
+      }
     } catch (error) {
-      showToast(`${t('Error')}: ${error.message}`)
+      if (mounted.current) showToast(`${t('Error')}: ${error.message}`)
     } finally {
       saveBusy.current = false
-      setSaving(false)
+      if (mounted.current) setSaving(false)
     }
   }
 
@@ -729,6 +768,9 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
   }
 
   const imeiClean = String(imei || '').replace(/\D/g, '')
+  const editingDisabled = loadingPool || saving || !!poolError || !cardID
+  const currentIMEI = loadingPool ? t('Loading…') : poolError ? (isZh ? '读取失败' : 'Read failed')
+    : savedIMEI ? `${savedIMEI.name ? `${savedIMEI.name} · ` : ''}•••• ${savedIMEI.imei.slice(-4)}` : (isZh ? '未设置' : 'Not set')
 
   return (
     <div className="card u-panel u-hardware-panel">
@@ -747,7 +789,7 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
         {isReader && (
           <div className="u-detail">
             <span>{isZh ? '当前 IMEI' : 'Current IMEI'}</span>
-            <b>{device.bound_imei?.is_bound ? `${device.bound_imei.name} (${device.bound_imei.imei_masked})` : (device.imei_masked || (isZh ? '未设置' : 'Not set'))}</b>
+            <b>{currentIMEI}</b>
           </div>
         )}
       </div>
@@ -761,12 +803,15 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 420, width: '100%' }}>
+            {poolError && <div role="alert" className="u-error">{isZh ? '无法读取已保存的 IMEI' : 'Could not read the saved IMEI'}: {poolError} <button className="btn btn-ghost" disabled={saving || loadingPool} onClick={loadPool}>{isZh ? '重新读取' : 'Reload binding'}</button></div>}
             {pool.length > 0 && (
               <div>
-                <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
+                <label htmlFor="hardware-imei-pool" style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
                   {isZh ? '从已保存的列表中选择' : 'Select from saved IMEIs'}
                 </label>
                 <select
+                  id="hardware-imei-pool"
+                  disabled={editingDisabled}
                   value={selectedPoolId}
                   onChange={e => handleSelectPool(e.target.value)}
                   style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'inherit' }}
@@ -782,10 +827,12 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
             )}
 
             <div>
-              <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
+              <label htmlFor="hardware-imei-value" style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
                 {isZh ? '15 位 IMEI' : '15-digit IMEI'}
               </label>
               <input
+                id="hardware-imei-value"
+                disabled={editingDisabled}
                 className="mono"
                 inputMode="numeric"
                 maxLength={18}
@@ -800,10 +847,12 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
             </div>
 
             <div>
-              <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
+              <label htmlFor="hardware-imei-name" style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
                 {isZh ? '设备型号名称 (可选，保存至常用列表)' : 'Device Name (Optional, saved for reuse)'}
               </label>
               <input
+                id="hardware-imei-name"
+                disabled={editingDisabled}
                 type="text"
                 value={name}
                 onChange={e => setName(e.target.value)}
@@ -815,7 +864,7 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
             <div style={{ marginTop: 4 }}>
               <button
                 className="btn btn-primary"
-                disabled={saving || imeiClean.length !== 15}
+                disabled={editingDisabled || device.present !== true || imeiClean.length !== 15}
                 onClick={save}
               >
                 {saving ? (isZh ? '保存中…' : 'Saving…') : t('Save')}
@@ -992,7 +1041,7 @@ export function DevicesPage({
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d} devices={devices}/></div>}
       {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<CellularProfilePanel device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}
       {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{d.facts?.facts?.tunnel?.code || (typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected')))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.facts?.facts?.ims?.code || d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? '—'} {t('minutes')}{d.vowifi?.rekey_state ? ` · ${t(d.vowifi.rekey_state)}` : ''}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
-      {tab==='hardware' && <HardwarePanel device={d} refreshDevices={refreshDevices} showToast={showToast}/>}
+      {tab==='hardware' && <HardwarePanel key={`${d.id}:${d.sim?.iccid || ''}`} device={d} refreshDevices={refreshDevices} showToast={showToast}/>}
       {tab==='imeis' && <ImeiPoolPanel devices={devices} instances={instances} refreshDevices={refreshDevices} showToast={showToast}/>}
       {tab==='trash' && <RecycleBinPanel refresh={refresh} showToast={showToast}/>}
       </fieldset>

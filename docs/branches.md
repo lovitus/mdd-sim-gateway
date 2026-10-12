@@ -70,6 +70,16 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October12 display evidence only: `archive/2026-10-12/hardware-imei-readback-proof`
+retains6afc927/CI38197352338 (old rendered-page readback assertion, fixed Chromium
+flow passes; full CI rejected stale embed). `hardware-imei-readback-qualified`
+retainsaef240a/CI38199470829 (invalid-response assertion red/full browser green,
+legacy14-digit compatibility; stale embed failure only). Final source/tests match
+aef240a; generated UI synchronized and temporary proof removed. The intermediate
+c7ada5b/CI38197980812 passed but needed read validation, retained as
+`hardware-imei-before-read-validation`;2b5e4dc/38198905250 is retained as
+`hardware-imei-invalid-read-proof`. These are not releases or merge candidates.
+
 October11 Devices/Hardware follow-up evidence only: `archive/2026-10-11/reader-imei-proof`
 retains68fc85d/CI38112817108 (old reader identity rejection, fixed adapter passes;
 full run failed stale embed). `reader-imei-initial-proof` retains7c54b26/CI38112281345.

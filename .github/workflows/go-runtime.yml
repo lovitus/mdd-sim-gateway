@@ -138,6 +138,19 @@ jobs:
         working-directory: webui
         run: npm run test:recording-browser
 
+      - name: Real browser Hardware IMEI save and readback
+        working-directory: webui
+        run: npm run test:hardware-imei-browser
+
+      - name: Retain Hardware IMEI browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hardware-imei-browser-${{ github.sha }}
+          path: webui/browser-evidence/hardware-imei
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Check out exact third-party review baseline
         uses: actions/checkout@v7
         with:
