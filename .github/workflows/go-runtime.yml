@@ -138,6 +138,24 @@ jobs:
         working-directory: webui
         run: npm run test:recording-browser
 
+      - name: Prove invalid Hardware IMEI readback failure
+        run: |
+          git fetch --no-tags origin c7ada5bdccd25a97e052531e5f8d5a497a01acc2
+          node tools/verify-hardware-imei-baseline.mjs
+
+      - name: Real browser Hardware IMEI save and readback
+        working-directory: webui
+        run: npm run test:hardware-imei-browser
+
+      - name: Retain Hardware IMEI browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hardware-imei-browser-${{ github.sha }}
+          path: webui/browser-evidence/hardware-imei
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Check out exact third-party review baseline
         uses: actions/checkout@v7
         with:
