@@ -1,0 +1,32 @@
+// Temporary hosted-only behavioral counterexamples; removed after qualification.
+import {readFileSync,writeFileSync,appendFileSync} from 'node:fs'
+import {spawnSync,execFileSync} from 'node:child_process'
+const log='esim-proof.log'
+writeFileSync(log,'')
+const run=(command,args,red,marker)=>{
+  const result=spawnSync(command,args,{encoding:'utf8',timeout:240000,maxBuffer:16*1024*1024})
+  const output=(result.stdout||'')+(result.stderr||'')
+  appendFileSync(log,`\n$ ${command} ${args.join(' ')}\n${output}\n`)
+  process.stdout.write(output)
+  if(result.error || (red ? result.status===0 || !output.includes(marker) || /build failed|undefined:|SyntaxError/.test(output) : result.status!==0))throw new Error(`invalid ${red?'red':'green'} evidence`)
+}
+const service='go-runtime/internal/euiccprofiles/service.go'
+const transport='go-runtime/agentlink/server.go'
+const page='webui/src/mdd/views/Esim.jsx'
+const adapter='webui/src/mdd/esimAdapter.js'
+const originals=new Map([service,transport,page,adapter].map(path=>[path,readFileSync(path,'utf8')]))
+const base='9a9aa783a5681ec203cd977b06c9582979dc7331'
+try {
+  // Withdraw the new guarded dispatcher while preserving signatures and test setup.
+  writeFileSync(service,originals.get(service).replace('service.mutateProfile(request.Context(), command)','service.agents.ExecuteEUICCProfileCommand(request.Context(), command)'))
+  run('go',['-C','go-runtime','test','-count=1','./internal/euiccprofiles','-run','TestProfileSwitchProtectsWholeEIDAndFrozenInsertion/active-other-disabled-line'],true,'unsafe switch: 202')
+  writeFileSync(service,originals.get(service))
+  writeFileSync(transport,execFileSync('git',['show',`${base}:${transport}`],{encoding:'utf8'}))
+  run('go',['-C','go-runtime','test','-count=1','./agentlink','-run','TestEUICCMaintenanceAllowsOnlyFrozenCommand'],true,'protected dispatch:')
+  writeFileSync(transport,originals.get(transport))
+  for(const path of [page,adapter])writeFileSync(path,execFileSync('git',['show',`${base}:${path}`],{encoding:'utf8'}))
+  run('node',['webui/tests/esimOperationsBrowser.mjs'],true,'ESIM_UNKNOWN_RETAINED')
+} finally {for(const [path,text] of originals)writeFileSync(path,text)}
+run('go',['-C','go-runtime','test','-race','-count=1','./agentlink','./internal/euiccprofiles','./internal/core'],false)
+run('node',['webui/tests/mddEsimAdapter.mjs'],false)
+run('node',['webui/tests/esimOperationsBrowser.mjs'],false)

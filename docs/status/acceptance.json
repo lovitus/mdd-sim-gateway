@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "ESIM_OPERATION_OWNERSHIP",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Approved N7/N8 batch: protect all current EID profiles including disabled catalog lines, freeze insertion identity across existing maintenance acquisition, and dispatch only the matching internal eSIM command. Unknown mutation retains its lease until original-Agent inventory readback. Web downloads retain independent EID/operation records across uncertain outcomes, new attempts and reader changes; new attempts require explicit confirmation and successful local persistence.",
+      "acceptance": "Implementation candidate only; hosted compiled/real Chromium old-red/new-green proof and original-session exact-head source review pending. No live eSIM operation, notification replay, paid operation, merge or deployment. PR29 and PR30 remain independent reviewed deliveries; deletion/backup and update batches remain open. Removed obsolete source-string eSIM assertions in favor of behavior coverage; no Agent wire extension or abandoned soft-delete restoration.",
+      "evidence": ["go-runtime/internal/euiccprofiles/mutation_guard.go", "go-runtime/internal/euiccprofiles/mutation_guard_test.go", "go-runtime/agentlink/euicc_maintenance_test.go", "webui/tests/esimOperationsBrowser.mjs", "webui/src/mdd/UPSTREAM.md"]
+    },
+    {
       "id": "IMEI_UNCONFIGURED_CARD",
       "state": "needs_verification",
       "releaseRelevance": "current",

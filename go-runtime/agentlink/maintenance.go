@@ -1,6 +1,28 @@
 package agentlink
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
+
+type euiccMaintenanceKey struct{}
+type euiccMaintenanceCall struct {
+	agent, generation, lease string
+	request                  EUICCProfileRequest
+}
+
+// WithEUICCProfileMaintenance is Core-local authority for one frozen command.
+// It is never populated from a header, browser request or Agent wire field.
+func WithEUICCProfileMaintenance(ctx context.Context, agent, generation, lease string, request EUICCProfileRequest) context.Context {
+	return context.WithValue(ctx, euiccMaintenanceKey{}, euiccMaintenanceCall{agent, generation, lease, request})
+}
+
+func permittedEUICC(ctx context.Context, connection *serverConnection, lease string, message envelope) bool {
+	permit, ok := ctx.Value(euiccMaintenanceKey{}).(euiccMaintenanceCall)
+	return ok && lease != "" && permit.lease == lease && permit.agent == connection.hello.AgentID &&
+		permit.generation == connection.hello.ProcessGeneration && message.Kind == kindEUICCRequest &&
+		message.EUICCRequest != nil && *message.EUICCRequest == permit.request
+}
 
 var ErrAgentMaintenance = errors.New("Agent is in host maintenance")
 

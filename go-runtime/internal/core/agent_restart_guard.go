@@ -17,6 +17,12 @@ func (f agentRestartGuardFunc) Prepare(ctx context.Context, status agentlink.Con
 }
 
 func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.ConnectionStatus, leaseID string) (func(context.Context) error, error) {
+	return s.prepareAgentMaintenance(ctx, status, nil, leaseID)
+}
+
+// eSIM callers supply every affected profile's line, including disabled catalog
+// entries; a device snapshot alone only associates the currently active SIM.
+func (s *Server) prepareAgentMaintenance(ctx context.Context, status agentlink.ConnectionStatus, extraLines []string, leaseID string) (func(context.Context) error, error) {
 	agents, ok := s.agents.(hostAgentMaintenance)
 	maintenance, available := s.systemMaintenance.(*SystemMaintenanceHandler)
 	if !ok || !available || maintenance.runtime == nil || s.catalog == nil || s.agentRestartBusy == nil || status.Topology == nil ||
@@ -39,6 +45,9 @@ func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.Conne
 		return nil, err
 	}
 	lineSet := map[string]bool{}
+	for _, id := range extraLines {
+		lineSet[id] = true
+	}
 	for _, device := range snapshot.Devices {
 		if device.AgentID != status.AgentID || device.ObservedOnly {
 			continue
