@@ -142,6 +142,19 @@ jobs:
         working-directory: webui
         run: npm run test:hardware-imei-browser
 
+      - name: Real browser communication ownership
+        working-directory: webui
+        run: npm run test:communication-browser
+
+      - name: Retain communication browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: communication-browser-${{ github.sha }}
+          path: webui/browser-evidence/communication
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Retain Hardware IMEI browser evidence
         if: always()
         uses: actions/upload-artifact@v7

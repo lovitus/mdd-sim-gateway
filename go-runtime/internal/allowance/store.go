@@ -297,6 +297,13 @@ func (store *Store) BeginQuery(candidate Query, now time.Time) (Query, bool, err
 			}
 			return nil
 		}
+		rule, err := ruleFromBucket(tx.Bucket(bucketRules), candidate.LineID)
+		if err != nil {
+			return err
+		}
+		if rule.Revision != candidate.RuleRevision || rule.Recipient != candidate.Recipient || rule.Body != candidate.Body || rule.Parser != candidate.Parser {
+			return ErrQueryChanged
+		}
 		if currentID := active.Get([]byte(candidate.LineID)); currentID != nil {
 			current, err := queryFromBucket(queries, string(currentID))
 			if err != nil {
@@ -363,6 +370,13 @@ func (store *Store) AuthorizeDispatch(queryID, transport, lineID, expectedCardID
 			current.Transport != transport || current.LineID != lineID || current.ExpectedCardID != expectedCardID ||
 			current.OperationID != operationID || current.MessageID != messageID ||
 			current.Recipient != recipient || current.Body != body || now.IsZero() {
+			return ErrQueryChanged
+		}
+		rule, err := ruleFromBucket(tx.Bucket(bucketRules), lineID)
+		if err != nil {
+			return err
+		}
+		if rule.Revision != current.RuleRevision || rule.Recipient != recipient || rule.Body != body {
 			return ErrQueryChanged
 		}
 		authorizedAt := now
