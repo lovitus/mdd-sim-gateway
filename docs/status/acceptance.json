@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "LINE_ARCHIVE_BACKUP",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Approved N4 before N3/N13 batch: SMS write-transaction deletion barrier rejects unresolved submissions and missing durable history before any purge; history-retaining deletion keeps operation evidence. Recycle bin works without attached devices, permanent deletion lives on archived records and resumes the same confirmed operation across reload. Catalog export v2 retains IMEI/pending bindings, independent runtime intent and operation/lifecycle receipts; SMS snapshot includes tombstones.",
+      "acceptance": "CI38397898267/32a8077 passed four affected Go race packages and original behavioral counterexamples; browser fixture StrictMode mismatch corrected. Original reviewer approves ad37f44 product source. CI38400205694 passes the fixed mounted browser, including lost-success-response tracking and single purge; old-page proof instead timed out on its missing nonempty title, not an accepted red. Loading wait now accepts either completed empty/list view before the unchanged row assertion. Hosted generated UI synchronized; final proof/full CI pending. Four obsolete source-string deletion assertions replaced by behavior. Backup remains per-source, not cross-database atomic or online restore; intent/receipts never authorize startup, commands or paid retry. No production data deletion, SIM operation, SMS or call.",
+      "evidence": ["webui/src/mdd/UPSTREAM.md", "webui/tests/lineArchiveBrowser.mjs", "go-runtime/internal/linedeletion/integration_test.go", "go-runtime/internal/cellularmessages/store_test.go", "go-runtime/internal/systembackup/recovery_test.go"]
+    },
+    {
       "id": "IMEI_UNCONFIGURED_CARD",
       "state": "needs_verification",
       "releaseRelevance": "current",

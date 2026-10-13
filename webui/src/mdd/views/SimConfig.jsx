@@ -27,14 +27,12 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const [saving, setSaving] = useState(false)
   const [detecting,setDetecting]=useState(false)
   const [deleting, setDeleting] = useState(false)
-  const [deleteHistory, setDeleteHistory] = useState(true)
   const [creating, setCreating] = useState(false)
   const [savedLineId, setSavedLineId] = useState('')
   const [smscMode, setSmscMode] = useState('auto')   // 'auto' = read from SIM, 'manual' = typed
   const currentFormID = useRef('')
   const newLineClaim = useRef({})
   const currentTarget = useRef('')
-  const deletionRequests = useRef(new Map())
   const mutationBusy = useRef(false)
   const [proof, setProof] = useState(null)
   const [pinConfiguration, setPinConfiguration] = useState(null)
@@ -250,45 +248,15 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     mutationBusy.current = false
   }
 
-  const del = async () => {
-    if (mutationBusy.current) return
-    const lineLabel = form.name || `${form.mcc || ''}-${form.mnc || ''}` || form.id
-    const warning = deleteHistory
-      ? t('Delete this SIM line and all of its messages and call records?')
-      : t('Delete this SIM line? Messages and call records will be preserved.')
-    if (!(await dialogs.confirm(`${t('You are deleting SIM line “{name}” (ID {id}).', { name: lineLabel, id: form.id })}\n\n${warning}\n\n${t('If the SIM is still inserted, automatic setup pauses until it is removed and inserted again.')}`))) return
-    const typed = (await dialogs.prompt(t('Type the line ID “{id}” to confirm deletion.', { id: form.id }), ''))
-    if (String(typed || '').trim() !== String(form.id)) {
-      if (typed !== null) (await dialogs.alert(t('Line ID did not match. Nothing was deleted.')))
-      return
-    }
-    setDeleting(true)
-    mutationBusy.current = true
-    const forId = form.id
-    try {
-      let request = deletionRequests.current.get(forId)
-      if (!request) { request = {operation:crypto.randomUUID(),deleteHistory}; deletionRequests.current.set(forId,request) }
-      if (request.deleteHistory !== deleteHistory) throw new Error('line_deletion_intent_changed')
-      await api.deleteInstance(forId, deleteHistory, form.__catalog_revision, request.operation)
-      if (currentFormID.current !== forId) { await refresh(); return }
-      setSelected(null)
-      setSavedLineId('')
-      setForm(emptyInstance())
-      await refresh()
-      setPinMsg(t(deleteHistory ? 'SIM line and history deleted.' : 'SIM line deleted; history preserved.'))
-    } catch (error) { (await dialogs.alert(error.message)) }
-    finally { mutationBusy.current = false; setDeleting(false) }
-  }
-
   const softDel = async () => {
     if (mutationBusy.current) return
-    const lineLabel = form.name || `${form.mcc || ''}-${form.mnc || ''}` || form.id
-    if (!(await dialogs.confirm(t('Move SIM line “{name}” to Recycle Bin (Soft Delete)?\n\nThe line will be stopped and hidden, but all settings, messages, and call history are preserved and can be restored at any time.', { name: lineLabel })))) return
-    setDeleting(true)
     mutationBusy.current = true
-    const forId = form.id
+    setDeleting(true)
+    const forId = form.id, revision = form.__catalog_revision
+    const lineLabel = form.name || form.id
     try {
-      await api.softDeleteInstance(form.id, form.__catalog_revision)
+      if (!(await dialogs.confirm(t('Archive line {name}? Disable and stop it first. Settings and history are retained; restoration keeps it disabled.', { name: lineLabel })))) return
+      await api.softDeleteInstance(forId, revision)
       if (currentFormID.current !== forId) { await refresh(); return }
       setSelected(null)
       setSavedLineId('')
@@ -484,19 +452,12 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
             <div>
               <h4 style={{ margin: 0 }}>{t('Move to Recycle Bin (Soft Delete)')}</h4>
-              <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--text-mute)' }}>{t('Hides this SIM and stops its line. Settings and history are 100% preserved and can be restored anytime.')}</p>
+              <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--text-mute)' }}>{t('Disable and stop the line before archiving. Settings and history are retained; restoration keeps it disabled.')}</p>
             </div>
             <button className="btn btn-ghost" style={{ color: '#d97706', borderColor: '#fcd34d' }} disabled={deleting} onClick={softDel}>
               {t('Move to Recycle Bin')}
             </button>
           </div>
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: 0 }} />
-          <div>
-            <h4>{t('Permanently Delete SIM line')}</h4>
-            <p>{t('Deletes IMS settings, saved PIN, routing and runtime files for this SIM. The physical device record is not affected.')}</p>
-            <label><input type="checkbox" checked={deleteHistory} onChange={event => setDeleteHistory(event.target.checked)} />{t('Also delete all messages and call records')}</label>
-          </div>
-          <button className="btn btn-danger" disabled={deleting} onClick={del}>{t(deleting ? 'Deleting…' : 'Delete permanently')}</button>
         </div>}
 
       </div>

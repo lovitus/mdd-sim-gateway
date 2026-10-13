@@ -1030,8 +1030,11 @@ export function DevicesPage({
   useEffect(() => { if (active && active !== selectedDeviceId) setSelectedDeviceId(active) }, [active, selectedDeviceId, setSelectedDeviceId])
   const d = devices.find(x => x.id === active)
   useEffect(() => { if (d && !supportsCellular(d) && tab === 'cellular') setTab('status') }, [d, tab])
-  if (!d) return discovering ? <Discovering t={t} /> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} />
   const isZh = language === 'zh'
+  if (!d) return <section className="u-page">
+    <div className="u-tabs"><button className={tab !== 'trash' ? 'active' : ''} onClick={() => setTab('status')}>{t('Devices')}</button><button className={tab === 'trash' ? 'active' : ''} onClick={() => setTab('trash')}>{isZh ? '回收站' : 'Recycle Bin'}</button></div>
+    {tab === 'trash' ? <RecycleBinPanel refresh={refresh} showToast={showToast}/> : discovering ? <Discovering t={t}/> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')}/>}
+  </section>
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network / APN')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['imeis', isZh ? 'IMEI 池' : 'IMEI Pool'],['trash', isZh ? '回收站' : 'Recycle Bin']]
   return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.stale ? 'degraded' : x.present === false ? 'error' : 'on'}>{x.stale ? t('Snapshot unavailable') : x.present === false ? t('Offline') : t('Device online')}</Badge><RuntimeHealth health={x.vowifi?.health} compact /></span></button>)}</aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
@@ -1056,23 +1059,37 @@ function RecycleBinPanel({ refresh, showToast }) {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [restoring, setRestoring] = useState('')
+  const [requests, setRequests] = useState({})
+  const [retainHistory, setRetainHistory] = useState({})
   const [error, setError] = useState('')
   const inFlight = useRef(false)
+  const mounted = useRef(false)
 
   const load = useCallback(() => {
     setLoading(true)
     api.softDeletedInstances()
-      .then(res => { setItems(res.instances || []); setError('') })
+      .then(res => {
+        const items = new Map((res.instances || []).map(item => [item.id,item])), pending = Object.create(null)
+        const prefix = 'mdd.line-deletion.v1.'
+        // A completed deletion can disappear from catalog before its response arrives.
+        for (const key of Object.keys(localStorage).filter(key => key.startsWith(prefix))) {
+          const request = JSON.parse(localStorage.getItem(key))
+          if (!request || typeof request.lineID !== 'string' || !request.lineID || key !== `${prefix}${request.lineID}` || typeof request.operation !== 'string' || !request.operation || typeof request.deleteHistory !== 'boolean') throw new Error('line_deletion_record_invalid')
+          pending[request.lineID] = {lineID:request.lineID,operation:request.operation,deleteHistory:request.deleteHistory}
+          if (!items.has(request.lineID)) items.set(request.lineID,{id:request.lineID,__catalog_revision:res.revision,__deletion_only:true})
+        }
+        setRequests(pending); setItems([...items.values()]); setError('')
+      })
       .catch(error => setError(error.message))
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { mounted.current = true; load(); return () => { mounted.current = false } }, [load])
 
   const restore = async (id) => {
-    if (inFlight.current) return
+    if (inFlight.current || requests[id]) return
     const item = items.find(value => String(value.id) === String(id))
-    if (!item) return
+    if (!item || item.__deletion_only) return
     inFlight.current = true
     setRestoring(id)
     try {
@@ -1088,23 +1105,67 @@ function RecycleBinPanel({ refresh, showToast }) {
     }
   }
 
+  const remove = async (item) => {
+    if (inFlight.current) return
+    inFlight.current = true
+    setRestoring(item.id)
+    // Freeze the selected line, revision and history choice before either dialog.
+    const request = requests[item.id] || {lineID:item.id, operation:crypto.randomUUID(), deleteHistory:retainHistory[item.id] !== true}
+    const revision = item.__catalog_revision, key = `mdd.line-deletion.v1.${item.id}`
+    const remember = value => {
+      localStorage.setItem(key,JSON.stringify(value))
+      setRequests(previous => ({...previous,[item.id]:value}))
+    }
+    try {
+      const warning = t(request.deleteHistory
+        ? 'Permanently delete this recycled line and its history? This cannot be undone.'
+        : 'Permanently delete this recycled line while retaining ended message and call history? The line cannot be restored.')
+      if (!(await dialogs.confirm(`${item.name || item.id} (${item.id})\n\n${warning}`))) return
+      const typed = await dialogs.prompt(`${t('Type the exact line ID to confirm permanent deletion.')}\n${item.id}`,'')
+      if (typed !== item.id) {
+        if (typed !== null) showToast(t('Permanent deletion was not confirmed.'))
+        return
+      }
+      if (!mounted.current) return
+      remember(request)
+      const result = await api.deleteInstance(request.lineID,request.deleteHistory,revision,request.operation)
+      const receipt = result?.operation
+      if (receipt?.line_id !== request.lineID || receipt.operation_id !== request.operation || receipt.delete_history !== request.deleteHistory || receipt.stage !== 'succeeded') throw new Error('line_deletion_receipt_unconfirmed')
+      localStorage.removeItem(key)
+      setRequests(previous => { const next = {...previous}; delete next[item.id]; return next })
+      setItems(previous => previous.filter(value => value.id !== item.id))
+      showToast(t(request.deleteHistory ? 'Line and retained history were permanently deleted.' : 'Line was permanently deleted; ended message and call history was retained.'))
+      await refresh?.()
+      load()
+    } catch (failure) {
+      showToast(`${t('Error')}: ${t(failure.code || failure.message)}`)
+      load()
+    } finally {
+      inFlight.current = false
+      setRestoring('')
+    }
+  }
+
   if (loading) return <div className="card u-panel"><p>{t('Reading…')}</p></div>
   if (error) return <div className="u-error" role="alert">{error}<button className="btn btn-ghost" onClick={load}>{t('Retry')}</button></div>
-  if (!items.length) return <div className="card u-panel"><Empty title={isZh ? '回收站为空' : 'Recycle Bin is empty'} detail={isZh ? '没有已软删除的 SIM 卡。软删除的卡片会保存在这里，可随时无损恢复。' : 'No soft-deleted SIM lines. Soft-deleted lines are kept here and can be restored anytime.'} /></div>
+  if (!items.length) return <div className="u-panel"><Empty title={isZh ? '回收站为空' : 'Recycle Bin is empty'} detail={isZh ? '没有已归档的线路。归档不会删除卡内的 eSIM。' : 'No archived lines. Archiving does not delete any eSIM profile on the card.'} /></div>
 
-  return <div className="card u-panel">
-    <h3>{isZh ? '回收站 (已软删除卡片)' : 'Recycle Bin (Soft-deleted lines)'}</h3>
+  return <div className="u-panel">
+    <h3>{isZh ? '回收站 (已归档线路)' : 'Recycle Bin (Archived lines)'}</h3>
     <p className="u-note">{isZh ? '线路归档保留配置和历史。恢复后保持停用，不会自动启动。' : 'Archived lines retain settings and history. Restored lines remain disabled and do not start automatically.'}</p>
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 14 }}>
       {items.map(item => (
-        <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', border: '1px solid var(--border)', borderRadius: 10 }}>
+        <div key={item.id} className="u-recycled-line" style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
           <div>
             <div style={{ fontWeight: 700, fontSize: 14 }}>{item.name || `SIM-${item.id}`} <span style={{ fontSize: 12, color: 'var(--text-mute)', fontWeight: 400 }}>({item.id})</span></div>
             <div style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'monospace', marginTop: 3 }}>ICCID: {item.iccid || '—'} · IMSI: {item.imsi || '—'}</div>
           </div>
-          <button className="btn btn-primary" disabled={!!restoring} onClick={() => restore(item.id)}>
-            {restoring === item.id ? (isZh ? '恢复中…' : 'Restoring…') : (isZh ? '恢复' : 'Restore')}
-          </button>
+          {requests[item.id] && <p role="status" className="u-note">{t('An earlier permanent deletion is unconfirmed. Confirm again to check or resume the same operation.')}</p>}
+          <label style={{display:'flex',gap:8,alignItems:'center',margin:'12px 0'}}><input type="checkbox" disabled={!!restoring || !!requests[item.id]} checked={requests[item.id] ? !requests[item.id].deleteHistory : retainHistory[item.id] === true} onChange={event => setRetainHistory(previous => ({...previous,[item.id]:event.target.checked}))}/>{t('Retain ended message and call history')}</label>
+          <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+            {!item.__deletion_only && <button className="btn btn-primary" disabled={!!restoring || !!requests[item.id]} onClick={() => restore(item.id)}>{isZh ? '恢复' : 'Restore'}</button>}
+            <button className="btn btn-danger" disabled={!!restoring} onClick={() => remove(item)}>{t(requests[item.id] ? 'Resume permanent deletion' : 'Delete permanently')}</button>
+          </div>
         </div>
       ))}
     </div>

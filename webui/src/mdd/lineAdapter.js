@@ -146,7 +146,7 @@ export const lineAPI = {
   },
   async softDeletedInstances() {
     const snapshot = await go.catalogLines(true)
-    return {instances:(snapshot.lines || []).filter(line => line.deleted).map(line => lineForm(line,snapshot.revision))}
+    return {revision:snapshot.revision,instances:(snapshot.lines || []).filter(line => line.deleted).map(line => lineForm(line,snapshot.revision))}
   },
   restoreInstance: (id,revision) => go.restoreCatalogLine(id,expectedRevision(revision)),
   softDeleteInstance: (id,revision) => go.softDeleteCatalogLine(id,expectedRevision(revision)),
