@@ -20,10 +20,11 @@ import (
 const maximumDrainRequestBytes = 64 << 10
 
 type DrainRequest struct {
-	SchemaVersion   int      `json:"schema_version"`
-	CatalogRevision uint64   `json:"catalog_revision"`
-	LeaseID         string   `json:"lease_id"`
-	LineIDs         []string `json:"line_ids"`
+	SchemaVersion       int               `json:"schema_version"`
+	CatalogRevision     uint64            `json:"catalog_revision"`
+	LeaseID             string            `json:"lease_id"`
+	LineIDs             []string          `json:"line_ids"`
+	ExpectedGenerations map[string]string `json:"expected_generations,omitempty"`
 }
 
 type DrainResult struct {
@@ -85,6 +86,12 @@ func (handler *Handler) Maintenance(parent context.Context, input DrainRequest, 
 			result.Code = "unknown_or_duplicate_line"
 			return result, errors.New("unknown or duplicate drain line")
 		}
+		if input.ExpectedGenerations != nil && input.ExpectedGenerations[lineID] == "" {
+			return result, errors.New("missing maintenance generation")
+		}
+	}
+	if input.ExpectedGenerations != nil && len(input.ExpectedGenerations) != len(lineIDs) {
+		return result, errors.New("invalid maintenance generation set")
 	}
 	ctx, cancel := context.WithTimeout(parent, 7*time.Second)
 	defer cancel()
@@ -95,7 +102,7 @@ func (handler *Handler) Maintenance(parent context.Context, input DrainRequest, 
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			result.Lines[index] = handler.maintenanceLine(ctx, lineID, input.LeaseID, begin)
+			result.Lines[index] = handler.maintenanceLine(ctx, lineID, input.LeaseID, begin, input.ExpectedGenerations[lineID])
 		}()
 	}
 	wait.Wait()
@@ -129,9 +136,13 @@ func (handler *Handler) Maintenance(parent context.Context, input DrainRequest, 
 	return result, nil
 }
 
-func (handler *Handler) maintenanceLine(ctx context.Context, lineID, leaseID string, begin bool) DrainLineResult {
+func (handler *Handler) maintenanceLine(ctx context.Context, lineID, leaseID string, begin bool, generation string) DrainLineResult {
 	result := DrainLineResult{LineID: lineID, Code: "provider_absent"}
 	err := handler.providers.UseCurrent(ctx, lineID, func(provider mediaauth.Provider) error {
+		if generation != "" && provider.Generation != generation {
+			result.Code = "provider_generation_changed"
+			return nil
+		}
 		client, err := handler.providerClient(provider)
 		if err != nil {
 			return err

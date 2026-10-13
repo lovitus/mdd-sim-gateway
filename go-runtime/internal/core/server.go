@@ -578,6 +578,11 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("PUT /v1/lines/{lineID}/raw-modem", server.protect(server.rawModem))
 	}
 	if server.euiccProfiles != nil {
+		if guarded, ok := server.euiccProfiles.(interface {
+			SetMutationGuard(func(context.Context, agentlink.ConnectionStatus, []string, string) (func(context.Context) error, error))
+		}); ok {
+			guarded.SetMutationGuard(server.prepareAgentMaintenance)
+		}
 		server.mux.Handle("GET /v1/euiccs", server.protect(server.euiccProfiles))
 		server.mux.Handle("POST /v1/euiccs/{eid}/profiles/{iccid}/recovery-codes", server.protect(server.euiccProfiles))
 		server.mux.Handle("GET /v1/euiccs/{eid}/deletions", server.protect(server.euiccProfiles))
