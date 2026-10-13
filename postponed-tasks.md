@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### COMMUNICATION_OWNERSHIP
+
+**State: needs_verification; release relevance: current.** Approved repair batch E/N5/N6: per-operation browser SMS journal, compose ownership, original-card-only historical reply and independent send transport; exact incoming-answer ownership and cancelled late acceptance cleanup; frozen allowance confirmation with server rule/card checks. Existing Android ownership rules are reused. No automatic send, Agent wire change or Android scope expansion.
+
+Acceptance scope / remaining action: PR30 qualified36f530f/CI38379711514 proves old Core/browser failures then affected race/full Chromium green; archive/2026-10-13/communication-qualified. Cleanup609afc6 normal CI38380931145 passed. Original reviewer approved paid confirmation, cancelled-answer ownership and journal filtering, but found one remaining old-scope conversation refresh race. The minimal pre-admission scope guard and send/receipt overlap regression await hosted proof and final review; communication-before-history-guard retains609afc6. Earlier failed fixtures are not evidence. No real allowance SMS, paid/hardware operation or deployment. PR29 c200dc5/CI38345314313 independently completes source review/full CI for A-D/N1/N2/N9/freshness, unmerged/undeployed. Remaining eSIM permits/downloads, deletion/backup and update admission/UI batches stay open.
+
 ### IMEI_UNCONFIGURED_CARD
 
 **State: needs_verification; release relevance: current.** October12 HardwarePanel readback joins the existing pool by ICCID for current IMEI/selection/inputs, preserving drafts and isolating card changes. Hosted38197352338/6afc927 proves old display failure;38199470829/aef240a proves invalid-response failure and passes the corrected full Chromium flow, including legacy14-digit readback and zero-revision empty pool. Both reviewers approve aef240a. Generated assets synchronized, temporary proof removed; archive/2026-10-12/hardware-imei-readback-qualified retains evidence. Final CI/review/rollout pending. PR27 artifact9b33e9c remains deployed; no Core/Agent/write-contract change or live card/paid operation. Synthetic HTTP browser evidence is not production clicking.
