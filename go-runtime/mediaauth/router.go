@@ -57,6 +57,7 @@ type Lease struct {
 }
 
 type Router struct {
+	admit     func() (func(), error)
 	mu        sync.Mutex
 	verifier  SessionVerifier
 	providers ProviderResolver
@@ -64,6 +65,8 @@ type Router struct {
 	capacity  int
 	leases    map[string]leaseRecord
 }
+
+func (router *Router) SetAdmission(admit func() (func(), error)) { router.admit = admit }
 
 type leaseRecord struct {
 	Lease
@@ -89,6 +92,13 @@ func NewRouter(verifier SessionVerifier, providers ProviderResolver, now func() 
 // Issue creates an opaque path identifier. The caller remains responsible for
 // revoking it when the exact call/session ends.
 func (router *Router) Issue(request LeaseRequest) (Lease, error) {
+	if router.admit != nil {
+		done, err := router.admit()
+		if err != nil {
+			return Lease{}, err
+		}
+		defer done()
+	}
 	now := router.now().UTC()
 	request.Subject = strings.TrimSpace(request.Subject)
 	request.LineID = strings.TrimSpace(request.LineID)

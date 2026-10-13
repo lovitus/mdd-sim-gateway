@@ -12,6 +12,9 @@ func (server *Server) BeginHostMaintenance(agentID, generation, leaseID string) 
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
+	if server.updateMaintenance != "" {
+		return ErrAgentMaintenance
+	}
 	if current := server.maintenance[agentID]; current != "" {
 		if current == leaseID {
 			return nil
@@ -34,6 +37,43 @@ func (server *Server) BeginHostMaintenance(agentID, generation, leaseID string) 
 		server.maintenance = make(map[string]string)
 	}
 	server.maintenance[agentID] = leaseID
+	return nil
+}
+
+// BeginUpdateMaintenance is installed only after Core's business admission is
+// closed and every existing session is confirmed idle. The same lock fences
+// pending RPC registration, including Agents connecting after this call.
+func (server *Server) BeginUpdateMaintenance(leaseID string) error {
+	if !validIdentifier(leaseID) {
+		return errors.New("invalid update maintenance lease")
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.updateMaintenance == leaseID {
+		return nil
+	}
+	if server.updateMaintenance != "" || len(server.maintenance) != 0 {
+		return ErrAgentMaintenance
+	}
+	for _, connection := range server.agents {
+		connection.mu.Lock()
+		busy := len(connection.pending) != 0
+		connection.mu.Unlock()
+		if busy {
+			return ErrAgentMaintenance
+		}
+	}
+	server.updateMaintenance = leaseID
+	return nil
+}
+
+func (server *Server) EndUpdateMaintenance(leaseID string) error {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if leaseID == "" || server.updateMaintenance != "" && server.updateMaintenance != leaseID {
+		return ErrAgentMaintenance
+	}
+	server.updateMaintenance = ""
 	return nil
 }
 

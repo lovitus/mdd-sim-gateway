@@ -71,6 +71,38 @@ env:
   CGO_ENABLED: '1'
 
 jobs:
+  prove-update-maintenance:
+    name: Temporary update continuity counterexamples
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install native fixture dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+      - run: npm ci
+        working-directory: webui
+      - name: Compiled withdrawals and restored runtime/browser verification
+        run: node tools/verify-update-maintenance-candidate.mjs
+      - name: Retain scoped evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-maintenance-proof-${{ github.sha }}
+          path: ${{ runner.temp }}/update-maintenance-proof
+          if-no-files-found: error
+          retention-days: 7
+
   validate-core:
     name: Validate Core runtime
     runs-on: ubuntu-latest
@@ -141,6 +173,19 @@ jobs:
       - name: Real browser Hardware IMEI save and readback
         working-directory: webui
         run: npm run test:hardware-imei-browser
+
+      - name: Real browser update sidebar and confirmation
+        working-directory: webui
+        run: npm run test:update-entry-browser
+
+      - name: Retain update entry browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-entry-browser-${{ github.sha }}
+          path: webui/browser-evidence/update-entry
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Retain Hardware IMEI browser evidence
         if: always()
