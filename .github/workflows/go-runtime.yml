@@ -71,6 +71,32 @@ env:
   CGO_ENABLED: '1'
 
 jobs:
+  communication-proof:
+    name: Temporary communication red-green proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+        working-directory: webui
+      - run: node tools/verify-communication-proof.mjs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: communication-proof-${{ github.sha }}
+          path: |
+            communication-proof.log
+            webui/browser-evidence/communication
+          if-no-files-found: error
   validate-core:
     name: Validate Core runtime
     runs-on: ubuntu-latest
@@ -141,6 +167,19 @@ jobs:
       - name: Real browser Hardware IMEI save and readback
         working-directory: webui
         run: npm run test:hardware-imei-browser
+
+      - name: Real browser communication ownership
+        working-directory: webui
+        run: npm run test:communication-browser
+
+      - name: Retain communication browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: communication-browser-${{ github.sha }}
+          path: webui/browser-evidence/communication
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Retain Hardware IMEI browser evidence
         if: always()
