@@ -67,6 +67,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### COMMUNICATION_OWNERSHIP
+
+**State: needs_verification; release relevance: current.** Approved repair batch E/N5/N6: per-operation browser SMS journal, compose ownership, original-card-only historical reply and independent send transport; exact incoming-answer ownership and cancelled late acceptance cleanup; frozen allowance confirmation with server rule/card checks. Existing Android ownership rules are reused. No automatic send, Agent wire change or Android scope expansion.
+
+Acceptance scope / remaining action: PR30 qualified36f530f/CI38379711514 proves old Core/browser failures then affected race/full Chromium green; archive/2026-10-13/communication-qualified. Cleanup609afc6 normal CI38380931145 passed, but reviewer found a remaining old-scope history refresh race. fcb1f71/CI38382538282 proves that exact old-source failure and complete fixed Chromium pass, including send/receipt overlap; archive/2026-10-13/communication-history-qualified. Final runtime/tests match fcb1f71; hosted UI synchronized and temporary proof removed. Final source approval/normal CI pending; earlier failed fixtures are not evidence. No real allowance SMS, paid/hardware operation or deployment. PR29 c200dc5/CI38345314313 independently completes source review/full CI for A-D/N1/N2/N9/freshness, unmerged/undeployed. Remaining eSIM permits/downloads, deletion/backup and update admission/UI batches stay open.
+
 ### IMEI_UNCONFIGURED_CARD
 
 **State: needs_verification; release relevance: current.** October12 HardwarePanel readback joins the existing pool by ICCID for current IMEI/selection/inputs, preserving drafts and isolating card changes. Hosted38197352338/6afc927 proves old display failure;38199470829/aef240a proves invalid-response failure and passes the corrected full Chromium flow, including legacy14-digit readback and zero-revision empty pool. Both reviewers approve aef240a. Generated assets synchronized, temporary proof removed; archive/2026-10-12/hardware-imei-readback-qualified retains evidence. Final CI/review/rollout pending. PR27 artifact9b33e9c remains deployed; no Core/Agent/write-contract change or live card/paid operation. Synthetic HTTP browser evidence is not production clicking.
@@ -433,7 +439,7 @@ Preserved original ([TODO.md:99](../../docs/archive/2026-09-20/TODO.md#L99)): ä¿
 
 Python cellular_sms.py/cellular_call.py preservation is obsolete: Go-only source/install gates prohibit restoring those entrypoints. Current v1 domain behavior must be preserved instead.
 
-Source/test boundaries: [`.github/workflows/go-runtime.yml`](../../.github/workflows/go-runtime.yml), [`go-runtime/internal/agentmedia/broker.go`](../../go-runtime/internal/agentmedia/broker.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`go-runtime/release/install-macos-agent.sh`](../../go-runtime/release/install-macos-agent.sh), [`go-runtime/release/install-windows-agent.ps1`](../../go-runtime/release/install-windows-agent.ps1), [`providers/vowifi-go/internal/service/call.go`](../../providers/vowifi-go/internal/service/call.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/goCallCoordinator.jsx`](../../webui/src/goCallCoordinator.jsx), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/smsSubmissionSafety.mjs`](../../webui/tests/smsSubmissionSafety.mjs).
+Source/test boundaries: [`.github/workflows/go-runtime.yml`](../../.github/workflows/go-runtime.yml), [`go-runtime/internal/agentmedia/broker.go`](../../go-runtime/internal/agentmedia/broker.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`go-runtime/release/install-macos-agent.sh`](../../go-runtime/release/install-macos-agent.sh), [`go-runtime/release/install-windows-agent.ps1`](../../go-runtime/release/install-windows-agent.ps1), [`providers/vowifi-go/internal/service/call.go`](../../providers/vowifi-go/internal/service/call.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/goCallCoordinator.jsx`](../../webui/src/goCallCoordinator.jsx), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/communicationBrowser.mjs`](../../webui/tests/communicationBrowser.mjs).
 
 ### M08
 
@@ -463,7 +469,7 @@ Preserved original ([TODO.md:112](../../docs/archive/2026-09-20/TODO.md#L112)): 
 
 Typed failures and durable paid-operation receipts preserve uncertainty; a reconnect does not authorize a second send. Original vocabulary changed in v1 without weakening this invariant.
 
-Source/test boundaries: [`go-runtime/agentlink/types.go`](../../go-runtime/agentlink/types.go), [`go-runtime/vowifiipc/types.go`](../../go-runtime/vowifiipc/types.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/smsSubmissionSafety.mjs`](../../webui/tests/smsSubmissionSafety.mjs).
+Source/test boundaries: [`go-runtime/agentlink/types.go`](../../go-runtime/agentlink/types.go), [`go-runtime/vowifiipc/types.go`](../../go-runtime/vowifiipc/types.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/communicationBrowser.mjs`](../../webui/tests/communicationBrowser.mjs).
 
 ### M11
 
@@ -657,7 +663,7 @@ Preserved original ([TODO.md:223](../../docs/archive/2026-09-20/TODO.md#L223)): 
 
 Current Agent event delivery and Core message persistence/deduplication exist; the old sms.list wording is not the only allowed implementation. Live receive/send matrices remain separate.
 
-Source/test boundaries: [`go-runtime/agentlink/client.go`](../../go-runtime/agentlink/client.go), [`go-runtime/agentlink/server.go`](../../go-runtime/agentlink/server.go), [`go-runtime/agentlink/types.go`](../../go-runtime/agentlink/types.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/smsSubmissionSafety.mjs`](../../webui/tests/smsSubmissionSafety.mjs).
+Source/test boundaries: [`go-runtime/agentlink/client.go`](../../go-runtime/agentlink/client.go), [`go-runtime/agentlink/server.go`](../../go-runtime/agentlink/server.go), [`go-runtime/agentlink/types.go`](../../go-runtime/agentlink/types.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/communicationBrowser.mjs`](../../webui/tests/communicationBrowser.mjs).
 
 ### M27
 
@@ -769,7 +775,7 @@ Preserved original ([TODO.md:287](../../docs/archive/2026-09-20/TODO.md#L287)): 
 
 Paid-message receipts and unknown outcomes prevent automatic duplicate resubmission across reconnect/restart within the documented scope.
 
-Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-runtime/internal/agentmedia/broker.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`providers/vowifi-go/internal/service/call.go`](../../providers/vowifi-go/internal/service/call.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/goCallCoordinator.jsx`](../../webui/src/goCallCoordinator.jsx), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/smsSubmissionSafety.mjs`](../../webui/tests/smsSubmissionSafety.mjs).
+Source/test boundaries: [`go-runtime/internal/agentmedia/broker.go`](../../go-runtime/internal/agentmedia/broker.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`providers/vowifi-go/internal/service/call.go`](../../providers/vowifi-go/internal/service/call.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/goCallCoordinator.jsx`](../../webui/src/goCallCoordinator.jsx), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/communicationBrowser.mjs`](../../webui/tests/communicationBrowser.mjs).
 
 ### M37
 
@@ -905,7 +911,7 @@ Preserved original ([TODO.md:315](../../docs/archive/2026-09-20/TODO.md#L315)): 
 
 Go send/receive/persistence and mounted UI are present. Historical paid-operation reports are not independently repeated live acceptance here.
 
-Source/test boundaries: [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/smsSubmissionSafety.mjs`](../../webui/tests/smsSubmissionSafety.mjs).
+Source/test boundaries: [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/communicationBrowser.mjs`](../../webui/tests/communicationBrowser.mjs).
 
 ### M49
 
@@ -915,7 +921,7 @@ Preserved original ([TODO.md:316](../../docs/archive/2026-09-20/TODO.md#L316)): 
 
 Current tests exercise stable operation identity, unknown outcomes, reconnect, duplicate responses and stale targets. Carrier-side behavior remains external.
 
-Source/test boundaries: [`go-runtime/agentlink/types.go`](../../go-runtime/agentlink/types.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/smsSubmissionSafety.mjs`](../../webui/tests/smsSubmissionSafety.mjs).
+Source/test boundaries: [`go-runtime/agentlink/types.go`](../../go-runtime/agentlink/types.go), [`go-runtime/internal/agentmodem/operations.go`](../../go-runtime/internal/agentmodem/operations.go), [`providers/vowifi-go/internal/service/operation_store.go`](../../providers/vowifi-go/internal/service/operation_store.go), [`webui/src/mdd/smsAdapter.js`](../../webui/src/mdd/smsAdapter.js), [`webui/tests/communicationBrowser.mjs`](../../webui/tests/communicationBrowser.mjs).
 
 ### M50
 

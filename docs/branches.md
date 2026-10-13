@@ -70,6 +70,21 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October13 communication evidence only: `archive/2026-10-13/communication-initial`
+retains e11cebb/CI38374418897. Proof passed; full CI and final source review did not.
+It is superseded by PR30's corrected candidate, not a release or merge candidate.
+`communication-fixture-before-expand` retains69712c0/CI38378206324: the browser
+read a collapsed receipt section, so its SMS_VIEW failure is invalid evidence.
+`communication-fixture-before-new-draft` retains49a2a3c/CI38378980213: SMS/call
+regressions pass; the allowance fixture failed to leave the retained SMS draft.
+`communication-qualified` retains36f530f/CI38379711514: compiled old Core and
+browser regressions fail as intended; fixed allowance race and full Chromium pass.
+Cleanup imports its hosted assets and removes temporary proof, not runtime/tests.
+`communication-before-history-guard` retains609afc6/CI38380931145 (full CI pass,
+one remaining scoped-history refresh race found by original reviewer).
+`communication-history-qualified` retainsfcb1f71/CI38382538282: old history
+scope race reproduced, fixed full Chromium passes; only stale embed rejected.
+
 October12 display evidence only: `archive/2026-10-12/hardware-imei-readback-proof`
 retains6afc927/CI38197352338 (old rendered-page readback assertion, fixed Chromium
 flow passes; full CI rejected stale embed). `hardware-imei-readback-qualified`

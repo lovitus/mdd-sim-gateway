@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -99,9 +100,12 @@ type Query struct {
 }
 
 type QueryRequest struct {
-	QueryID        string `json:"query_id"`
-	ExpectedCardID string `json:"expected_card_id"`
-	Transport      string `json:"transport"`
+	QueryID              string `json:"query_id"`
+	ExpectedCardID       string `json:"expected_card_id"`
+	Transport            string `json:"transport"`
+	ExpectedRuleRevision uint64 `json:"expected_rule_revision"`
+	Recipient            string `json:"recipient"`
+	Body                 string `json:"body"`
 }
 
 type Dispatch struct {
@@ -243,7 +247,12 @@ func queryRequestHash(lineID string, request QueryRequest) (string, error) {
 		(request.Transport != "vowifi" && request.Transport != "cellular") {
 		return "", errors.New("invalid allowance query request")
 	}
-	wire, err := json.Marshal([]string{lineID, request.QueryID, request.ExpectedCardID, request.Transport})
+	identity := []string{lineID, request.QueryID, request.ExpectedCardID, request.Transport}
+	// Preserve lookup of pre-confirmation queries, but never create another one.
+	if request.ExpectedRuleRevision != 0 || request.Recipient != "" || request.Body != "" {
+		identity = append(identity, fmt.Sprint(request.ExpectedRuleRevision), request.Recipient, request.Body)
+	}
+	wire, err := json.Marshal(identity)
 	if err != nil {
 		return "", err
 	}

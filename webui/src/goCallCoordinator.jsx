@@ -35,6 +35,7 @@ function terminalMissing(error) {
 
 function activeStatus(status, call) {
   if (!status || !call?.lease?.session_id) return false
+  if (call.direction === 'incoming' && !call.admissionAccepted) return false
   if (call.mode === 'cellular')
     return (status.sessions || []).some(session => session.session_id === call.lease.session_id && session.phase === 'active')
   return status.active_call?.call_id === call.call_id
@@ -126,19 +127,26 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     observeTestCall(call,call.phase,['start_unknown','media_failed'].includes(call.phase)?call.message:'')
   }, [])
 
-  const release = useCallback(async call => {
+  const releaseMedia = useCallback(async call => {
     if (!call) return
     call.cancelled = true
     call.media?.close()
+    if (call.lease?.session_id && !call.mediaReleased) {
+      if (!call.mediaRelease) call.mediaRelease = api.releaseCallMediaLease(call.mode, call.lease.session_id)
+        .then(() => {call.mediaReleased = true}).catch(() => {}).finally(() => {call.mediaRelease = null})
+      await call.mediaRelease
+    }
+  }, [])
+
+  const retire = useCallback(async call => {
+    if (!call) return
+    await releaseMedia(call)
     if (currentRef.current === call) {
       currentRef.current = null
       setCurrent(null)
     }
-    if (call.lease?.session_id) {
-      try { await api.releaseCallMediaLease(call.mode, call.lease.session_id) } catch {}
-    }
     observeTestCall(call,'ended',call.testFailure || '')
-  }, [])
+  }, [releaseMedia])
 
   const loadHistory = useCallback(async () => {
 	const scope = historyScope.current
@@ -165,6 +173,8 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     if (!enabled || statusInFlight.current) return
 	statusInFlight.current = true
     const lines = instancesRef.current || []
+    const requestedCall = currentRef.current
+    const requestedPhase = requestedCall?.phase
     try {
     const values = await Promise.all(lines.flatMap(line => ['vowifi', 'cellular'].map(async mode => {
       try { return [`${mode}:${line.id}`, { status: await api.callTransportStatus(line.id, mode) }] }
@@ -173,19 +183,34 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     const next = Object.fromEntries(values)
     setStatuses(next)
     const call = currentRef.current
+    if (call !== requestedCall || call?.phase !== requestedPhase) return
     if (!call || !call.lease?.session_id) return
     const entry = next[`${call.mode}:${call.line_id}`]
     if (!entry?.status) return
+    if (call.direction === 'incoming' && call.cancelled) {
+      const observed = presentStatus(entry.status,call) || (call.mode === 'vowifi'
+        && entry.status.pending_incoming_call?.call_id === call.call_id)
+      if (!call.startPending && !call.endPending && !observed) {
+        const history = await api.callHistoryV1(call.line_id,call.mode).catch(() => null)
+        // Match Android recovery: a loser's failed history row or an empty live
+        // snapshot is not evidence that the shared incoming call has ended.
+        const terminal = history?.calls?.some(row => row.call_id === call.call_id
+          && String(row.line_id) === call.line_id && row.transport === call.mode
+          && row.ended_at && row.status !== 'failed')
+        if (terminal && currentRef.current === call && !call.startPending && !call.endPending) await retire(call)
+      }
+      return
+    }
     if (call.phase === 'start_unknown' && activeStatus(entry.status, call)) {
       call.media?.markActive()
       update(call, { phase: 'active', message: 'The same call is confirmed active' })
     } else if (['active', 'media_failed', 'ending'].includes(call.phase) && presentStatus(entry.status, call) === false) {
       showToastRef.current?.('The backend confirmed the call ended')
-      await release(call)
+      await retire(call)
       await loadHistory()
     }
     } finally { statusInFlight.current = false }
-  }, [enabled, loadHistory, release, update])
+  }, [enabled, loadHistory, retire, update])
 
   useEffect(() => {
     if (!enabled) return undefined
@@ -219,37 +244,75 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     else if (type === 'reconnected') update(call, { message: 'Media reconnected', media_state: 'ready' })
     else if (type === 'ended') {
       update(call, { message: detail || 'Call ended', phase: 'ended' })
-      void release(call).then(loadHistory)
+      void retire(call).then(loadHistory)
     } else if (type === 'failed' && call.phase === 'active') {
       call.media.close()
       update(call, { phase: 'media_failed', media_state: 'failed',
         message: `${detail}. The 10-second exact call guard will terminate this call.` })
     }
-  }, [loadHistory, release, update])
+  }, [loadHistory, retire, update])
+
+  const endOwnedCall = useCallback(async call => {
+    if (call.endPending) return
+    call.endPending = true
+    if (!call.end_operation_id) call.end_operation_id = operationID('react-call-end')
+    try {
+      const result = await api.hangupCallV1(call)
+      const terminal = call.mode === 'cellular'
+        ? result.session_id === call.lease.session_id && result.terminal_confirmed === true
+        : result.call_id === call.call_id && result.operation_id === call.end_operation_id && result.accepted === true && result.code === 'ended'
+      if (!terminal) throw new Error('Hangup response does not confirm the original call ended')
+      await retire(call)
+    } catch (error) {
+      if (terminalMissing(error)) await retire(call)
+      else {
+        call.ending = false
+        update(call, {phase:'ending', message:`${error.message}. Hangup is unconfirmed; the exact call guard remains active.`})
+        showToastRef.current?.(error.message)
+      }
+    } finally { call.endPending = false; void refreshStatuses(); void loadHistory() }
+  }, [loadHistory, refreshStatuses, retire, update])
 
   const submitStart = useCallback(async call => {
     if (currentRef.current !== call || call.cancelled || !['ready', 'start_unknown'].includes(call.phase)) return
+    if (call.direction === 'incoming' && call.submitted) return
     update(call, { phase: 'signalling', message: 'Bidirectional audio passed; submitting the carrier call' })
+    call.submitted = true
+    call.startPending = true
     try {
       const result = await api.startCallV1(call, call.direction === 'incoming')
-      if (currentRef.current !== call || call.cancelled) return
+      // Incoming VoWiFi IDs are shared by all clients, unlike this frozen media lease.
+      // Match the original answer receipt, as Android RemoteCall already does.
+      const accepted = call.mode === 'vowifi'
+        ? result.accepted === true && result.code === 'active' && result.call_id === call.call_id && result.operation_id === call.start_operation_id
+        : result.session_id === call.lease.session_id && (call.direction === 'incoming'
+          ? result.code === 'cellular_incoming_answered' && result.incoming_event_id === call.incoming.incoming_event_id
+          : result.code === 'cellular_call_started' && result.call_id === call.call_id)
+      if (!accepted) throw new Error('Call admission response identity unavailable')
+      call.admissionAccepted = true
+      if (currentRef.current !== call || call.cancelled || call.ending) {
+        await endOwnedCall(call)
+        return
+      }
       call.media.markActive()
       update(call, { phase: 'active', media_state: 'ready', message: result.code || 'Call active', started_at: Date.now() })
       void refreshStatuses(); void loadHistory()
     } catch (error) {
-      if (currentRef.current !== call || call.cancelled) return
+      if (currentRef.current !== call) return
       if (ambiguousStart(error)) {
-        update(call, { phase: 'start_unknown', message: call.mode === 'cellular'
+        update(call, { phase: 'start_unknown', message: call.direction === 'incoming'
+          ? `${error.message}. Answer ownership is unknown; do not answer again. Cancel releases only this browser's media.`
+          : call.mode === 'cellular'
           ? `${error.message}. The call will not be submitted again; hang up or wait for the 10-second guard.`
           : `${error.message}. Retry will reuse the same call identity.` })
       } else {
         call.testFailure=error.message
         showToastRef.current?.(`Call failed: ${error.message}`)
-        await release(call)
+        await retire(call)
         void refreshStatuses(); void loadHistory()
       }
-    }
-  }, [loadHistory, refreshStatuses, release, update])
+    } finally { call.startPending = false; void refreshStatuses() }
+  }, [endOwnedCall, loadHistory, refreshStatuses, retire, update])
 
   const begin = useCallback(async ({ line, mode, callee, bufferMS, incoming, testObserver }) => {
     if (currentRef.current || mediaProbeRef.current) throw new Error('another call or media test is already owned by this browser')
@@ -261,7 +324,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
       start_operation_id: operationID(incoming ? 'react-call-answer' : 'react-call-start'),
       end_operation_id: '', lease: null, phase: 'preparing', media_state: 'opening',
       message: 'Requesting microphone and bidirectional audio evidence',
-      direction: incoming ? 'incoming' : 'outgoing', incoming: incoming || null,
+      direction: incoming ? 'incoming' : 'outgoing', incoming: incoming ? {...incoming} : null,
       muted: false, cancelled: false,
       testObserver,
     }
@@ -281,7 +344,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
           native_call_index: incoming.native_call_index, call_occurrence: incoming.occurrence,
         } : {}),
       } : { line_id: call.line_id, call_id: call.call_id }
-      call.lease = await api.createCallMediaLease(mode, leaseBody)
+      call.lease = Object.freeze(await api.createCallMediaLease(mode, leaseBody))
       if (currentRef.current !== call || call.cancelled) {
         await api.releaseCallMediaLease(mode, call.lease.session_id).catch(() => {})
         return null
@@ -296,11 +359,11 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
       if (!['active', 'start_unknown'].includes(call.phase)) {
         call.testFailure=error.message
         showToastRef.current?.(`Pre-call check failed: ${error.message}. No carrier call was confirmed.`)
-        await release(call)
+        await retire(call)
       }
       throw error
     }
-  }, [mediaEvent, release, submitStart, update])
+  }, [mediaEvent, retire, submitStart, update])
 
   const startOutgoing = useCallback((lineID, mode, callee, bufferMS, testObserver) => {
     const route = routes.find(value => value.mode === mode && String(value.line.id) === String(lineID))
@@ -332,22 +395,22 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
     const call = currentRef.current
     if (!call || call.ending) return
     call.ending = true
+    call.cancelled = true
     call.media?.close()
     if (!call.end_operation_id) call.end_operation_id = operationID('react-call-end')
     update(call, { phase: 'ending', message: 'Sending the exact hangup; media evidence has stopped' })
-    if (!call.lease?.session_id) { await release(call); return }
-    try {
-      const result = await api.hangupCallV1(call)
-      showToastRef.current?.(result.code || 'Call ended')
-      await release(call); await refreshStatuses(); await loadHistory()
-    } catch (error) {
-      if (terminalMissing(error)) {
-        await release(call); await refreshStatuses(); await loadHistory(); return
-      }
+    if (!call.lease?.session_id || !call.submitted) { await retire(call); return }
+    if (call.direction === 'incoming' && !call.admissionAccepted) {
+      // Keep the pending answer promise alive. Only its matching late acceptance
+      // can authorize /end; releasing this lease cannot end the winning client's call.
+      update(call, {phase:'start_unknown', message:'Answer ownership is unknown. Media is released; the original request remains until its end is confirmed.'})
+      await releaseMedia(call)
       call.ending = false
-      update(call, { phase: 'ending', message: `${error.message}. Hangup is unconfirmed; the 10-second guard remains active.` })
+      void refreshStatuses()
+      return
     }
-  }, [loadHistory, refreshStatuses, release, update])
+    await endOwnedCall(call)
+  }, [endOwnedCall, refreshStatuses, releaseMedia, retire, update])
 
   const runStabilityTest = useCallback((lineID,number,activeSeconds=50) => {
     const key=String(lineID || '')
@@ -375,7 +438,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
 
   const retryStart = useCallback(() => {
     const call = currentRef.current
-    if (call?.phase !== 'start_unknown' || call.mode === 'cellular') return Promise.resolve()
+    if (call?.phase !== 'start_unknown' || call.mode === 'cellular' || call.direction === 'incoming') return Promise.resolve()
     return submitStart(call)
   }, [submitStart])
 
@@ -474,7 +537,7 @@ export function GlobalGoCallOverlay({ coordinator, translate }) {
   if (!call && !incoming) return coordinator?.recording ? <div className="u-global-call">{recordingControls}</div> : null
   if (!call && incoming) return <div className="u-global-call"><div><b>{t('Incoming call')}</b><span>{incoming.call.number || incoming.call.caller || t('Unknown')}</span><small>{incoming.line.name || incoming.line.id} · {incoming.mode}</small></div><div className="u-inline"><button className="btn btn-primary" disabled={incoming.mode === 'cellular' && incoming.call.actionable !== true} onClick={() => coordinator.answerIncoming(incoming.line.id, incoming.mode, incoming.call, getCallAudioBufferMS()).catch(() => {})}>{t('Answer')}</button><button className="btn btn-danger" onClick={() => coordinator.rejectIncoming(incoming.line.id, incoming.mode, incoming.call).catch(() => {})}>{t('Reject')}</button>{recordingControls}</div></div>
   const seconds = call.started_at ? Math.max(0, Math.floor((Date.now() - call.started_at) / 1000)) : 0
-  return <div className="u-global-call"><div><b>{call.callee}</b><span>{call.mode} · {call.phase} · {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}</span><small>{call.message}</small></div><div className="u-inline">{call.phase === 'active' && <button className="btn btn-ghost" onClick={coordinator.toggleMute}>{t(call.muted ? 'Unmute' : 'Mute')}</button>}<button className="btn btn-danger" onClick={coordinator.hangup}>{t('Hang up')}</button>{recordingControls}</div></div>
+  return <div className="u-global-call"><div><b>{call.callee}</b><span>{call.mode} · {call.phase} · {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}</span><small>{call.message}</small></div><div className="u-inline">{call.phase === 'active' && <button className="btn btn-ghost" onClick={coordinator.toggleMute}>{t(call.muted ? 'Unmute' : 'Mute')}</button>}{call.cancelled && <button className="btn btn-ghost" onClick={coordinator.refresh}>{t('Refresh')}</button>}<button className="btn btn-danger" onClick={coordinator.hangup}>{t('Hang up')}</button>{recordingControls}</div></div>
 }
 
 
