@@ -70,6 +70,14 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October13 archived-line evidence, not a release or merge queue:
+`archive/2026-10-13/line-archive-qualified` retains20c516f/CI38401181375, full success
+with compiled old/withdrawn deletion/backup failures, old-page assertions and fixed
+race/browser passes. Runtime/permanent tests remain unchanged after proof cleanup.
+`line-archive-before-receipt-recovery` retains32a8077/38397898267 and
+`line-archive-reviewed` retainsad37f44/38400205694; neither passed full qualification.
+Final-head normal CI, merge and deployment remain separate receipts.
+
 October12 display evidence only: `archive/2026-10-12/hardware-imei-readback-proof`
 retains6afc927/CI38197352338 (old rendered-page readback assertion, fixed Chromium
 flow passes; full CI rejected stale embed). `hardware-imei-readback-qualified`

@@ -142,6 +142,19 @@ jobs:
         working-directory: webui
         run: npm run test:hardware-imei-browser
 
+      - name: Real browser archived line lifecycle without attached devices
+        working-directory: webui
+        run: npm run test:line-archive-browser
+
+      - name: Retain archived line browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: line-archive-browser-${{ github.sha }}
+          path: webui/browser-evidence/line-archive
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Retain Hardware IMEI browser evidence
         if: always()
         uses: actions/upload-artifact@v7
