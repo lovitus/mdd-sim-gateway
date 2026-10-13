@@ -5,6 +5,8 @@ import { simPINIdentity, pinProof, runtimeNetworkSelection } from '../lineAdapte
 import ProvisionActions from './ProvisionActions.jsx'
 import { useI18n } from '../i18n.jsx'
 import { compactReaderName, lineCompositeStatus } from '../linePresentation.js'
+import { useReaderIMEI } from '../useReaderIMEI.js'
+import { simHomeCountry } from '../../simCountry.js'
 
 const emptyInstance = () => ({
   id: '', name: '', imsi: '', mcc: '', mnc: '', imei: '', imeisv: '', pin: '', reader: '', proxy_country: '',
@@ -25,6 +27,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const [pinMsg, setPinMsg] = useState('')
   const [form, setForm] = useState(emptyInstance())
   const [saving, setSaving] = useState(false)
+  const [loadingConfiguration, setLoadingConfiguration] = useState(false)
   const [detecting,setDetecting]=useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteHistory, setDeleteHistory] = useState(true)
@@ -34,6 +37,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const currentFormID = useRef('')
   const newLineClaim = useRef({})
   const currentTarget = useRef('')
+  const draftEpoch = useRef(0)
+  const binding = useReaderIMEI(targetDevice)
   const deletionRequests = useRef(new Map())
   const mutationBusy = useRef(false)
   const [proof, setProof] = useState(null)
@@ -59,16 +64,20 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     ? selected : null
   useEffect(() => {
     if (!managedSelected) {
+      setLoadingConfiguration(false)
       if (targetDevice?.present === false) setForm(emptyInstance())
       return
     }
     let cancelled = false
+    const epoch = ++draftEpoch.current
+    setLoadingConfiguration(true)
     setForm({...emptyInstance(),...managedSelected})
     api.lineConfiguration(managedSelected.id).then(value => {
-      if (cancelled) return
+      if (cancelled || draftEpoch.current !== epoch) return
       setCreating(value.provisioning_state === 'draft')
       setForm({...emptyInstance(),...managedSelected,...value})
     }).catch(error => { if (!cancelled) setPinMsg(error.message) })
+      .finally(() => { if (!cancelled) setLoadingConfiguration(false) })
     return () => { cancelled = true }
   }, [managedSelected?.id, managedSelected?.provisioning_state, targetDevice?.present])
   // Opening the SIM tab for an unconfigured physical reader starts a new-line form bound to
@@ -92,9 +101,6 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       setCreating(false)
       return
     }
-    const providerIdentity = !!(targetDevice.remote_modem &&
-      (targetDevice.sim?.iccid || targetDevice.sim?.imsi))
-    if (!readers.length && !providerIdentity) return
     const wanted = targetDevice.reader || targetDevice.name
     const index = Math.max(0, readers.findIndex((reader) => reader === wanted))
     setCreating(true)
@@ -107,11 +113,10 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     setForm({ ...emptyInstance(), reader_index: index,
       reader_port: (cards.find((item) => item.index === index) || {}).reader_port || '',
       imsi: sim.imsi || '', mcc: sim.mcc || '', mnc: sim.mnc || '',
-      msisdn: sim.number || '',
+      msisdn: sim.number || '', proxy_country: simHomeCountry(sim.mcc),
       smsc: targetDevice.sms_diagnostics?.service_center || '' })
   }, [targetDevice?.id, targetDevice?.instance_id, targetDevice?.sim?.iccid,
-    targetDevice?.sim?.imsi, targetDevice?.sim?.apdu_available,
-    readers.join('|')]) // eslint-disable-line react-hooks/exhaustive-deps
+    targetDevice?.sim?.apdu_available]) // eslint-disable-line react-hooks/exhaustive-deps
   // Keep the reader selection valid for the CURRENT hardware. A stored reader_index can be
   // stale — saved when more readers were attached — and point past the live reader list; the
   // <select> then has no matching option and "Detect card" probes a phantom reader ("No SIM
@@ -125,8 +130,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   // start-with-PIN) without a full line switch — mirror the fresh value onto the form.
   useEffect(() => { if (managedSelected) setForm((f) => ({ ...f, has_pin: managedSelected.has_pin })) }, [managedSelected?.has_pin])
 
-  const upd = (patch) => setForm((f) => ({ ...f, ...patch }))
-  const updSip = (patch) => setForm((f) => ({ ...f, sip: { ...f.sip, ...patch } }))
+  const upd = (patch) => { ++draftEpoch.current; setForm((f) => ({ ...f, ...patch })) }
+  const updSip = (patch) => { ++draftEpoch.current; setForm((f) => ({ ...f, sip: { ...f.sip, ...patch } })) }
   // The reader index to act on, clamped to a reader that currently exists (never probe a
   // stale/out-of-range index that would report a phantom empty reader).
   const readerIdx = () => (form.reader_index >= 0 && form.reader_index < readers.length) ? form.reader_index : 0
@@ -318,11 +323,11 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   }
   const missing = targetDevice?.provisioning?.missing || []
   const missingLabels = { imsi: 'IMSI / PIN', imei: 'IMEI', smsc: t('SMS centre (SMSC)') }
-  const imeiReady = String(targetDevice?.imei || '').replace(/[^0-9]/g, '').length === 15
+  const imeiReady = !!binding.imei && !binding.loading && !binding.error
   const existingLine = instances.some(line => String(line.id) === String(form.id))
 
   return (
-    <div style={{ maxWidth: 1000 }}>
+    <fieldset disabled={saving || loadingConfiguration} style={{ maxWidth: 1000, minWidth: 0, border: 0, padding: 0 }}>
       {!!instances.length && <div className="u-saved-lines">
         <div><label>{t('Saved SIM line')}</label><p>{t('Select a saved SIM line to edit or delete it. This list does not depend on whether its former device is connected.')}</p></div>
         <select value={boundLineId || savedLineId} disabled={!!boundLineId} onChange={event => {
@@ -404,7 +409,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           <Field label="MNC"><input value={form.mnc} onChange={(e) => upd({ mnc: e.target.value })} /></Field>
           <Field label={t('Proxy country override')}><input className="mono" value={form.proxy_country || ''} maxLength={2}
             onChange={(e) => upd({ proxy_country: e.target.value.replace(/[^a-z]/gi, '').toLowerCase() })}
-            placeholder={`auto (${(form.proxy_country_effective || 'MCC').toUpperCase()})`} /></Field>
+            placeholder={t('Choose an exit country')} />
+            <button type="button" className="btn btn-ghost" disabled={!simHomeCountry(form.mcc)} onClick={() => upd({proxy_country:simHomeCountry(form.mcc)})}>{t('Use SIM home country')}{simHomeCountry(form.mcc) ? ` (${simHomeCountry(form.mcc).toUpperCase()})` : ''}</button></Field>
           <Field label={t('Phone number (MSISDN)')}><input className="mono" value={form.msisdn} onChange={(e) => upd({ msisdn: e.target.value })} placeholder={t('auto-learned')} /></Field>
           <Field label={t('SMS centre (SMSC)')}>
             <div style={{ display: 'flex', gap: 12, marginBottom: 6, fontSize: 13 }}>
@@ -501,6 +507,6 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
 
       </div>
       </div>
-    </div>
+    </fieldset>
   )
 }

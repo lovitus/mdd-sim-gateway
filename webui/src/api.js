@@ -118,8 +118,9 @@ async function loadGoSnapshot() {
     j('GET', '/v1/agents'),
     optionalGet('/v1/egress/exits', { schema_version: 1, exits: [] }),
   ])
+  if (!Array.isArray(devices.devices)) throw new Error('device_snapshot_unavailable')
   latestGoSnapshot = mapGoSnapshot({
-    at: lines.at || devices.at,
+    at: devices.at,
     lines: lines.lines || [], catalog,
     devices: devices.devices || [], agents: agents.agents || [], egress,
   })
@@ -198,23 +199,39 @@ async function goReaderProvision(device, lineID, expectedCatalogRevision) {
 	}, { 'X-MDD-Agent-ID': identity.agentID })
 }
 
-async function patchGoDevice(id, patch) {
+function confirmedModemTarget(device) {
+  if (!device || device.stale || device.observed_only) throw Object.assign(new Error('device_snapshot_unavailable'), {not_dispatched:true})
+  const raw = device.go_device || device
+  const modem = raw.modem || {}
+  const target = {
+    agent_id: raw.agent_id, process_generation: raw.process_generation,
+    equipment_id: modem.equipment_id, attachment_id: modem.attachment_id,
+    card_id: modem.sim?.iccid, sim_session_generation: modem.sim_session_generation || modem.sim?.session_generation,
+  }
+  if (Object.values(target).some(value => typeof value !== 'string' || !value)) throw Object.assign(new Error('device_confirmation_identity_required'), {not_dispatched:true})
+  return target
+}
+
+async function patchGoDevice(id, patch, confirmed) {
   const keys = Object.keys(patch || {}).filter(key => patch[key] !== undefined)
 	if (keys.length !== 1 || !['cellular_enabled', 'connection_enabled', 'flight_mode', 'roaming_enabled', 'selected_profile', 'vowifi_enabled'].includes(keys[0]))
     throw new Error('exactly one supported device policy field is required')
   const field = keys[0]
   if (field === 'vowifi_enabled') {
-    const lineID = exactDeviceLine(await freshDevice(id))
+    const lineID = String(confirmed?.instance_id || '')
+    const cardID = String(confirmed?.sim?.iccid || '')
+    if (!lineID || !cardID || String(confirmed.id) !== String(id)) throw new Error('device_confirmation_identity_required')
     const action = patch[field] ? 'start' : 'stop'
     return j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/runtime/${action}`,
-      { operation_id: operationID(`react-vowifi-${action}`) })
+      { operation_id: operationID(`react-vowifi-${action}`), expected_card_id: cardID })
   }
-  const current = await requestJSON('GET', `/v1/devices/${encodeURIComponent(id)}/policy`)
-  const etag = current.response.headers.get('ETag')
-  if (!etag) throw new Error('device policy revision is unavailable')
+  const target = confirmedModemTarget(confirmed)
+  const revision = confirmed?.policy_revision
+  if (String(confirmed.id) !== String(id) || !Number.isSafeInteger(revision) || revision < 0) throw new Error('device policy revision is unavailable')
   return j('PATCH', `/v1/devices/${encodeURIComponent(id)}/policy`, {
     operation_id: operationID('react-device-policy'), [field]: field === 'selected_profile' ? String(patch[field] || '') : patch[field] === true,
-  }, { 'If-Match': etag })
+    expected_target: target,
+  }, { 'If-Match': `"${revision}"` })
 }
 
 async function goDeviceProfiles(id) {
@@ -222,21 +239,19 @@ async function goDeviceProfiles(id) {
   return mapDeviceProfilesResponse(result.data)
 }
 
-async function softRestartGoDevice(id) {
-	const device = await freshDevice(id)
-	const lineID = exactDeviceLine(device)
-	const modem = device.modem || device.raw?.imported_modem
-	if (!modem?.equipment_id || !modem?.sim?.iccid) throw new Error('modem_recovery_target_unavailable')
-	return j('POST', `/v1/lines/${encodeURIComponent(lineID)}/cellular/soft-restart`, {
-		operation_id: operationID('react-modem-restart'), expected_card_id: modem.sim.iccid,
-		equipment_id: modem.equipment_id,
-	})
+async function softRestartGoDevice(id, confirmed, operation) {
+  const target = confirmedModemTarget(confirmed)
+  const lineID = confirmed?.instance_id
+  if (!lineID || String(confirmed.id) !== String(id) || !operation) throw Object.assign(new Error('modem_recovery_target_unavailable'), {not_dispatched:true})
+  return j('POST', `/v1/lines/${encodeURIComponent(lineID)}/cellular/soft-restart`, {
+    operation_id: operation, expected_card_id: target.card_id,
+    equipment_id: target.equipment_id, expected_target: target,
+  })
 }
 
-async function saveGoDeviceProfile(id, profile) {
-  const current = await requestJSON('GET', `/v1/devices/${encodeURIComponent(id)}/profiles`)
-  const etag = current.response.headers.get('ETag')
-  if (!etag) throw new Error('device profile revision is unavailable')
+async function saveGoDeviceProfile(id, profile, confirmed, revision) {
+  const target = confirmedModemTarget(confirmed)
+  if (String(confirmed.id) !== String(id) || !Number.isSafeInteger(revision) || revision < 0) throw new Error('device profile revision is unavailable')
   const payload = await j('PUT', `/v1/devices/${encodeURIComponent(id)}/profiles`, {
     operation_id: operationID('react-device-profile'),
     name: String(profile?.name || '').trim(),
@@ -245,7 +260,8 @@ async function saveGoDeviceProfile(id, profile) {
     username: String(profile?.username || '').trim(),
     password: String(profile?.password || ''),
     password_set: String(profile?.password || '') !== '',
-  }, { 'If-Match': etag })
+    expected_target: target,
+  }, { 'If-Match': `"${revision}"` })
   return (payload.profiles || []).find(item => item.name === String(profile?.name || '').trim()) || profile
 }
 
@@ -439,10 +455,12 @@ async function resetGoAllowanceRule(lineID, revision) {
     { 'If-Match': `"${revision}"` }))
 }
 
-async function setGoLineCountry(lineID, country) {
+async function setGoLineCountry(lineID, country, expectedCardID) {
   const catalog = await j('GET', '/v1/catalog/lines')
   const line = (catalog.lines || []).find(value => String(value.id) === String(lineID))
   if (!line) throw new Error('line not found')
+  if (!expectedCardID || line.card_id !== expectedCardID) throw new Error('line_card_identity_changed')
+  if (!/^[a-z]{2}$/.test(country)) throw new Error('country_exit_required')
   const next = { ...line, network: { ...(line.network || {}), egress_country: String(country || '').toLowerCase() } }
   const result = await j('PUT', `/v1/catalog/lines/${encodeURIComponent(lineID)}`, next,
     { 'If-Match': `"${catalog.revision}"` })
@@ -737,6 +755,7 @@ export function connectWs(onMsg, onAuthLost) {
       } catch {}
     }
     ws.onclose = (event) => {
+      onMsg({ type: 'ws-lifecycle', event: 'close', connection_generation: connectionGeneration })
       if (event.code === 4401) {
         alive = false
         onAuthLost?.()

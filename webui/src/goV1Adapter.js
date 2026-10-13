@@ -331,7 +331,8 @@ export function mapGoSnapshot(input = {}) {
   const liveEgress = egressMap(input.egress)
   return {
     schema_version: 1,
-    at: input.at || new Date().toISOString(),
+    at: input.at || '',
+    devices_available: Array.isArray(input.devices),
     instances: catalogLines.map(line => mapCatalogLine(line,
       projections.find(value => text(value?.line_id) === text(line?.id)))),
     cards: mapReaderCards(input.devices || []),

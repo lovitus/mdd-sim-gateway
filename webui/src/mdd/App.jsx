@@ -11,6 +11,7 @@ import { useI18n } from './i18n.jsx'
 import { GlobalGoCallOverlay, useGoCallCoordinator } from '../goCallCoordinator.jsx'
 import { liveStatusFromWsMessage, mergeLiveLineStatus } from './liveStatus.js'
 import { consumeUpdateCompletion, updateProgressOutcome, matchUpdateProgress } from './updateProgress.js'
+import { snapshotObservation, snapshotIsFresh } from './snapshotFreshness.js'
 
 const NAV = [
   ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['imeis', 'IMEI Pool', '◈'], ['calls', 'Calls', '☎'],
@@ -89,6 +90,20 @@ export default function App() {
   const updateCompletionSeen = useRef('')
   const refreshInFlight = useRef(false)
   const refreshDebounce = useRef(null)
+  const [observation, setObservation] = useState(null)
+  const [snapshotClock, setSnapshotClock] = useState(Date.now)
+  const [transports, setTransports] = useState({ rest: 'unknown', ws: 'unknown' })
+  const observeSnapshot = useCallback(snapshot => {
+    const now = Date.now()
+    const next = snapshotObservation(snapshot, now)
+    if (next) setObservation(next)
+    setSnapshotClock(now)
+  }, [])
+  useEffect(() => {
+    if (!authState?.authenticated) return
+    const timer = setInterval(() => setSnapshotClock(Date.now()), 5000)
+    return () => clearInterval(timer)
+  }, [authState?.authenticated])
 
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('theme', theme) }, [theme])
   // Keep the address bar on the current page without growing history, and follow the hash
@@ -125,7 +140,10 @@ export default function App() {
     try {
       const epoch = snapshotEpoch.current
       const snapshot = await api.snapshot()
+      setTransports(value => ({ ...value, rest: 'connected' }))
       if (snapshotEpoch.current !== epoch) return
+      if (!snapshotObservation(snapshot, Date.now())) throw new Error('device_snapshot_unavailable')
+      observeSnapshot(snapshot)
       unifiedAvailable.current = true
       setInstances(snapshot.instances || [])
       setCards(snapshot.cards || [])
@@ -133,6 +151,7 @@ export default function App() {
       setDiscovering(!!snapshot.discovering)
       setSelected(value => value && (snapshot.instances || []).some(item => String(item.id) === String(value)) ? value : null)
     } catch (error) {
+      setTransports(value => ({ ...value, rest: 'disconnected' }))
       // Retain the last visible snapshot on a failed read; do not invent empty inventory.
       if (error?.status !== 401) showToast(error.message)
     } finally {
@@ -165,7 +184,10 @@ export default function App() {
   useEffect(()=>{ if(!authState?.authenticated)return; const timer=setInterval(refresh,30000); return()=>clearInterval(timer) },[refresh,authState?.authenticated])
 
   useEffect(()=>{ if(!authState?.authenticated)return; return connectWs(msg=>{
+    if (msg.type === 'ws-lifecycle') setTransports(value => ({ ...value, ws: msg.event === 'open' ? 'connected' : 'disconnected' }))
     if (msg.type === 'go.snapshot' && msg.snapshot) {
+      if (!snapshotObservation(msg.snapshot, Date.now())) return
+      observeSnapshot(msg.snapshot)
       unifiedAvailable.current = true
       ++snapshotEpoch.current
       setInstances(msg.snapshot.instances || [])
@@ -221,7 +243,7 @@ export default function App() {
     <button className="u-menu" onClick={()=>setMenuOpen(!menuOpen)}>☰</button>
     {menuOpen&&<button className="u-scrim" aria-label={t('Close menu')} onClick={()=>setMenuOpen(false)}/>}
     <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header>
-      <div className="u-content"><HostAlerts/>{content}</div></main>
+      <div className="u-content">{!snapshotIsFresh(observation, snapshotClock) && <div role="status" className="u-note" style={{ color: 'var(--warning, #996600)' }}><b>{t('Current device state is unconfirmed')}</b><p>{t('Last valid observation')}: {observation ? new Date(observation.observedAt).toLocaleString() : '—'}</p><small>REST: {t(transports.rest)} · WebSocket: {t(transports.ws)}</small></div>}<HostAlerts/>{content}</div></main>
     {toast&&<div className="u-toast" key={toast.id} role="status" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{toast.message}</span>
       <button type="button" className="btn btn-ghost" aria-label={t('Dismiss')} title={t('Dismiss')} onClick={dismissToast} style={{ flexShrink: 0, background: 'transparent', color: 'inherit' }}>×</button>

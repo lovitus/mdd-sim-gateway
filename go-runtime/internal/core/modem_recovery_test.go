@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -40,7 +41,7 @@ func TestModemRecoveryHandlerRecordsUnavailableBeforeAgentAsFailed(t *testing.T)
 	stub := &modemRecoveryStub{err: agentlink.ErrModemOffline}
 	handler, _ := NewModemRecoveryHandler(stub, store)
 	request := httptest.NewRequest(http.MethodPost, "/v1/lines/line-1/cellular/soft-restart",
-		strings.NewReader(`{"operation_id":"restart-offline","expected_card_id":"8985200000000000001","equipment_id":"862547055201716"}`))
+		strings.NewReader(`{"operation_id":"restart-offline","expected_card_id":"8985200000000000001","equipment_id":"862547055201716","expected_target":{"agent_id":"agent-1","process_generation":"process-1","attachment_id":"attachment-1","equipment_id":"862547055201716","card_id":"8985200000000000001","sim_session_generation":"session-1"}}`))
 	request.SetPathValue("lineID", "line-1")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -61,7 +62,7 @@ func TestModemRecoveryHandlerIsExactDurableAndIdempotent(t *testing.T) {
 		CardID: "8985200000000000001", SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"}})
 	stub := &modemRecoveryStub{}
 	handler, _ := NewModemRecoveryHandler(stub, store)
-	payload := `{"operation_id":"restart-1","expected_card_id":"8985200000000000001","equipment_id":"862547055201716"}`
+	payload := `{"operation_id":"restart-1","expected_card_id":"8985200000000000001","equipment_id":"862547055201716","expected_target":{"agent_id":"agent-1","process_generation":"process-1","attachment_id":"attachment-1","equipment_id":"862547055201716","card_id":"8985200000000000001","sim_session_generation":"session-1"}}`
 	for attempt := 0; attempt < 2; attempt++ {
 		request := httptest.NewRequest(http.MethodPost, "/v1/lines/line-1/cellular/soft-restart", strings.NewReader(payload))
 		request.SetPathValue("lineID", "line-1")
@@ -89,12 +90,16 @@ func TestModemRecoveryHandlerRecordsTransportUnknownWithoutRetry(t *testing.T) {
 	stub := &modemRecoveryStub{err: context.DeadlineExceeded}
 	handler, _ := NewModemRecoveryHandler(stub, store)
 	request := httptest.NewRequest(http.MethodPost, "/v1/lines/line-1/cellular/soft-restart",
-		strings.NewReader(`{"operation_id":"restart-unknown","expected_card_id":"8985200000000000001","equipment_id":"862547055201716"}`))
+		strings.NewReader(`{"operation_id":"restart-unknown","expected_card_id":"8985200000000000001","equipment_id":"862547055201716","expected_target":{"agent_id":"agent-1","process_generation":"process-1","attachment_id":"attachment-1","equipment_id":"862547055201716","card_id":"8985200000000000001","sim_session_generation":"session-1"}}`))
 	request.SetPathValue("lineID", "line-1")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	receipt, found, err := store.GetOperation("restart-unknown")
 	if response.Code != http.StatusAccepted || stub.calls != 1 || err != nil || !found || receipt.State != linecatalog.OperationUnknown {
 		t.Fatalf("status=%d calls=%d receipt=%+v found=%t err=%v", response.Code, stub.calls, receipt, found, err)
+	}
+	var outcome map[string]string
+	if json.Unmarshal(response.Body.Bytes(), &outcome) != nil || outcome["operation_id"] != "restart-unknown" || outcome["state"] != "unknown" {
+		t.Fatalf("unknown response lost original operation: %s", response.Body.String())
 	}
 }
