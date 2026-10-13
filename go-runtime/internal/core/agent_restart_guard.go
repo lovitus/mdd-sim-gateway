@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
@@ -17,6 +18,12 @@ func (f agentRestartGuardFunc) Prepare(ctx context.Context, status agentlink.Con
 }
 
 func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.ConnectionStatus, leaseID string) (func(context.Context) error, error) {
+	return s.prepareAgentMaintenance(ctx, status, nil, leaseID)
+}
+
+// eSIM callers supply every affected profile's line, including disabled catalog
+// entries; a device snapshot alone only associates the currently active SIM.
+func (s *Server) prepareAgentMaintenance(ctx context.Context, status agentlink.ConnectionStatus, extraLines []string, leaseID string) (func(context.Context) error, error) {
 	agents, ok := s.agents.(hostAgentMaintenance)
 	maintenance, available := s.systemMaintenance.(*SystemMaintenanceHandler)
 	if !ok || !available || maintenance.runtime == nil || s.catalog == nil || s.agentRestartBusy == nil || status.Topology == nil ||
@@ -39,6 +46,9 @@ func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.Conne
 		return nil, err
 	}
 	lineSet := map[string]bool{}
+	for _, id := range extraLines {
+		lineSet[id] = true
+	}
 	for _, device := range snapshot.Devices {
 		if device.AgentID != status.AgentID || device.ObservedOnly {
 			continue
@@ -77,21 +87,66 @@ func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.Conne
 		return nil, err
 	}
 	drain := providerapply.DrainRequest{SchemaVersion: 1, CatalogRevision: catalog.Revision, LeaseID: leaseID, LineIDs: lineIDs}
-	var drainedLineIDs []string
+	drained := map[string]string{}
+	var releaseMu sync.Mutex
 	releaseProviders := func(releaseContext context.Context) error {
-		if len(drainedLineIDs) == 0 {
+		if len(drained) == 0 {
 			return nil
 		}
-		releaseRequest := drain
-		releaseRequest.LineIDs = drainedLineIDs
-		result, err := maintenance.runtime.Request(releaseContext, releaseRequest, false)
+		reader, ok := maintenance.runtime.(MaintenanceStatusRuntime)
+		if !ok {
+			return errors.New("provider maintenance status unavailable")
+		}
+		observed, err := reader.Snapshot(releaseContext)
 		if err != nil {
 			return err
 		}
-		if !result.Ready {
-			return errors.New("provider maintenance release unconfirmed")
+		if observed.SchemaVersion != 1 || observed.CatalogRevision == 0 {
+			return errors.New("invalid provider maintenance status")
 		}
-		return nil
+		releaseRequest := drain
+		releaseRequest.CatalogRevision = observed.CatalogRevision
+		releaseRequest.LineIDs = nil
+		releaseRequest.ExpectedGenerations = map[string]string{}
+		for id, generation := range drained {
+			var current *providerapply.LineStatus
+			for i := range observed.Lines {
+				if observed.Lines[i].LineID == id {
+					if current != nil {
+						return errors.New("ambiguous provider maintenance status")
+					}
+					current = &observed.Lines[i]
+				}
+			}
+			if current == nil || !current.ProviderPresent || generation == "" || current.ProcessGeneration != generation || current.Code != "provider_reachable" {
+				return errors.New("original provider maintenance identity unavailable")
+			}
+			if !current.Maintenance.Draining && current.Maintenance.LeaseID == "" {
+				delete(drained, id)
+				continue
+			}
+			if current.Maintenance.LeaseID != leaseID {
+				return errors.New("provider maintenance lease changed")
+			}
+			releaseRequest.LineIDs = append(releaseRequest.LineIDs, id)
+			releaseRequest.ExpectedGenerations[id] = generation
+		}
+		if len(releaseRequest.LineIDs) == 0 {
+			return nil
+		}
+		sort.Strings(releaseRequest.LineIDs)
+		result, err := maintenance.runtime.Request(releaseContext, releaseRequest, false)
+		if result.SchemaVersion == 1 && result.LeaseID == leaseID && result.CatalogRevision == releaseRequest.CatalogRevision {
+			for _, line := range result.Lines {
+				if generation := drained[line.LineID]; generation != "" && generation == line.ProcessGeneration && line.Code == "resumed" {
+					delete(drained, line.LineID)
+				}
+			}
+		}
+		if len(drained) == 0 {
+			return nil
+		}
+		return errors.Join(err, errors.New("provider maintenance release unconfirmed"))
 	}
 	if len(lineIDs) != 0 {
 		result, err := maintenance.runtime.Request(ctx, drain, true)
@@ -100,7 +155,7 @@ func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.Conne
 		}
 		for _, line := range result.Lines {
 			if line.Code == "drained" {
-				drainedLineIDs = append(drainedLineIDs, line.LineID)
+				drained[line.LineID] = line.ProcessGeneration
 			}
 		}
 	}
@@ -110,7 +165,12 @@ func (s *Server) prepareAgentRestart(ctx context.Context, status agentlink.Conne
 		return nil, errors.Join(err, releaseProviders(cleanup))
 	}
 	release := func(releaseContext context.Context) error {
-		return errors.Join(agents.EndHostMaintenance(status.AgentID, leaseID), releaseProviders(releaseContext))
+		releaseMu.Lock()
+		defer releaseMu.Unlock()
+		if err := releaseProviders(releaseContext); err != nil {
+			return err
+		}
+		return agents.EndHostMaintenance(status.AgentID, leaseID)
 	}
 	if err := check(); err != nil {
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)

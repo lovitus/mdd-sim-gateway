@@ -67,6 +67,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### ESIM_OPERATION_OWNERSHIP
+
+**State: needs_verification; release relevance: current.** Approved N7/N8 batch: protect all current EID profiles including disabled catalog lines, freeze insertion identity across existing maintenance acquisition, and dispatch only the matching internal eSIM command. Unknown mutation retains its lease until original-Agent inventory readback. Web downloads retain independent EID/operation records across uncertain outcomes, new attempts and reader changes; new attempts require explicit confirmation and successful local persistence.
+
+Acceptance scope / remaining action: PR31 review corrections follow the original session's approved four-item plan: resumable generation-pinned permit cleanup, partial-inventory readback, late-reply UI ownership, and reader-independent legacy history. Candidate7e4534f/CI38387589266 proves three old behaviors and fixed Go race, but browser/full CI failed; not qualified. Corrected hosted proof and exact-head source approval pending. No live eSIM operation, notification replay, paid operation, merge or deployment. PR29/30 remain independent; deletion/backup and update batches remain open. Obsolete source-string assertions removed; no Agent wire extension or soft-delete restoration.
+
 ### IMEI_UNCONFIGURED_CARD
 
 **State: needs_verification; release relevance: current.** October12 HardwarePanel readback joins the existing pool by ICCID for current IMEI/selection/inputs, preserving drafts and isolating card changes. Hosted38197352338/6afc927 proves old display failure;38199470829/aef240a proves invalid-response failure and passes the corrected full Chromium flow, including legacy14-digit readback and zero-revision empty pool. Both reviewers approve aef240a. Generated assets synchronized, temporary proof removed; archive/2026-10-12/hardware-imei-readback-qualified retains evidence. Final CI/review/rollout pending. PR27 artifact9b33e9c remains deployed; no Core/Agent/write-contract change or live card/paid operation. Synthetic HTTP browser evidence is not production clicking.
