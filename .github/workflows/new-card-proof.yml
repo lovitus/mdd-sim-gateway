@@ -1,0 +1,62 @@
+name: New-card one-time proof
+on:
+  push:
+    branches: ['codex/new-card-control-flow']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+          package-manager-cache: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - name: Install native dependencies
+        run: |
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+      - name: Install locked frontend dependencies
+        working-directory: webui
+        run: npm ci
+      - name: Fixed behavior and actual Chromium page
+        run: |
+          mkdir -p proof-evidence
+          set -o pipefail
+          go -C go-runtime test -race -count=1 -timeout 3m ./agentlink ./internal/linecatalog ./internal/core ./internal/runtimereconcile ./providercontrol 2>&1 | tee proof-evidence/go-green.log
+          cd webui
+          node tests/newCardControl.mjs
+          node tests/mddLineAdapter.mjs
+          node tests/mddHardwareAdapter.mjs
+          npm run test:source-graph
+          npm run test:hardware-imei-browser
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - name: Compiled pre-fix counterexamples
+        run: bash tools/new-card-proof.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: new-card-proof-${{ github.sha }}
+          path: |
+            proof-evidence
+            webui/browser-evidence
+            webui/.go-dist
+            go-runtime/internal/webui/assets
+          include-hidden-files: true
+          retention-days: 7

@@ -63,7 +63,7 @@ type AllowanceDispatchAuthorizer interface {
 // runtime reconciler. Public lifecycle requests persist intent through it and
 // wait for an exact observed target; they never invoke a Provider directly.
 type RuntimeIntentRequester interface {
-	RequestIntent(context.Context, string, bool, string) (vowifiipc.OperationResult, error)
+	RequestIntent(context.Context, string, bool, string, ...string) (vowifiipc.OperationResult, error)
 }
 
 type Option func(*Handler) error
@@ -391,7 +391,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 		result, requestErr := requester.RequestIntent(operationContext, lineID,
-			prepared.runtime.enabled, prepared.runtime.operationID)
+			prepared.runtime.enabled, prepared.runtime.operationID, prepared.runtime.expectedCard...)
 		if requestErr != nil {
 			handler.writeError(response, requestErr)
 			return
@@ -467,8 +467,9 @@ type callMutation struct {
 }
 
 type runtimeMutation struct {
-	operationID string
-	enabled     bool
+	operationID  string
+	enabled      bool
+	expectedCard []string
 }
 
 func prepareOperation(request *http.Request, operation string) (preparedOperation, error) {
@@ -481,24 +482,28 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 			return preparedOperation{}, errInvalidRequest
 		}
 		return preparedOperation{status: true}, nil
-	case "runtime/start":
+	case "runtime/start", "runtime/stop":
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest
 		}
-		var input vowifiipc.LifecycleRequest
+		var input struct {
+			vowifiipc.LifecycleRequest
+			ExpectedCardID string `json:"expected_card_id,omitempty"`
+		}
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil || input.RequireIdle {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{runtime: &runtimeMutation{operationID: input.OperationID, enabled: true}}, nil
-	case "runtime/stop":
-		if request.Method != http.MethodPost {
+		var expected []string
+		if input.ExpectedCardID != "" && !validCardID(input.ExpectedCardID) {
 			return preparedOperation{}, errInvalidRequest
 		}
-		var input vowifiipc.LifecycleRequest
-		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil || input.RequireIdle {
-			return preparedOperation{}, errInvalidRequest
+		if input.ExpectedCardID != "" {
+			expected = []string{input.ExpectedCardID}
 		}
-		return preparedOperation{runtime: &runtimeMutation{operationID: input.OperationID}}, nil
+		// Not the paid-action guard: stop intent must remain writable while
+		// offline or globally disabled. The store verifies the card atomically.
+		return preparedOperation{runtime: &runtimeMutation{operationID: input.OperationID,
+			enabled: operation == "runtime/start", expectedCard: expected}}, nil
 	case "register":
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest

@@ -208,6 +208,34 @@ func TestRuntimeIntentIsIndependentPersistentAndNoOpStable(t *testing.T) {
 	}
 }
 
+func TestRuntimeIntentRejectsReplacedCardEvenForNoOp(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := testLine("line-1", "8944100000000000001")
+	line.Enabled = false
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := store.SetRuntimeIntent(line.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	_, _, before, _ := store.RuntimeIntent(line.ID)
+	for _, desired := range []bool{true, false} {
+		if _, changed, _, err := store.SetRuntimeIntent(line.ID, desired, "8944100000000000002"); !errors.Is(err, ErrRuntimeCardChanged) || changed {
+			t.Fatalf("stale intent %t accepted: changed=%t err=%v", desired, changed, err)
+		}
+		if value, found, revision, err := store.RuntimeIntent(line.ID); err != nil || !found || !value || revision != before {
+			t.Fatalf("stale request changed intent: value=%t found=%t revision=%d err=%v", value, found, revision, err)
+		}
+	}
+	if enabled, changed, _, err := store.SetRuntimeIntent(line.ID, false, line.CardID); err != nil || enabled || !changed {
+		t.Fatalf("disabled/offline stop was rejected: enabled=%t changed=%t err=%v", enabled, changed, err)
+	}
+}
+
 func TestLegacyImportIsAtomicReadOnlyAndCannotOverwrite(t *testing.T) {
 	directory := t.TempDir()
 	source := filepath.Join(directory, "config.yaml")
