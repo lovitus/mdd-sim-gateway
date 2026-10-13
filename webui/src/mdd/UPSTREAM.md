@@ -672,6 +672,21 @@ not external traffic or relaxed TLS verification.
 
 ## Management safety and certificate readback
 
+October13 N7/N8 keeps the existing eSIM page/Agent protocol. Enable/disable
+protects the complete current EID inventory under the existing Core maintenance
+permit, freezes its insertion, and rejects active/unknown business regardless of
+catalog enabled intent. Internal exact-command authority does not reach the wire.
+Unknown mutation replies retain their permit for explicit original-Agent inventory
+readback, not mutation retry. Download records are per EID/operation, contain no
+activation/confirmation code, and distinguish execution terminal from certainty.
+New attempts require explicit confirmation; original unknowns survive refresh and
+location changes, including legacy records whose reader is gone. Late replies
+save only their own record without closing a newer draft. Partial permit release
+retains host protection and resumes exact original Provider generations using
+current catalog evidence; pending readback permits partial read-only inventory.
+Hosted proof and final source review are pending; no real card
+or paid acceptance is asserted. Legacy source-text assertions were removed.
+
 Provider preflight and the locked maintenance entry both reject ringing calls,
 not just active calls. Refused maintenance does not acquire a lease.
 The original Web/security fields read the certificate actually loaded by Core:
