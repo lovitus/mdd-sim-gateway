@@ -142,6 +142,19 @@ jobs:
         working-directory: webui
         run: npm run test:hardware-imei-browser
 
+      - name: Real browser eSIM operation retention and confirmation
+        working-directory: webui
+        run: node tests/esimOperationsBrowser.mjs
+
+      - name: Retain eSIM browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: esim-browser-${{ github.sha }}
+          path: webui/browser-evidence/esim-operations
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Retain Hardware IMEI browser evidence
         if: always()
         uses: actions/upload-artifact@v7

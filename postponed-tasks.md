@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### ESIM_OPERATION_OWNERSHIP
+
+**State: needs_verification; release relevance: current.** Approved N7/N8 batch: protect all current EID profiles including disabled catalog lines, freeze insertion identity across existing maintenance acquisition, and dispatch only the matching internal eSIM command. Unknown mutation retains its lease until original-Agent inventory readback. Web downloads retain independent EID/operation records across uncertain outcomes, new attempts and reader changes; new attempts require explicit confirmation and successful local persistence.
+
+Acceptance scope / remaining action: Qualified ac2c230, full Go CI38500419306 success; archive/2026-10-14/esim-operation-qualified retains the hosted proof. Twelve behavioral counterexample invocations fail as intended, including all three admission failure exits; fixed affected-package race, adapter and real Chromium flow pass. Original reviewer approves the five exact read-only fixture responses with strict unexpected-request and business assertions unchanged. Generated UI matches hosted output; runtime/permanent tests are unchanged by temporary proof cleanup. Final-head normal CI/review remain separate PR31 receipts; no merge or deployment implied. Prior38391757681 fixture failure remains historical evidence. Opt-in physical/systemd acceptance is not claimed. No live eSIM, replay, paid operation, Agent wire extension or soft-delete restoration.
+
 ### IMEI_UNCONFIGURED_CARD
 
 **State: needs_verification; release relevance: current.** October12 HardwarePanel readback joins the existing pool by ICCID for current IMEI/selection/inputs, preserving drafts and isolating card changes. Hosted38197352338/6afc927 proves old display failure;38199470829/aef240a proves invalid-response failure and passes the corrected full Chromium flow, including legacy14-digit readback and zero-revision empty pool. Both reviewers approve aef240a. Generated assets synchronized, temporary proof removed; archive/2026-10-12/hardware-imei-readback-qualified retains evidence. Final CI/review/rollout pending. PR27 artifact9b33e9c remains deployed; no Core/Agent/write-contract change or live card/paid operation. Synthetic HTTP browser evidence is not production clicking.

@@ -1461,10 +1461,12 @@ func (server *Server) roundTrip(ctx context.Context, connection *serverConnectio
 	reply := make(chan envelope, 1)
 	server.mu.RLock()
 	lease := server.maintenance[connection.hello.AgentID]
+	permittedProfile := permittedEUICC(ctx, connection, lease, message)
+	profilePermitRequested := ctx.Value(euiccMaintenanceKey{}) != nil
 	restart := message.Kind == kindAgentRestartRequest && message.AgentRestartRequest != nil &&
 		message.AgentRestartRequest.OperationID == lease && lease != "" &&
 		message.AgentRestartRequest.ProcessGeneration == connection.hello.ProcessGeneration
-	if (lease != "" && !restart) || (message.Kind == kindAgentRestartRequest && !restart) {
+	if (profilePermitRequested && !permittedProfile) || (lease != "" && !restart && !permittedProfile) || (message.Kind == kindAgentRestartRequest && !restart) {
 		server.mu.RUnlock()
 		return envelope{}, ErrAgentMaintenance
 	}

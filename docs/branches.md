@@ -70,6 +70,13 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+PR31 evidence only: `archive/2026-10-14/esim-operation-qualified` retains
+ac2c230/Go CI38500419306 success (12 behavioral counterexample invocations,
+fixed affected-package race/adapter/Chromium passes). Final runtime/permanent tests
+match this source; temporary proof removed. Final-head review/CI and any later
+merge/deployment are separate PR receipts. Earlier failed fixtures remain history,
+not approval to restore them.
+
 October12 display evidence only: `archive/2026-10-12/hardware-imei-readback-proof`
 retains6afc927/CI38197352338 (old rendered-page readback assertion, fixed Chromium
 flow passes; full CI rejected stale embed). `hardware-imei-readback-qualified`
