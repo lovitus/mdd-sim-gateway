@@ -147,7 +147,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: hardware-imei-browser-${{ github.sha }}
-          path: webui/browser-evidence/hardware-imei
+          path: |
+            webui/browser-evidence/hardware-imei
+            webui/browser-evidence/new-card
+            webui/browser-evidence/new-card-review
           if-no-files-found: ignore
           retention-days: 7
 

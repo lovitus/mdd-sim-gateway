@@ -14,6 +14,29 @@ of every platform, hardware combination or failure branch.
 
 ## Delivery And Acceptance
 
+### New-Card Control Flow
+
+The October 13 repair keeps the copied SIM claim/save/provision/apply flow and
+explicit user enable/start actions. Setup reads the existing ICCID IMEI binding;
+both country controls use the existing SIM MCC table, not the roaming network.
+Confirmed controls retain card/attachment identity and revision. Drafts and
+unknown recovery receipts survive unrelated updates; snapshot freshness is
+separate from transport connection. No automatic activation or new Agent wire
+contract. Historical offline attachments expose a separate stop-only intent
+target, never restored hardware routing. Late saves cannot select another SIM.
+Hosted38342258088/6e63731 passed compiled red/green and actual Chromium fixture
+flows; `archive/2026-10-13/new-card-qualified` retains the one-time proof. The
+generated app.js is imported from that run. Source review/full CI and production
+acceptance remain separate; remaining reviewed batches are in the ledger.
+The source review additionally keeps dispatched recovery disconnects unknown,
+stores recovery results by operation and leaves offline receipt reads available.
+Only an existing VoWiFi start intent may bypass the transition lock to stop;
+other transitioning controls retain their original limits. Correction evidence
+is retained by1811eea/CI38344633611 and archive/2026-10-13/new-card-review-proof:
+actual WebSocket and old-page regressions fail, fixed race/browser flows pass.
+That run failed only stale embedded UI; its generated app.js is now imported,
+temporary proof removed, runtime/tests unchanged. Final review/full CI pending.
+
 ### IMEI Binding Before Line Creation
 
 October 12 readback follow-up: HardwarePanel now resolves its existing pool

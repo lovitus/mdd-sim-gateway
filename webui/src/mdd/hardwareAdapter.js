@@ -2,6 +2,24 @@ import {api as go} from '../api.js'
 
 export const hardwareAPI = {deleteDevice:device => go.hideOfflineDevice(device)}
 
+// Shared by Hardware, SIM setup and VoWiFi. A pending binding follows the card,
+// not the last reader or a cached line projection.
+export function readerIMEIBinding(data, cardID) {
+  if (!Number.isSafeInteger(data?.revision) || data.revision < 0 ||
+      !Number.isSafeInteger(data.catalog_revision) || data.catalog_revision <= 0 ||
+      !Array.isArray(data.pool) || !Array.isArray(data.unpooled) ||
+      !data.bindings || typeof data.bindings !== 'object' || Array.isArray(data.bindings)) {
+    throw new Error('imei_pool_snapshot_invalid')
+  }
+  const binding = data.bindings[cardID]
+  const entry = binding && data.pool.find(item => item.id === binding.imei_id)
+  if (binding && (!entry || entry.imei !== binding.imei)) throw new Error('imei_binding_entry_mismatch')
+  const saved = entry || data.unpooled.find(item => item.card_id === cardID) || null
+  const validIMEI = entry ? /^\d{15}$/ : /^\d{14,16}$/
+  if (saved && (typeof saved.imei !== 'string' || !validIMEI.test(saved.imei))) throw new Error('imei_binding_value_invalid')
+  return { saved, entry }
+}
+
 export async function saveReaderIMEI(device, input, snapshot) {
   const cardID = device?.sim?.iccid
   if (device?.device_type !== 'reader' || !cardID || device.present !== true) throw new Error('reader_imei_binding_identity_required')
