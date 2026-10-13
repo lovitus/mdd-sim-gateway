@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "SYSTEM_UPDATE_CONTINUITY",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "N10/N11/N12: Core-owned durable update maintenance, exact original Provider lease recovery, service-readable progress and sidebar confirmation are implemented. Qualified6b718e7 passed original-reviewer source review and hosted Go CI38425248981; no deployment or hardware acceptance is claimed.",
+      "acceptance": "archive/2026-10-14/update-maintenance-qualified preserves6b718e7 and temporary proof:17 compiled backend behavior reds plus old-sidebar rendered assertion, followed by fixed scoped race, root permission/worker exclusion and production-App Chromium passes. Full Go CI38425248981 succeeded; its merge tree matches the candidate and hosted embed matches the checked-in asset. Root-only cases also pass separate permanent hosted checks; opt-in real-systemd/process cases remain unverified, not silently accepted. Temporary proof/job removed without changing runtime or permanent tests; final normal CI and cleanup equivalence review remain pending. Earlier38423424333 failed fixture startup;38413555978 failed;38420434058 terminal unknown after bounded timeout. No merge, installation, hardware or paid operation; PR29/30/32 and frozen PR31 remain separate.",
+      "evidence": ["DEVELOPMENT.md", "go-runtime/internal/systemupdate/maintenance.go", "go-runtime/internal/systemupdate/maintenance_test.go", "go-runtime/internal/core/update_maintenance_test.go", "go-runtime/internal/cellularmedia/update_maintenance_test.go", "go-runtime/internal/systemupdate/status_owner_linux_test.go", "webui/tests/updateEntryBrowser.mjs"]
+    },
+    {
       "id": "IMEI_UNCONFIGURED_CARD",
       "state": "needs_verification",
       "releaseRelevance": "current",

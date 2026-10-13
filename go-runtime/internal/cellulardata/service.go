@@ -44,6 +44,7 @@ type AgentRuntime interface {
 }
 
 type Config struct {
+	Admit   func() (func(), error)
 	Context context.Context
 	Catalog Catalog
 	Agents  AgentRuntime
@@ -196,6 +197,13 @@ func (service *Service) stopHTTP(response http.ResponseWriter, lineID, sessionID
 }
 
 func (service *Service) create(ctx context.Context, lineID, purpose, profile string, ttl time.Duration, maxBytes uint64) (*session, error) {
+	if service.config.Admit != nil {
+		done, err := service.config.Admit()
+		if err != nil {
+			return nil, err
+		}
+		defer done()
+	}
 	line, err := service.config.Catalog.Get(lineID)
 	if err != nil {
 		return nil, err

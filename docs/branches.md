@@ -70,6 +70,13 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October13 `codex/update-maintenance-continuity` is an independent candidate from
+main9a9aa78 for N10/N11/N12. It does not reopen PR29/30/32 or the frozen PR31 fixture
+decision. Qualified6b718e7 is retained at
+`archive/2026-10-14/update-maintenance-qualified` (Go CI38425248981 and original
+source review passed). Temporary proof cleanup retains runtime/permanent tests;
+final normal CI follows on PR33. This is not merge or deployment approval.
+
 October12 display evidence only: `archive/2026-10-12/hardware-imei-readback-proof`
 retains6afc927/CI38197352338 (old rendered-page readback assertion, fixed Chromium
 flow passes; full CI rejected stale embed). `hardware-imei-readback-qualified`

@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### SYSTEM_UPDATE_CONTINUITY
+
+**State: needs_verification; release relevance: current.** N10/N11/N12: Core-owned durable update maintenance, exact original Provider lease recovery, service-readable progress and sidebar confirmation are implemented. Qualified6b718e7 passed original-reviewer source review and hosted Go CI38425248981; no deployment or hardware acceptance is claimed.
+
+Acceptance scope / remaining action: archive/2026-10-14/update-maintenance-qualified preserves6b718e7 and temporary proof:17 compiled backend behavior reds plus old-sidebar rendered assertion, followed by fixed scoped race, root permission/worker exclusion and production-App Chromium passes. Full Go CI38425248981 succeeded; its merge tree matches the candidate and hosted embed matches the checked-in asset. Root-only cases also pass separate permanent hosted checks; opt-in real-systemd/process cases remain unverified, not silently accepted. Temporary proof/job removed without changing runtime or permanent tests; final normal CI and cleanup equivalence review remain pending. Earlier38423424333 failed fixture startup;38413555978 failed;38420434058 terminal unknown after bounded timeout. No merge, installation, hardware or paid operation; PR29/30/32 and frozen PR31 remain separate.
+
 ### IMEI_UNCONFIGURED_CARD
 
 **State: needs_verification; release relevance: current.** October12 HardwarePanel readback joins the existing pool by ICCID for current IMEI/selection/inputs, preserving drafts and isolating card changes. Hosted38197352338/6afc927 proves old display failure;38199470829/aef240a proves invalid-response failure and passes the corrected full Chromium flow, including legacy14-digit readback and zero-revision empty pool. Both reviewers approve aef240a. Generated assets synchronized, temporary proof removed; archive/2026-10-12/hardware-imei-readback-qualified retains evidence. Final CI/review/rollout pending. PR27 artifact9b33e9c remains deployed; no Core/Agent/write-contract change or live card/paid operation. Synthetic HTTP browser evidence is not production clicking.

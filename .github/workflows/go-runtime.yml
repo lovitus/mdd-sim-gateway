@@ -142,6 +142,19 @@ jobs:
         working-directory: webui
         run: npm run test:hardware-imei-browser
 
+      - name: Real browser update sidebar and confirmation
+        working-directory: webui
+        run: npm run test:update-entry-browser
+
+      - name: Retain update entry browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-entry-browser-${{ github.sha }}
+          path: webui/browser-evidence/update-entry
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Retain Hardware IMEI browser evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -196,6 +209,13 @@ jobs:
       - name: Race-test entire Linux Core module
         working-directory: go-runtime
         run: go test -race -count=1 -timeout 5m ./...
+
+      - name: Verify root update publication and worker exclusion
+        run: |
+          go -C go-runtime test -c ./internal/systemupdate -o "$RUNNER_TEMP/update-status.test"
+          sudo "$RUNNER_TEMP/update-status.test" -test.run='^TestUpdateRootStatusReadableByCoreWithoutOpeningPrivateDirectory$' -test.v
+          go -C go-runtime test -c ./cmd/mdd-updater -o "$RUNNER_TEMP/update-worker.test"
+          sudo "$RUNNER_TEMP/update-worker.test" -test.run='^TestUpdaterReconcileRejectsActiveWorkerBeforeReadingOrChangingState$' -test.v
 
       - name: Test exact-modem audio helper
         run: GOWORK=off go -C agent/call-audio-helper test -race ./...

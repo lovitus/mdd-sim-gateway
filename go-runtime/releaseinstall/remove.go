@@ -28,7 +28,7 @@ func PreflightRemove(layout Layout, rootUID, rootGID int) (RemovePlan, error) {
 	if err := validateDirectory(layout.ReceiptDirectory, rootUID, rootGID, true, 0o700); err != nil {
 		return RemovePlan{}, err
 	}
-	lock, err := acquireLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
+	lock, err := AcquireExecutionLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
 	if err != nil {
 		return RemovePlan{}, err
 	}
@@ -49,7 +49,7 @@ func Remove(ctx context.Context, layout Layout, rootUID, rootGID int, gate Remov
 	if err := validateDirectory(layout.ReceiptDirectory, rootUID, rootGID, true, 0o700); err != nil {
 		return RemovePlan{}, err
 	}
-	lock, err := acquireLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
+	lock, err := AcquireExecutionLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
 	if err != nil {
 		return RemovePlan{}, err
 	}
