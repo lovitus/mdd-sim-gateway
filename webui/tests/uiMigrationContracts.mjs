@@ -57,7 +57,8 @@ assert.match(lineAdapter, /attempts > 2/)
 assert.doesNotMatch(sim, /new_pin|set_enabled|api\.operationStatus/)
 assert.match(sim, /Actual IMS network[\s\S]*actualNetwork.responderID[\s\S]*actualNetwork.pdnFamily/)
 for (const field of ['imeisv','ims_apn','idr_mode','cp_mode']) assert.ok(lineAdapter.includes(field+':'),field+' must reach provision')
-assert.match(apiSource, /softRestartGoDevice[\s\S]*expected_card_id:[^\n]*modem.sim.iccid/)
+// Recovery identity and unknown outcomes are exercised at the HTTP boundary
+// and through the mounted page in newCardControl/newCardBrowser.
 assert.match(systemAdapter, /go\.registerV1\(lineID, line.card_id\)/)
 assert.match(unified, /sim_apdu_data_active[\s\S]*VoWiFi intent was saved[\s\S]*persistent 4G data connection/)
 assert.match(sim, /providerOnly && targetDevice\?\.go_device\?\.modem\?\.at_control\?\.sim_apdu_on_demand/)

@@ -35,9 +35,10 @@ func NewModemRecoveryHandler(runtime ModemRecoveryRuntime, store *linecatalog.St
 func (handler *ModemRecoveryHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	lineID := strings.TrimSpace(request.PathValue("lineID"))
 	var input struct {
-		OperationID    string `json:"operation_id"`
-		ExpectedCardID string `json:"expected_card_id"`
-		EquipmentID    string `json:"equipment_id"`
+		OperationID    string                          `json:"operation_id"`
+		ExpectedCardID string                          `json:"expected_card_id"`
+		EquipmentID    string                          `json:"equipment_id"`
+		ExpectedTarget *agentlink.ModemControlIdentity `json:"expected_target"`
 	}
 	payload, err := io.ReadAll(io.LimitReader(request.Body, 4097))
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -49,12 +50,16 @@ func (handler *ModemRecoveryHandler) ServeHTTP(response http.ResponseWriter, req
 	}
 	line, err := handler.store.Get(lineID)
 	command := agentlink.ModemRecoveryCommand{OperationID: input.OperationID, EquipmentID: input.EquipmentID,
-		CardID: input.ExpectedCardID, Action: agentlink.ModemSoftRestart}
+		CardID: input.ExpectedCardID, Action: agentlink.ModemSoftRestart, ExpectedTarget: input.ExpectedTarget}
 	if err != nil || !line.Enabled || line.CardID != input.ExpectedCardID || command.Validate() != nil {
 		writeJSON(response, http.StatusPreconditionFailed, map[string]string{"code": "modem_recovery_target_unavailable"})
 		return
 	}
-	wire, _ := json.Marshal(command)
+	if input.ExpectedTarget == nil || input.ExpectedTarget.EquipmentID != input.EquipmentID || input.ExpectedTarget.CardID != input.ExpectedCardID {
+		writeJSON(response, http.StatusConflict, map[string]string{"code": "device_confirmation_changed"})
+		return
+	}
+	wire, _ := json.Marshal(input)
 	digestBytes := sha256.Sum256(wire)
 	digest := hex.EncodeToString(digestBytes[:])
 	prior, found, err := handler.store.LookupOperation(command.OperationID, digest)
@@ -106,7 +111,7 @@ func (handler *ModemRecoveryHandler) ServeHTTP(response http.ResponseWriter, req
 		}
 		_ = handler.store.UpdateOperationCAS(receipt, linecatalog.OperationInProgress, digest)
 		if receipt.State == linecatalog.OperationUnknown {
-			writeJSON(response, status, map[string]string{"code": receipt.ErrorCode})
+			writeJSON(response, status, map[string]string{"code": receipt.ErrorCode, "state": "unknown", "operation_id": command.OperationID})
 		} else if result.OperationID != "" {
 			writeJSON(response, status, result)
 		} else {
