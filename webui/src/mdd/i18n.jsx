@@ -3,6 +3,20 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'Line not configured': '线路尚未配置',
+  'Configure SIM': '配置此 SIM',
+  'Open SIM configuration': '打开 SIM 配置',
+  'Configure this SIM before calling or messaging.': '请先配置此 SIM，再使用通话和短信。',
+  'Retry start': '重试启动',
+  'Retry starting this line? This saves start intent and resets the failure window; a healthy runtime is not restarted.': '重试启动此线路？将保存启动意图并重置失败窗口；已正常运行的线路不会重启。',
+  'Choose an exit country': '请选择出口国家',
+  'Use SIM home country': '按 SIM 归属国填入',
+  'Country saved. Apply the saved configuration in the SIM tab.': '国家已保存；请在 SIM 标签页应用已保存配置。',
+  'Saved configuration and the active route can differ until protected apply succeeds.': '保存不等于已生效；受保护的应用成功后，运行出口才会更新。',
+  'Current device state is unconfirmed': '当前设备状态未确认，以下保留上次观测',
+  'Last valid observation': '上次有效观测',
+  'runtime_intent_card_mismatch': '线路的 SIM 已变化，请重新核对后操作',
+  'device_confirmation_changed': '设备、卡片或连接世代已变化，请重新核对后操作',
   "Record locally": "本机录音",
   "Local recording": "本机录音",
   "Recording locally": "正在本机录音",

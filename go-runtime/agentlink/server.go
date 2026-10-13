@@ -933,6 +933,9 @@ func (server *Server) ExecuteModemRecoveryCommand(ctx context.Context,
 	}
 	request := ModemRecoveryRequest{ModemRecoveryCommand: command, ProcessGeneration: target.ProcessGeneration,
 		AttachmentID: target.AttachmentID, SIMSessionGeneration: target.SIMSessionGeneration}
+	if command.ExpectedTarget != nil && !command.ExpectedTarget.Matches(target) {
+		return ModemRecoveryResponse{}, ErrGenerationMismatch
+	}
 	return server.ExecuteModemRecovery(ctx, target.AgentID, target.ProcessGeneration, request)
 }
 
@@ -1037,6 +1040,10 @@ func (server *Server) ExecuteModemPolicyCommand(ctx context.Context,
 	target, session, err := server.ResolveModemPolicyTarget(command.EquipmentID, command.CardID)
 	if err != nil {
 		return ModemPolicyResponse{}, err
+	}
+	target.SIMSessionGeneration = session
+	if command.ExpectedTarget != nil && !command.ExpectedTarget.Matches(target) {
+		return ModemPolicyResponse{}, ErrGenerationMismatch
 	}
 	return server.ExecuteModemPolicy(ctx, target.AgentID, target.ProcessGeneration, command.requestFor(target, session))
 }

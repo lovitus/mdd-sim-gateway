@@ -80,3 +80,43 @@ func TestModemRecoveryTargetRequiresFreshUniqueCard(t *testing.T) {
 		t.Fatalf("duplicate target error=%v", err)
 	}
 }
+
+func TestConfirmedModemCommandsDoNotRetargetAfterResolution(t *testing.T) {
+	for _, field := range []string{"agent", "process", "attachment", "session"} {
+		t.Run(field, func(t *testing.T) {
+			server := modemCardTestServer(t)
+			fact := modemCardFact("attachment-1", "862547055201716", "8985200000000000001", false, true, false)
+			connection := modemCardConnection("agent-1", "process-1", fact)
+			connection.capabilities = append(connection.capabilities, modemRecoveryFeature)
+			server.agents["agent-1"] = connection
+			// The real dispatch gate is closed, so an unguarded re-resolution is
+			// distinguishable without sending a hardware command or using a socket.
+			server.maintenance = map[string]string{"agent-1": "fixture-maintenance"}
+			identity := ModemControlIdentity{AgentID: "agent-1", ProcessGeneration: "process-1",
+				EquipmentID: fact.EquipmentID, AttachmentID: fact.AttachmentID, CardID: fact.SIM.ICCID,
+				SIMSessionGeneration: fact.SIM.SessionGeneration}
+			switch field {
+			case "agent":
+				identity.AgentID = "old-agent"
+			case "process":
+				identity.ProcessGeneration = "old-process"
+			case "attachment":
+				identity.AttachmentID = "old-attachment"
+			case "session":
+				identity.SIMSessionGeneration = "old-session"
+			}
+			_, err := server.ExecuteModemPolicyCommand(context.Background(), ModemPolicyCommand{
+				OperationID: "frozen-policy", EquipmentID: fact.EquipmentID, CardID: fact.SIM.ICCID,
+				Action: ModemPolicySet, Patch: ModemPolicyPatch{ConnectionEnabled: new(bool)}, ExpectedTarget: &identity})
+			if !errors.Is(err, ErrGenerationMismatch) {
+				t.Fatalf("policy retargeted: %v", err)
+			}
+			_, err = server.ExecuteModemRecoveryCommand(context.Background(), ModemRecoveryCommand{
+				OperationID: "frozen-recovery", EquipmentID: fact.EquipmentID, CardID: fact.SIM.ICCID,
+				Action: ModemSoftRestart, ExpectedTarget: &identity})
+			if !errors.Is(err, ErrGenerationMismatch) {
+				t.Fatalf("recovery retargeted: %v", err)
+			}
+		})
+	}
+}

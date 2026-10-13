@@ -14,6 +14,16 @@ of every platform, hardware combination or failure branch.
 
 ## Delivery And Acceptance
 
+### New-Card Control Flow
+
+The October 13 repair keeps the copied SIM claim/save/provision/apply flow and
+explicit user enable/start actions. Setup reads the existing ICCID IMEI binding;
+both country controls use the existing SIM MCC table, not the roaming network.
+Confirmed controls retain card/attachment identity and revision. Drafts and
+unknown recovery receipts survive unrelated updates; snapshot freshness is
+separate from transport connection. No automatic activation or new Agent wire
+contract. Current evidence and remaining reviewed batches are in the ledger.
+
 ### IMEI Binding Before Line Creation
 
 October 12 readback follow-up: HardwarePanel now resolves its existing pool
