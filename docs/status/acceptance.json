@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "SYSTEM_UPDATE_CONTINUITY",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "N10/N11/N12: Core-owned durable update maintenance fences business admission, retains exact Provider leases through fixed-service restart, and reconciles original cleanup without repeating activation. Root worker publishes service-readable progress; sidebar reuses the existing confirmation dialog. Original reviewer approved the plan subject to these contracts; candidate is not yet qualified.",
+      "acceptance": "PR33 initial432f20f/CI38413555978 failed stale embed and a nil WebSocket in the late-agent withdrawal fixture; neither is a qualified full run. Six earlier compiled behavioral reds and normal production-root Chromium passed. Hosted embed imported; fixture repaired without weakening assertions. d6874b4/CI38420434058 reached the bounded wait timeout, not a known pass or failure. Original review accepted receipt admission and sidecar recovery, then requested corrupt-status cleanup, exclusion of active-worker cancellation and durability confirmation after Core reopen. These targeted corrections and regressions are implemented but await source review and hosted qualification. No merge, installation, hardware or paid operation; existing PR29/30/32 and frozen PR31 remain separate.",
+      "evidence": ["DEVELOPMENT.md", "go-runtime/internal/systemupdate/maintenance.go", "go-runtime/internal/systemupdate/maintenance_test.go", "go-runtime/internal/core/update_maintenance_test.go", "go-runtime/internal/cellularmedia/update_maintenance_test.go", "go-runtime/internal/systemupdate/status_owner_linux_test.go", "webui/tests/updateEntryBrowser.mjs"]
+    },
+    {
       "id": "IMEI_UNCONFIGURED_CARD",
       "state": "needs_verification",
       "releaseRelevance": "current",

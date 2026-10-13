@@ -55,6 +55,7 @@ var (
 
 type Server struct {
 	maintenance          map[string]string
+	updateMaintenance    string
 	deviceDefaultsSource func() (*DeviceDefaults, error)
 	tokens               TokenResolver
 	mu                   sync.RWMutex
@@ -1461,6 +1462,10 @@ func (server *Server) roundTrip(ctx context.Context, connection *serverConnectio
 	reply := make(chan envelope, 1)
 	server.mu.RLock()
 	lease := server.maintenance[connection.hello.AgentID]
+	if server.updateMaintenance != "" {
+		server.mu.RUnlock()
+		return envelope{}, ErrAgentMaintenance
+	}
 	restart := message.Kind == kindAgentRestartRequest && message.AgentRestartRequest != nil &&
 		message.AgentRestartRequest.OperationID == lease && lease != "" &&
 		message.AgentRestartRequest.ProcessGeneration == connection.hello.ProcessGeneration

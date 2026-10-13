@@ -28,6 +28,7 @@ const (
 )
 
 type Handler struct {
+	admit       func() (func(), error)
 	providers   *mediaauth.ProviderDirectory
 	http        *http.Client
 	catalog     PaidActionCatalog
@@ -67,6 +68,10 @@ type RuntimeIntentRequester interface {
 }
 
 type Option func(*Handler) error
+
+func WithAdmission(admit func() (func(), error)) Option {
+	return func(handler *Handler) error { handler.admit = admit; return nil }
+}
 
 func (handler *Handler) operationDuration(prepared preparedOperation) (time.Duration, error) {
 	if prepared.call == nil || prepared.call.action != "start" || handler.callTimeout == nil {
@@ -243,6 +248,13 @@ func (handler *Handler) Stop(ctx context.Context, lineID string, fence mediaauth
 }
 
 func (handler *Handler) lifecycle(ctx context.Context, lineID string, fence mediaauth.ProviderFence, request vowifiipc.LifecycleRequest, start bool) (vowifiipc.OperationResult, error) {
+	if handler.admit != nil {
+		done, err := handler.admit()
+		if err != nil {
+			return vowifiipc.OperationResult{}, err
+		}
+		defer done()
+	}
 	var result vowifiipc.OperationResult
 	lineID = strings.TrimSpace(lineID)
 	if request.Validate() != nil || fence.LineID != lineID {
@@ -322,6 +334,14 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	if err != nil {
 		handler.writeError(response, err)
 		return
+	}
+	if request.Method != http.MethodGet && operation != "calls/end" && operation != "calls/incoming/reject" && handler.admit != nil {
+		done, err := handler.admit()
+		if err != nil {
+			writeFailure(response, http.StatusConflict, vowifiipc.OperationError{Kind: vowifiipc.ErrorConflict, Code: "system_update_maintenance"})
+			return
+		}
+		defer done()
 	}
 	if prepared.expectedCardID != "" {
 		line, catalogErr := handler.catalog.Get(lineID)

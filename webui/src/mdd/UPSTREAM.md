@@ -14,6 +14,12 @@ of every platform, hardware combination or failure branch.
 
 ## Delivery And Acceptance
 
+N12 candidate: the sidebar version link now opens the existing UpdateModal with
+current metadata. Unknown original updates remain readback-only across reopening;
+Core-reported maintenance/worker discrepancies are shown rather than offered as a
+second update. Production-root Chromium confirmation/cancel/target-change coverage
+is added but not yet run. This is not deployment acceptance.
+
 ### IMEI Binding Before Line Creation
 
 October 12 readback follow-up: HardwarePanel now resolves its existing pool

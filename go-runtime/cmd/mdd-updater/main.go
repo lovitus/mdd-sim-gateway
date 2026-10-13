@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,8 +23,8 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemupdate"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/updatenetwork"
-	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerdeploy"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/releasebundle"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/releaseinstall"
 )
 
@@ -40,6 +41,7 @@ func run(arguments []string) error {
 	destination := flags.String("destination", "", "absolute private staging directory")
 	systemctlPath := flags.String("systemctl", "/bin/systemctl", "absolute systemctl executable")
 	coreConfigPath := flags.String("core-config", "/etc/mdd/core.json", "absolute Core config containing loopback token")
+	reconcile := flags.Bool("reconcile", false, "only reconcile the original maintenance operation; never install or restart")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -50,56 +52,17 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	execution, err := releaseinstall.AcquireExecutionLock(filepath.Clean(*state)+".worker.lock", os.Geteuid())
+	if err != nil {
+		return err
+	}
+	defer execution.Close()
 	request, found, err := store.PendingRequest()
 	if err != nil {
 		return err
 	}
 	if !found {
 		return errors.New("no pending update request")
-	}
-	status, err := store.Status()
-	if err != nil {
-		return err
-	}
-	if status.OperationID == request.OperationID && status.State == systemupdate.StateSucceeded {
-		return nil
-	}
-	if status.OperationID == request.OperationID && status.State == systemupdate.StateUnknown {
-		return errors.New("previous update outcome is unknown; explicit reconciliation is required")
-	}
-	status.State, status.Phase, status.UpdatedAt = systemupdate.StateRunning, "download", time.Now().UTC()
-	if err := store.SetStatus(status); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-	core, err := loadCoreMaintenance(filepath.Clean(*coreConfigPath))
-	if err != nil {
-		return markUpdaterFailure(store, status, "maintenance_preflight", "update_maintenance_preflight_failed", err)
-	}
-	if err := core.begin(ctx, request.OperationID); err != nil {
-		return markUpdaterFailure(store, status, "maintenance_preflight", "update_maintenance_begin_failed", err)
-	}
-	maintenanceBegun := true
-	defer func() {
-		if maintenanceBegun {
-			_ = core.resume(context.Background())
-		}
-	}()
-	downloadClient, err := core.updateClient(ctx, request.Network)
-	if err != nil {
-		return markUpdaterFailure(store, status, "download", "update_network_changed", errors.New("verified update network route is unavailable"))
-	}
-	defer downloadClient.CloseIdleConnections()
-	staged, err := systemupdate.FetchAndStage(ctx, request.Repository, request.Target, filepath.Clean(*destination), downloadClient)
-	if err != nil {
-		status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateFailed, "download", "update_download_failed", "release download or verification failed on the selected route", time.Now().UTC()
-		_ = store.SetStatus(status)
-		return errors.New(status.ErrorDetail)
-	}
-	manager := providerdeploy.Systemctl{Path: filepath.Clean(*systemctlPath)}
-	if err := manager.Validate(); err != nil {
-		return err
 	}
 	serviceUser, err := user.Lookup("mdd")
 	if err != nil {
@@ -113,48 +76,126 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	if err := store.SetWorkerStatusReaderGroup(gid); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	core, err := loadCoreMaintenance(filepath.Clean(*coreConfigPath))
+	if err != nil {
+		return err
+	}
+	view, err := core.maintenance(ctx, &systemupdate.MaintenanceCommand{Action: "request", OperationID: request.OperationID, RequestedTarget: request.Target})
+	if err != nil {
+		return err
+	}
+	if view.Publication == nil {
+		return errors.New("Core did not confirm original request publication")
+	}
+	request, status := view.Publication.Request, view.Publication.Status
+	if view.Publication.Committed && status.State == systemupdate.StateSucceeded && !view.PersistencePending && !view.GuardInstalled &&
+		(view.Record == nil || view.Record.Phase == systemupdate.MaintenanceReleased) {
+		return nil
+	}
+	if *reconcile {
+		return reconcileUpdate(ctx, store, &core, status, request.OperationID, view)
+	}
+	if view.Record != nil && (view.Record.Phase != systemupdate.MaintenanceReleased || view.Record.OperationID == request.OperationID) {
+		return errors.New("original maintenance exists; use explicit reconciliation, never repeat installation")
+	}
+	if !view.Publication.Committed {
+		if view.Publication.Unconfirmed != "" || view.PersistencePending || view.GuardInstalled {
+			return errors.New("unconfirmed maintenance prevents request publication cleanup")
+		}
+		return markUpdaterFailure(store, status, "publication", "update_request_not_committed", errors.New("original update request publication did not complete; nothing was installed"))
+	}
+	if status.OperationID == request.OperationID && status.State == systemupdate.StateUnknown {
+		return errors.New("previous update outcome is unknown; explicit reconciliation is required")
+	}
+	if status.OperationID != request.OperationID || status.State != systemupdate.StateRequested {
+		return errors.New("update worker requires the original fresh request; reconcile interrupted work")
+	}
+	status.State, status.Phase, status.UpdatedAt = systemupdate.StateRunning, "download", time.Now().UTC()
+	if err := store.SetStatus(status); err != nil {
+		return err
+	}
+	downloadClient, err := core.updateClient(ctx, request.Network)
+	if err != nil {
+		return markUpdaterFailure(store, status, "download", "update_network_changed", errors.New("verified update network route is unavailable"))
+	}
+	defer downloadClient.CloseIdleConnections()
+	staged, err := systemupdate.FetchAndStage(ctx, request.Repository, request.Target, filepath.Clean(*destination), downloadClient)
+	if err != nil {
+		status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateFailed, "download", "update_download_failed", "release download or verification failed on the selected route", time.Now().UTC()
+		_ = store.SetStatus(status)
+		return errors.New(status.ErrorDetail)
+	}
+	manager := providerdeploy.Systemctl{Path: filepath.Clean(*systemctlPath)}
+	if err := manager.Validate(); err != nil {
+		return markUpdaterFailure(store, status, "preflight", "update_preflight_failed", err)
+	}
+	manifest, err := releaseinstall.Preflight(staged, releaseinstall.DefaultLayout())
+	if err != nil {
+		return markUpdaterFailure(store, status, "preflight", "update_preflight_failed", err)
+	}
+	target := systemupdate.UpdateTarget{RequestedTarget: request.Target, ReleaseID: manifest.ReleaseID, SourceRevision: manifest.SourceRevision, Contract: manifest.UpdateMaintenance}
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Role == releasebundle.RoleCore {
+			target.CoreSHA256 = artifact.SHA256
+		}
+	}
+	if err := target.Validate(); err != nil {
+		return markUpdaterFailure(store, status, "preflight", "update_maintenance_contract_unsupported", err)
+	}
+	view, err = core.maintenance(ctx, &systemupdate.MaintenanceCommand{Action: "begin", OperationID: request.OperationID, Target: target})
+	if err != nil {
+		if view.Instance != "" && !view.GuardInstalled && (view.Record == nil || view.Record.Phase == systemupdate.MaintenanceReleased) {
+			return markUpdaterFailure(store, status, "maintenance", "update_maintenance_rejected", err)
+		}
+		return markUpdaterUnknown(store, status, "maintenance", "update_maintenance_unconfirmed", err)
+	}
+	if view.Record == nil || view.Record.Target != target || view.Record.Phase != systemupdate.MaintenanceReady || !view.GuardInstalled {
+		return markUpdaterUnknown(store, status, "maintenance", "update_maintenance_unconfirmed", errors.New("update maintenance receipt mismatch"))
+	}
+	view, err = core.maintenance(ctx, &systemupdate.MaintenanceCommand{Action: "activate", OperationID: request.OperationID, Revision: view.Record.Revision})
+	if err != nil {
+		return markUpdaterUnknown(store, status, "install", "update_activation_permit_unknown", err)
+	}
+	activation := view.Record
+	if activation == nil || activation.Target != target || activation.Phase != systemupdate.MaintenanceActivating {
+		return markUpdaterUnknown(store, status, "install", "update_activation_permit_unknown", errors.New("activation receipt mismatch"))
+	}
 	if _, err := releaseinstall.Activate(ctx, staged, releaseinstall.DefaultLayout(), releaseinstall.Identity{RootUID: 0, RootGID: 0, ServiceUID: uid, ServiceGID: gid}, updaterReloader{ctx: ctx, manager: manager}); err != nil {
 		status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateUnknown, "install", "update_install_unknown", "release activation outcome is unknown", time.Now().UTC()
 		_ = store.SetStatus(status)
 		return err
 	}
-	if err := core.resume(ctx); err != nil {
-		status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateUnknown, "maintenance_resume", "update_maintenance_resume_unknown", "provider resume outcome is unknown", time.Now().UTC()
-		_ = store.SetStatus(status)
-		return err
-	}
-	maintenanceBegun = false
 	status.State, status.Phase, status.UpdatedAt = systemupdate.StateRunning, "restart", time.Now().UTC()
 	if err := store.SetStatus(status); err != nil {
 		return err
 	}
-	for _, unit := range []string{"mdd-core.service", "mdd-provider-apply.service", "mdd-egress.service"} {
+	for _, unit := range systemupdate.FixedServices {
 		if err := manager.RestartFixed(ctx, unit); err != nil {
-			status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateUnknown, "restart", "update_restart_unknown", "fixed service restart outcome is unknown", time.Now().UTC()
-			_ = store.SetStatus(status)
-			if _, rollbackErr := releaseinstall.RollbackLatest(context.Background(), releaseinstall.DefaultLayout(), 0, updaterReloader{ctx: context.Background(), manager: manager}); rollbackErr != nil {
-				status.ErrorCode, status.ErrorDetail = "update_rollback_unknown", "restart failed and rollback outcome is unknown"
-			} else {
-				status.ErrorCode, status.ErrorDetail = "update_rolled_back", "restart failed; previous release restored"
-			}
-			status.UpdatedAt = time.Now().UTC()
-			_ = store.SetStatus(status)
-			return err
+			return markUpdaterUnknown(store, status, "restart", "update_restart_unknown", err)
+		}
+		if err := manager.VerifyFixedImage(ctx, unit, target.CoreSHA256); err != nil {
+			return markUpdaterUnknown(store, status, "health", "update_fixed_service_unconfirmed", err)
+		}
+		view, err = core.waitRestored(ctx, *activation)
+		if err != nil {
+			return markUpdaterUnknown(store, status, "health", "update_guard_restore_unconfirmed", err)
+		}
+		view, err = core.maintenance(ctx, &systemupdate.MaintenanceCommand{Action: "restarted", OperationID: request.OperationID, Revision: view.Record.Revision, Unit: unit})
+		if err != nil {
+			return markUpdaterUnknown(store, status, "restart", "update_restart_receipt_unknown", err)
 		}
 	}
-	if err := core.waitHealthy(ctx); err != nil {
-		status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateUnknown, "health", "update_health_unknown", "Core health after restart is unconfirmed", time.Now().UTC()
-		_ = store.SetStatus(status)
-		if _, rollbackErr := releaseinstall.RollbackLatest(context.Background(), releaseinstall.DefaultLayout(), 0, updaterReloader{ctx: context.Background(), manager: manager}); rollbackErr != nil {
-			status.ErrorCode, status.ErrorDetail = "update_rollback_unknown", "health failed and rollback outcome is unknown"
-		} else {
-			status.ErrorCode, status.ErrorDetail = "update_rolled_back", "health failed; previous release restored"
-		}
-		status.UpdatedAt = time.Now().UTC()
-		_ = store.SetStatus(status)
-		return err
+	view, err = core.maintenance(ctx, &systemupdate.MaintenanceCommand{Action: "finish", OperationID: request.OperationID, Revision: view.Record.Revision})
+	if err != nil || view.Record == nil || view.Record.Phase != systemupdate.MaintenanceReleased || view.GuardInstalled {
+		return markUpdaterUnknown(store, status, "release", "update_release_unconfirmed", errors.Join(err, errors.New("original maintenance release is unconfirmed")))
 	}
 	status.State, status.Phase, status.ErrorCode, status.UpdatedAt = systemupdate.StateSucceeded, "restarted", "update_applied", time.Now().UTC()
+	status.ErrorDetail = ""
 	if err := store.SetStatus(status); err != nil {
 		return err
 	}
@@ -170,8 +211,6 @@ func markUpdaterFailure(store *systemupdate.Store, status systemupdate.Status, p
 type coreMaintenance struct {
 	egressStatusPath string
 	baseURL, token   string
-	request          providerapply.DrainRequest
-	active           bool
 }
 
 func loadCoreMaintenance(path string) (coreMaintenance, error) {
@@ -236,72 +275,128 @@ func (core *coreMaintenance) updateClient(ctx context.Context, recorded *updaten
 	}
 	return resolved.Client(0)
 }
-func (core *coreMaintenance) begin(ctx context.Context, operationID string) error {
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
-	snapshot, err := providerapply.Fetch(ctx, core.baseURL+providerapply.Path, core.token, client)
+func (core *coreMaintenance) maintenance(ctx context.Context, command *systemupdate.MaintenanceCommand) (systemupdate.MaintenanceView, error) {
+	method := http.MethodGet
+	var body io.Reader
+	if command != nil {
+		method = http.MethodPost
+		payload, err := json.Marshal(command)
+		if err != nil {
+			return systemupdate.MaintenanceView{}, err
+		}
+		body = bytes.NewReader(payload)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, core.baseURL+systemupdate.MaintenancePath, body)
 	if err != nil {
-		return err
+		return systemupdate.MaintenanceView{}, err
 	}
-	if len(snapshot.Lines) == 0 {
-		return errors.New("no provider lines available for maintenance")
-	}
-	ids := make([]string, len(snapshot.Lines))
-	for i, line := range snapshot.Lines {
-		ids[i] = line.LineID
-	}
-	core.request = providerapply.DrainRequest{SchemaVersion: 1, CatalogRevision: snapshot.CatalogRevision, LeaseID: "update-drain-" + operationID, LineIDs: ids}
-	result, err := providerapply.RequestMaintenance(ctx, core.baseURL, core.token, core.request, true, client)
+	request.Header.Set("Authorization", "Bearer "+core.token)
+	request.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer client.CloseIdleConnections()
+	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return systemupdate.MaintenanceView{}, err
 	}
-	if !result.Ready {
-		return errors.New("provider maintenance drain not ready")
+	defer response.Body.Close()
+	var result struct {
+		systemupdate.MaintenanceView
+		Error string `json:"error"`
 	}
-	core.active = true
-	return nil
-}
-func (core *coreMaintenance) resume(ctx context.Context) error {
-	if !core.active {
-		return nil
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return result.MaintenanceView, err
 	}
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
-	result, err := providerapply.RequestMaintenance(ctx, core.baseURL, core.token, core.request, false, client)
-	if err != nil {
-		return err
+	if result.Record != nil && result.Record.Validate() != nil {
+		return result.MaintenanceView, errors.New("invalid update maintenance response")
 	}
-	if !result.Ready {
-		return errors.New("provider maintenance resume not ready")
+	if response.StatusCode != http.StatusOK {
+		return result.MaintenanceView, fmt.Errorf("update maintenance rejected: %s", result.Error)
 	}
-	core.active = false
-	return nil
+	if command != nil && command.Action == "request" {
+		if result.Publication == nil || result.Publication.Request.OperationID != command.OperationID || result.Publication.Request.Target != command.RequestedTarget ||
+			result.Publication.Status.OperationID != command.OperationID || result.Publication.Status.Target != command.RequestedTarget {
+			return result.MaintenanceView, errors.New("update request publication response mismatch")
+		}
+	} else if command != nil && (result.Record == nil || result.Record.OperationID != command.OperationID) {
+		return result.MaintenanceView, errors.New("update operation response mismatch")
+	}
+	return result.MaintenanceView, nil
 }
 
-func (core *coreMaintenance) waitHealthy(ctx context.Context) error {
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
-	deadline := time.NewTimer(30 * time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+func (core *coreMaintenance) waitRestored(ctx context.Context, expected systemupdate.Maintenance) (systemupdate.MaintenanceView, error) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	delay := time.Second
 	for {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, core.baseURL+"/healthz", nil)
-		if err == nil {
-			response, requestErr := client.Do(request)
-			if requestErr == nil {
-				_, _ = io.Copy(io.Discard, response.Body)
-				_ = response.Body.Close()
-				if response.StatusCode == http.StatusOK {
-					return nil
-				}
-			}
+		view, err := core.maintenance(ctx, nil)
+		if err == nil && view.Record != nil && view.Record.OperationID == expected.OperationID && view.Record.LeaseID == expected.LeaseID &&
+			view.Record.Target == expected.Target && view.Record.Phase == systemupdate.MaintenanceActivating &&
+			view.Record.Revision >= expected.Revision && view.Instance != expected.OriginalCore && view.CoreSHA256 == expected.Target.CoreSHA256 && view.GuardInstalled {
+			return view, nil
 		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return errors.New("Core health did not recover after restart")
-		case <-ticker.C:
+			timer.Stop()
+			return view, errors.New("replacement Core maintenance identity did not recover")
+		case <-timer.C:
+		}
+		if delay < 8*time.Second {
+			delay *= 2
 		}
 	}
+}
+
+func markUpdaterUnknown(store *systemupdate.Store, status systemupdate.Status, phase, code string, cause error) error {
+	status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = systemupdate.StateUnknown, phase, code, "original update requires explicit reconciliation", time.Now().UTC()
+	return errors.Join(cause, store.SetStatus(status))
+}
+
+func reconcileUpdate(ctx context.Context, store *systemupdate.Store, core *coreMaintenance, status systemupdate.Status, operation string, view systemupdate.MaintenanceView) error {
+	if view.Record == nil || view.Record.OperationID != operation {
+		if view.Publication == nil || view.Publication.Request.OperationID != operation || view.GuardInstalled || view.PersistencePending ||
+			view.Record != nil && view.Record.Phase != systemupdate.MaintenanceReleased {
+			return errors.New("original request cannot be confirmed as unactivated")
+		}
+		if view.Publication.Committed && (status.State == systemupdate.StateSucceeded || status.State == systemupdate.StateFailed) {
+			return nil
+		}
+		status.OperationID, status.Target = operation, view.Publication.Request.Target
+		return markUpdaterFailure(store, status, "cancelled", "update_cancelled_before_maintenance", errors.New("original request cancelled before maintenance; nothing was installed"))
+	}
+	switch view.Record.Phase {
+	case systemupdate.MaintenancePreparing, systemupdate.MaintenanceReady, systemupdate.MaintenanceCleanup:
+		var err error
+		view, err = core.maintenance(ctx, &systemupdate.MaintenanceCommand{Action: "cleanup", OperationID: operation, Revision: view.Record.Revision})
+		if err != nil {
+			return err
+		}
+	case systemupdate.MaintenanceReleasing:
+		var err error
+		view, err = core.maintenance(ctx, &systemupdate.MaintenanceCommand{Action: "finish", OperationID: operation, Revision: view.Record.Revision})
+		if err != nil {
+			return err
+		}
+	case systemupdate.MaintenanceReleased:
+		if view.GuardInstalled {
+			var err error
+			view, err = core.maintenance(ctx, &systemupdate.MaintenanceCommand{Action: "finish", OperationID: operation, Revision: view.Record.Revision})
+			if err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.New("activation outcome unconfirmed; reconciliation will not install, restart or roll back")
+	}
+	if view.Record == nil || view.Record.Phase != systemupdate.MaintenanceReleased || view.GuardInstalled {
+		return errors.New("maintenance release is unconfirmed")
+	}
+	status.Target = view.Record.Target.RequestedTarget
+	status.OperationID, status.State, status.Phase, status.ErrorCode, status.ErrorDetail, status.UpdatedAt = operation, systemupdate.StateFailed, "cancelled", "update_cancelled_before_activation", "", time.Now().UTC()
+	if view.Record.VerifiedCore != "" {
+		status.State, status.Phase, status.ErrorCode = systemupdate.StateSucceeded, "restarted", "update_applied"
+	}
+	return store.SetStatus(status)
 }
 
 type updaterReloader struct {
