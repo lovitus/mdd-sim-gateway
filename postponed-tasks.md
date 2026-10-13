@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### LINE_ARCHIVE_BACKUP
+
+**State: needs_verification; release relevance: current.** Approved N4 before N3/N13 batch: SMS write-transaction deletion barrier rejects unresolved submissions and missing durable history before any purge; history-retaining deletion keeps operation evidence. Recycle bin works without attached devices, permanent deletion lives on archived records and resumes the same confirmed operation across reload. Catalog export v2 retains IMEI/pending bindings, independent runtime intent and operation/lifecycle receipts; SMS snapshot includes tombstones.
+
+Acceptance scope / remaining action: CI38397898267/32a8077 reproduced the intended old/withdrawn behavior failures and passed four affected Go packages under race, but failed the browser fixture's extra StrictMode dialog lifecycle and stale embed. Original reviewer approved N4/N13 and identified lost-success-response continuation in N3; corrected intent enumeration and exact terminal-receipt validation await hosted proof and source closure. Fixture now matches production root; assertions retained. Four obsolete source-string deletion assertions were replaced by behavior. Backup remains per-source, not cross-database atomic or an online restore; exported intent/receipts never authorize startup, commands or paid retry. No production data deletion, SIM operation, SMS or call.
+
 ### IMEI_UNCONFIGURED_CARD
 
 **State: needs_verification; release relevance: current.** October12 HardwarePanel readback joins the existing pool by ICCID for current IMEI/selection/inputs, preserving drafts and isolating card changes. Hosted38197352338/6afc927 proves old display failure;38199470829/aef240a proves invalid-response failure and passes the corrected full Chromium flow, including legacy14-digit readback and zero-revision empty pool. Both reviewers approve aef240a. Generated assets synchronized, temporary proof removed; archive/2026-10-12/hardware-imei-readback-qualified retains evidence. Final CI/review/rollout pending. PR27 artifact9b33e9c remains deployed; no Core/Agent/write-contract change or live card/paid operation. Synthetic HTTP browser evidence is not production clicking.

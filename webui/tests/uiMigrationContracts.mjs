@@ -46,10 +46,7 @@ assert.match(provision, /api\.provisionV1\(request\).*api\.reprovisionV1\(reques
 assert.match(provision, /proof.identity !== identity/)
 assert.match(provision, /api\.reconcileProvisionV1\(reconcile\)/)
 assert.doesNotMatch(provision, /setInterval|setTimeout/, 'synchronous provision must not gain a polling loop')
-assert.match(sim, /prompt\(t\('Type the line ID/)
-assert.match(sim, /deletionRequests.current.get\(forId\)/)
-assert.match(sim, /request.deleteHistory !== deleteHistory/)
-assert.match(sim, /api\.deleteInstance\(forId, deleteHistory, form.__catalog_revision, request.operation\)/)
+// Permanent deletion is covered by mounted DevicesPage/recycle-bin browser behavior.
 assert.match(sim, /preflight_operation_id:preflight/)
 assert.match(sim, /action:saveOnAgent \? 'verify_save' : 'verify'/)
 assert.match(sim, /action:'remove_saved'[\s\S]*expected_config_revision:pinConfiguration.revision/)

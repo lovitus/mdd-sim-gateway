@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
@@ -17,6 +18,14 @@ type historyFinalizer interface {
 	PurgeLine(string) error
 	RetainLine(string) error
 }
+type messageFinalizer interface {
+	historyFinalizer
+	cellularmessages.SubmissionHistory
+}
+type operationFinalizer interface {
+	historyFinalizer
+	PrepareLineDeletion(string, cellularmessages.SubmissionHistory) error
+}
 
 type Config struct {
 	Catalog       *linecatalog.Store
@@ -24,8 +33,8 @@ type Config struct {
 	Notifications linePurger
 	Events        linePurger
 	Allowance     linePurger
-	Messages      historyFinalizer
-	SMSOperations linePurger
+	Messages      messageFinalizer
+	SMSOperations operationFinalizer
 	Calls         historyFinalizer
 	Now           func() time.Time
 }
@@ -105,6 +114,14 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		handler.writeStoreError(response, err, receipt.CatalogRevision)
 		return
 	}
+	if err := handler.config.SMSOperations.PrepareLineDeletion(lineID, handler.config.Messages); err != nil {
+		status, code := http.StatusServiceUnavailable, "line_sms_state_unavailable"
+		if errors.Is(err, cellularmessages.ErrUnresolvedOperation) {
+			status, code = http.StatusConflict, "line_sms_operation_unresolved"
+		}
+		writeJSON(response, status, map[string]any{"code": code, "operation": receipt})
+		return
+	}
 	steps := []struct {
 		expected linecatalog.DeletionStage
 		next     linecatalog.DeletionStage
@@ -119,7 +136,12 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			}
 			return handler.config.Messages.RetainLine(lineID)
 		}},
-		{linecatalog.DeletionMessages, linecatalog.DeletionSMSOperations, handler.config.SMSOperations.PurgeLine},
+		{linecatalog.DeletionMessages, linecatalog.DeletionSMSOperations, func(lineID string) error {
+			if receipt.DeleteHistory {
+				return handler.config.SMSOperations.PurgeLine(lineID)
+			}
+			return handler.config.SMSOperations.RetainLine(lineID)
+		}},
 		{linecatalog.DeletionSMSOperations, linecatalog.DeletionCalls, func(lineID string) error {
 			if receipt.DeleteHistory {
 				return handler.config.Calls.PurgeLine(lineID)
