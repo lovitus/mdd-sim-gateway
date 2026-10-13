@@ -71,6 +71,33 @@ env:
   CGO_ENABLED: '1'
 
 jobs:
+  line-archive-proof:
+    name: Temporary archived-line counterexamples
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install browser dependencies
+        run: npm --prefix webui ci
+      - name: Prove old failures and fixed flow
+        run: node tools/verify-line-archive-proof.mjs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: line-archive-proof-${{ github.sha }}
+          path: |
+            line-archive-proof.log
+            webui/browser-evidence/line-archive
+          retention-days: 7
   validate-core:
     name: Validate Core runtime
     runs-on: ubuntu-latest
@@ -141,6 +168,19 @@ jobs:
       - name: Real browser Hardware IMEI save and readback
         working-directory: webui
         run: npm run test:hardware-imei-browser
+
+      - name: Real browser archived line lifecycle without attached devices
+        working-directory: webui
+        run: npm run test:line-archive-browser
+
+      - name: Retain archived line browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: line-archive-browser-${{ github.sha }}
+          path: webui/browser-evidence/line-archive
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Retain Hardware IMEI browser evidence
         if: always()

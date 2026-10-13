@@ -9,13 +9,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 )
 
 type fakePurger struct {
 	calls   int
 	retains int
 	fail    int
+}
+
+func (*fakePurger) PrepareLineDeletion(string, cellularmessages.SubmissionHistory) error { return nil }
+func (*fakePurger) Find(string, string, string) (providermessages.Record, bool, error) {
+	return providermessages.Record{}, false, nil
 }
 
 func (purger *fakePurger) RetainLine(string) error {

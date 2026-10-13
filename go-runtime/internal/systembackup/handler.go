@@ -28,12 +28,14 @@ const (
 type Source struct {
 	Name, Path string
 	Read       func() ([]byte, error)
+	Recovery   string
 }
 
 type FileEvidence struct {
-	Name   string `json:"name"`
-	Bytes  int    `json:"bytes"`
-	SHA256 string `json:"sha256"`
+	Name     string `json:"name"`
+	Bytes    int    `json:"bytes"`
+	SHA256   string `json:"sha256"`
+	Recovery string `json:"recovery,omitempty"`
 }
 type Handler struct {
 	sources []Source
@@ -102,7 +104,9 @@ func (handler *Handler) build() ([]byte, error) {
 		Files         []string       `json:"files"`
 		Entries       []FileEvidence `json:"entries"`
 		Consistency   string         `json:"consistency"`
-	}{SchemaVersion: 1, CreatedAt: handler.now().UTC(), Consistency: "per_source_not_cross_database_atomic"}
+		Recovery      string         `json:"recovery"`
+	}{SchemaVersion: 2, CreatedAt: handler.now().UTC(), Consistency: "per_source_not_cross_database_atomic",
+		Recovery: "offline_operator_reconciliation_only; no online restore, automatic start, command execution or paid retry; catalog APN passwords and operation digest key excluded; other source snapshots may contain sensitive state"}
 	for _, source := range handler.sources {
 		var err error
 		var payload []byte
@@ -155,7 +159,7 @@ func (handler *Handler) build() ([]byte, error) {
 		}
 		manifest.Files = append(manifest.Files, source.Name)
 		digest := sha256.Sum256(payload)
-		manifest.Entries = append(manifest.Entries, FileEvidence{Name: source.Name, Bytes: len(payload), SHA256: hex.EncodeToString(digest[:])})
+		manifest.Entries = append(manifest.Entries, FileEvidence{Name: source.Name, Bytes: len(payload), SHA256: hex.EncodeToString(digest[:]), Recovery: source.Recovery})
 		if output.Len() > maximumBackupBytes {
 			return nil, errors.New("backup exceeds maximum size")
 		}

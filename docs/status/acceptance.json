@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "LINE_ARCHIVE_BACKUP",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Approved N4 before N3/N13 batch: SMS write-transaction deletion barrier rejects unresolved submissions and missing durable history before any purge; history-retaining deletion keeps operation evidence. Recycle bin works without attached devices, permanent deletion lives on archived records and resumes the same confirmed operation across reload. Catalog export v2 retains IMEI/pending bindings, independent runtime intent and operation/lifecycle receipts; SMS snapshot includes tombstones.",
+      "acceptance": "Implementation complete candidate, not yet qualified or deployed. Hosted compiled counterexamples, affected-package race and mounted Chromium flow are pending. Four obsolete source-string deletion assertions were replaced by behavior. Backup remains per-source, not cross-database atomic or an online restore; exported intent/receipts never authorize startup, commands or paid retry. No production data deletion, SIM operation, SMS or call.",
+      "evidence": ["webui/src/mdd/UPSTREAM.md", "webui/tests/lineArchiveBrowser.mjs", "go-runtime/internal/linedeletion/integration_test.go", "go-runtime/internal/cellularmessages/store_test.go", "go-runtime/internal/systembackup/recovery_test.go"]
+    },
+    {
       "id": "IMEI_UNCONFIGURED_CARD",
       "state": "needs_verification",
       "releaseRelevance": "current",

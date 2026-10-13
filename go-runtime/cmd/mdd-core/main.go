@@ -878,18 +878,9 @@ func run(ctx context.Context, settings config) error {
 	defer devicePresentation.Close()
 	backupAPI, err := systembackup.NewHandler([]systembackup.Source{
 		{Name: "events.db", Read: store.Backup}, {Name: "messages.db", Read: messages.Backup},
-		{Name: "calls.db", Read: calls.Backup}, {Name: "catalog.json", Read: func() ([]byte, error) {
-			snapshot, snapshotErr := catalog.SnapshotIncludingDeleted()
-			if snapshotErr != nil {
-				return nil, snapshotErr
-			}
-			for lineIndex := range snapshot.Lines {
-				for profileIndex := range snapshot.Lines[lineIndex].Network.APNProfiles {
-					snapshot.Lines[lineIndex].Network.APNProfiles[profileIndex].Password = ""
-				}
-			}
-			return json.Marshal(snapshot)
-		}},
+		{Name: "calls.db", Read: calls.Backup},
+		{Name: "catalog.json", Read: catalog.Backup, Recovery: "export_v2; lines including archived, defaults, IMEI pool/pending, runtime intent, raw bindings, lifecycle receipts; derived indexes must be rebuilt; APN passwords omitted; operation digest key excluded, receipts are reconciliation evidence only"},
+		{Name: "cellular-sms-operations.db", Read: cellularSMSOperations.Backup, Recovery: "transactional operation records and deletion barriers; preserve unresolved receipts and tombstones; never an automatic send queue"},
 		{Name: "egress.db", Read: egressStore.Backup}, {Name: "allowance.db", Read: allowanceStore.Backup},
 		{Name: "notifications.db", Read: notificationStore.Backup}, {Name: "preferences.db", Read: preferenceStore.Backup},
 		{Name: "device-presentation.db", Read: devicePresentation.Backup},

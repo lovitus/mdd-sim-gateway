@@ -14,6 +14,26 @@ of every platform, hardware combination or failure branch.
 
 ## Delivery And Acceptance
 
+### Archived Lines And Recovery Export
+
+October13 approved N4/N3/N13 correction reuses the existing catalog lifecycle,
+deletion receipt, SMS store and backup endpoint. Archive requires prior disable/stop;
+restore remains disabled. Recycle Bin is independent of hardware presence, and
+permanent deletion is offered only for archived records with two confirmations.
+The browser retains operation/history intent across reload; unknown outcomes do
+not trigger automatic retry. No eSIM profile operation is added.
+Before any destructive store step, one SMS write transaction rejects unresolved
+or unpersisted submissions and establishes the existing tombstone against Begin.
+Keeping history also keeps SMS operation evidence. Export v2 includes IMEI/pending
+bindings, runtime intent and lifecycle receipts; the SMS snapshot includes barriers.
+Catalog APN passwords/digest key stay excluded. Other snapshots remain sensitive;
+protect the archive. Snapshots are not cross-database atomic, and no online restore,
+automatic startup or operation replay is implemented. Failure boundaries include
+Begin/delete races, missing history, reload/cancel/partial deletion and incomplete
+backup. Hosted qualification and original-reviewer source closure are pending.
+Four source-text assertions about the old deletion button were removed in favor
+of the mounted browser workflow; no production or paid acceptance is implied.
+
 ### IMEI Binding Before Line Creation
 
 October 12 readback follow-up: HardwarePanel now resolves its existing pool
