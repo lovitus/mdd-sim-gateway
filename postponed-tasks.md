@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### SYSTEM_UPDATE_CONTINUITY
+
+**State: needs_verification; release relevance: current.** N10/N11/N12: Core-owned durable update maintenance fences business admission, retains exact Provider leases through fixed-service restart, and reconciles original cleanup without repeating activation. Root worker publishes service-readable progress; sidebar reuses the existing confirmation dialog. Original reviewer approved the plan subject to these contracts; candidate is not yet qualified.
+
+Acceptance scope / remaining action: Not built, tested, merged or deployed. Hosted compiled counterexamples, scoped race tests, root-to-service progress readback and the production-root Chromium confirmation flow are pending. No live installation, hardware or paid operation; existing PR29/30/32 and frozen PR31 remain separate.
+
 ### IMEI_UNCONFIGURED_CARD
 
 **State: needs_verification; release relevance: current.** October12 HardwarePanel readback joins the existing pool by ICCID for current IMEI/selection/inputs, preserving drafts and isolating card changes. Hosted38197352338/6afc927 proves old display failure;38199470829/aef240a proves invalid-response failure and passes the corrected full Chromium flow, including legacy14-digit readback and zero-revision empty pool. Both reviewers approve aef240a. Generated assets synchronized, temporary proof removed; archive/2026-10-12/hardware-imei-readback-qualified retains evidence. Final CI/review/rollout pending. PR27 artifact9b33e9c remains deployed; no Core/Agent/write-contract change or live card/paid operation. Synthetic HTTP browser evidence is not production clicking.

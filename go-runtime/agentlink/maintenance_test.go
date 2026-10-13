@@ -34,3 +34,33 @@ func TestHostMaintenanceExcludesRPCsAcrossReconnect(t *testing.T) {
 		t.Fatal("host remained gated")
 	}
 }
+
+func TestUpdateMaintenanceFencesNewAgentsButNotRefusedBusyAdmission(t *testing.T) {
+	connection := &serverConnection{hello: Hello{AgentID: "host", ProcessGeneration: "old"}, pending: map[string]chan envelope{"busy": make(chan envelope, 1)}, closed: make(chan struct{})}
+	server := &Server{agents: map[string]*serverConnection{"host": connection}}
+	if err := server.BeginUpdateMaintenance("update-one"); err == nil || server.updateMaintenance != "" {
+		t.Fatal("BUSY_RPC: update disturbed existing owner")
+	}
+	delete(connection.pending, "busy")
+	if err := server.BeginUpdateMaintenance("update-one"); err != nil {
+		t.Fatal(err)
+	}
+	newcomer := &serverConnection{hello: Hello{AgentID: "new-host", ProcessGeneration: "new"}, pending: map[string]chan envelope{}, closed: make(chan struct{})}
+	server.agents["new-host"] = newcomer
+	for _, current := range []*serverConnection{connection, newcomer} {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if _, err := server.roundTrip(ctx, current, envelope{}); !errors.Is(err, ErrAgentMaintenance) {
+			t.Fatalf("NEW_AGENT_RPC: maintenance bypassed: %v", err)
+		}
+	}
+	if err := server.BeginHostMaintenance("new-host", "new", "foreign"); !errors.Is(err, ErrAgentMaintenance) {
+		t.Fatal("host lease bypassed update")
+	}
+	if err := server.EndUpdateMaintenance("foreign"); !errors.Is(err, ErrAgentMaintenance) {
+		t.Fatal("foreign operation released update")
+	}
+	if err := server.EndUpdateMaintenance("update-one"); err != nil || server.updateMaintenance != "" {
+		t.Fatal("original update did not release")
+	}
+}
