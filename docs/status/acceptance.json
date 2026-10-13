@@ -187,7 +187,7 @@
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/goCallCoordinator.jsx",
         "webui/src/mdd/smsAdapter.js",
-        "webui/tests/smsSubmissionSafety.mjs"
+        "webui/tests/communicationBrowser.mjs"
       ],
       "historicalEvidence": []
     },
@@ -245,7 +245,7 @@
         "go-runtime/vowifiipc/types.go",
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/mdd/smsAdapter.js",
-        "webui/tests/smsSubmissionSafety.mjs"
+        "webui/tests/communicationBrowser.mjs"
       ],
       "historicalEvidence": []
     },
@@ -611,7 +611,7 @@
         "go-runtime/agentlink/types.go",
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/mdd/smsAdapter.js",
-        "webui/tests/smsSubmissionSafety.mjs"
+        "webui/tests/communicationBrowser.mjs"
       ],
       "historicalEvidence": []
     },
@@ -829,7 +829,7 @@
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/goCallCoordinator.jsx",
         "webui/src/mdd/smsAdapter.js",
-        "webui/tests/smsSubmissionSafety.mjs"
+        "webui/tests/communicationBrowser.mjs"
       ],
       "historicalEvidence": []
     },
@@ -1087,7 +1087,7 @@
       "evidence": [
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/mdd/smsAdapter.js",
-        "webui/tests/smsSubmissionSafety.mjs"
+        "webui/tests/communicationBrowser.mjs"
       ],
       "historicalEvidence": []
     },
@@ -1106,7 +1106,7 @@
         "go-runtime/internal/agentmodem/operations.go",
         "providers/vowifi-go/internal/service/operation_store.go",
         "webui/src/mdd/smsAdapter.js",
-        "webui/tests/smsSubmissionSafety.mjs"
+        "webui/tests/communicationBrowser.mjs"
       ],
       "historicalEvidence": []
     },
@@ -1420,6 +1420,20 @@
     }
   ],
   "workstreams": [
+    {
+      "id": "COMMUNICATION_OWNERSHIP",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Approved repair batch E/N5/N6: per-operation browser SMS journal, compose ownership, original-card-only historical reply and independent send transport; exact incoming-answer ownership and cancelled late acceptance cleanup; frozen allowance confirmation with server rule/card checks. Existing Android ownership rules are reused. No automatic send, Agent wire change or Android scope expansion.",
+      "acceptance": "Implementation candidate only; hosted compiled pre-fix counterexamples, actual Chromium flows and original-reviewer source review are pending. No real allowance SMS, paid/hardware operation or deployment. PR29 c200dc5/CI38345314313 completes source review and full CI for the separate A-D/N1/N2/N9/freshness batch, unmerged and not deployed; its receipt remains in PR29. Remaining approved eSIM permits/downloads, deletion/backup, update admission/UI batches are not abandoned. Replaced legacy SMS source-string checks with behavior coverage.",
+      "evidence": [
+        "webui/src/mdd/UPSTREAM.md",
+        "webui/src/mdd/smsJournal.js",
+        "webui/src/goCallCoordinator.jsx",
+        "webui/tests/communicationBrowser.mjs",
+        "go-runtime/internal/allowance/confirmation_test.go"
+      ]
+    },
     {
       "id": "IMEI_UNCONFIGURED_CARD",
       "state": "needs_verification",

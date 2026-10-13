@@ -679,3 +679,19 @@ self-signature, DNS names and expiry, with missing evidence remaining unknown.
 This does not expose key paths, enable certificate editing or equate a
 non-self-signed certificate with a validated trust chain. Support bundles keep
 certificate identifiers redacted.
+
+## Communication ownership (October 13)
+
+E/N5/N6 keeps the copied Messages/Allowance and existing call coordinator.
+Browser SMS receipts adopt this repository's Android MessageJournal per-operation
+ownership and exact submission receipt rules; unresolved payloads are retained,
+never auto-sent or discarded to compose a new message. History without original
+card evidence requires an explicit new message; historical transport is not the
+new send route. Incoming-answer ownership follows Android RemoteCall, including
+late acceptance after cancellation; shared active status grants no ownership.
+Allowance confirmation freezes card, rule revision, recipient and body; Core
+checks them before creation, atomically at storage, and at dispatch. Existing
+message route identity checks still apply. No new Agent protocol or Android change.
+Hosted browser/confirmation regression results remain pending. The obsolete
+SMS source-string assertions are replaced by mounted browser behavior coverage.
+No real allowance SMS, carrier acceptance or production rollout is claimed.

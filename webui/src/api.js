@@ -449,13 +449,13 @@ async function setGoLineCountry(lineID, country) {
   return { effective_country: result.line?.network?.egress_country || '', line: result.line, revision: result.revision }
 }
 
-async function queryGoAllowance(lineID, transport) {
+async function queryGoAllowance(lineID, transport, confirmed) {
   if (!['cellular', 'vowifi'].includes(transport)) throw new Error('choose an explicit SMS transport in Messages')
-  const catalog = await j('GET', '/v1/catalog/lines')
-  const line = (catalog.lines || []).find(value => String(value.id) === String(lineID))
-  if (!line?.card_id) throw new Error('line SIM identity is unavailable')
+  if (!confirmed?.cardID || !Number.isSafeInteger(confirmed.ruleRevision) || confirmed.ruleRevision < 1 || !confirmed.recipient || !confirmed.body)
+    throw new Error('allowance confirmation identity is unavailable')
   const query = await j('POST', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query`, {
-    query_id: operationID('react-allowance-query'), expected_card_id: line.card_id, transport,
+    query_id: operationID('react-allowance-query'), expected_card_id: confirmed.cardID, transport,
+    expected_rule_revision:confirmed.ruleRevision, recipient:confirmed.recipient, body:confirmed.body,
   })
   const dispatch = query.dispatch
   const expectedPath = transport === 'cellular'
@@ -463,7 +463,8 @@ async function queryGoAllowance(lineID, transport) {
     : `/v1/lines/${encodeURIComponent(lineID)}/vowifi/messages/send`
   const body = dispatch?.body || {}
   if (dispatch?.method !== 'POST' || dispatch.path !== expectedPath ||
-      body.allowance_query_id !== query.query?.query_id || body.expected_card_id !== line.card_id)
+      body.allowance_query_id !== query.query?.query_id || body.expected_card_id !== confirmed.cardID ||
+      body.recipient !== confirmed.recipient || body.body !== confirmed.body || query.query?.rule_revision !== confirmed.ruleRevision)
     throw new Error('allowance dispatch identity mismatch')
   const result = await api.sendMessageV1(lineID, transport, body)
   return { ...result, ok: true, query }

@@ -10,7 +10,7 @@ const FIELDS = [
 ]
 const EMPTY = Object.fromEntries(FIELDS.map(([key]) => [key, '']))
 
-export default function AllowancePanel({ instanceId, mode = 'overview', transport = 'auto', availableTransports = [], showToast }) {
+export default function AllowancePanel({ instanceId, cardID, mode = 'overview', transport = 'auto', availableTransports = [], showToast }) {
   const { t, language } = useI18n()
   const [value, setValue] = useState({ ...EMPTY })
   const [draft, setDraft] = useState({ ...EMPTY })
@@ -34,6 +34,10 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
   const operationBusy = useRef(false)
   const activeId = useRef(instanceId)
   activeId.current = instanceId
+  const target = JSON.stringify([String(instanceId), String(cardID || '')])
+  const activeTarget = useRef(target)
+  activeTarget.current = target
+  useEffect(() => { activeTarget.current = target; return () => {activeTarget.current = null} }, [target])
 
   const toast = (message) => showToast?.(message)
   const load = useCallback(async () => {
@@ -119,13 +123,16 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
       return
     }
     const { recipient, body } = rule.effective
-    if (!(await dialogs.confirm(t('Send “{body}” to {recipient} to query the allowance? SMS charges may apply.', { body, recipient })))) return
+    const confirmed = Object.freeze({cardID:String(cardID || ''), ruleRevision:rule.revision, recipient, body})
+    if (!confirmed.cardID) {toast(t('The exact SIM identity is unavailable.')); return}
     operationBusy.current = true
     setBusy(true)
     const previousTs = value.updated_ts
     try {
-      const result = await api.queryAllowance(instanceId, sendTransport)
-      if (String(activeId.current) !== String(instanceId)) return
+      if (!(await dialogs.confirm(t('Send “{body}” to {recipient} to query the allowance? SMS charges may apply.', { body, recipient }) + `\nICCID ${confirmed.cardID} · ${sendTransport}`))) return
+      if (activeTarget.current !== target) return
+      const result = await api.queryAllowance(instanceId, sendTransport, confirmed)
+      if (activeTarget.current !== target) return
       if (result.ok === false) {
         toast(t('The query SMS was submitted with an uncertain result. Check Messages before retrying.'))
       } else {
@@ -133,7 +140,7 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
       }
       beginPolling(previousTs)
     } catch (error) { toast(`${t('Query failed')}: ${error.message}`) }
-    finally { operationBusy.current = false; setBusy(false) }
+    finally { operationBusy.current = false; if(activeTarget.current !== null)setBusy(false) }
   }
 
   const saveRule = async () => {
