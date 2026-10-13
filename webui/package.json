@@ -19,7 +19,7 @@
     "test:native-incoming-coordinator": "node tests/nativeIncomingCoordinator.mjs",
     "test:update-progress": "node tests/updateProgress.mjs",
     "test:toast": "node tests/toastLifecycle.mjs",
-    "test:go-v1-adapter": "node tests/goV1Adapter.mjs",
+    "test:go-v1-adapter": "node tests/goV1Adapter.mjs && node tests/newCardControl.mjs",
     "test:ui-migration": "node tests/uiMigrationContracts.mjs",
     "test:mdd-notifications": "node tests/mddNotificationAdapter.mjs",
     "test:mdd-adapters": "node tests/mddNotificationAdapter.mjs && node tests/mddSmsAdapter.mjs && node tests/mddCallView.mjs && node tests/mddHistoryAdapter.mjs && node tests/mddSystemAdapter.mjs && node tests/mddEsimAdapter.mjs && node tests/esimRelocation.mjs && node tests/mddLineAdapter.mjs && node tests/mddHardwareAdapter.mjs && node tests/mddNetworkAdapter.mjs && node tests/mddUpdateContracts.mjs",
@@ -29,7 +29,7 @@
     "test:shared-i18n": "node tests/sharedI18n.mjs",
     "test:recording": "node tests/callRecording.mjs",
     "test:recording-browser": "node tests/recordingBrowser.mjs",
-    "test:hardware-imei-browser": "node tests/hardwareImeiBrowser.mjs"
+    "test:hardware-imei-browser": "node tests/hardwareImeiBrowser.mjs && node tests/newCardBrowser.mjs && node tests/newCardReviewBrowser.mjs"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

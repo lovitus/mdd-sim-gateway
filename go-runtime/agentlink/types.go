@@ -979,6 +979,26 @@ type ModemPolicyCommand struct {
 	ExpectedRevision uint64            `json:"expected_revision"`
 	Patch            ModemPolicyPatch  `json:"patch,omitempty"`
 	Profile          ModemProfileInput `json:"profile,omitempty"`
+	// Core confirmation fence; never added to the Agent wire request.
+	ExpectedTarget *ModemControlIdentity `json:"-"`
+}
+
+type ModemControlIdentity struct {
+	AgentID              string `json:"agent_id"`
+	ProcessGeneration    string `json:"process_generation"`
+	EquipmentID          string `json:"equipment_id"`
+	AttachmentID         string `json:"attachment_id"`
+	CardID               string `json:"card_id"`
+	SIMSessionGeneration string `json:"sim_session_generation"`
+}
+
+func (identity ModemControlIdentity) Matches(target ModemTarget) bool {
+	return identity.AgentID != "" && identity.ProcessGeneration != "" &&
+		identity.EquipmentID != "" && identity.AttachmentID != "" &&
+		identity.CardID != "" && identity.SIMSessionGeneration != "" &&
+		identity.AgentID == target.AgentID && identity.ProcessGeneration == target.ProcessGeneration &&
+		identity.EquipmentID == target.EquipmentID && identity.AttachmentID == target.AttachmentID &&
+		identity.CardID == target.CardID && identity.SIMSessionGeneration == target.SIMSessionGeneration
 }
 
 type ModemPolicyRequest struct {

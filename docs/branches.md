@@ -70,6 +70,16 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October13 new-card evidence only: `archive/2026-10-13/new-card-qualified`
+retains6e63731/CI38342258088 (compiled behavioral counterexamples followed by
+fixed race/API/Chromium passes). Initial tags `new-card-initial-proof` and
+`new-card-first-proof` retain1998fc7/38340413097 (new fixture root mismatch) and
+ef465e8/38340756689 (green before offline-stop/late-save review corrections).
+The first cleanup imported the hosted app.js and removed its temporary proof.
+`new-card-review-baseline` retainsae29abb before the final review corrections;
+CI38342967333 reached the bounded wait timeout, not acceptance. Later corrections
+require their own proof. These tags are not releases or branches to restore.
+
 October12 display evidence only: `archive/2026-10-12/hardware-imei-readback-proof`
 retains6afc927/CI38197352338 (old rendered-page readback assertion, fixed Chromium
 flow passes; full CI rejected stale embed). `hardware-imei-readback-qualified`
