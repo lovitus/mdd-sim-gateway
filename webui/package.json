@@ -29,7 +29,8 @@
     "test:shared-i18n": "node tests/sharedI18n.mjs",
     "test:recording": "node tests/callRecording.mjs",
     "test:recording-browser": "node tests/recordingBrowser.mjs",
-    "test:hardware-imei-browser": "node tests/hardwareImeiBrowser.mjs"
+    "test:hardware-imei-browser": "node tests/hardwareImeiBrowser.mjs",
+    "test:update-entry-browser": "node tests/updateEntryBrowser.mjs"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

@@ -67,6 +67,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### SYSTEM_UPDATE_CONTINUITY
+
+**State: needs_verification; release relevance: current.** N10/N11/N12: Core-owned durable update maintenance fences business admission, retains exact Provider leases through fixed-service restart, and reconciles original cleanup without repeating activation. Root worker publishes service-readable progress; sidebar reuses the existing confirmation dialog. Original reviewer approved the plan subject to these contracts; candidate is not yet qualified.
+
+Acceptance scope / remaining action: Original reviewer approved exact05f9329; archive/2026-10-14/update-before-root-fixture preserves that source. CI38423424333 reached16 compiled behavioral counterexamples, then failed because the lowered-UID fixture could not execute its test binary through a private runner ancestor; the permanent root check had the same fixture failure. Repair1 copies that binary into its own private Linux fixture directory without broadening runner permissions or changing the status permission assertion. Hosted qualification remains pending. Earlier38413555978 failed;38420434058 timed out with terminal unknown. No merge, installation, hardware or paid operation; existing PR29/30/32 and frozen PR31 remain separate.
+
 ### IMEI_UNCONFIGURED_CARD
 
 **State: needs_verification; release relevance: current.** October12 HardwarePanel readback joins the existing pool by ICCID for current IMEI/selection/inputs, preserving drafts and isolating card changes. Hosted38197352338/6afc927 proves old display failure;38199470829/aef240a proves invalid-response failure and passes the corrected full Chromium flow, including legacy14-digit readback and zero-revision empty pool. Both reviewers approve aef240a. Generated assets synchronized, temporary proof removed; archive/2026-10-12/hardware-imei-readback-qualified retains evidence. Final CI/review/rollout pending. PR27 artifact9b33e9c remains deployed; no Core/Agent/write-contract change or live card/paid operation. Synthetic HTTP browser evidence is not production clicking.

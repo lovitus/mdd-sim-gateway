@@ -79,6 +79,7 @@ type EventStore interface {
 }
 
 type Config struct {
+	Admit                  func() (func(), error)
 	ReconcileDefaultDrafts func(context.Context) error
 	ContinuousRetry        func() (recovery.ContinuousRetry, error)
 	ExitRecovery           *ExitRecoveryConfig
@@ -98,6 +99,7 @@ type Config struct {
 }
 
 type Reconciler struct {
+	admit                  func() (func(), error)
 	defaultsInFlight       bool
 	defaultsNext           time.Time
 	defaultsFailures       uint32
@@ -251,6 +253,7 @@ func New(config Config) (*Reconciler, error) {
 	}
 	ctx, cancel := context.WithCancel(config.Context)
 	return &Reconciler{
+		admit:                  config.Admit,
 		reconcileDefaultDrafts: config.ReconcileDefaultDrafts,
 		continuousRetry:        config.ContinuousRetry,
 		exitRecovery:           config.ExitRecovery,
@@ -453,6 +456,13 @@ func (reconciler *Reconciler) run() {
 }
 
 func (reconciler *Reconciler) reconcile(ctx context.Context) error {
+	if reconciler.admit != nil {
+		done, err := reconciler.admit()
+		if err != nil {
+			return nil
+		}
+		defer done()
+	}
 	var failures []error
 	reconciler.scheduleDefaultDrafts()
 	catalog, err := reconciler.catalog.Snapshot()
@@ -811,7 +821,17 @@ func (reconciler *Reconciler) execute(plan actionPlan, operationID string) {
 	defer reconciler.wg.Done()
 	ctx, cancel := context.WithTimeout(reconciler.ctx, reconciler.actionTimeout)
 	request := vowifiipc.LifecycleRequest{OperationID: operationID, RequireIdle: plan.recovery}
-	err := reconciler.validatePlan(ctx, plan)
+	var err error
+	if reconciler.admit != nil {
+		var done func()
+		done, err = reconciler.admit()
+		if err == nil {
+			defer done()
+		}
+	}
+	if err == nil {
+		err = reconciler.validatePlan(ctx, plan)
+	}
 	if err == nil {
 		if plan.action == "prepare_sim_apdu" {
 			preparer, ok := reconciler.agents.(interface {

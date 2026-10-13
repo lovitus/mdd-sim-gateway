@@ -60,6 +60,7 @@ type Config struct {
 	Incoming IncomingCallStore
 	Now      func() time.Time
 	Capacity int
+	Admit    func() (func(), error)
 }
 
 type CallRecorder interface {
@@ -310,6 +311,13 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 func (service *Service) prepare(ctx context.Context, subject, lineID, callID, expectedCardID, direction string,
 	incoming *incomingFence,
 ) (*session, error) {
+	if service.config.Admit != nil {
+		done, err := service.config.Admit()
+		if err != nil {
+			return nil, err
+		}
+		defer done()
+	}
 	line, err := service.config.Catalog.Get(lineID)
 	cardID, targetReady := cellularTargetIdentity(line)
 	if err != nil || !targetReady {
@@ -380,6 +388,23 @@ func (service *Service) prepare(ctx context.Context, subject, lineID, callID, ex
 	current.mu.Unlock()
 	failed = false
 	return current, nil
+}
+
+// UpdateBusy includes preparation and ready media, not only established calls.
+// A prepare admission token spans insertion; freeze and this check cannot both
+// miss a new session. Existing renew and hangup paths are left unchanged.
+func (service *Service) UpdateBusy() error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if len(service.sessions) != 0 {
+		return errors.New("cellular media ownership is active")
+	}
+	for _, claim := range service.claims {
+		if claim.state == "claiming" || claim.state == "uncertain" || claim.state == "active" {
+			return errors.New("cellular incoming call ownership is active")
+		}
+	}
+	return nil
 }
 
 func cellularTargetIdentity(line linecatalog.Line) (string, bool) {

@@ -51,12 +51,13 @@ const (
 )
 
 type Manifest struct {
-	SchemaVersion  int        `json:"schema_version"`
-	ReleaseID      string     `json:"release_id"`
-	SourceRevision string     `json:"source_revision"`
-	OS             string     `json:"os"`
-	Architecture   string     `json:"architecture"`
-	Artifacts      []Artifact `json:"artifacts"`
+	UpdateMaintenance int        `json:"update_maintenance,omitempty"`
+	SchemaVersion     int        `json:"schema_version"`
+	ReleaseID         string     `json:"release_id"`
+	SourceRevision    string     `json:"source_revision"`
+	OS                string     `json:"os"`
+	Architecture      string     `json:"architecture"`
+	Artifacts         []Artifact `json:"artifacts"`
 }
 
 type Artifact struct {
@@ -93,6 +94,7 @@ func CreateDirectory(output string, manifest Manifest, inputs []Input) (Manifest
 		return Manifest{}, err
 	}
 	manifest.SchemaVersion = SchemaVersion
+	manifest.UpdateMaintenance = 1
 	manifest.Artifacts = make([]Artifact, 0, len(inputs))
 	seen := map[string]struct{}{}
 	for _, input := range inputs {
@@ -217,6 +219,9 @@ func LoadDirectory(directory string) (Manifest, error) {
 }
 
 func (manifest Manifest) Validate() error {
+	if manifest.UpdateMaintenance < 0 || manifest.UpdateMaintenance > 1 {
+		return errors.New("unsupported release update maintenance contract")
+	}
 	if manifest.SchemaVersion != legacySchemaVersion && manifest.SchemaVersion != previousSchemaVersion && manifest.SchemaVersion != guardSchemaVersion && manifest.SchemaVersion != SchemaVersion || !releaseIDPattern.MatchString(manifest.ReleaseID) ||
 		!validRevision(manifest.SourceRevision) || manifest.OS != "linux" ||
 		(manifest.Architecture != "amd64" && manifest.Architecture != "arm64") ||

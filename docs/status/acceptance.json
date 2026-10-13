@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "SYSTEM_UPDATE_CONTINUITY",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "N10/N11/N12: Core-owned durable update maintenance fences business admission, retains exact Provider leases through fixed-service restart, and reconciles original cleanup without repeating activation. Root worker publishes service-readable progress; sidebar reuses the existing confirmation dialog. Original reviewer approved the plan subject to these contracts; candidate is not yet qualified.",
+      "acceptance": "Original reviewer approved exact05f9329; archive/2026-10-14/update-before-root-fixture preserves that source. CI38423424333 reached16 compiled behavioral counterexamples, then failed because the lowered-UID fixture could not execute its test binary through a private runner ancestor; the permanent root check had the same fixture failure. Repair1 copies that binary into its own private Linux fixture directory without broadening runner permissions or changing the status permission assertion. Hosted qualification remains pending. Earlier38413555978 failed;38420434058 timed out with terminal unknown. No merge, installation, hardware or paid operation; existing PR29/30/32 and frozen PR31 remain separate.",
+      "evidence": ["DEVELOPMENT.md", "go-runtime/internal/systemupdate/maintenance.go", "go-runtime/internal/systemupdate/maintenance_test.go", "go-runtime/internal/core/update_maintenance_test.go", "go-runtime/internal/cellularmedia/update_maintenance_test.go", "go-runtime/internal/systemupdate/status_owner_linux_test.go", "webui/tests/updateEntryBrowser.mjs"]
+    },
+    {
       "id": "IMEI_UNCONFIGURED_CARD",
       "state": "needs_verification",
       "releaseRelevance": "current",

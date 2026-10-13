@@ -9,9 +9,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type installLock struct{ file *os.File }
+type ExecutionLock struct{ file *os.File }
 
-func acquireLock(path string, expectedUID int) (*installLock, error) {
+// AcquireExecutionLock also serializes the detached worker with explicit
+// reconciliation. Its lifetime must include download and final status publication.
+func AcquireExecutionLock(path string, expectedUID int) (*ExecutionLock, error) {
 	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
@@ -38,10 +40,10 @@ func acquireLock(path string, expectedUID int) (*installLock, error) {
 		}
 		return nil, err
 	}
-	return &installLock{file: file}, nil
+	return &ExecutionLock{file: file}, nil
 }
 
-func (lock *installLock) Close() error {
+func (lock *ExecutionLock) Close() error {
 	if lock == nil || lock.file == nil {
 		return nil
 	}
