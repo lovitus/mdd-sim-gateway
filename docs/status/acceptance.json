@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "ESIM_OPERATION_OWNERSHIP",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Approved N7/N8 batch: protect all current EID profiles including disabled catalog lines, freeze insertion identity across existing maintenance acquisition, and dispatch only the matching internal eSIM command. Unknown mutation retains its lease until original-Agent inventory readback. Web downloads retain independent EID/operation records across uncertain outcomes, new attempts and reader changes; new attempts require explicit confirmation and successful local persistence.",
+      "acceptance": "PR31 CI38391757681 at6166112 reproduced the intended old behaviors and passed fixed affected-package race and adapter tests; browser/full CI failed on five unimplemented fixture snapshot GET routes. Browser edits/reruns are stopped at the two-fix ceiling, not waived. The original reviewer approved corrections2-4 and normal permit cleanup, but found admission failure discarded unfinished cleanup. This candidate retains the exact cleanup handle with the rejection, records cleanupOnly, and releases host only if acquired by this operation; its three new failure-exit cases await hosted red/green and source review. Candidate CI is intentionally not triggered while browser validation is frozen; this is not qualification. No live eSIM, replay, paid operation, merge or deployment. PR29/30 remain independent; deletion/backup and update batches remain open. No Agent wire extension or soft-delete restoration.",
+      "evidence": ["go-runtime/internal/euiccprofiles/mutation_guard.go", "go-runtime/internal/euiccprofiles/mutation_guard_test.go", "go-runtime/agentlink/euicc_maintenance_test.go", "webui/tests/esimOperationsBrowser.mjs", "webui/src/mdd/UPSTREAM.md"]
+    },
+    {
       "id": "IMEI_UNCONFIGURED_CARD",
       "state": "needs_verification",
       "releaseRelevance": "current",
