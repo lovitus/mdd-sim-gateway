@@ -290,7 +290,7 @@ func (core *coreMaintenance) maintenance(ctx context.Context, command *systemupd
 	if err != nil {
 		return systemupdate.MaintenanceView{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+core.token)
+	request.Header.Set("X-MDD-Provider-Apply-Token", core.token)
 	request.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
