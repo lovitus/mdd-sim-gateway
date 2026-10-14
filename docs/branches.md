@@ -1,5 +1,16 @@
 # Branch disposition and integration record
 
+PR36 source `185c736` is retained at
+`archive/2026-10-14/reader-setup-pre-publication-review`; hosted run `38538977486` records loaded/
+compiled pre-fix counterexamples, mounted setup and existing-flow regressions.
+Only stale-embed gates remained; exact same-source merge `b0ffd8e` supplied the UI.
+Follow-up source review found own-claim publication remounting a recovered draft;
+the existing journey now includes that snapshot before explicit retry. Source
+`9b0a3df` / run `38540681863` confirms that counterexample and green browser
+journeys; only stale embed gates remain. Its review found publication during the
+pending PUT too: claim ID, edits and exact baseline now transfer before that PUT,
+with original target ownership required. Final CI, review and deployment remain pending.
+
 ## October 14 integration and rollout
 
 Final PR35 source `431fa6b` / full Go CI `38516014673` and original review passed;

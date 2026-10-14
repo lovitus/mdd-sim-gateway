@@ -185,11 +185,11 @@ function readerOperationIdentity(device) {
 	return { agentID, readerName, cardID, sessionGeneration, processGeneration }
 }
 
-async function goReaderProvision(device, lineID, expectedCatalogRevision) {
+async function goReaderProvision(device, lineID, expectedCatalogRevision, retainedOperationID) {
 	const identity = readerOperationIdentity(device)
 	return j('POST', '/v1/readers/provision', {
 		schema_version: 1,
-		operation_id: operationID('react-reader-provision'),
+		operation_id: retainedOperationID || operationID('react-reader-provision'),
 		line_id: String(lineID || ''),
 		expected_catalog_revision: Number(expectedCatalogRevision),
 		process_generation: identity.processGeneration,
@@ -695,8 +695,9 @@ Object.assign(api, {
     `/v1/line-candidates/${encodeURIComponent(candidateID)}/claim`,
     { schema_version: 1, operation_id: operationIDValue, name: String(name || '').trim() }, { 'If-Match': `"${Number(revision)}"` }),
   providerApplyStatus: () => j('GET', '/v1/system/provider-config'),
-  applyProviderConfig: revision => j('POST', '/v1/system/provider-config', {
+  applyProviderConfig: (revision, onlyAddLineID = '') => j('POST', '/v1/system/provider-config', {
     schema_version: 1, catalog_revision: Number(revision),
+    ...(onlyAddLineID ? {only_add_line_id:String(onlyAddLineID)} : {}),
   }, {}, 140000),
   rawModemBinding: lineID => j('GET', `/v1/lines/${encodeURIComponent(lineID)}/raw-modem`),
   saveRawModemBinding: (lineID, body) => j('PUT', `/v1/lines/${encodeURIComponent(lineID)}/raw-modem`, body),

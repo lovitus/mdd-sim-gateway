@@ -430,7 +430,8 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const c = capability(device, kind)
   const isReader = device.device_type === 'reader'
   const isImeiMissing = isReader && !binding.imei
-  const needsSetup = kind === 'vowifi' && !device.instance_id && !device.runtime_intent_target
+  const needsSetup = kind === 'vowifi' && device.present !== false && ((!device.instance_id && !device.runtime_intent_target) ||
+    device.line_configuration?.enabled === false || device.line_configuration?.provisioning_state === 'draft')
   const stopIntent = kind === 'vowifi' && c.desired
   const pending = submitting || (['starting', 'stopping'].includes(c.actual) && !stopIntent)
   const unavailable = device.stale || (!c.available && !isImeiMissing) || c.actual === 'unsupported' || device.compatibilityOnly ||
@@ -439,7 +440,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const canRetry = kind === 'vowifi' && c.desired && ['off', 'degraded', 'error'].includes(c.actual) && !unavailable
   const change = async (next, retry = false) => {
     if (requestBusy.current) return
-    if (needsSetup) { onNavigateToSim?.(device.id); return }
+    if (needsSetup && next) { onNavigateToSim?.(device.id); return }
     if (kind === 'vowifi' && next && (binding.loading || binding.error)) {
       showToast?.(binding.error || t('Reading…')); return
     }
@@ -468,6 +469,12 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     } catch (e) {
       const errorDetail = e.data?.detail || {}
       const errorCode = e.code || errorDetail.code || ''
+      if (kind === 'vowifi' && errorCode === 'line_disabled') {
+        await onChanged?.()
+        showToast?.(t('Start request saved; complete SIM setup before starting.'))
+        onNavigateToSim?.(device.id)
+        return
+      }
       if (kind === 'vowifi' && (errorCode === 'sim_apdu_data_active' || errorCode === 'flight_mode_enabled')) {
         await onChanged?.()
         showToast?.(errorCode === 'flight_mode_enabled'
@@ -508,7 +515,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
     <div><b>{title}</b><div className="u-cap-detail">{needsSetup ? t('Line not configured') : detail}</div></div>
-    <div className="u-cap-actions">{needsSetup ? <button className="btn btn-ghost" onClick={() => onNavigateToSim?.(device.id)}>{t('Configure SIM')}</button> : <>{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Retry start')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
+    <div className="u-cap-actions">{needsSetup ? <><button className="btn btn-primary" onClick={() => onNavigateToSim?.(device.id)}>{t('Configure SIM')}</button>{stopIntent && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(false)}>{t('Cancel pending start')}</button>}</> : <>{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Retry start')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
       aria-label={title} disabled={pending || (unavailable && !c.desired)} onClick={toggle}><span /></button></>}</div>
   </div>
 }
@@ -1117,7 +1124,7 @@ export function DevicesPage({
       {d.stale && <p role="status" className="u-note">{t('Showing the last device snapshot; hardware actions are unavailable.')}<button className="btn btn-ghost" onClick={refreshDevices}>{t('Refresh')}</button></p>}
       <fieldset disabled={d.stale && !['status','vowifi','imeis','trash'].includes(tab)} style={{border:0,padding:0,minWidth:0}}>
       {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t(unavailableCellularLabel(d))}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} onNavigateToSim={() => setTab('sim')} /><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><SmsAdvisory key={`${d.id}:${d.sim?.iccid || ''}:${d.process_generation || ''}`} device={d} refreshDevices={refreshDevices} showToast={showToast}/><FirmwareAdvice advice={d.firmware_advice}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
-      {tab==='sim' && <div className="card u-panel"><SimConfig key={`${d.id}:${d.sim?.iccid || ''}:${d.instance_id || ''}`} instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d} devices={devices}/></div>}
+      {tab==='sim' && <div className="card u-panel"><SimConfig key={`${d.id}:${d.sim?.iccid || ''}`} instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d} devices={devices}/></div>}
       {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<CellularProfilePanel key={`${d.id}:${d.sim?.iccid || ''}:${d.go_device?.process_generation || d.process_generation || ''}:${d.go_device?.modem?.sim_session_generation || d.go_device?.modem?.sim?.session_generation || ''}`} device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}
       {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl key={`${d.id}:${d.sim?.iccid || ''}`} device={d} refresh={refresh} showToast={showToast} onConfigure={() => setTab('sim')}/><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{d.facts?.facts?.tunnel?.code || (typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected')))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.facts?.facts?.ims?.code || d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? '—'} {t('minutes')}{d.vowifi?.rekey_state ? ` · ${t(d.vowifi.rekey_state)}` : ''}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='hardware' && <HardwarePanel key={`${d.id}:${d.sim?.iccid || ''}`} device={d} refreshDevices={refreshDevices} showToast={showToast}/>}
