@@ -102,6 +102,30 @@ and exact hosted result are recorded separately in docs/branches.md.
 
 ## Source, artifact and running-instance identity
 
+The N10/N11/N12 update candidate keeps a Core-owned maintenance sidecar separate
+from root-worker progress. Persisted exact Provider identities and lease transitions
+precede external effects; the replacement Core restores admission before listening.
+The target manifest must declare update maintenance contract 1. All three fixed
+services must run the target Core image and record ordered restart receipts before
+the original leases are released. Unknown activation never triggers automatic
+rollback, restart or a second install. `mdd-updater -reconcile` only completes the
+original pre-activation cleanup/release or worker receipt; uncertain activation
+requires diagnosis. The first upgrade from a Core without this contract remains
+an operator-controlled deployment, not an in-app self-update acceptance claim.
+Failure boundaries include active/preparing media, in-flight writes, late/replaced
+Providers, lost drain/release acknowledgements, unreadable worker status and a
+released sidecar with a missing worker receipt. Candidate verification is tracked
+in `SYSTEM_UPDATE_CONTINUITY`; no deployment or hardware acceptance is implied.
+
+Worker publication reads use the same Core Store lock as request publication.
+Missing completion receipts retain the current request, including released leases.
+A post-rename sync failure retains the new revision and blocks effects until exact
+readback and directory sync succeed; explicit reconciliation never retries activation.
+The existing installation file-lock primitive also covers the entire detached worker
+invocation, so explicit reconciliation cannot cancel an active download. Corrupt worker
+progress does not prevent verified original maintenance cleanup; reopened request
+publication rechecks file and directory durability before granting preparation.
+
 Prefer verified immutable releases when a source rebuild is unnecessary. For a rebuild, record the reviewed commit,
 source tree, toolchain, commands, test evidence and artifact SHA-256. Release manifests and exact Provider source/license
 archives remain mandatory. Do not create a production artifact by copying edited files into a running installation.

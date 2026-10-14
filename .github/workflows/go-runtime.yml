@@ -142,12 +142,67 @@ jobs:
         working-directory: webui
         run: npm run test:hardware-imei-browser
 
+      - name: Real browser communication ownership
+        working-directory: webui
+        run: npm run test:communication-browser
+
+      - name: Retain communication browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: communication-browser-${{ github.sha }}
+          path: webui/browser-evidence/communication
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Real browser eSIM operation retention and confirmation
+        working-directory: webui
+        run: node tests/esimOperationsBrowser.mjs
+
+      - name: Retain eSIM browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: esim-browser-${{ github.sha }}
+          path: webui/browser-evidence/esim-operations
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Real browser archived line lifecycle without attached devices
+        working-directory: webui
+        run: npm run test:line-archive-browser
+
+      - name: Retain archived line browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: line-archive-browser-${{ github.sha }}
+          path: webui/browser-evidence/line-archive
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Real browser update sidebar and confirmation
+        working-directory: webui
+        run: npm run test:update-entry-browser
+
+      - name: Retain update entry browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-entry-browser-${{ github.sha }}
+          path: webui/browser-evidence/update-entry
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Retain Hardware IMEI browser evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: hardware-imei-browser-${{ github.sha }}
-          path: webui/browser-evidence/hardware-imei
+          path: |
+            webui/browser-evidence/hardware-imei
+            webui/browser-evidence/new-card
+            webui/browser-evidence/new-card-review
           if-no-files-found: ignore
           retention-days: 7
 
@@ -196,6 +251,13 @@ jobs:
       - name: Race-test entire Linux Core module
         working-directory: go-runtime
         run: go test -race -count=1 -timeout 5m ./...
+
+      - name: Verify root update publication and worker exclusion
+        run: |
+          go -C go-runtime test -c ./internal/systemupdate -o "$RUNNER_TEMP/update-status.test"
+          sudo "$RUNNER_TEMP/update-status.test" -test.run='^TestUpdateRootStatusReadableByCoreWithoutOpeningPrivateDirectory$' -test.v
+          go -C go-runtime test -c ./cmd/mdd-updater -o "$RUNNER_TEMP/update-worker.test"
+          sudo "$RUNNER_TEMP/update-worker.test" -test.run='^TestUpdaterReconcileRejectsActiveWorkerBeforeReadingOrChangingState$' -test.v
 
       - name: Test exact-modem audio helper
         run: GOWORK=off go -C agent/call-audio-helper test -race ./...

@@ -40,6 +40,7 @@ var (
 	ErrNotFound                      = errors.New("line not found")
 	ErrAlreadyExists                 = errors.New("line already exists")
 	ErrCardInUse                     = errors.New("card identity belongs to another line")
+	ErrRuntimeCardChanged            = errors.New("runtime intent card identity changed")
 	ErrNotEmpty                      = errors.New("line catalog is not empty")
 	ErrRevision                      = errors.New("line catalog revision does not match")
 	ErrRawModemRevision              = errors.New("raw modem binding revision does not match")
@@ -905,7 +906,7 @@ func (store *Store) RuntimeIntent(id string) (enabled, found bool, revision uint
 // apply, because starting or stopping a runtime does not change its config.
 // lineEnabled is returned so the public control path can persist a future
 // intent while refusing to bypass a globally disabled line right now.
-func (store *Store) SetRuntimeIntent(id string, enabled bool) (lineEnabled, changed bool, revision uint64, err error) {
+func (store *Store) SetRuntimeIntent(id string, enabled bool, expectedCard ...string) (lineEnabled, changed bool, revision uint64, err error) {
 	err = store.db.Update(func(transaction *bolt.Tx) error {
 		payload := transaction.Bucket(linesBucket).Get([]byte(id))
 		if payload == nil {
@@ -916,6 +917,11 @@ func (store *Store) SetRuntimeIntent(id string, enabled bool) (lineEnabled, chan
 			return errors.New("stored line is corrupt")
 		}
 		lineEnabled = line.Enabled
+		// Check before the no-change return too: a retry must not reset recovery
+		// state for a different card that now occupies the same line.
+		if len(expectedCard) > 1 || len(expectedCard) == 1 && line.CardID != expectedCard[0] {
+			return ErrRuntimeCardChanged
+		}
 		intents := transaction.Bucket(runtimeIntentsBucket)
 		current := intents.Get([]byte(id))
 		desired := byte(0)

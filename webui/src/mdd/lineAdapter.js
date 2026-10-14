@@ -1,4 +1,5 @@
 import { api as go } from '../api.js'
+import { simHomeCountry } from '../simCountry.js'
 
 export function simPINIdentity(device, expectedCardID = '') {
   if (device?.stale || device?.observed_only) throw new Error('device_snapshot_unavailable')
@@ -79,7 +80,8 @@ export function editedCatalogLine(form) {
   next.name = form.name
   next.enabled = form.enabled === true
   next.sim = {...next.sim,imsi:form.imsi,mcc:form.mcc,mnc:form.mnc,msisdn:form.msisdn,smsc:form.smsc}
-  next.network = {...next.network,egress_country:form.proxy_country,ims_apn:form.apn,idr_mode:form.idr_mode,cp_mode:form.cp_mode}
+  const country = String(form.proxy_country || '').trim().toLowerCase() || simHomeCountry(form.mcc) || base.network?.egress_country || ''
+  next.network = {...next.network,egress_country:country,ims_apn:form.apn,idr_mode:form.idr_mode,cp_mode:form.cp_mode}
   next.ims = {...next.ims,access_network_info:form.sip?.pani || '',access_type:form.sip?.access_type || '',user_equals_phone:form.sip?.user_eq_phone === true}
   return next
 }
@@ -146,7 +148,7 @@ export const lineAPI = {
   },
   async softDeletedInstances() {
     const snapshot = await go.catalogLines(true)
-    return {instances:(snapshot.lines || []).filter(line => line.deleted).map(line => lineForm(line,snapshot.revision))}
+    return {revision:snapshot.revision,instances:(snapshot.lines || []).filter(line => line.deleted).map(line => lineForm(line,snapshot.revision))}
   },
   restoreInstance: (id,revision) => go.restoreCatalogLine(id,expectedRevision(revision)),
   softDeleteInstance: (id,revision) => go.softDeleteCatalogLine(id,expectedRevision(revision)),

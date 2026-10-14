@@ -136,6 +136,17 @@ func TestMaintenanceDrainsAndResumesCurrentGeneration(t *testing.T) {
 		drained.Lines[0].ProcessGeneration != "generation-1" {
 		t.Fatalf("drained=%+v err=%v", drained, err)
 	}
+	request.ExpectedGenerations = map[string]string{"line-1": "previous-generation"}
+	if result, err := RequestMaintenance(context.Background(), coreServer.URL, preflightToken, request, false, nil); err == nil || result.Ready {
+		t.Fatal("PROFILE_RELEASE_TARGET: resumed a replacement provider")
+	}
+	provider.mu.Lock()
+	lease, resumes := provider.lease, provider.resumeCount
+	provider.mu.Unlock()
+	if lease != request.LeaseID || resumes != 0 {
+		t.Fatal("PROFILE_RELEASE_TARGET: dispatched to wrong generation")
+	}
+	request.ExpectedGenerations["line-1"] = "generation-1"
 	resumed, err := RequestMaintenance(context.Background(), coreServer.URL, preflightToken, request, false, nil)
 	if err != nil || !resumed.Ready || resumed.Lines[0].Code != "resumed" {
 		t.Fatalf("resumed=%+v err=%v", resumed, err)

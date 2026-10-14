@@ -55,6 +55,7 @@ var (
 
 type Server struct {
 	maintenance          map[string]string
+	updateMaintenance    string
 	deviceDefaultsSource func() (*DeviceDefaults, error)
 	tokens               TokenResolver
 	mu                   sync.RWMutex
@@ -933,6 +934,9 @@ func (server *Server) ExecuteModemRecoveryCommand(ctx context.Context,
 	}
 	request := ModemRecoveryRequest{ModemRecoveryCommand: command, ProcessGeneration: target.ProcessGeneration,
 		AttachmentID: target.AttachmentID, SIMSessionGeneration: target.SIMSessionGeneration}
+	if command.ExpectedTarget != nil && !command.ExpectedTarget.Matches(target) {
+		return ModemRecoveryResponse{}, ErrGenerationMismatch
+	}
 	return server.ExecuteModemRecovery(ctx, target.AgentID, target.ProcessGeneration, request)
 }
 
@@ -1037,6 +1041,10 @@ func (server *Server) ExecuteModemPolicyCommand(ctx context.Context,
 	target, session, err := server.ResolveModemPolicyTarget(command.EquipmentID, command.CardID)
 	if err != nil {
 		return ModemPolicyResponse{}, err
+	}
+	target.SIMSessionGeneration = session
+	if command.ExpectedTarget != nil && !command.ExpectedTarget.Matches(target) {
+		return ModemPolicyResponse{}, ErrGenerationMismatch
 	}
 	return server.ExecuteModemPolicy(ctx, target.AgentID, target.ProcessGeneration, command.requestFor(target, session))
 }
@@ -1461,10 +1469,16 @@ func (server *Server) roundTrip(ctx context.Context, connection *serverConnectio
 	reply := make(chan envelope, 1)
 	server.mu.RLock()
 	lease := server.maintenance[connection.hello.AgentID]
+	if server.updateMaintenance != "" {
+		server.mu.RUnlock()
+		return envelope{}, ErrAgentMaintenance
+	}
+	permittedProfile := permittedEUICC(ctx, connection, lease, message)
+	profilePermitRequested := ctx.Value(euiccMaintenanceKey{}) != nil
 	restart := message.Kind == kindAgentRestartRequest && message.AgentRestartRequest != nil &&
 		message.AgentRestartRequest.OperationID == lease && lease != "" &&
 		message.AgentRestartRequest.ProcessGeneration == connection.hello.ProcessGeneration
-	if (lease != "" && !restart) || (message.Kind == kindAgentRestartRequest && !restart) {
+	if (profilePermitRequested && !permittedProfile) || (lease != "" && !restart && !permittedProfile) || (message.Kind == kindAgentRestartRequest && !restart) {
 		server.mu.RUnlock()
 		return envelope{}, ErrAgentMaintenance
 	}
@@ -1481,15 +1495,21 @@ func (server *Server) roundTrip(ctx context.Context, connection *serverConnectio
 	server.mu.RUnlock()
 	defer connection.deletePending(requestID)
 	message.RequestID = requestID
+	uncertain := func(err error) error {
+		if message.Kind == kindModemRecoveryRequest {
+			return fmt.Errorf("%w: %w", ErrModemRecoveryUnknown, err)
+		}
+		return err
+	}
 	connection.writeMu.Lock()
 	err := writeEnvelope(ctx, connection.socket, message)
 	connection.writeMu.Unlock()
 	if err != nil {
-		return envelope{}, fmt.Errorf("send Agent request: %w", err)
+		return envelope{}, uncertain(fmt.Errorf("send Agent request: %w", err))
 	}
 	select {
 	case <-ctx.Done():
-		return envelope{}, ctx.Err()
+		return envelope{}, uncertain(ctx.Err())
 	case <-connection.closed:
 		// A process restart may close immediately after its acknowledgement.
 		// Preserve an already-dispatched response instead of racing it with EOF.
@@ -1497,7 +1517,7 @@ func (server *Server) roundTrip(ctx context.Context, connection *serverConnectio
 		case response := <-reply:
 			return response, nil
 		default:
-			return envelope{}, ErrAgentOffline
+			return envelope{}, uncertain(ErrAgentOffline)
 		}
 	case response := <-reply:
 		return response, nil

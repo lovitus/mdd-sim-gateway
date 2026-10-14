@@ -33,7 +33,7 @@ func Activate(ctx context.Context, source string, layout Layout, identity Identi
 	if err := prepareLayout(layout, identity); err != nil {
 		return Receipt{}, err
 	}
-	lock, err := acquireLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), identity.RootUID)
+	lock, err := AcquireExecutionLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), identity.RootUID)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -120,7 +120,7 @@ func Recover(ctx context.Context, layout Layout, rootUID int, reloader Reloader)
 	if reloader == nil || layout.Validate() != nil || rootUID < 0 {
 		return Receipt{}, errors.New("invalid release recovery input")
 	}
-	lock, err := acquireLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
+	lock, err := AcquireExecutionLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -135,7 +135,7 @@ func RollbackLatest(ctx context.Context, layout Layout, rootUID int, reloader Re
 	if reloader == nil || layout.Validate() != nil || rootUID < 0 {
 		return Receipt{}, errors.New("invalid release rollback input")
 	}
-	lock, err := acquireLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
+	lock, err := AcquireExecutionLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
 	if err != nil {
 		return Receipt{}, err
 	}
