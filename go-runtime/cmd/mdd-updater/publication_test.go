@@ -3,16 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemupdate"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/provideradmin"
 )
 
 type publicationRuntime struct {
@@ -96,9 +99,14 @@ func TestUpdaterReconcilesOriginalMaintenanceWithCorruptWorkerStatus(t *testing.
 			if err := os.WriteFile(path+".status.json", []byte("interrupted worker status"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			server := httptest.NewServer(owner)
+			token := strings.Repeat("t", 32)
+			authenticated, err := provideradmin.Authenticate(owner, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(authenticated)
 			defer server.Close()
-			core := coreMaintenance{baseURL: server.URL, token: strings.Repeat("t", 32)}
+			core := coreMaintenance{baseURL: server.URL, token: token}
 			view, err = core.maintenance(t.Context(), &systemupdate.MaintenanceCommand{Action: "request", OperationID: request.OperationID, RequestedTarget: request.Target})
 			if err != nil || view.Publication == nil || view.Publication.Committed || view.Publication.Unconfirmed == "" {
 				t.Fatalf("CORRUPT_STATUS_CLEANUP: %+v %v", view, err)
@@ -150,13 +158,11 @@ func TestUpdaterReconcilesOnlyOriginalUnactivatedRequest(t *testing.T) {
 				t.Fatal(err)
 			}
 			token := strings.Repeat("t", 32)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer "+token {
-					w.WriteHeader(401)
-					return
-				}
-				owner.ServeHTTP(w, r)
-			}))
+			authenticated, err := provideradmin.Authenticate(owner, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(authenticated)
 			defer server.Close()
 			core := coreMaintenance{baseURL: server.URL, token: token}
 			view, err := core.maintenance(t.Context(), &systemupdate.MaintenanceCommand{Action: "request", OperationID: request.OperationID, RequestedTarget: request.Target})
@@ -179,6 +185,94 @@ func TestUpdaterReconcilesOnlyOriginalUnactivatedRequest(t *testing.T) {
 			}
 			if _, err := core.maintenance(t.Context(), &systemupdate.MaintenanceCommand{Action: "request", OperationID: request.OperationID, RequestedTarget: request.Target}); err == nil {
 				t.Fatal("stale worker publication was accepted")
+			}
+		})
+	}
+}
+
+func TestUpdaterUsesProductionMaintenanceAuthentication(t *testing.T) {
+	token := strings.Repeat("t", 32)
+	for _, credentials := range []struct {
+		name, token string
+		accepted    bool
+	}{{"valid", token, true}, {"wrong", strings.Repeat("w", 32), false}, {"empty", "", false}} {
+		t.Run(credentials.name, func(t *testing.T) {
+			directory := t.TempDir()
+			store, err := systemupdate.Open(filepath.Join(directory, "update"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := systemupdate.Request{OperationID: "update-one", Repository: "example/project", Target: "2.0.0", RequestedAt: time.Now()}
+			if err := store.Request(request); err != nil {
+				t.Fatal(err)
+			}
+			gate, err := systemupdate.OpenAdmission(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := &publicationRuntime{}
+			owner, err := systemupdate.NewMaintenanceOwner(store, gate, runtime, "original-core", strings.Repeat("a", 64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			authenticated, err := provideradmin.Authenticate(owner, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			codes := make(chan int, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				recorded := httptest.NewRecorder()
+				authenticated.ServeHTTP(recorded, r)
+				response := recorded.Result()
+				defer response.Body.Close()
+				for name, values := range response.Header {
+					w.Header()[name] = values
+				}
+				w.WriteHeader(response.StatusCode)
+				_, _ = io.Copy(w, response.Body)
+				codes <- response.StatusCode
+			}))
+			defer server.Close()
+			core := coreMaintenance{baseURL: server.URL, token: credentials.token}
+			readState := func() map[string]string {
+				t.Helper()
+				entries, err := os.ReadDir(directory)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files := make(map[string]string)
+				for _, entry := range entries {
+					payload, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+					if err != nil {
+						t.Fatal(err)
+					}
+					files[entry.Name()] = string(payload)
+				}
+				return files
+			}
+			before, viewBefore := readState(), owner.View()
+			for _, method := range []string{"get", "post"} {
+				t.Run(method, func(t *testing.T) {
+					var command *systemupdate.MaintenanceCommand
+					if method == "post" {
+						command = &systemupdate.MaintenanceCommand{Action: "request", OperationID: request.OperationID, RequestedTarget: request.Target}
+					}
+					view, err := core.maintenance(t.Context(), command)
+					code := <-codes
+					if credentials.accepted {
+						if err != nil || code != http.StatusOK || view.Instance != viewBefore.Instance || view.CoreSHA256 != viewBefore.CoreSHA256 {
+							t.Fatalf("PRODUCTION_MAINTENANCE_AUTH: %s status=%d view=%+v error=%v", method, code, view, err)
+						}
+						if method == "post" && (view.Publication == nil || !view.Publication.Committed || view.Publication.Request.OperationID != request.OperationID || view.Publication.Status.Target != request.Target) {
+							t.Fatalf("original request not returned: %+v", view.Publication)
+						}
+					} else if err == nil || code != http.StatusUnauthorized {
+						t.Fatalf("bad credential not rejected: status=%d error=%v", code, err)
+					}
+				})
+			}
+			if runtime.effects != 0 || !reflect.DeepEqual(owner.View(), viewBefore) || !reflect.DeepEqual(readState(), before) {
+				t.Fatal("maintenance authentication/readback changed durable state or admission")
 			}
 		})
 	}

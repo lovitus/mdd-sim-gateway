@@ -1,6 +1,18 @@
 # Branch disposition and integration record
 
-## October 14 integration in progress
+## October 14 integration and rollout
+
+PR34 merged normally at `202e5206c47210e3ebd51a9ac5de0d9a3cd74152` after final
+source `639f55a` / full Go CI `38509927202` and original-reviewer approval.
+PR29-33 are closed as integrated, not abandoned; do not merge their old heads again.
+Field cutover rolled back to the retained previous Core: update maintenance IPC
+uses `provideradmin.Authenticate`, but the worker sent a different credential header.
+The follow-up changes only that client header and makes its recovery tests use the
+real production middleware. A GET/POST credential table checks unchanged durable
+state and admission; hosted counterexample/race/full qualification is pending.
+Original state/configuration and maintenance were preserved; no paid/SIM action.
+First-upgrade installation uses canonical managed links and the existing installer;
+the watcher stays inactive until the corrected worker is qualified and deployed.
 
 The owner authorized one combined PR29-33 delivery, normal protected merge and
 controlled GitHub-artifact rollout with rollback retained and scoped field tests.
