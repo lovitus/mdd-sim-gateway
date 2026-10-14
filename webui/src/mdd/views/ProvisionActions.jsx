@@ -1,7 +1,7 @@
 import { dialogs } from '../../dialogs.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
-import { candidateForDevice, claimedDraftForm, savedCatalogLine, modemProvisionIntent } from '../lineAdapter.js'
+import { candidateForDevice, claimedDraftForm, savedCatalogLine, modemProvisionIntent, lineForm } from '../lineAdapter.js'
 import { useI18n } from '../i18n.jsx'
 import {rememberProvision,recalledProvision,forgetProvision,provisionTerminal} from '../provisionRecovery.js'
 
@@ -119,10 +119,21 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
     if (epoch === generation.current) setMessage([result.state || 'unknown',result.code || ''].filter(Boolean).join(' · '))
     await refresh?.()
   })
+  const setEnabled = () => run(async epoch => {
+    const line=savedCatalogLine(form)
+    if (!(await dialogs.confirm(t(line.enabled
+      ? 'Disable this saved line? Its saved start intent is retained. Stop VoWiFi before archiving.'
+      : 'Enable this saved line? Any retained or concurrent start request may become active. Other SIM switches remain unchanged.')))) return
+    if(epoch!==generation.current)throw new Error('line_configuration_changed')
+    const result=await api.saveCatalogLine({...line,enabled:!line.enabled},form.__catalog_revision)
+    if(epoch===generation.current)onSaved(lineForm(result.line,result.revision))
+    await refresh?.()
+  })
   return <section>
     <div className="u-inline">
       {!form.__catalog_revision && <button className="btn btn-primary" disabled={busy || !candidate?.can_claim} onClick={claim}>{t('Create disabled draft')}</button>}
       {form.__catalog_revision && <>
+        <button className="btn btn-ghost" disabled={busy || !saved || form.provisioning_state==='draft'} onClick={setEnabled}>{t(form.enabled ? 'Disable line' : 'Enable line')}</button>
         {device?.device_type !== 'reader' && <button className="btn btn-ghost" disabled={busy || unresolved || !device || !savedReady} onClick={readback}>{t('Verify hardware state')}</button>}
         <button className="btn btn-ghost" disabled={busy || unresolved || !device || !savedReady || (device.device_type !== 'reader' && (!proof || proof.identity !== identity))} onClick={provision}>{t('Provision hardware')}</button>
         <button className="btn btn-ghost" disabled={busy} onClick={apply}>{t('Apply saved catalog')}</button>

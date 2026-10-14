@@ -16,6 +16,10 @@ of every platform, hardware combination or failure branch.
 
 ### New-Card Control Flow
 
+The October 14 owner correction below supersedes this section's manual-flow
+assumption. These October 13 receipts remain scoped history, not acceptance of
+the insert-card/Enable product workflow.
+
 The October 13 repair keeps the copied SIM claim/save/provision/apply flow and
 explicit user enable/start actions. Setup reads the existing ICCID IMEI binding;
 both country controls use the existing SIM MCC table, not the roaming network.
@@ -766,3 +770,56 @@ Hosted38382538282/fcb1f71 adds old-scope history race proof and full Chromium pa
 archive/2026-10-13/communication-history-qualified retains the temporary entry.
 The obsolete SMS/retry source-string assertions are replaced by browser behavior.
 No real allowance SMS, carrier acceptance or production rollout is claimed.
+
+## New-Card Owner Correction (October 14)
+
+NEW_CARD_ONE_ACTION retains its decision ID. The owner's subsequent clarification
+allows detailed initialization or reuse of existing configuration; literal
+zero-configuration one-click activation is not required. The requirement is a
+coherent path with current stage, missing requirements, a clear next action and
+an honest start result. This supersedes both the disconnected manual-flow premise
+above and an overly strict one-action interpretation. The bounded implementation
+is in the current-card setup delivery; qualification and field results are separate.
+
+Source recheck at ec620942: main.py::_ensure_card_draft creates the record;
+_auto_promote_card_draft merges observed/stored identity, lists real missing
+requirements and promotes complete drafts; api_instance_start checks PIN/identity
+and enables/starts. Port that orchestration, not Python or its retired engines.
+Go already has claim, reader readback/provision, defaults and runtime owners;
+defaultClaimAuthorized currently excludes readers and requires modem enrollment.
+Consequently the existing modem default path does not complete reader setup.
+
+- Show current-card configuration, with existing ICCID configuration/IMEI reused.
+  Another saved line must not silently become the current form; any explicit
+  template reuse copies only compatible settings, never card identity/ownership.
+- Save draft stays non-starting and visibly leads to Continue initialization.
+  A completed configuration leads to Enable, or a clearly labelled Initialize
+  and enable action. Show preparing/starting/ready/failure from actual results.
+- Missing PIN/IMEI/identity/exit must show the specific requirement and its action;
+  internal disabled-draft state is not a user-operated second Enable switch.
+- Keep configuration editing and unrelated saved-line management separate from
+  activation. Existing saved start intent from line_disabled must be reported;
+  ordinary Save cannot silently turn it into a newly enabled runtime.
+- Do not chain the whole-catalog Apply button invisibly into per-card Enable.
+  Reuse the existing restricted-added-line path where its contract allows it;
+  unrelated pending changes need an explicit impact review, not silent adoption.
+- Retain exact card/generation, revision and unknown-operation checks. Card
+  replacement, conflict or uncertain writes must not advance to the next step.
+  Never alter other lines, 4G/roaming/borrowing intent or retry paid operations.
+- Acceptance is an actual device-page journey from a new card or retained draft
+  through guided configuration/initialization to explicit Enable, including clear
+  missing-input recovery and stop/cancel behavior. Individual endpoint success
+  or unexplained manual catalog/runtime steps are insufficient.
+
+The original review approved this boundary: current-card and saved-record editors
+are separate; ordinary Save preserves enabled state; initialization remains a
+readback-only promotion; explicit Enable warns about retained/concurrent start
+intent, and cancellation remains a separate operation. Restricted Provider apply
+never widens automatically. Revision-wide application requires separate consent.
+Reader unknown receipts and uncertain apply attempts survive view changes. Existing
+modem provisioning, IMEI/PIN ownership, lifecycle executor and apply guards remain.
+Only existing apply blocker codes are added to the public error detail, without
+line identities. No Android/Agent/Provider execution or network policy is changed.
+The mounted browser journey pairs with existing real reader-provision, scoped-plan
+and durable-intent tests. Hosted pre-fix proof and exact green run are recorded in
+the acceptance ledger when available; no live startup is claimed from fixtures.

@@ -29,7 +29,7 @@
     "test:shared-i18n": "node tests/sharedI18n.mjs",
     "test:recording": "node tests/callRecording.mjs",
     "test:recording-browser": "node tests/recordingBrowser.mjs",
-    "test:hardware-imei-browser": "node tests/hardwareImeiBrowser.mjs && node tests/newCardBrowser.mjs && node tests/newCardReviewBrowser.mjs",
+    "test:hardware-imei-browser": "node tests/hardwareImeiBrowser.mjs && node tests/newCardBrowser.mjs && node tests/newCardReviewBrowser.mjs && node tests/readerSetupBrowser.mjs",
     "test:line-archive-browser": "node tests/lineArchiveBrowser.mjs",
     "test:update-entry-browser": "node tests/updateEntryBrowser.mjs"
   },
