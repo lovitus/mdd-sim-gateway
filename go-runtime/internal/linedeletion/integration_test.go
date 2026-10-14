@@ -1,6 +1,8 @@
 package linedeletion
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,6 +21,12 @@ import (
 )
 
 func TestPermanentDeletionCleansEveryDurableLineStore(t *testing.T) {
+	for _, deleteHistory := range []bool{true, false} {
+		t.Run(fmt.Sprint(deleteHistory), func(t *testing.T) { permanentDeletionFlow(t, deleteHistory) })
+	}
+}
+
+func permanentDeletionFlow(t *testing.T, deleteHistory bool) {
 	root, now := t.TempDir(), time.Now().UTC()
 	catalog, err := linecatalog.Open(filepath.Join(root, "catalog.db"), time.Second)
 	if err != nil {
@@ -88,7 +96,7 @@ func TestPermanentDeletionCleansEveryDurableLineStore(t *testing.T) {
 	defer smsOperations.Close()
 	sms := cellularmessages.OperationRecord{OperationID: "sms-operation", MessageID: "message-1", LineID: line.ID,
 		EquipmentID: "123456789012345", CardID: line.CardID, AgentID: "agent-1", ProcessGeneration: "generation-1",
-		AttachmentID: "attachment-1", Recipient: "+44123", BodySHA256: "digest", CreatedAt: now}
+		AttachmentID: "attachment-1", Recipient: "+44123", BodySHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("hello"))), CreatedAt: now}
 	if _, created, err := smsOperations.Begin(sms); err != nil || !created {
 		t.Fatalf("SMS operation created=%t err=%v", created, err)
 	}
@@ -99,12 +107,50 @@ func TestPermanentDeletionCleansEveryDurableLineStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/v1/catalog/lines/line-integrated/permanent-delete",
-		strings.NewReader(`{"schema_version":1,"operation_id":"integrated-delete","delete_history":true}`))
-	request.SetPathValue("lineID", line.ID)
-	request.Header.Set("If-Match", `"3"`)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	deleteLine := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/v1/catalog/lines/line-integrated/permanent-delete",
+			strings.NewReader(fmt.Sprintf(`{"schema_version":1,"operation_id":"integrated-delete","delete_history":%t}`, deleteHistory)))
+		request.SetPathValue("lineID", line.ID)
+		request.Header.Set("If-Match", `"3"`)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	for _, state := range []string{"prepared", "uncertain", "submitted"} {
+		if _, err := smsOperations.Mark(sms.OperationID, state, []int{9}); err != nil {
+			t.Fatal(err)
+		}
+		response := deleteLine()
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "line_sms_operation_unresolved") {
+			t.Fatalf("UNRESOLVED_SMS_DELETION: %s status=%d body=%s", state, response.Code, response.Body.String())
+		}
+		if got, err := catalog.Get(line.ID); err != nil || !got.Deleted {
+			t.Fatal("catalog removed before SMS protection", err)
+		}
+		if count, _ := eventStore.Count(); count != 1 {
+			t.Fatal("events purged before SMS protection")
+		}
+		if records, _ := messages.List(line.ID, 10); len(records) != 1 {
+			t.Fatal("messages purged before SMS protection")
+		}
+		if records, _ := calls.List(line.ID, 10); len(records) != 1 {
+			t.Fatal("calls purged before SMS protection")
+		}
+		if snapshot, _ := allowances.Snapshot(line.ID); snapshot.Values.Balance != "5" {
+			t.Fatal("allowance purged before SMS protection")
+		}
+		if _, found, _ := smsOperations.Get(sms.OperationID); !found {
+			t.Fatal("unresolved SMS evidence erased")
+		}
+	}
+	if _, _, err := messages.Accept(providermessages.Event{SchemaVersion: 1,
+		EventID: "cellular-submit-sms-operation-1", LineID: line.ID, ProviderID: "cellular",
+		ProcessGeneration: sms.ProcessGeneration, Kind: providermessages.KindSubmitted, ObservedAt: now,
+		MessageID: sms.MessageID, Part: 1, Recipient: sms.Recipient, CallID: "cellular-mr-9", RPMR: 9,
+		State: "submitted", Body: "hello"}, now); err != nil {
+		t.Fatal(err)
+	}
+	response := deleteLine()
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -114,16 +160,27 @@ func TestPermanentDeletionCleansEveryDurableLineStore(t *testing.T) {
 	if count, _ := eventStore.Count(); count != 0 {
 		t.Fatalf("event count=%d", count)
 	}
-	if records, _ := messages.List(line.ID, 10); len(records) != 0 {
+	wantMessages, wantCalls := 0, 0
+	if !deleteHistory {
+		wantMessages, wantCalls = 2, 1
+	}
+	if records, _ := messages.List(line.ID, 10); len(records) != wantMessages {
 		t.Fatalf("message records=%+v", records)
 	}
-	if records, _ := calls.List(line.ID, 10); len(records) != 0 {
+	if records, _ := calls.List(line.ID, 10); len(records) != wantCalls {
 		t.Fatalf("call records=%+v", records)
 	}
 	if snapshot, _ := allowances.Snapshot(line.ID); snapshot.Revision != 1 || snapshot.Values.Balance != "" {
 		t.Fatalf("allowance snapshot=%+v", snapshot)
 	}
-	if _, found, _ := smsOperations.Get(sms.OperationID); found {
-		t.Fatal("SMS operation remains")
+	if _, found, _ := smsOperations.Get(sms.OperationID); found == deleteHistory {
+		t.Fatal("SMS history retention differs from confirmed intent")
+	}
+	sms.OperationID = "new-after-delete"
+	if _, _, err := smsOperations.Begin(sms); err == nil {
+		t.Fatal("deleted line accepted a new paid operation")
+	}
+	if repeated := deleteLine(); repeated.Code != http.StatusOK {
+		t.Fatal("original deletion cannot be resumed", repeated.Body.String())
 	}
 }

@@ -59,7 +59,7 @@ func TestDevicePolicyKeepsPersistentConnectionSeparateFromBorrowPermission(t *te
 		t.Fatalf("devices=%d %s", devices.Code, devices.Body.String())
 	}
 	request := httptest.NewRequest(http.MethodPatch, "/v1/devices/"+inventory.Devices[0].ID+"/policy",
-		strings.NewReader(`{"operation_id":"connection-on","connection_enabled":true}`))
+		strings.NewReader(`{"operation_id":"connection-on","connection_enabled":true,"expected_target":{"agent_id":"agent-a","process_generation":"process-a","attachment_id":"attachment-a","equipment_id":"862547055201716","card_id":"8944100000000000001","sim_session_generation":"sim-session"}}`))
 	request.Header.Set("If-Match", `"0"`)
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
@@ -115,5 +115,47 @@ func TestSystemManagedDeviceProfilesAreReadOnlyBeforeAgentMutation(t *testing.T)
 	_ = json.Unmarshal(put.Body.Bytes(), &failure)
 	if put.Code != http.StatusUnprocessableEntity || failure["code"] != "modem_profile_system_managed" || runtime.saves != 0 {
 		t.Fatalf("PUT profiles=%d body=%s saves=%d", put.Code, put.Body.String(), runtime.saves)
+	}
+}
+
+func TestDeviceWritesRejectChangedConfirmationAtSamePolicyRevision(t *testing.T) {
+	for _, field := range []string{"agent_id", "process_generation", "attachment_id", "equipment_id", "card_id", "sim_session_generation"} {
+		for _, route := range []string{"policy", "profiles"} {
+			t.Run(route+"/"+field, func(t *testing.T) {
+				now := time.Unix(1_800_000_000, 0).UTC()
+				status := deviceModemStatus(now, "agent-a", "process-a", "attachment-a", "862547055201716", "8944100000000000001")
+				status.Topology.Modems[0].Policy = &agentlink.ModemPolicyFact{SchemaVersion: 1,
+					EquipmentID: "862547055201716", CardID: "8944100000000000001", ProfileMode: "agent", State: "ready"}
+				runtime := &connectionPolicyRuntime{}
+				server := NewServer(testReplay(t, now), func() time.Time { return now },
+					WithAgentFacts(fixedAgentFacts{statuses: []agentlink.ConnectionStatus{status}}), WithModemPolicies(runtime))
+				inventory, err := server.currentDevices()
+				if err != nil || len(inventory.Devices) != 1 {
+					t.Fatalf("inventory=%+v err=%v", inventory, err)
+				}
+				target := map[string]string{"agent_id": "agent-a", "process_generation": "process-a", "attachment_id": "attachment-a",
+					"equipment_id": "862547055201716", "card_id": "8944100000000000001", "sim_session_generation": "sim-session"}
+				target[field] = "stale-confirmation"
+				body := map[string]any{"operation_id": "frozen-confirmation", "expected_target": target}
+				method := http.MethodPatch
+				if route == "policy" {
+					body["connection_enabled"] = true
+				} else {
+					method = http.MethodPut
+					body["name"] = "MDD"
+					body["apn"] = "internet"
+					body["auth"] = "NONE"
+					body["password_set"] = false
+				}
+				payload, _ := json.Marshal(body)
+				request := httptest.NewRequest(method, "/v1/devices/"+inventory.Devices[0].ID+"/"+route, strings.NewReader(string(payload)))
+				request.Header.Set("If-Match", `"0"`)
+				response := httptest.NewRecorder()
+				server.ServeHTTP(response, request)
+				if response.Code != http.StatusConflict || runtime.command.OperationID != "" {
+					t.Fatalf("changed %s dispatched: status=%d body=%s command=%+v", field, response.Code, response.Body.String(), runtime.command)
+				}
+			})
+		}
 	}
 }

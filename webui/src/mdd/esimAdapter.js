@@ -23,29 +23,78 @@ export function relatedSIMReaders(card, readers) {
   })
 }
 
-const downloadPointerKey = reader => `mdd_euicc_download_${reader}`
+const downloadPointerPrefix = 'mdd_euicc_download_'
+const downloadRecordPrefix = 'mdd_euicc_operation_'
+const validDownload = value => /^\d{32}$/.test(value?.eid || '') && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value?.operation_id || '')
+const downloadRecordKey = value => `${downloadRecordPrefix}${value.eid}_${value.operation_id}`
+
+// Keep only recovery identity and observations, never activation/confirmation codes.
 export function rememberDownload(reader, receipt) {
-  if (!reader || !/^\d{32}$/.test(receipt.eid || '') || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(receipt.operation_id || '')) throw new Error('euicc_download_identity_required')
-  const previous=rememberedDownload(reader)
-  if(previous?.eid===receipt.eid && previous.operation_id!==receipt.operation_id) throw new Error('An earlier download is still tracked; check its result before starting another.')
-  try {localStorage.setItem(downloadPointerKey(reader),JSON.stringify({eid:receipt.eid,operation_id:receipt.operation_id}))}
-  catch {throw new Error('Download tracking could not be saved; no request was sent.')}
+  if (!validDownload(receipt)) throw new Error('euicc_download_identity_required')
+  try {
+    const key = downloadRecordKey(receipt)
+    const previous = JSON.parse(localStorage.getItem(key) || 'null')
+    if(!previous) {
+      const records=storedDownloadReceipts()
+      if(records.length>=128) {
+        const oldest=[...records].reverse().find(record=>record.rejected || downloadView(record.job).certain)
+        if(!oldest)throw new Error('unresolved download capacity reached')
+        localStorage.removeItem(downloadRecordKey(oldest))
+      }
+    }
+    const job = receipt.job
+    const observed = job && (!job.operation_id || job.operation_id === receipt.operation_id) && (!job.eid || job.eid === receipt.eid)
+      ? {state:job.state,stage:job.stage,code:job.code,updated_at:job.updated_at} : null
+    const saved = {eid:receipt.eid,operation_id:receipt.operation_id,reader:reader || previous?.reader || '',
+      created_at:previous?.created_at || Date.now(),job:previous?.job || null,rejected:previous?.rejected === true}
+    if (observed && !downloadView(saved.job).certain) saved.job = observed
+    if (receipt.rejected) saved.rejected = true
+    localStorage.setItem(key,JSON.stringify(saved))
+    return saved
+  }
+  catch {throw new Error('Download tracking could not be saved.')}
+}
+export function downloadReceipts() {
+  // Snapshot keys before migrating; persistence must succeed before removal.
+  const legacy=[]
+  for(let index=0;index<localStorage.length;index++) {
+    const key=localStorage.key(index)
+    if(key?.startsWith(downloadPointerPrefix))legacy.push(key)
+  }
+  for(const key of legacy) {
+    const value=JSON.parse(localStorage.getItem(key))
+    if(!validDownload(value))continue
+    rememberDownload(key.slice(downloadPointerPrefix.length),value)
+    localStorage.removeItem(key)
+  }
+  return storedDownloadReceipts()
+}
+function storedDownloadReceipts() {
+  const result = []
+  for (let index=0;index<localStorage.length;index++) {
+    const key=localStorage.key(index)
+    if (!key?.startsWith(downloadRecordPrefix)) continue
+    const value=JSON.parse(localStorage.getItem(key))
+    if(!validDownload(value))throw new Error('Download tracking could not be read.')
+    result.push(value)
+  }
+  return result.sort((a,b)=>b.created_at-a.created_at)
 }
 export function rememberedDownload(reader) {
   try {
-    const value=JSON.parse(localStorage.getItem(downloadPointerKey(reader)) || 'null')
-    return value && /^\d{32}$/.test(value.eid || '') && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value.operation_id || '') ? value : null
-  } catch {return null}
+    return downloadReceipts().find(record=>record.reader===reader && !record.rejected && !downloadView(record.job).certain) || null
+  } catch {throw new Error('Download tracking could not be read.')}
 }
 export function forgetDownload(reader, receipt) {
-  const saved=rememberedDownload(reader)
-  if (saved?.eid!==receipt.eid || saved?.operation_id!==receipt.operation_id) return
-  try {localStorage.removeItem(downloadPointerKey(reader))} catch {}
+  if (!validDownload(receipt)) return
+  const saved=JSON.parse(localStorage.getItem(downloadRecordKey(receipt)) || 'null')
+  if(!saved || (!saved.rejected && !downloadView(saved.job).certain)) return
+  localStorage.removeItem(downloadRecordKey(receipt))
 }
 export function cachedDownloadReceipt(ses, pointer) {
   const target=pointer && ses.find(se=>se.eid===pointer.eid)
-  if(target) return target.download?.operation_id===pointer.operation_id ? {...pointer,job:target.download.job}
-    : {...pointer,job:null,submit_error:'Download result unknown; only the original operation will be queried.'}
+  if(pointer) return target?.download?.operation_id===pointer.operation_id ? {...pointer,job:target.download.job}
+    : {...pointer,job:pointer.job || null,submit_error:'Download result unknown; only the original operation will be queried.'}
   const latest=ses.filter(se=>se.download?.job).sort((a,b)=>Date.parse(b.download.job.updated_at)-Date.parse(a.download.job.updated_at))[0]
   return latest ? {eid:latest.eid,...latest.download} : null
 }
@@ -59,6 +108,7 @@ export function downloadView(job) {
     done:job?.state === 'completed',error:terminal && job.state !== 'completed' ? job.code || job.state : '',
     metadata:job?.metadata ? {profileName:job.metadata.profile_name,serviceProviderName:job.metadata.service_provider_name} : null,
     terminal,
+    certain:['completed','failed','canceled'].includes(job?.state),
   }
 }
 

@@ -1,5 +1,38 @@
 # Branch disposition and integration record
 
+## October 14 integration in progress
+
+The owner authorized one combined PR29-33 delivery, normal protected merge and
+controlled GitHub-artifact rollout with rollback retained and scoped field tests.
+Base: `9a9aa783a5681ec203cd977b06c9582979dc7331`. Reviewed source/normal Go CI:
+
+| PR | Exact source | CI |
+|---|---|---|
+| 29 | `c200dc5e1c05239f8d1f3636f99342c768fa8779` | 38345314313 |
+| 30 | `254c140cff85467dfd9b0ca530f97425fff6a76f` | 38383637312 |
+| 31 | `b579963d5bc17786f9c2859295fa7da01d5b9f28` | 38501900200 |
+| 32 | `1152132f0ec39198d8ca02e9a744a26685bb8c12` | 38403121778 |
+| 33 | `e531446ffbf54bc7da92c23aec373d423cab19e0` | 38427350573 |
+
+Shared conflicts preserve all three Agent dispatch guards, card-fenced intent with
+update admission, original cleanup ownership, current-view navigation with original
+paid-operation identity, and separate new-card/archive actions. Permanent workflow
+gates are combined without restoring temporary proofs; workstreams retain their IDs.
+The embedded UI must be generated from the complete integrated frontend on GitHub,
+not selected from one PR. Final integrated CI/review and deployment receipts remain
+pending. Do not close or restore old PRs as if integration has already completed.
+PR34 source candidate `b5d3102` is retained by
+`archive/2026-10-14/integrated-source-before-embed`. Hosted run `38505387105`
+passed the integrated browser flows and produced the combined UI; its two failed
+jobs stopped at the expected old embedded-resource diff, not a waived gate.
+Generated resources are imported from its exact-tree merge `58f08fad` before final
+normal qualification. Source tests and workflow gates remain unchanged.
+Cross-review found one eSIM/update cleanup interlock. The correction adds read-only
+retained eSIM/host checks after admission closes and before update Provider drains;
+the two-case regression preserves original refresh and subsequent update admission.
+The temporary hosted proof removes only those checks to reproduce both behavioral
+failures, then restores the production implementation for race/full qualification.
+
 ## Current cursor: September 29 reconciliation
 
 Owner request: coordinate with the existing reviewer, merge useful completed work,
@@ -69,6 +102,58 @@ not releases or approved merge candidates. Each tag resolves to the exact SHA be
 Private unsubmitted worktree evidence was backed up separately, not in public tags.
 
 ## Rules for subsequent work
+
+October13 new-card evidence only: `archive/2026-10-13/new-card-qualified`
+retains6e63731/CI38342258088 (compiled behavioral counterexamples followed by
+fixed race/API/Chromium passes). Initial tags `new-card-initial-proof` and
+`new-card-first-proof` retain1998fc7/38340413097 (new fixture root mismatch) and
+ef465e8/38340756689 (green before offline-stop/late-save review corrections).
+The first cleanup imported the hosted app.js and removed its temporary proof.
+`new-card-review-baseline` retainsae29abb before the final review corrections;
+CI38342967333 reached the bounded wait timeout, not acceptance. Later corrections
+require their own proof. These tags are not releases or branches to restore.
+`new-card-review-proof` retains1811eea/CI38344633611: actual WebSocket disconnect,
+late recovery response and transition-lock counterexamples fail on ae29abb, then
+fixed race and Chromium flows pass. Both failed jobs reject only stale embedded
+UI. Cleanup imports that generated app.js and removes the temporary job/script;
+runtime/tests are unchanged. Final review/full CI/rollout remain separate.
+
+October13 communication evidence only: `archive/2026-10-13/communication-initial`
+retains e11cebb/CI38374418897. Proof passed; full CI and final source review did not.
+It is superseded by PR30's corrected candidate, not a release or merge candidate.
+`communication-fixture-before-expand` retains69712c0/CI38378206324: the browser
+read a collapsed receipt section, so its SMS_VIEW failure is invalid evidence.
+`communication-fixture-before-new-draft` retains49a2a3c/CI38378980213: SMS/call
+regressions pass; the allowance fixture failed to leave the retained SMS draft.
+`communication-qualified` retains36f530f/CI38379711514: compiled old Core and
+browser regressions fail as intended; fixed allowance race and full Chromium pass.
+Cleanup imports its hosted assets and removes temporary proof, not runtime/tests.
+`communication-before-history-guard` retains609afc6/CI38380931145 (full CI pass,
+one remaining scoped-history refresh race found by original reviewer).
+`communication-history-qualified` retainsfcb1f71/CI38382538282: old history
+scope race reproduced, fixed full Chromium passes; only stale embed rejected.
+
+PR31 evidence only: `archive/2026-10-14/esim-operation-qualified` retains
+ac2c230/Go CI38500419306 success (12 behavioral counterexample invocations,
+fixed affected-package race/adapter/Chromium passes). Final runtime/permanent tests
+match this source; temporary proof removed. Final-head review/CI and any later
+merge/deployment are separate PR receipts. Earlier failed fixtures remain history,
+not approval to restore them.
+
+October13 archived-line evidence, not a release or merge queue:
+`archive/2026-10-13/line-archive-qualified` retains20c516f/CI38401181375, full success
+with compiled old/withdrawn deletion/backup failures, old-page assertions and fixed
+race/browser passes. Runtime/permanent tests remain unchanged after proof cleanup.
+`line-archive-before-receipt-recovery` retains32a8077/38397898267 and
+`line-archive-reviewed` retainsad37f44/38400205694; neither passed full qualification.
+Final-head normal CI, merge and deployment remain separate receipts.
+
+October13 `codex/update-maintenance-continuity` is an independent candidate from
+main9a9aa78 for N10/N11/N12. It does not reopen PR29/30/32 or the frozen PR31 fixture
+decision. Qualified6b718e7 is retained at
+`archive/2026-10-14/update-maintenance-qualified` (Go CI38425248981 and original
+source review passed). Temporary proof cleanup retains runtime/permanent tests;
+final normal CI follows on PR33. This is not merge or deployment approval.
 
 October12 display evidence only: `archive/2026-10-12/hardware-imei-readback-proof`
 retains6afc927/CI38197352338 (old rendered-page readback assertion, fixed Chromium

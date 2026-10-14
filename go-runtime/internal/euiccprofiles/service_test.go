@@ -86,6 +86,27 @@ func (agents *fakeAgents) ExecuteEUICCProfileCommand(_ context.Context,
 	return agents.result, agents.err
 }
 
+func (agents *fakeAgents) ExecuteEUICCProfile(_ context.Context, agent, generation string, request agentlink.EUICCProfileRequest) (agentlink.EUICCProfileResponse, error) {
+	agents.commands = append(agents.commands, agentlink.EUICCProfileCommand{OperationID: request.OperationID, EID: request.EID, ICCID: request.ICCID, Action: request.Action, ExpectedState: request.ExpectedState})
+	result := agents.result
+	result.OperationID, result.SessionGeneration, result.EID, result.ICCID, result.Action = request.OperationID, request.SessionGeneration, request.EID, request.ICCID, request.Action
+	var remote *agentlink.RemoteError
+	if errors.As(agents.err, &remote) {
+		result.Failure = remote
+	}
+	return result, agents.err
+}
+
+func mutationService(agents *fakeAgents) *Service {
+	agents.statuses = []agentlink.ConnectionStatus{{AgentID: "agent-a", ProcessGeneration: "process-a", LastReport: time.Now(),
+		Topology: topology("reader-a", "insertion-a", testEID, []agentlink.EUICCProfileFact{{ICCID: testICCID, State: agentlink.EUICCProfileDisabled}})}}
+	service, _ := New(agents, WithDownloadSafety(fakeCatalog{snapshot: linecatalog.Snapshot{Revision: 1}}, fakeProviderStatus{}))
+	service.SetMutationGuard(func(context.Context, agentlink.ConnectionStatus, []string, string) (func(context.Context) error, error) {
+		return func(context.Context) error { return nil }, nil
+	})
+	return service
+}
+
 func TestInventoryPreservesMultiReaderIdentityAndProfileMetadata(t *testing.T) {
 	agents := &fakeAgents{statuses: []agentlink.ConnectionStatus{
 		{AgentID: "agent-b", ProcessGeneration: "process-b", LastSeen: time.Unix(20, 0).UTC(), Topology: topology("reader-b", "insertion-b", "89049032000000000000000000000002", nil)},
@@ -148,7 +169,7 @@ func TestProfileMutationForwardsExactIntentAndReportsRefreshPending(t *testing.T
 		OperationID: "operation-1", SessionGeneration: "insertion-a", EID: testEID, ICCID: testICCID,
 		Action: agentlink.EUICCProfileEnable, Outcome: agentlink.EUICCProfileRefreshPending, Changed: true,
 	}}
-	service, _ := New(agents)
+	service := mutationService(agents)
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/euiccs/{eid}/profiles/{iccid}/{action}", service)
 	response := post(t, mux, "/v1/euiccs/"+testEID+"/profiles/"+testICCID+"/enable", map[string]any{
@@ -166,6 +187,7 @@ func TestProfileMutationForwardsExactIntentAndReportsRefreshPending(t *testing.T
 
 func TestProfileEnableRejectsWhileMatchingLineIsRunning(t *testing.T) {
 	agents := &fakeAgents{}
+	mutationService(agents)
 	service, err := New(agents, WithDownloadSafety(
 		fakeCatalog{snapshot: linecatalog.Snapshot{Lines: []linecatalog.Line{{ID: "line-1", Enabled: true, CardID: testICCID}}}},
 		fakeProviderStatus{statuses: map[string]vowifiipc.Snapshot{"line-1": {Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning}}}},
@@ -220,7 +242,7 @@ func TestProfileNicknameForwardsDesiredAndExpectedValues(t *testing.T) {
 
 func TestProfileMutationRejectsStaleIntentAndPreservesTypedErrors(t *testing.T) {
 	agents := &fakeAgents{}
-	service, _ := New(agents)
+	service := mutationService(agents)
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/euiccs/{eid}/profiles/{iccid}/{action}", service)
 	response := post(t, mux, "/v1/euiccs/"+testEID+"/profiles/"+testICCID+"/enable", map[string]any{

@@ -51,15 +51,20 @@ func (s *Server) devicePolicy(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	var input struct {
-		OperationID       string  `json:"operation_id"`
-		CellularEnabled   *bool   `json:"cellular_enabled,omitempty"`
-		ConnectionEnabled *bool   `json:"connection_enabled,omitempty"`
-		FlightMode        *bool   `json:"flight_mode,omitempty"`
-		RoamingEnabled    *bool   `json:"roaming_enabled,omitempty"`
-		SelectedProfile   *string `json:"selected_profile,omitempty"`
+		OperationID       string                          `json:"operation_id"`
+		CellularEnabled   *bool                           `json:"cellular_enabled,omitempty"`
+		ConnectionEnabled *bool                           `json:"connection_enabled,omitempty"`
+		FlightMode        *bool                           `json:"flight_mode,omitempty"`
+		RoamingEnabled    *bool                           `json:"roaming_enabled,omitempty"`
+		SelectedProfile   *string                         `json:"selected_profile,omitempty"`
+		ExpectedTarget    *agentlink.ModemControlIdentity `json:"expected_target"`
 	}
 	if decodeDevicePolicyBody(request, &input) != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_device_policy"})
+		return
+	}
+	if input.ExpectedTarget == nil || !input.ExpectedTarget.Matches(view.target()) {
+		writeDevicePolicyError(response, agentlink.ErrGenerationMismatch)
 		return
 	}
 	if s.modemPolicies == nil {
@@ -69,6 +74,7 @@ func (s *Server) devicePolicy(response http.ResponseWriter, request *http.Reques
 	result, err := s.modemPolicies.ExecuteModemPolicyCommand(request.Context(), agentlink.ModemPolicyCommand{
 		OperationID: input.OperationID, EquipmentID: device.Modem.EquipmentID, CardID: device.Modem.SIM.ICCID,
 		Action: agentlink.ModemPolicySet, ExpectedRevision: expected,
+		ExpectedTarget: input.ExpectedTarget,
 		Patch: agentlink.ModemPolicyPatch{CellularEnabled: input.CellularEnabled,
 			ConnectionEnabled: input.ConnectionEnabled, FlightMode: input.FlightMode, RoamingEnabled: input.RoamingEnabled,
 			SelectedProfile: input.SelectedProfile},
@@ -123,16 +129,21 @@ func (s *Server) deviceProfiles(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	var input struct {
-		OperationID string `json:"operation_id"`
-		Name        string `json:"name"`
-		APN         string `json:"apn"`
-		Auth        string `json:"auth"`
-		Username    string `json:"username,omitempty"`
-		Password    string `json:"password,omitempty"`
-		PasswordSet bool   `json:"password_set"`
+		OperationID    string                          `json:"operation_id"`
+		Name           string                          `json:"name"`
+		APN            string                          `json:"apn"`
+		Auth           string                          `json:"auth"`
+		Username       string                          `json:"username,omitempty"`
+		Password       string                          `json:"password,omitempty"`
+		PasswordSet    bool                            `json:"password_set"`
+		ExpectedTarget *agentlink.ModemControlIdentity `json:"expected_target"`
 	}
 	if decodeDevicePolicyBody(request, &input) != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_modem_profile"})
+		return
+	}
+	if input.ExpectedTarget == nil || !input.ExpectedTarget.Matches(view.target()) {
+		writeDevicePolicyError(response, agentlink.ErrGenerationMismatch)
 		return
 	}
 	if s.modemPolicies == nil {
@@ -142,6 +153,7 @@ func (s *Server) deviceProfiles(response http.ResponseWriter, request *http.Requ
 	result, err := s.modemPolicies.ExecuteModemPolicyCommand(request.Context(), agentlink.ModemPolicyCommand{
 		OperationID: input.OperationID, EquipmentID: device.Modem.EquipmentID, CardID: device.Modem.SIM.ICCID,
 		Action: agentlink.ModemPolicyProfileSave, ExpectedRevision: expected,
+		ExpectedTarget: input.ExpectedTarget,
 		Profile: agentlink.ModemProfileInput{Name: input.Name, APN: input.APN, Auth: input.Auth,
 			Username: input.Username, Password: input.Password, PasswordSet: input.PasswordSet},
 	})
@@ -199,6 +211,12 @@ func (s *Server) devicePolicyTarget(deviceID string) (DeviceProjection, devicePo
 	return DeviceProjection{}, devicePolicyView{}, agentlink.ErrModemOffline
 }
 
+func (view devicePolicyView) target() agentlink.ModemTarget {
+	return agentlink.ModemTarget{AgentID: view.AgentID, ProcessGeneration: view.ProcessGeneration,
+		EquipmentID: view.EquipmentID, AttachmentID: view.AttachmentID, CardID: view.CardID,
+		SIMSessionGeneration: view.SIMSessionGeneration}
+}
+
 func parseDeviceRevision(value string) (uint64, error) {
 	value = strings.TrimSpace(value)
 	if len(value) < 3 || value[0] != '"' || value[len(value)-1] != '"' {
@@ -234,6 +252,8 @@ func writeDevicePolicyError(response http.ResponseWriter, err error) {
 		return
 	}
 	switch {
+	case errors.Is(err, agentlink.ErrGenerationMismatch):
+		writeJSON(response, http.StatusConflict, map[string]string{"code": "device_confirmation_changed"})
 	case errors.Is(err, agentlink.ErrModemOffline):
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "device_offline"})
 	case errors.Is(err, agentlink.ErrModemAmbiguous):

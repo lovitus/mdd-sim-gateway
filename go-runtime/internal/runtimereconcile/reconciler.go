@@ -59,7 +59,7 @@ type Catalog interface {
 	Snapshot() (linecatalog.Snapshot, error)
 	Get(string) (linecatalog.Line, error)
 	RuntimeIntent(string) (enabled, found bool, revision uint64, err error)
-	SetRuntimeIntent(string, bool) (lineEnabled, changed bool, revision uint64, err error)
+	SetRuntimeIntent(string, bool, ...string) (lineEnabled, changed bool, revision uint64, err error)
 }
 
 type AgentFacts interface {
@@ -79,6 +79,7 @@ type EventStore interface {
 }
 
 type Config struct {
+	Admit                  func() (func(), error)
 	ReconcileDefaultDrafts func(context.Context) error
 	ContinuousRetry        func() (recovery.ContinuousRetry, error)
 	ExitRecovery           *ExitRecoveryConfig
@@ -98,6 +99,7 @@ type Config struct {
 }
 
 type Reconciler struct {
+	admit                  func() (func(), error)
 	defaultsInFlight       bool
 	defaultsNext           time.Time
 	defaultsFailures       uint32
@@ -251,6 +253,7 @@ func New(config Config) (*Reconciler, error) {
 	}
 	ctx, cancel := context.WithCancel(config.Context)
 	return &Reconciler{
+		admit:                  config.Admit,
 		reconcileDefaultDrafts: config.ReconcileDefaultDrafts,
 		continuousRetry:        config.ContinuousRetry,
 		exitRecovery:           config.ExitRecovery,
@@ -292,7 +295,7 @@ func (reconciler *Reconciler) Wake() {
 // RequestIntent is the synchronous public lifecycle facade. It persists only
 // operator intent, wakes the single reconciler executor, and returns success
 // only after an exact Provider observation reaches the requested target.
-func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, enabled bool, operationID string) (vowifiipc.OperationResult, error) {
+func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, enabled bool, operationID string, expectedCard ...string) (vowifiipc.OperationResult, error) {
 	var result vowifiipc.OperationResult
 	if ctx == nil || reconciler == nil || (vowifiipc.LifecycleRequest{OperationID: operationID}).Validate() != nil {
 		return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorInvalid, Code: "invalid_request", Layer: "intent"}
@@ -300,8 +303,11 @@ func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, 
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	lineEnabled, _, _, commandEpoch, err := reconciler.setIntent(lineID, enabled)
+	lineEnabled, _, _, commandEpoch, err := reconciler.setIntent(lineID, enabled, expectedCard...)
 	if err != nil {
+		if errors.Is(err, linecatalog.ErrRuntimeCardChanged) {
+			return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorConflict, Code: "runtime_intent_card_mismatch", Layer: "intent"}
+		}
 		if errors.Is(err, linecatalog.ErrNotFound) {
 			return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "intent"}
 		}
@@ -391,14 +397,14 @@ func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, 
 // process-local per-line epoch. The catalog revision is global, so it cannot
 // identify which public lifecycle request was superseded. The epoch changes
 // only when this line's durable desired value (or presence) actually changes.
-func (reconciler *Reconciler) setIntent(lineID string, enabled bool) (lineEnabled, changed bool, revision, epoch uint64, err error) {
+func (reconciler *Reconciler) setIntent(lineID string, enabled bool, expectedCard ...string) (lineEnabled, changed bool, revision, epoch uint64, err error) {
 	reconciler.mu.Lock()
 	defer reconciler.mu.Unlock()
-	return reconciler.setIntentLocked(lineID, enabled)
+	return reconciler.setIntentLocked(lineID, enabled, expectedCard...)
 }
 
-func (reconciler *Reconciler) setIntentLocked(lineID string, enabled bool) (lineEnabled, changed bool, revision, epoch uint64, err error) {
-	lineEnabled, changed, revision, err = reconciler.catalog.SetRuntimeIntent(lineID, enabled)
+func (reconciler *Reconciler) setIntentLocked(lineID string, enabled bool, expectedCard ...string) (lineEnabled, changed bool, revision, epoch uint64, err error) {
+	lineEnabled, changed, revision, err = reconciler.catalog.SetRuntimeIntent(lineID, enabled, expectedCard...)
 	if err != nil {
 		return
 	}
@@ -453,6 +459,13 @@ func (reconciler *Reconciler) run() {
 }
 
 func (reconciler *Reconciler) reconcile(ctx context.Context) error {
+	if reconciler.admit != nil {
+		done, err := reconciler.admit()
+		if err != nil {
+			return nil
+		}
+		defer done()
+	}
 	var failures []error
 	reconciler.scheduleDefaultDrafts()
 	catalog, err := reconciler.catalog.Snapshot()
@@ -811,7 +824,17 @@ func (reconciler *Reconciler) execute(plan actionPlan, operationID string) {
 	defer reconciler.wg.Done()
 	ctx, cancel := context.WithTimeout(reconciler.ctx, reconciler.actionTimeout)
 	request := vowifiipc.LifecycleRequest{OperationID: operationID, RequireIdle: plan.recovery}
-	err := reconciler.validatePlan(ctx, plan)
+	var err error
+	if reconciler.admit != nil {
+		var done func()
+		done, err = reconciler.admit()
+		if err == nil {
+			defer done()
+		}
+	}
+	if err == nil {
+		err = reconciler.validatePlan(ctx, plan)
+	}
 	if err == nil {
 		if plan.action == "prepare_sim_apdu" {
 			preparer, ok := reconciler.agents.(interface {

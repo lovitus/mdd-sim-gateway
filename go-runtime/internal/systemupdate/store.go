@@ -21,14 +21,15 @@ type Request struct {
 }
 
 type Status struct {
-	SchemaVersion int       `json:"schema_version"`
-	OperationID   string    `json:"operation_id,omitempty"`
-	State         string    `json:"state"`
-	Phase         string    `json:"phase,omitempty"`
-	Target        string    `json:"target,omitempty"`
-	ErrorCode     string    `json:"error_code,omitempty"`
-	ErrorDetail   string    `json:"error_detail,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Maintenance   *Maintenance `json:"maintenance,omitempty"`
+	SchemaVersion int          `json:"schema_version"`
+	OperationID   string       `json:"operation_id,omitempty"`
+	State         string       `json:"state"`
+	Phase         string       `json:"phase,omitempty"`
+	Target        string       `json:"target,omitempty"`
+	ErrorCode     string       `json:"error_code,omitempty"`
+	ErrorDetail   string       `json:"error_detail,omitempty"`
+	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
 const (
@@ -42,7 +43,13 @@ const (
 
 type Store struct {
 	requestPath, statusPath string
+	maintenancePath         string
+	statusReaderGID         int
 	mu                      sync.Mutex
+	rename                  func(string, string) error
+	syncDirectory           func(string) error
+	publicationPending      string
+	maintenancePending      bool
 }
 
 func Open(path string) (*Store, error) {
@@ -56,7 +63,8 @@ func Open(path string) (*Store, error) {
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{requestPath: path + ".request.json", statusPath: path + ".status.json"}, nil
+	return &Store{requestPath: path + ".request.json", statusPath: path + ".status.json", maintenancePath: path + ".maintenance.json", statusReaderGID: -1,
+		rename: os.Rename, syncDirectory: syncUpdateDirectory}, nil
 }
 
 func (store *Store) Request(input Request) error {
@@ -73,23 +81,69 @@ func (store *Store) Request(input Request) error {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	maintenance, err := store.maintenanceLocked()
+	if err != nil {
+		return err
+	}
+	if store.maintenancePending || maintenance != nil && maintenance.Phase != MaintenanceReleased {
+		return errors.New("update maintenance requires reconciliation")
+	}
 	status, found, err := store.statusLocked()
 	if err != nil {
 		return err
 	}
-	if found && (status.State == StateRequested || status.State == StateRunning || status.State == StateUnknown) {
-		return errors.New("update already in progress")
-	}
-	if err := atomicJSON(store.requestPath, input); err != nil {
+	prior, priorFound, err := store.pendingRequestLocked()
+	if err != nil {
 		return err
 	}
-	return atomicJSON(store.statusPath, Status{SchemaVersion: 1, OperationID: input.OperationID, State: StateRequested, Phase: "requested", Target: input.Target, UpdatedAt: time.Now().UTC()})
+	if priorFound && (!found || !requestStatusMatches(prior, status) || !terminalStatus(status)) ||
+		!priorFound && (maintenance != nil || found && !terminalStatus(status)) ||
+		maintenance != nil && maintenance.OperationID == prior.OperationID && maintenance.Target.RequestedTarget != prior.Target {
+		return errors.New("original update completion requires reconciliation")
+	}
+	if err := store.atomicJSON(store.requestPath, input); err != nil {
+		if wasPublished(err) {
+			store.publicationPending = input.OperationID
+		}
+		return err
+	}
+	store.publicationPending = input.OperationID
+	if err := store.atomicJSON(store.statusPath, Status{SchemaVersion: 1, OperationID: input.OperationID, State: StateRequested, Phase: "requested", Target: input.Target, UpdatedAt: time.Now().UTC()}); err != nil {
+		return err
+	}
+	store.publicationPending = ""
+	return nil
 }
 
 func (store *Store) Status() (Status, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	status, found, err := store.statusLocked()
+	record, maintenanceErr := store.maintenanceLocked()
+	if maintenanceErr != nil {
+		return Status{}, maintenanceErr
+	}
+	if record != nil && (record.Phase != MaintenanceReleased || !found || status.OperationID == record.OperationID) {
+		if err != nil || !found || status.OperationID != record.OperationID || status.Target != record.Target.RequestedTarget {
+			return Status{SchemaVersion: 1, OperationID: record.OperationID, State: StateUnknown, Phase: record.Phase,
+				Target: record.Target.RequestedTarget, ErrorCode: "update_worker_status_unconfirmed", Maintenance: record, UpdatedAt: record.UpdatedAt}, nil
+		}
+		status.Maintenance = record
+		if record.Phase != MaintenanceReleased && status.State != StateRunning && status.State != StateRequested {
+			status.State, status.Phase, status.ErrorCode = StateUnknown, record.Phase, "update_maintenance_unconfirmed"
+			status.ErrorDetail = "Original update maintenance is retained; reconcile this operation before another update."
+		} else if record.Phase == MaintenanceReleased && status.State != StateSucceeded && status.State != StateFailed {
+			status.State, status.Phase, status.ErrorCode = StateUnknown, record.Phase, "update_release_receipt_pending"
+			status.ErrorDetail = "Maintenance was released; the worker completion receipt still requires reconciliation."
+		}
+	}
+	request, requestFound, requestErr := store.pendingRequestLocked()
+	if requestErr != nil {
+		return Status{}, requestErr
+	}
+	if requestFound && (store.publicationPending == request.OperationID && !terminalStatus(status) || err != nil || !found || !requestStatusMatches(request, status)) {
+		return publicationUnknown(request), nil
+	}
 	if err != nil {
 		return Status{}, err
 	}
@@ -102,6 +156,10 @@ func (store *Store) Status() (Status, error) {
 func (store *Store) PendingRequest() (Request, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	return store.pendingRequestLocked()
+}
+
+func (store *Store) pendingRequestLocked() (Request, bool, error) {
 	payload, err := os.ReadFile(store.requestPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return Request{}, false, nil
@@ -128,7 +186,19 @@ func (store *Store) SetStatus(next Status) error {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return atomicJSON(store.statusPath, next)
+	next.Maintenance = nil
+	if store.statusReaderGID >= 0 {
+		return store.atomicJSONOwner(store.statusPath, next, 0o640, 0, store.statusReaderGID)
+	}
+	return store.atomicJSON(store.statusPath, next)
+}
+
+func (store *Store) SetWorkerStatusReaderGroup(gid int) error {
+	if os.Geteuid() != 0 || gid < 0 {
+		return errors.New("worker status ownership requires root and a service group")
+	}
+	store.statusReaderGID = gid
+	return nil
 }
 
 func (store *Store) statusLocked() (Status, bool, error) {
@@ -146,7 +216,11 @@ func (store *Store) statusLocked() (Status, bool, error) {
 	return status, true, nil
 }
 
-func atomicJSON(path string, value any) error {
+func (store *Store) atomicJSON(path string, value any) error {
+	return store.atomicJSONOwner(path, value, 0o600, -1, -1)
+}
+
+func (store *Store) atomicJSONOwner(path string, value any, mode os.FileMode, uid, gid int) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -157,7 +231,13 @@ func atomicJSON(path string, value any) error {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
+	if uid >= 0 {
+		if err := temporary.Chown(uid, gid); err != nil {
+			_ = temporary.Close()
+			return err
+		}
+	}
+	if err := temporary.Chmod(mode); err != nil {
 		_ = temporary.Close()
 		return err
 	}
@@ -172,5 +252,29 @@ func atomicJSON(path string, value any) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temporaryPath, path)
+	if err := store.rename(temporaryPath, path); err != nil {
+		return err
+	}
+	if err := store.syncDirectory(filepath.Dir(path)); err != nil {
+		return &publishedWriteError{err}
+	}
+	return nil
+}
+
+type publishedWriteError struct{ error }
+
+func (err *publishedWriteError) Unwrap() error { return err.error }
+
+func wasPublished(err error) bool {
+	var published *publishedWriteError
+	return errors.As(err, &published)
+}
+
+func syncUpdateDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
