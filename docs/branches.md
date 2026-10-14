@@ -1,6 +1,25 @@
 # Branch disposition and integration record
 
-## October 14 integration in progress
+## October 14 integration and rollout
+
+PR34 merged normally at `202e5206c47210e3ebd51a9ac5de0d9a3cd74152` after final
+source `639f55a` / full Go CI `38509927202` and original-reviewer approval.
+PR29-33 are closed as integrated, not abandoned; do not merge their old heads again.
+Field cutover rolled back to the retained previous Core: update maintenance IPC
+uses `provideradmin.Authenticate`, but the worker sent a different credential header.
+The follow-up changes only that client header and makes its recovery tests use the
+real production middleware. A GET/POST credential table checks unchanged durable
+state and admission. Qualified `c59056d` / full Go CI `38514560874` is retained at
+`archive/2026-10-14/update-auth-qualified`: old valid GET/POST fail with 401, then
+the credential table and both original recovery tests pass under race, with no skips.
+Test-merge `679ffcd` has the same tree `5fada26`. Initial proof `38514002965`
+failed before tests because shallow checkout lacked a baseline object; the archived
+`update-auth-first-proof` is not a behavioral counterexample. The qualified proof
+withdraws only the header fix. Final cleanup removes temporary proof steps/script,
+with runtime and permanent tests unchanged; final normal CI and rollout remain.
+Original state/configuration and maintenance were preserved; no paid/SIM action.
+First-upgrade installation uses canonical managed links and the existing installer;
+the watcher stays inactive until the corrected worker is qualified and deployed.
 
 The owner authorized one combined PR29-33 delivery, normal protected merge and
 controlled GitHub-artifact rollout with rollback retained and scoped field tests.
@@ -19,8 +38,8 @@ update admission, original cleanup ownership, current-view navigation with origi
 paid-operation identity, and separate new-card/archive actions. Permanent workflow
 gates are combined without restoring temporary proofs; workstreams retain their IDs.
 The embedded UI is generated from the complete integrated frontend on GitHub,
-not selected from one PR. Final normal CI/cleanup review and deployment receipts
-remain pending. Do not close or restore old PRs before integration reaches main.
+not selected from one PR. PR34 final normal CI/cleanup review and merge are complete;
+the corrected-worker rollout receipt remains pending. Do not restore the old PRs.
 PR34 source candidate `b5d3102` is retained by
 `archive/2026-10-14/integrated-source-before-embed`. Hosted run `38505387105`
 passed the integrated browser flows and produced the combined UI; its two failed
