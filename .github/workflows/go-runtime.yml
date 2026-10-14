@@ -203,6 +203,7 @@ jobs:
             webui/browser-evidence/hardware-imei
             webui/browser-evidence/new-card
             webui/browser-evidence/new-card-review
+            webui/browser-evidence/reader-setup
           if-no-files-found: ignore
           retention-days: 7
 
