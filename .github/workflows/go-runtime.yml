@@ -138,6 +138,18 @@ jobs:
         working-directory: webui
         run: npm run test:recording-browser
 
+      - name: Prove pre-fix claimed-line publication preservation
+        run: bash tools/prove-reader-setup.sh
+
+      - name: Retain setup publication counterexample
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-setup-proof-${{ github.sha }}
+          path: |
+            proof-reader-setup
+            webui/browser-evidence/reader-setup-publication-red
+
       - name: Real browser Hardware IMEI save and readback
         working-directory: webui
         run: npm run test:hardware-imei-browser
@@ -203,6 +215,7 @@ jobs:
             webui/browser-evidence/hardware-imei
             webui/browser-evidence/new-card
             webui/browser-evidence/new-card-review
+            webui/browser-evidence/reader-setup
           if-no-files-found: ignore
           retention-days: 7
 
