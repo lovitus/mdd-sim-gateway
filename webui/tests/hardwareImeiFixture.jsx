@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { DevicesPage } from '../src/mdd/views/UnifiedPages.jsx'
 import { UnifiedOverview } from '../src/mdd/views/UnifiedPages.jsx'
@@ -6,6 +6,7 @@ import DialogHost from '../src/DialogHost.jsx'
 import { lineForm } from '../src/mdd/lineAdapter.js'
 import { mapGoSnapshot } from '../src/goV1Adapter.js'
 import { I18nProvider } from '../src/mdd/i18n.jsx'
+import { api } from '../src/api.js'
 import '../src/mdd/index.css'
 
 const reader = { id:'fixture-reader', device_type:'reader', display_name:'Fixture reader',
@@ -77,7 +78,22 @@ function Fixture() {
   </>
 }
 
+function SetupFixture() {
+  const [snapshot,setSnapshot]=useState(null)
+  const [selected,setSelected]=useState(null)
+  const [tab,setTab]=useState('sim')
+  const [toast,setToast]=useState('')
+  const refresh=async()=>setSnapshot(await api.snapshot())
+  useEffect(()=>{refresh().catch(error=>setToast(error.message))},[])
+  return <><DialogHost language="en"/><output aria-label="Toast">{toast}</output>
+    <button onClick={refresh}>Refresh fixture</button>
+    {snapshot && <DevicesPage {...snapshot} refresh={refresh} refreshDevices={refresh} showToast={setToast}
+      selected={snapshot.instances.find(line=>line.id===selected)} setSelected={setSelected}
+      selectedDeviceId="setup-reader" setSelectedDeviceId={()=>{}} deviceTab={tab} setDeviceTab={setTab}/>}
+  </>
+}
+
 localStorage.setItem('mdd-language','en')
 // The control-flow fixture uses the same root as main.jsx. Keep the existing
 // Hardware readback stress fixture's separate StrictMode coverage unchanged.
-createRoot(document.getElementById('root')).render(<I18nProvider>{new URLSearchParams(location.search).has('flow') ? <FlowFixture/> : <React.StrictMode><Fixture/></React.StrictMode>}</I18nProvider>)
+createRoot(document.getElementById('root')).render(<I18nProvider>{new URLSearchParams(location.search).has('setup') ? <SetupFixture/> : new URLSearchParams(location.search).has('flow') ? <FlowFixture/> : <React.StrictMode><Fixture/></React.StrictMode>}</I18nProvider>)
