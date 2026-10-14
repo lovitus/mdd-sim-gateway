@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { simPINIdentity, pinProof, runtimeNetworkSelection } from '../lineAdapter.js'
 import ProvisionActions from './ProvisionActions.jsx'
+import ReaderSetupActions from './ReaderSetupActions.jsx'
 import { useI18n } from '../i18n.jsx'
 import { compactReaderName, lineCompositeStatus } from '../linePresentation.js'
 import { useReaderIMEI } from '../useReaderIMEI.js'
@@ -10,7 +11,7 @@ import { simHomeCountry } from '../../simCountry.js'
 
 const emptyInstance = () => ({
   id: '', name: '', imsi: '', mcc: '', mnc: '', imei: '', imeisv: '', pin: '', reader: '', proxy_country: '',
-  reader_index: 0, reader_port: '', msisdn: '', smsc: '', enabled: true, apn: 'ims', idr_mode: 'apn', cp_mode: 'auto',
+  reader_index: 0, reader_port: '', msisdn: '', smsc: '', enabled: false, apn: 'ims', idr_mode: 'apn', cp_mode: 'auto',
   sip: { listen_addr: '0.0.0.0', webrtc: { enable: true } },
   debug: { asterisk: false, charon: false },
 })
@@ -19,8 +20,10 @@ function Field({ label, children }) {
   return <div><label>{label}</label>{children}</div>
 }
 
-export default function SimConfig({ instances, selected, refresh, cards, setSelected, targetDevice, devices = [] }) {
+export default function SimConfig({ instances, selected, refresh, cards, setSelected, targetDevice: physicalDevice, devices = [] }) {
   const { t } = useI18n()
+  const [editorMode,setEditorMode] = useState(physicalDevice?.present === false ? 'saved' : 'current')
+  const targetDevice=editorMode==='current' ? physicalDevice : null
   const [readers, setReaders] = useState([])
   const [card, setCard] = useState(null)
   const [pin, setPin] = useState('')
@@ -83,7 +86,11 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   // Opening the SIM tab for an unconfigured physical reader starts a new-line form bound to
   // that reader. This avoids silently editing the currently selected (unrelated) line.
   useEffect(() => {
-    if (!targetDevice) return
+    if (!targetDevice) {
+      ++draftEpoch.current
+      setSelected(null);setSavedLineId('');setForm(emptyInstance());setCreating(false);setCard(null)
+      return
+    }
     if (targetDevice.instance_id) {
       setSavedLineId('')
       setSelected(String(targetDevice.instance_id))
@@ -114,8 +121,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       reader_port: (cards.find((item) => item.index === index) || {}).reader_port || '',
       imsi: sim.imsi || '', mcc: sim.mcc || '', mnc: sim.mnc || '',
       msisdn: sim.number || '', proxy_country: simHomeCountry(sim.mcc),
-      smsc: targetDevice.sms_diagnostics?.service_center || '' })
-  }, [targetDevice?.id, targetDevice?.instance_id, targetDevice?.sim?.iccid]) // eslint-disable-line react-hooks/exhaustive-deps
+      smsc: sim.smsc || targetDevice.sms_diagnostics?.service_center || '' })
+  }, [targetDevice?.id, targetDevice?.instance_id, targetDevice?.sim?.iccid,editorMode]) // eslint-disable-line react-hooks/exhaustive-deps
   // Keep the reader selection valid for the CURRENT hardware. A stored reader_index can be
   // stale — saved when more readers were attached — and point past the live reader list; the
   // <select> then has no matching option and "Detect card" probes a phantom reader ("No SIM
@@ -222,6 +229,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     try {
       const rawMnc = String(form.mnc || '').trim()
       const body = { ...form, mnc: rawMnc }
+      // Saving fields is not lifecycle consent, including a previously armed start.
+      body.enabled = form.__catalog_line?.enabled === true
       if (!creating && managedSelected?.id) body.original_id = String(managedSelected.id)
       const editedNumber = String(form.msisdn || '').trim() !== String(managedSelected?.msisdn || '').trim()
       if (editedNumber) body.msisdn_source = String(form.msisdn || '').trim() ? 'manual' : ''
@@ -295,14 +304,22 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const missingLabels = { imsi: 'IMSI / PIN', imei: 'IMEI', smsc: t('SMS centre (SMSC)') }
   const imeiReady = !!binding.imei && !binding.loading && !binding.error
   const existingLine = instances.some(line => String(line.id) === String(form.id))
+  const onSaved = value => {setForm({...emptyInstance(),...value});setCreating(value.provisioning_state==='draft');setSavedLineId(String(value.id));setSelected(String(value.id))}
+  const readerSetup = targetDevice?.device_type==='reader'
 
   return (
     <fieldset disabled={saving || loadingConfiguration} style={{ maxWidth: 1000, minWidth: 0, border: 0, padding: 0 }}>
-      {!!instances.length && <div className="u-saved-lines">
+      <div className="u-editor-tabs" role="tablist" aria-label={t('SIM editing target')}>
+        <button role="tab" aria-selected={editorMode==='current'} className={editorMode==='current' ? 'active' : ''} disabled={!physicalDevice || physicalDevice.present===false} onClick={()=>setEditorMode('current')}>{t('Current SIM')}</button>
+        <button role="tab" aria-selected={editorMode==='saved'} className={editorMode==='saved' ? 'active' : ''} onClick={()=>setEditorMode('saved')}>{t('Manage saved lines')}</button>
+      </div>
+      {editorMode==='saved' && <div className="u-saved-lines">
         <div><label>{t('Saved SIM line')}</label><p>{t('Select a saved SIM line to edit or delete it. This list does not depend on whether its former device is connected.')}</p></div>
         <select value={boundLineId || savedLineId} disabled={!!boundLineId} onChange={event => {
           const value = event.target.value
           setCreating(false)
+          ++draftEpoch.current
+          setForm(emptyInstance());setCard(null);setProof(null)
           setSavedLineId(value)
           setSelected(value || null)
         }}>
@@ -310,12 +327,15 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           {instances.map(line => <option value={line.id} key={line.id}>{line.name || `${line.mcc || ''}-${line.mnc || ''}`} · {lineCompositeStatus(line, devices, t)}</option>)}
         </select>
       </div>}
+      {readerSetup && <ReaderSetupActions form={form} device={targetDevice} save={save} onSaved={onSaved}
+        refresh={refresh} operationLock={mutationBusy} blocked={saving || deleting || detecting || pinBusy || loadingConfiguration} imeiReady={imeiReady}/>
+      }
       {!!savedLineId && !!targetDevice?.sim?.iccid && !!managedSelected?.iccid &&
         String(targetDevice.sim.iccid) !== String(managedSelected.iccid) &&
         <div className="u-note" style={{ marginBottom: 14 }}>
           {t('This saved line belongs to another ICCID. Selecting it only opens that saved record; it does not bind it to the current SIM.')}
         </div>}
-      {creating && <div className="u-note" style={{ marginBottom: 14 }}>
+      {creating && !readerSetup && <div className="u-note" style={{ marginBottom: 14 }}>
         <b>{t(form.__catalog_revision ? 'Disabled draft' : 'Unconfigured SIM')}</b><br />
         {providerOnly && targetDevice?.go_device?.modem?.at_control?.sim_apdu_on_demand
           ? t('SIM APDU is available on demand. Automatic setup must prepare it and read the card identity before VoWiFi can start; this is not an unsupported modem.')
@@ -370,7 +390,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       {/* Instance form */}
       <div className="card" style={{ padding: 20 }}>
         <h3 style={{ marginTop: 0 }}>{t('Line configuration')}</h3>
-        <label><input type="checkbox" checked={form.enabled === true} disabled={!form.__catalog_revision || form.provisioning_state === 'draft' || saving || deleting || pinBusy} onChange={event => upd({enabled:event.target.checked})} />{t('Enabled in Provider catalog')}</label>
+        <label><input type="checkbox" checked={form.enabled === true} disabled readOnly />{t('Enabled in Provider catalog')}</label>
         <div className="mdd-sim-fields">
           {!creating && <Field label={t('Instance ID')}><input className="mono" value={form.id} readOnly title={t('Assigned by the system and cannot be changed.')} /></Field>}
           <Field label={t('Name')}><input value={form.name} onChange={(e) => upd({ name: e.target.value })} placeholder="Telus" /></Field>
@@ -451,11 +471,11 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           </label>
         </details>
 
-        <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+        {(!readerSetup || form.__catalog_line) && <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
           <button className="btn btn-primary" onClick={save} disabled={saving || deleting || detecting || pinBusy || (!form.__catalog_revision && !(creating && targetDevice?.present === true && targetDevice?.sim?.iccid && !targetDevice.stale && !targetDevice.observed_only))}>{t('Save')}</button>
-        </div>
-        <ProvisionActions form={form} device={targetDevice} refresh={refresh} operationLock={mutationBusy} blocked={saving || deleting || detecting || pinBusy}
-          onSaved={value => { setForm({...emptyInstance(),...value}); setCreating(value.provisioning_state === 'draft'); setSavedLineId(String(value.id)); setSelected(String(value.id)) }} />
+        </div>}
+        {!readerSetup && <ProvisionActions form={form} device={targetDevice} refresh={refresh} operationLock={mutationBusy} blocked={saving || deleting || detecting || pinBusy}
+          onSaved={onSaved} />}
         {existingLine && <div className="u-line-delete" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
             <div>

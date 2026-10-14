@@ -208,6 +208,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
     reader: device?.reader?.reader_name || '',
     stable_path: modem?.attachment_id || device?.reader?.reader_name || device?.id || '',
     instance_id: lineID,
+    line_configuration: line ? {enabled:line.enabled === true, provisioning_state:line.hardware_provision_state || ''} : null,
     runtime_intent_target: intentLine ? {line_id:text(intentLine.id),card_id:intentLine.card_id} : null,
     endpoints: device?.endpoints || [],
     endpoint_ambiguous: !endpoint && (device?.endpoints || []).some(value => value?.line),

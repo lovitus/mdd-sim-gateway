@@ -1,9 +1,10 @@
 import { dialogs } from '../../dialogs.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
-import { candidateForDevice, claimedDraftForm, savedCatalogLine, modemProvisionIntent } from '../lineAdapter.js'
+import { candidateForDevice, claimedDraftForm, savedCatalogLine, modemProvisionIntent, lineForm } from '../lineAdapter.js'
 import { useI18n } from '../i18n.jsx'
 import {rememberProvision,recalledProvision,forgetProvision,provisionTerminal} from '../provisionRecovery.js'
+import {pendingProviderApply,rememberProviderApply,archiveProviderApply,providerApplyRejected,providerApplyObserved} from '../providerApplyRecovery.js'
 
 // The existing Go preflight/provision/apply workflow, within the original SIM form.
 export default function ProvisionActions({form,device,onSaved,refresh,operationLock,blocked = false}) {
@@ -14,6 +15,7 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
   const [working,setBusy] = useState(false)
   const [recovering,setRecovering] = useState(true)
   const [recoveryError,setRecoveryError] = useState('')
+  const [pendingApply,setPendingApply] = useState(null)
   const busy = working || blocked || recovering || Boolean(recoveryError)
   const unresolved = Boolean(reconcile && String(reconcile.line_id) === String(form.id))
   const [message,setMessage] = useState('')
@@ -23,11 +25,14 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
   const inFlight = operationLock || localLock
   const claimOperation = useRef(null)
   const generation = useRef(0)
+  const mounted = useRef(true)
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;++generation.current}},[])
   const raw = device?.go_device || {}
   useEffect(()=>{
     let stopped=false
     setRecovering(true);setRecoveryError('');setReconcile(null)
     try {
+      setPendingApply(pendingProviderApply())
       const stored=form.id ? recalledProvision(String(form.id)) : null
       if(stored){
         setReconcile(stored)
@@ -67,7 +72,7 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
     const epoch = generation.current
     try { await action(epoch) }
     catch (error) {if(epoch === generation.current)setMessage(error.message)}
-    finally {inFlight.current = false;setBusy(false)}
+    finally {inFlight.current = false;if(mounted.current)setBusy(false)}
   }
   const reload = async epoch => {
     const value = await api.lineConfiguration(form.id)
@@ -113,30 +118,63 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
     await reload(epoch)
   })
   const apply = () => run(async epoch => {
+    if(pendingProviderApply())throw new Error(t('Application is not confirmed; read status before any further action.'))
     savedCatalogLine(form)
     if (!(await dialogs.confirm(t('Apply this exact catalog revision to VoWiFi Providers? Changed lines may restart.')))) return
-    const result = await api.applyProviderConfig(form.__catalog_revision)
-    if (epoch === generation.current) setMessage([result.state || 'unknown',result.code || ''].filter(Boolean).join(' · '))
+    if(!mounted.current || epoch!==generation.current)throw new Error('line_configuration_changed')
+    const attempt={id:crypto.randomUUID(),line_id:form.id,card_id:form.iccid,revision:form.__catalog_revision,wide:true}
+    rememberProviderApply(attempt);setPendingApply(attempt)
+    try {
+      const result = await api.applyProviderConfig(form.__catalog_revision)
+      if(result.state==='applied')archiveProviderApply(attempt,{result})
+      if(mounted.current && epoch===generation.current){setPendingApply(pendingProviderApply());setMessage([result.state || 'unknown',result.code || ''].filter(Boolean).join(' · '))}
+    }catch(error){
+      if(providerApplyRejected(error))archiveProviderApply(attempt,{rejected:error.code})
+      if(mounted.current && epoch===generation.current)setPendingApply(pendingProviderApply())
+      throw error
+    }
+    await refresh?.()
+  })
+  const readApply = () => run(async epoch => {
+    const attempt=pendingProviderApply()
+    if(!attempt)return
+    const [status,value,configuration]=await Promise.all([api.providerApplyStatus(),api.lineFacts(attempt.line_id),api.lineConfiguration(attempt.line_id)])
+    if(!mounted.current || epoch!==generation.current)return
+    if(providerApplyObserved(attempt,status,value,configuration))archiveProviderApply(attempt,{observed_applied:true})
+    setPendingApply(pendingProviderApply())
+    setMessage(value.provider_error || (pendingProviderApply() ? t('Application is not confirmed; read status before any further action.') : t('Current Provider state confirmed; the original response remains unknown.')))
+  })
+  const setEnabled = () => run(async epoch => {
+    const line=savedCatalogLine(form)
+    if (!(await dialogs.confirm(t(line.enabled
+      ? 'Disable this saved line? Its saved start intent is retained. Stop VoWiFi before archiving.'
+      : 'Enable this saved line? Any retained or concurrent start request may become active. Other SIM switches remain unchanged.')))) return
+    if(!mounted.current || epoch!==generation.current)throw new Error('line_configuration_changed')
+    const result=await api.saveCatalogLine({...line,enabled:!line.enabled},form.__catalog_revision)
+    if(mounted.current && epoch===generation.current)onSaved(lineForm(result.line,result.revision))
     await refresh?.()
   })
   return <section>
     <div className="u-inline">
       {!form.__catalog_revision && <button className="btn btn-primary" disabled={busy || !candidate?.can_claim} onClick={claim}>{t('Create disabled draft')}</button>}
       {form.__catalog_revision && <>
+        <button className="btn btn-ghost" disabled={busy || !saved || form.provisioning_state==='draft'} onClick={setEnabled}>{t(form.enabled ? 'Disable line' : 'Enable line')}</button>
         {device?.device_type !== 'reader' && <button className="btn btn-ghost" disabled={busy || unresolved || !device || !savedReady} onClick={readback}>{t('Verify hardware state')}</button>}
         <button className="btn btn-ghost" disabled={busy || unresolved || !device || !savedReady || (device.device_type !== 'reader' && (!proof || proof.identity !== identity))} onClick={provision}>{t('Provision hardware')}</button>
-        <button className="btn btn-ghost" disabled={busy} onClick={apply}>{t('Apply saved catalog')}</button>
+        <button className="btn btn-ghost" disabled={busy || !!pendingApply} onClick={apply}>{t('Apply saved catalog')}</button>
       </>}
       {reconcile && reconcile.line_id === form.id && <button className="btn btn-ghost" disabled={busy} onClick={() => run(async epoch => {
         const status = await api.operationStatus(reconcile.operation_id)
         if (status.operation_id !== reconcile.operation_id || String(status.line_id) !== String(form.id)) throw new Error('provision_receipt_identity_changed')
         if (provisionTerminal(status.state)) {forgetProvision(reconcile);setReconcile(null);await reload(epoch);return}
-        if (status.state !== 'unknown') {if(epoch===generation.current)setMessage(status.state || 'unknown');return}
+        if (status.state !== 'unknown' || reconcile.kind==='reader') {if(epoch===generation.current)setMessage(status.state || 'unknown');return}
         const result = await api.reconcileProvisionV1(reconcile)
         if (epoch === generation.current) setMessage(result.state || 'unknown'); if (provisionTerminal(result.state)) {forgetProvision(reconcile);setReconcile(null)}
         await reload(epoch)
-      })}>{t('Read back and reconcile')}</button>}
+      })}>{t(reconcile.kind==='reader' ? 'Check original result' : 'Read back and reconcile')}</button>}
+      {pendingApply && <button className="btn btn-ghost" disabled={busy} onClick={readApply}>{t('Read current state')}</button>}
     </div>
+    {pendingApply && <p className="u-error">{t('Application is not confirmed; read status before any further action.')} · {pendingApply.line_id} · {pendingApply.revision}</p>}
     {message && <p role="status" className="u-note">{message}</p>}
     {recoveryError && <p role="alert" className="u-error">{recoveryError}</p>}
     {candidateError && <p role="alert" className="u-error">{candidateError} <button className="btn btn-ghost" disabled={busy} onClick={()=>setCandidateRead(value=>value+1)}>{t('Retry')}</button></p>}
