@@ -180,6 +180,15 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
 	const sim = modem?.sim || device?.reader?.sim || {}
   const cardIDs = endpoint?.card_ids || []
   const iccid = text(sim.iccid || device?.reader?.card_id || (cardIDs.length === 1 ? cardIDs[0] : ''))
+  // Historical attachment identity never grants a hardware operation. It may
+  // still identify the one durable line whose stop intent the user can save.
+  const rememberedLines = device?.observed_only && iccid ? catalogLines.filter(item =>
+    !item.deleted && item.card_id === iccid && (device.endpoints || []).some(value =>
+      value.association === 'exact' && value.line?.id === item.id && value.card_ids?.length === 1 && value.card_ids[0] === iccid)) : []
+  const intentLine = line || (rememberedLines.length === 1 ? rememberedLines[0] : null)
+  const intentProjection = intentLine ? projectionByLine.get(text(intentLine.id)) : null
+  const savedIntent = factsByLayer(intentProjection).vowifi_intent
+  const intentDesired = savedIntent ? savedIntent.available === true : intentLine?.enabled === true
   const msisdn = (Array.isArray(sim.msisdns) ? sim.msisdns.find(Boolean) : '') || line?.sim?.msisdn || ''
   const imei = text(modem?.equipment_id || line?.sim?.imei)
   const policyAvailable = adapted && !!policy && sim.state === 'ready'
@@ -199,6 +208,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
     reader: device?.reader?.reader_name || '',
     stable_path: modem?.attachment_id || device?.reader?.reader_name || device?.id || '',
     instance_id: lineID,
+    runtime_intent_target: intentLine ? {line_id:text(intentLine.id),card_id:intentLine.card_id} : null,
     endpoints: device?.endpoints || [],
     endpoint_ambiguous: !endpoint && (device?.endpoints || []).some(value => value?.line),
     sim: {
@@ -229,8 +239,8 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
       flight: policyCapability(policy, 'flight_mode', flightActual, policyAvailable),
       roaming: policyCapability(policy, 'roaming_enabled', policyAvailable ? (policy?.desired?.roaming_enabled ? 'on' : 'off') : 'unsupported', policyAvailable),
       vowifi: {
-        desired: vowifiDesired,
-        actual: lineID ? vowifiState(projection, vowifiDesired) : 'unsupported',
+        desired: intentDesired,
+        actual: lineID ? vowifiState(projection, vowifiDesired) : intentLine ? (intentDesired ? 'degraded' : 'off') : 'unsupported',
         available: !!lineID,
         requestable: !!lineID,
         reason: factSummary(projection).code,
@@ -331,7 +341,8 @@ export function mapGoSnapshot(input = {}) {
   const liveEgress = egressMap(input.egress)
   return {
     schema_version: 1,
-    at: input.at || new Date().toISOString(),
+    at: input.at || '',
+    devices_available: Array.isArray(input.devices),
     instances: catalogLines.map(line => mapCatalogLine(line,
       projections.find(value => text(value?.line_id) === text(line?.id)))),
     cards: mapReaderCards(input.devices || []),

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
@@ -394,6 +395,14 @@ func (settings *config) validate() error {
 }
 
 func run(ctx context.Context, settings config) error {
+	updateStore, err := systemupdate.Open(filepath.Join(filepath.Dir(settings.EventsPath), "update-state"))
+	if err != nil {
+		return err
+	}
+	updateAdmission, err := systemupdate.OpenAdmission(updateStore)
+	if err != nil {
+		return err
+	}
 	certificate, err := tls.LoadX509KeyPair(settings.Public.TLSCert, settings.Public.TLSKey)
 	if err != nil {
 		return fmt.Errorf("load TLS identity: %w", err)
@@ -585,6 +594,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	rawModems, err := rawmodem.New(rawmodem.Config{
+		Admit:   updateAdmission.Enter,
 		Context: ctx, Catalog: catalog, Agents: agents, Broker: agentUSBIP, Logf: log.Printf,
 	})
 	if err != nil {
@@ -595,7 +605,7 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	cellularData, err := cellulardata.New(cellulardata.Config{Context: ctx, Catalog: catalog, Agents: agents, Broker: agentData})
+	cellularData, err := cellulardata.New(cellulardata.Config{Context: ctx, Catalog: catalog, Agents: agents, Broker: agentData, Admit: updateAdmission.Enter})
 	if err != nil {
 		return err
 	}
@@ -613,6 +623,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	cellularMedia, err := cellularmedia.New(cellularmedia.Config{
+		Admit:   updateAdmission.Enter,
 		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia, Calls: calls, Incoming: calls,
 	})
 	if err != nil {
@@ -648,6 +659,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	control, err := providercontrol.NewHandler(providers, catalog, nil,
+		providercontrol.WithAdmission(updateAdmission.Enter),
 		providercontrol.WithCallRecorder(calls), providercontrol.WithCardRouteResolver(agents),
 		providercontrol.WithOutboundCallTimeout(func() (time.Duration, error) {
 			snapshot, err := preferenceStore.Snapshot()
@@ -691,7 +703,13 @@ func run(ctx context.Context, settings config) error {
 			DesiredPath: settings.ProviderApply.EgressDesiredPath, StatusPath: settings.ProviderApply.EgressStatusPath}
 	}
 	runtimeReconciler, err := runtimereconcile.New(runtimereconcile.Config{
+		Admit: updateAdmission.Enter,
 		ReconcileDefaultDrafts: func(ctx context.Context) error {
+			done, err := updateAdmission.Enter()
+			if err != nil {
+				return err
+			}
+			defer done()
 			return lineBootstrap.ReconcileDefaultDrafts(ctx, defaultAuthority, []byte(settings.Local.Token))
 		},
 		ContinuousRetry: func() (recovery.ContinuousRetry, error) {
@@ -723,6 +741,7 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	router.SetAdmission(updateAdmission.Enter)
 	lifecycleGuard := linecatalog.LifecycleGuardFunc(func(lineID string) (bool, error) {
 		if active, err := store.ActiveExitRecovery(lineID); err != nil || active {
 			return active, err
@@ -878,18 +897,9 @@ func run(ctx context.Context, settings config) error {
 	defer devicePresentation.Close()
 	backupAPI, err := systembackup.NewHandler([]systembackup.Source{
 		{Name: "events.db", Read: store.Backup}, {Name: "messages.db", Read: messages.Backup},
-		{Name: "calls.db", Read: calls.Backup}, {Name: "catalog.json", Read: func() ([]byte, error) {
-			snapshot, snapshotErr := catalog.SnapshotIncludingDeleted()
-			if snapshotErr != nil {
-				return nil, snapshotErr
-			}
-			for lineIndex := range snapshot.Lines {
-				for profileIndex := range snapshot.Lines[lineIndex].Network.APNProfiles {
-					snapshot.Lines[lineIndex].Network.APNProfiles[profileIndex].Password = ""
-				}
-			}
-			return json.Marshal(snapshot)
-		}},
+		{Name: "calls.db", Read: calls.Backup},
+		{Name: "catalog.json", Read: catalog.Backup, Recovery: "export_v2; lines including archived, defaults, IMEI pool/pending, runtime intent, raw bindings, lifecycle receipts; derived indexes must be rebuilt; APN passwords omitted; operation digest key excluded, receipts are reconciliation evidence only"},
+		{Name: "cellular-sms-operations.db", Read: cellularSMSOperations.Backup, Recovery: "transactional operation records and deletion barriers; preserve unresolved receipts and tombstones; never an automatic send queue"},
 		{Name: "egress.db", Read: egressStore.Backup}, {Name: "allowance.db", Read: allowanceStore.Backup},
 		{Name: "notifications.db", Read: notificationStore.Backup}, {Name: "preferences.db", Read: preferenceStore.Backup},
 		{Name: "device-presentation.db", Read: devicePresentation.Backup},
@@ -930,14 +940,26 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	updateStore, err := systemupdate.Open(filepath.Join(filepath.Dir(settings.EventsPath), "update-state"))
-	if err != nil {
-		return err
-	}
 	updateAPI, err := systemupdate.NewHandler(updateChecker, updateStore)
 	if err != nil {
 		return err
 	}
+	instanceBytes := make([]byte, 16)
+	if _, err := rand.Read(instanceBytes); err != nil {
+		return err
+	}
+	coreDigest, err := currentCoreDigest()
+	if err != nil {
+		return err
+	}
+	updateMaintenance, err := systemupdate.NewMaintenanceOwner(updateStore, updateAdmission, core.UpdateMaintenanceRuntime{
+		Catalog: catalog, Providers: providers, Agents: agents, EUICC: euiccProfiles, CheckMedia: cellularMedia.UpdateBusy,
+		Checks: []func(string) (bool, error){store.ActiveExitRecovery, rawModemAPI.ActiveLine, calls.ActiveLine, router.ActiveLine, allowanceStore.ActiveLine, cellularData.ActiveLine},
+	}, fmt.Sprintf("core-%x", instanceBytes), coreDigest)
+	if err != nil {
+		return err
+	}
+	registration.SetAdmission(updateMaintenance.Registration)
 	publicHandler := core.NewServer(replay, nil,
 		core.WithAdminAudit(preferenceStore, store),
 		core.WithDevicePresentation(devicePresentation),
@@ -1011,6 +1033,11 @@ func run(ctx context.Context, settings config) error {
 		core.WithEgressConfig(egressConfigAPI, egressApplyAPI),
 	)
 	localMux := http.NewServeMux()
+	updateMaintenanceIPC, err := provideradmin.Authenticate(updateMaintenance, settings.Local.Token)
+	if err != nil {
+		return err
+	}
+	localMux.Handle(systemupdate.MaintenancePath, updateMaintenanceIPC)
 	if settings.HostModem != nil {
 		hostIdle, err := provideradmin.Authenticate(core.HostModemIdleHandler(settings.HostModem.AgentID, catalog, agents.Statuses,
 			calls.ActiveLine, router.ActiveLine, cellularData.ActiveLine, rawModemAPI.ActiveLine), settings.Local.Token)
@@ -1052,7 +1079,7 @@ func run(ctx context.Context, settings config) error {
 	defer localListener.Close()
 
 	publicServer := &http.Server{
-		Handler:           publicHandler,
+		Handler:           updateAdmission.HTTP(publicHandler),
 		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,

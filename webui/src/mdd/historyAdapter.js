@@ -27,6 +27,7 @@ export function conversationRows(conversations, lineID = '') {
   return conversations.filter(item => !lineID || String(item.line_id) === String(lineID)).map(item => ({
     key: JSON.stringify([String(item.line_id), item.transport, item.peer]),
     line_id:String(item.line_id), transport:item.transport, peer:item.peer,
+    card_id:String(item.last?.card_id || ''),
     n:item.count, last_ts:recordedUnixSeconds(item.last?.received_at), last_body:item.last?.body || '',
   })).sort((left, right) => right.last_ts - left.last_ts || left.key.localeCompare(right.key))
 }

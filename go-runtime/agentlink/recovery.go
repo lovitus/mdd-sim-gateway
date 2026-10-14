@@ -7,11 +7,16 @@ import (
 
 const ModemSoftRestart = "soft_restart"
 
+// A failed write may already have delivered a recovery command. Preserve this
+// phase even when the underlying cause also matches ErrAgentOffline.
+var ErrModemRecoveryUnknown = errors.New("modem recovery dispatch outcome is unknown")
+
 type ModemRecoveryCommand struct {
-	OperationID string `json:"operation_id"`
-	EquipmentID string `json:"equipment_id"`
-	CardID      string `json:"card_id"`
-	Action      string `json:"action"`
+	OperationID    string                `json:"operation_id"`
+	EquipmentID    string                `json:"equipment_id"`
+	CardID         string                `json:"card_id"`
+	Action         string                `json:"action"`
+	ExpectedTarget *ModemControlIdentity `json:"-"`
 }
 
 type ModemRecoveryRequest struct {

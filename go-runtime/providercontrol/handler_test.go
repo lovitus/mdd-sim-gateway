@@ -75,7 +75,7 @@ func paidActionCatalog() fakeCatalog {
 	return fakeCatalog{line: linecatalog.Line{ID: "line-1", CardID: "8944100000000000001", Enabled: true}}
 }
 
-func (requester *fakeIntentRequester) RequestIntent(_ context.Context, _ string, enabled bool, operationID string) (vowifiipc.OperationResult, error) {
+func (requester *fakeIntentRequester) RequestIntent(_ context.Context, _ string, enabled bool, operationID string, _ ...string) (vowifiipc.OperationResult, error) {
 	requester.mu.Lock()
 	defer requester.mu.Unlock()
 	requester.requests = append(requester.requests, runtimeMutation{operationID: operationID, enabled: enabled})

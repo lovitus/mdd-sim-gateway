@@ -11,6 +11,7 @@ import { useI18n } from './i18n.jsx'
 import { GlobalGoCallOverlay, useGoCallCoordinator } from '../goCallCoordinator.jsx'
 import { liveStatusFromWsMessage, mergeLiveLineStatus } from './liveStatus.js'
 import { consumeUpdateCompletion, updateProgressOutcome, matchUpdateProgress } from './updateProgress.js'
+import { snapshotObservation, snapshotIsFresh } from './snapshotFreshness.js'
 
 const NAV = [
   ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['imeis', 'IMEI Pool', '◈'], ['calls', 'Calls', '☎'],
@@ -89,6 +90,20 @@ export default function App() {
   const updateCompletionSeen = useRef('')
   const refreshInFlight = useRef(false)
   const refreshDebounce = useRef(null)
+  const [observation, setObservation] = useState(null)
+  const [snapshotClock, setSnapshotClock] = useState(Date.now)
+  const [transports, setTransports] = useState({ rest: 'unknown', ws: 'unknown' })
+  const observeSnapshot = useCallback(snapshot => {
+    const now = Date.now()
+    const next = snapshotObservation(snapshot, now)
+    if (next) setObservation(next)
+    setSnapshotClock(now)
+  }, [])
+  useEffect(() => {
+    if (!authState?.authenticated) return
+    const timer = setInterval(() => setSnapshotClock(Date.now()), 5000)
+    return () => clearInterval(timer)
+  }, [authState?.authenticated])
 
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('theme', theme) }, [theme])
   // Keep the address bar on the current page without growing history, and follow the hash
@@ -125,7 +140,10 @@ export default function App() {
     try {
       const epoch = snapshotEpoch.current
       const snapshot = await api.snapshot()
+      setTransports(value => ({ ...value, rest: 'connected' }))
       if (snapshotEpoch.current !== epoch) return
+      if (!snapshotObservation(snapshot, Date.now())) throw new Error('device_snapshot_unavailable')
+      observeSnapshot(snapshot)
       unifiedAvailable.current = true
       setInstances(snapshot.instances || [])
       setCards(snapshot.cards || [])
@@ -133,6 +151,7 @@ export default function App() {
       setDiscovering(!!snapshot.discovering)
       setSelected(value => value && (snapshot.instances || []).some(item => String(item.id) === String(value)) ? value : null)
     } catch (error) {
+      setTransports(value => ({ ...value, rest: 'disconnected' }))
       // Retain the last visible snapshot on a failed read; do not invent empty inventory.
       if (error?.status !== 401) showToast(error.message)
     } finally {
@@ -165,7 +184,10 @@ export default function App() {
   useEffect(()=>{ if(!authState?.authenticated)return; const timer=setInterval(refresh,30000); return()=>clearInterval(timer) },[refresh,authState?.authenticated])
 
   useEffect(()=>{ if(!authState?.authenticated)return; return connectWs(msg=>{
+    if (msg.type === 'ws-lifecycle') setTransports(value => ({ ...value, ws: msg.event === 'open' ? 'connected' : 'disconnected' }))
     if (msg.type === 'go.snapshot' && msg.snapshot) {
+      if (!snapshotObservation(msg.snapshot, Date.now())) return
+      observeSnapshot(msg.snapshot)
       unifiedAvailable.current = true
       ++snapshotEpoch.current
       setInstances(msg.snapshot.instances || [])
@@ -216,12 +238,12 @@ export default function App() {
     <aside className={`u-sidebar ${menuOpen?'open':''}`}>
       <div className="u-brand"><img src="/logo.svg" alt="" /><div>MDD Sim Gateway<small>{t('4G + VoWiFi unified')}</small></div></div>
       <nav>{NAV.map(([key,label,icon])=><button key={key} className={view===key?'active':''} onClick={()=>{setView(key);setMenuOpen(false)}}><span>{icon}</span>{t(label)}{key==='diagnostics'&&!!systemMeta.host_alerts?.length&&<i className={`u-nav-dot ${systemMeta.host_alerts.some(a=>a.severity==='critical')?'critical':'warning'}`} title={t('The gateway host needs attention')}/>}</button>)}</nav>
-      <div className="u-sidebar-foot"><div className="u-theme">{[['auto','◐'],['light','☀'],['dark','☾']].map(([k,x])=><button key={k} className={theme===k?'active':''} onClick={()=>setTheme(k)} title={t(k)}>{x}</button>)}</div><small>{discovering&&!devices.length?t('Detecting devices…'):`${devices.length} ${t(devices.length === 1 ? 'device' : 'devices')}`}</small><a className="u-feedback-link" href={issueUrl} target="_blank" rel="noreferrer"><span>◉</span>{t('Issues and suggestions')}<b>↗</b></a><div className="u-project-meta">{systemMeta.update?.update_available&&systemMeta.update?.release_url?<a className="u-version has-update" href={systemMeta.update.release_url} onClick={e=>{e.preventDefault();setUpdateOpen(true)}} title={t('New version available: v{version}',{version:systemMeta.update.latest})}><i />v{systemMeta.version}</a>:<span className="u-version">{systemMeta.version ? `v${systemMeta.version}` : '—'}</span>}<span className="u-repo-actions">{systemMeta.repository_url&&<><a href={systemMeta.repository_url} target="_blank" rel="noreferrer" aria-label="GitHub" title="GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.38.97.1-.75.4-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.16 1.18a10.9 10.9 0 0 1 5.75 0c2.19-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.07.79 2.16v3.2c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg></a><a className="u-star-link" href={systemMeta.repository_url} target="_blank" rel="noreferrer" aria-label={t('Star on GitHub')} title={t('Star on GitHub')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2.7 2.75 5.58 6.16.9-4.46 4.34 1.05 6.13L12 16.76l-5.5 2.89 1.05-6.13-4.46-4.34 6.16-.9L12 2.7Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"/></svg><b>{starCount(systemMeta.update?.stars) || '—'}</b></a></>}</span></div><button className="btn btn-ghost" onClick={async()=>{try{await api.authLogout()}finally{setCsrf('');setAuthToken('');setAuthState(s=>({...s,configured:true,authenticated:false,csrf:'',token:''}))}}}>{t('Sign out')}</button></div>
+      <div className="u-sidebar-foot"><div className="u-theme">{[['auto','◐'],['light','☀'],['dark','☾']].map(([k,x])=><button key={k} className={theme===k?'active':''} onClick={()=>setTheme(k)} title={t(k)}>{x}</button>)}</div><small>{discovering&&!devices.length?t('Detecting devices…'):`${devices.length} ${t(devices.length === 1 ? 'device' : 'devices')}`}</small><a className="u-feedback-link" href={issueUrl} target="_blank" rel="noreferrer"><span>◉</span>{t('Issues and suggestions')}<b>↗</b></a><div className="u-project-meta">{systemMeta.update?.update_available&&systemMeta.update?.release_url?<a className="u-version has-update" href={systemMeta.update.release_url} onClick={e=>{e.preventDefault();openUpdateDialog(systemMeta.update)}} title={t('New version available: v{version}',{version:systemMeta.update.latest})}><i />v{systemMeta.version}</a>:<span className="u-version">{systemMeta.version ? `v${systemMeta.version}` : '—'}</span>}<span className="u-repo-actions">{systemMeta.repository_url&&<><a href={systemMeta.repository_url} target="_blank" rel="noreferrer" aria-label="GitHub" title="GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.38.97.1-.75.4-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.16 1.18a10.9 10.9 0 0 1 5.75 0c2.19-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.07.79 2.16v3.2c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg></a><a className="u-star-link" href={systemMeta.repository_url} target="_blank" rel="noreferrer" aria-label={t('Star on GitHub')} title={t('Star on GitHub')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2.7 2.75 5.58 6.16.9-4.46 4.34 1.05 6.13L12 16.76l-5.5 2.89 1.05-6.13-4.46-4.34 6.16-.9L12 2.7Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"/></svg><b>{starCount(systemMeta.update?.stars) || '—'}</b></a></>}</span></div><button className="btn btn-ghost" onClick={async()=>{try{await api.authLogout()}finally{setCsrf('');setAuthToken('');setAuthState(s=>({...s,configured:true,authenticated:false,csrf:'',token:''}))}}}>{t('Sign out')}</button></div>
     </aside>
     <button className="u-menu" onClick={()=>setMenuOpen(!menuOpen)}>☰</button>
     {menuOpen&&<button className="u-scrim" aria-label={t('Close menu')} onClick={()=>setMenuOpen(false)}/>}
     <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header>
-      <div className="u-content"><HostAlerts/>{content}</div></main>
+      <div className="u-content">{!snapshotIsFresh(observation, snapshotClock) && <div role="status" className="u-note" style={{ color: 'var(--warning, #996600)' }}><b>{t('Current device state is unconfirmed')}</b><p>{t('Last valid observation')}: {observation ? new Date(observation.observedAt).toLocaleString() : '—'}</p><small>REST: {t(transports.rest)} · WebSocket: {t(transports.ws)}</small></div>}<HostAlerts/>{content}</div></main>
     {toast&&<div className="u-toast" key={toast.id} role="status" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{toast.message}</span>
       <button type="button" className="btn btn-ghost" aria-label={t('Dismiss')} title={t('Dismiss')} onClick={dismissToast} style={{ flexShrink: 0, background: 'transparent', color: 'inherit' }}>×</button>
@@ -271,13 +293,13 @@ function UpdateModal({ update, current, t, onClose, onCompleted }) {
           previous.current=status.operation_id || ''
           if (uncertain.current) {expected.current=decision.operation;uncertain.current=null}
           const active=['requested','running'].includes(status.state)
-          if (active || expected.current || !update.update_available && status.operation_id) {
+          if (active || status.state === 'unknown' && status.operation_id || expected.current || !update.update_available && status.operation_id) {
             if (!expected.current) expected.current=status.operation_id
             setTarget(status.target || update.latest);setPhase(status.phase || status.state)
             if (decision.outcome === 'complete') {setMode('complete');completed.current?.(status)}
             else if (decision.outcome === 'failed') {setMode('failed');setError(status.error_code || status.error || '')}
             else if (active) {setMode('working');setError('');continuing=true}
-            else {setMode('unknown');setError('update_state_unknown')}
+            else {setMode('unknown');setError(status.error_detail || status.error_code || 'update_state_unknown')}
           } else {setMode('confirm');setError('')}
         }
       } catch (failure) {

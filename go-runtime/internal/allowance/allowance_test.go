@@ -99,6 +99,7 @@ func TestSnapshotAndRuleUseIndependentCASAndRuneLimits(t *testing.T) {
 func TestPurgeLineRejectsActiveQueryAndErasesClosedState(t *testing.T) {
 	store := testStore(t)
 	now := time.Now().UTC()
+	putRule(t, store, now, ParserUltraV1)
 	if _, _, err := store.PutSnapshotExpected(testLineID, 1, Values{Balance: "5"}, now); err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +153,7 @@ func TestLegacyNonISOValidUntilMayOnlyBePreservedUnchanged(t *testing.T) {
 func TestQueryCreationReplayCloseAndCorrelationQuarantine(t *testing.T) {
 	store := testStore(t)
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
+	putRule(t, store, now, ParserUltraV1)
 	first := queryCandidate(t, "query-1", testLineID, testCardID, "vowifi")
 	query, created, err := store.BeginQuery(first, now)
 	if err != nil || !created || query.State != QueryPrepared || !query.CorrelationUntil.Equal(now.Add(QueryWindow)) {
@@ -184,6 +186,7 @@ func TestQueryCreationReplayCloseAndCorrelationQuarantine(t *testing.T) {
 func TestCloseAndManualWriteCannotBeOverwrittenByStaleReconcile(t *testing.T) {
 	store := testStore(t)
 	now := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
+	putRule(t, store, now, ParserUltraV1)
 	query, _, err := store.BeginQuery(queryCandidate(t, "query-cas", testLineID, testCardID, "vowifi"), now)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +244,7 @@ func TestServiceCorrelatesOnlyAfterSubmittedUsingCoreReceiveTimeAndMergesMultipa
 	service, store, messages, routes := testService(t, now)
 	putRule(t, store, now, ParserUltraV1)
 	view, created, err := service.CreateQuery(context.Background(), testLineID, QueryRequest{
-		QueryID: "query-service", ExpectedCardID: testCardID, Transport: "vowifi",
+		QueryID: "query-service", ExpectedCardID: testCardID, Transport: "vowifi", ExpectedRuleRevision: 2, Recipient: "6700", Body: "BAL",
 	})
 	if err != nil || !created || view.Dispatch == nil || view.Dispatch.Body["expected_card_id"] != testCardID ||
 		view.Dispatch.Body["allowance_query_id"] != "query-service" || len(routes.calls) != 1 {
@@ -310,7 +313,7 @@ func TestServiceClosePreventsLateReplyAndBlocksNewQueryUntilQuarantineEnds(t *te
 	service, store, messages, _ := testService(t, now)
 	putRule(t, store, now, ParserCTExcelV1)
 	view, _, err := service.CreateQuery(context.Background(), testLineID, QueryRequest{
-		QueryID: "query-close", ExpectedCardID: testCardID, Transport: "vowifi",
+		QueryID: "query-close", ExpectedCardID: testCardID, Transport: "vowifi", ExpectedRuleRevision: 2, Recipient: "6700", Body: "BAL",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -349,13 +352,13 @@ func TestServiceClosePreventsLateReplyAndBlocksNewQueryUntilQuarantineEnds(t *te
 	}
 	service.now = func() time.Time { return now.Add(134 * time.Second) }
 	if _, _, err := service.CreateQuery(context.Background(), testLineID, QueryRequest{
-		QueryID: "query-too-soon", ExpectedCardID: testCardID, Transport: "vowifi",
+		QueryID: "query-too-soon", ExpectedCardID: testCardID, Transport: "vowifi", ExpectedRuleRevision: 2, Recipient: "6700", Body: "BAL",
 	}); !errors.Is(err, ErrQueryActive) {
 		t.Fatalf("new query bypassed quarantine: %v", err)
 	}
 	service.now = func() time.Time { return authorized.CorrelationUntil.Add(time.Second) }
 	if _, created, err := service.CreateQuery(context.Background(), testLineID, QueryRequest{
-		QueryID: "query-after", ExpectedCardID: testCardID, Transport: "vowifi",
+		QueryID: "query-after", ExpectedCardID: testCardID, Transport: "vowifi", ExpectedRuleRevision: 2, Recipient: "6700", Body: "BAL",
 	}); err != nil || !created {
 		t.Fatalf("query after quarantine created=%t err=%v", created, err)
 	}
@@ -366,7 +369,7 @@ func TestServiceMarksRouteStaleAndParserNoneLeavesSnapshotUntouched(t *testing.T
 	service, store, messages, routes := testService(t, now)
 	putRule(t, store, now, ParserNone)
 	view, _, err := service.CreateQuery(context.Background(), testLineID, QueryRequest{
-		QueryID: "query-raw", ExpectedCardID: testCardID, Transport: "cellular",
+		QueryID: "query-raw", ExpectedCardID: testCardID, Transport: "cellular", ExpectedRuleRevision: 2, Recipient: "6700", Body: "BAL",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -412,7 +415,7 @@ func TestPreparedQueryRestoresAcrossRestartAndNoMatchCompletesAtWindowEnd(t *tes
 		Enabled: true, CardID: testCardID, SIM: linecatalog.SIMConfig{IMEI: "862547055201716"}}}, messages, routes)
 	service.now = func() time.Time { return now }
 	view, _, err := service.CreateQuery(context.Background(), testLineID, QueryRequest{
-		QueryID: "query-restart", ExpectedCardID: testCardID, Transport: "vowifi",
+		QueryID: "query-restart", ExpectedCardID: testCardID, Transport: "vowifi", ExpectedRuleRevision: 2, Recipient: "6700", Body: "BAL",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -451,7 +454,7 @@ func TestMessageWindowLimitFailsClosed(t *testing.T) {
 	service, store, messages, _ := testService(t, now)
 	putRule(t, store, now, ParserNone)
 	view, _, err := service.CreateQuery(context.Background(), testLineID, QueryRequest{
-		QueryID: "query-window", ExpectedCardID: testCardID, Transport: "vowifi",
+		QueryID: "query-window", ExpectedCardID: testCardID, Transport: "vowifi", ExpectedRuleRevision: 2, Recipient: "6700", Body: "BAL",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -485,7 +488,7 @@ func TestReplyByteLimitKeepsQueryClosable(t *testing.T) {
 	service, store, messages, _ := testService(t, now)
 	putRule(t, store, now, ParserNone)
 	view, _, err := service.CreateQuery(context.Background(), testLineID, QueryRequest{
-		QueryID: "query-bytes", ExpectedCardID: testCardID, Transport: "vowifi",
+		QueryID: "query-bytes", ExpectedCardID: testCardID, Transport: "vowifi", ExpectedRuleRevision: 2, Recipient: "6700", Body: "BAL",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -566,12 +569,12 @@ func TestHTTPContractUsesSeparateETagsAndStrictQueryIntent(t *testing.T) {
 		t.Fatalf("rule status=%d etag=%q body=%s", rule.Code, rule.Header().Get("ETag"), rule.Body.String())
 	}
 	created := request(t, mux, http.MethodPost, "/v1/lines/line-1/allowance/query",
-		`{"query_id":"query-http","expected_card_id":"8944100000000000001","transport":"vowifi"}`, "")
+		`{"query_id":"query-http","expected_card_id":"8944100000000000001","transport":"vowifi","expected_rule_revision":2,"recipient":"6700","body":"BAL"}`, "")
 	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"expected_card_id":"8944100000000000001"`) {
 		t.Fatalf("query status=%d body=%s", created.Code, created.Body.String())
 	}
 	replay := request(t, mux, http.MethodPost, "/v1/lines/line-1/allowance/query",
-		`{"query_id":"query-http","expected_card_id":"8944100000000000001","transport":"vowifi"}`, "")
+		`{"query_id":"query-http","expected_card_id":"8944100000000000001","transport":"vowifi","expected_rule_revision":2,"recipient":"6700","body":"BAL"}`, "")
 	if replay.Code != http.StatusOK {
 		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
 	}

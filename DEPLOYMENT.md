@@ -10,6 +10,18 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-12 PR28 硬件页 IMEI 回显修复
+
+PR28 精确 `f1c2708` 三方通过，完整 CI `38199997050` 成功，正常合并 `9a9aa78`。
+Core-only 工件 `2b66b073` 完整 tree 与批准/合并源码一致；实际进程 SHA-256
+`77619a88ef7fd55ba8490553087c3b1ab7a79517ba82df91be3c8693d4f99e1c`，
+线上 app.js SHA-256 `0a569e39bd5feeafa98fa0ff7409a5107ef4bfdc2c4e14505f8d208c29cef3ff`。
+5 个此前在线 Agent 原代际恢复，其他组件 PID、用户配置、线路、池及通知不变；租约全部释放。
+离线 catalog 备份 SHA-256 `05c3639af492b5b0033700df34cf7ee60594f46345c7a79a809c32e71632eda6`。
+固定证书读回确认原 pending 绑定及在场设备，未重复绑定/执行硬件或付费操作。
+实际 Chromium 页面回归使用合成 HTTP 数据；生产点击仍受浏览器证书校验限制，未冒充已验。
+脱敏部署回执见 [PR28](https://github.com/lovitus/mdd-sim-gateway/pull/28)。
+
 ## 2026-10-11 PR27 设备页 IMEI 保存补修
 
 PR27 三方通过后正常合并 `ef0d37d`，完整 CI `38113306638` 通过。
