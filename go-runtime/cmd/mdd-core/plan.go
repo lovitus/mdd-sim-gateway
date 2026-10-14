@@ -17,7 +17,17 @@ var errProviderApplyBlocked = errors.New("provider apply plan is blocked")
 
 type providerApplyBlockedError struct{ plan providerapply.Plan }
 
-func (failure providerApplyBlockedError) Error() string { return errProviderApplyBlocked.Error() }
+func (failure providerApplyBlockedError) Error() string {
+	codes := make([]string, 0, len(failure.plan.Blockers))
+	for _, blocker := range failure.plan.Blockers {
+		codes = append(codes, blocker.Code)
+	}
+	if len(codes) == 0 {
+		return errProviderApplyBlocked.Error()
+	}
+	// Only machine blocker codes cross the public error boundary, not identities.
+	return errProviderApplyBlocked.Error() + ": " + strings.Join(codes, ", ")
+}
 func (failure providerApplyBlockedError) Unwrap() error { return errProviderApplyBlocked }
 
 func runProviderPlan(arguments []string, output io.Writer) error {
