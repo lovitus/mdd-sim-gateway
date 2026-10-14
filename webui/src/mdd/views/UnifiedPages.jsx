@@ -430,7 +430,8 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const c = capability(device, kind)
   const isReader = device.device_type === 'reader'
   const isImeiMissing = isReader && !binding.imei
-  const needsSetup = kind === 'vowifi' && !device.instance_id && !device.runtime_intent_target
+  const needsSetup = kind === 'vowifi' && device.present !== false && ((!device.instance_id && !device.runtime_intent_target) ||
+    device.line_configuration?.enabled === false || device.line_configuration?.provisioning_state === 'draft')
   const stopIntent = kind === 'vowifi' && c.desired
   const pending = submitting || (['starting', 'stopping'].includes(c.actual) && !stopIntent)
   const unavailable = device.stale || (!c.available && !isImeiMissing) || c.actual === 'unsupported' || device.compatibilityOnly ||
@@ -439,7 +440,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const canRetry = kind === 'vowifi' && c.desired && ['off', 'degraded', 'error'].includes(c.actual) && !unavailable
   const change = async (next, retry = false) => {
     if (requestBusy.current) return
-    if (needsSetup) { onNavigateToSim?.(device.id); return }
+    if (needsSetup && next) { onNavigateToSim?.(device.id); return }
     if (kind === 'vowifi' && next && (binding.loading || binding.error)) {
       showToast?.(binding.error || t('Reading…')); return
     }
@@ -468,6 +469,12 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     } catch (e) {
       const errorDetail = e.data?.detail || {}
       const errorCode = e.code || errorDetail.code || ''
+      if (kind === 'vowifi' && errorCode === 'line_disabled') {
+        await onChanged?.()
+        showToast?.(t('Start request saved; complete SIM setup before starting.'))
+        onNavigateToSim?.(device.id)
+        return
+      }
       if (kind === 'vowifi' && (errorCode === 'sim_apdu_data_active' || errorCode === 'flight_mode_enabled')) {
         await onChanged?.()
         showToast?.(errorCode === 'flight_mode_enabled'
@@ -508,7 +515,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
     <div><b>{title}</b><div className="u-cap-detail">{needsSetup ? t('Line not configured') : detail}</div></div>
-    <div className="u-cap-actions">{needsSetup ? <button className="btn btn-ghost" onClick={() => onNavigateToSim?.(device.id)}>{t('Configure SIM')}</button> : <>{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Retry start')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
+    <div className="u-cap-actions">{needsSetup ? <><button className="btn btn-primary" onClick={() => onNavigateToSim?.(device.id)}>{t('Configure SIM')}</button>{stopIntent && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(false)}>{t('Cancel pending start')}</button>}</> : <>{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Retry start')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
       aria-label={title} disabled={pending || (unavailable && !c.desired)} onClick={toggle}><span /></button></>}</div>
   </div>
 }
