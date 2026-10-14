@@ -1,5 +1,14 @@
 # Branch disposition and integration record
 
+PR36 source `96e7dd9` is retained at
+`archive/2026-10-14/reader-setup-source-approved`; original source review passed.
+Hosted `38542327466` proves the pending-claim behavioral red and complete green
+setup/existing browser journeys; only stale-embed gates failed. Same-source merge
+`834dad6` supplies the exact UI now imported. Earlier counterexamples remain at
+`185c736` / `38538977486` and `9b0a3df` / `38540681863` with their archive tags.
+Temporary proof is removed; business source/permanent tests are frozen. Final
+normal CI, cleanup review and deployment remain separate pending gates.
+
 ## October 14 integration and rollout
 
 Final PR35 source `431fa6b` / full Go CI `38516014673` and original review passed;

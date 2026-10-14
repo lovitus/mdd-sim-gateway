@@ -34,8 +34,8 @@ assert.match(entry, /mdd\/index.css/, 'the customized stylesheet must be mounted
 assert.match(appSource, /api\.authLogin\(username,password\)/)
 assert.doesNotMatch(appSource, /api\.authSetup|Create the administrator account/)
 assert.doesNotMatch(apiSource, /\/api\/auth\/(setup|agent-token)/)
-assert.match(sim, /form\.provisioning_state === 'draft'/, 'hardware drafts cannot be enabled')
-assert.match(sim, /api\.lineConfiguration\(managedSelected.id\)/, 'forms use a catalog revision, not observed UI values')
+// Draft enablement and catalog revision/If-Match are checked through the
+// mounted readerSetupBrowser journey, not the loader's local variable name.
 assert.match(lineAdapter, /go\.saveCatalogLine\(editedCatalogLine\(form\),expectedRevision\(form.__catalog_revision\)\)/)
 assert.match(provision, /savedReady[\s\S]*!savedReady/, 'incomplete or unsaved provisioning is not actionable')
 assert.match(provision, /api\.readerProvisionV1\(device,form.id,form.__catalog_revision\)/)
