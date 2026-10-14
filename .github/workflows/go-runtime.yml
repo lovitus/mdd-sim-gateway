@@ -138,6 +138,9 @@ jobs:
         working-directory: webui
         run: npm run test:recording-browser
 
+      - name: Prove pre-fix reader setup journey
+        run: bash tools/prove-reader-setup.sh browser
+
       - name: Real browser Hardware IMEI save and readback
         working-directory: webui
         run: npm run test:hardware-imei-browser
@@ -203,6 +206,7 @@ jobs:
             webui/browser-evidence/hardware-imei
             webui/browser-evidence/new-card
             webui/browser-evidence/new-card-review
+            webui/browser-evidence/reader-setup
           if-no-files-found: ignore
           retention-days: 7
 
@@ -226,11 +230,6 @@ jobs:
           retention-days: 7
           include-hidden-files: true
 
-      - name: Verify embedded React WebUI matches Linux build
-        working-directory: webui
-        run: |
-          git diff --exit-code -- ../go-runtime/internal/webui/assets
-
       - name: Install native build dependencies
         run: |
           azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
@@ -239,6 +238,18 @@ jobs:
           fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+
+      - name: Prove pre-fix setup application blockers
+        run: bash tools/prove-reader-setup.sh core
+
+      - name: Retain setup counterexamples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-setup-proof-${{ github.sha }}
+          path: |
+            proof-reader-setup
+            webui/browser-evidence/reader-setup-red
 
       - name: Verify Core module
         working-directory: go-runtime
@@ -251,6 +262,11 @@ jobs:
       - name: Race-test entire Linux Core module
         working-directory: go-runtime
         run: go test -race -count=1 -timeout 5m ./...
+
+      - name: Verify embedded React WebUI matches Linux build
+        working-directory: webui
+        run: |
+          git diff --exit-code -- ../go-runtime/internal/webui/assets
 
       - name: Verify root update publication and worker exclusion
         run: |
