@@ -6,8 +6,12 @@ Hosted `38542327466` proves the pending-claim behavioral red and complete green
 setup/existing browser journeys; only stale-embed gates failed. Same-source merge
 `834dad6` supplies the exact UI now imported. Earlier counterexamples remain at
 `185c736` / `38538977486` and `9b0a3df` / `38540681863` with their archive tags.
-Temporary proof is removed; business source/permanent tests are frozen. Final
-normal CI, cleanup review and deployment remain separate pending gates.
+Final `df63ab6` / normal CI `38543615650` and original cleanup review passed;
+PR36 merged normally at `8fe8dbe`, same complete tree as deployed `022c7e9`.
+Only Core restarted, six original Agent generations restored; configurations,
+unrelated processes and pending application state preserved. Production browser
+clicks/new-card startup remain unaccepted, not superseded by API readback.
+[Deployment receipt](https://github.com/lovitus/mdd-sim-gateway/pull/36#issuecomment-6165782776).
 
 ## October 14 integration and rollout
 
