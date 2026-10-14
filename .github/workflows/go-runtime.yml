@@ -244,6 +244,18 @@ jobs:
         working-directory: go-runtime
         run: go mod verify
 
+      - name: Prove production update maintenance authentication
+        run: bash tools/prove-update-maintenance-auth.sh
+
+      - name: Retain update authentication proof
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-auth-proof-${{ github.sha }}
+          path: update-auth-proof
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Test Core runtime
         working-directory: go-runtime
         run: go test -timeout 2m ./...
