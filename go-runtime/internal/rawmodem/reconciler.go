@@ -46,6 +46,7 @@ type StreamBroker interface {
 }
 
 type Config struct {
+	Admit          func() (func(), error)
 	Context        context.Context
 	Catalog        Catalog
 	Agents         AgentControl
@@ -62,6 +63,7 @@ type Config struct {
 }
 
 type Reconciler struct {
+	admit          func() (func(), error)
 	catalog        Catalog
 	agents         AgentControl
 	broker         StreamBroker
@@ -160,6 +162,7 @@ func New(config Config) (*Reconciler, error) {
 	}
 	ctx, cancel := context.WithCancel(config.Context)
 	return &Reconciler{
+		admit:   config.Admit,
 		catalog: config.Catalog, agents: config.Agents, broker: config.Broker,
 		ctx: ctx, cancel: cancel,
 		interval: config.Interval, actionTimeout: config.ActionTimeout,
@@ -213,6 +216,13 @@ func (reconciler *Reconciler) run() {
 }
 
 func (reconciler *Reconciler) reconcile(ctx context.Context) error {
+	if reconciler.admit != nil {
+		done, err := reconciler.admit()
+		if err != nil {
+			return nil
+		}
+		defer done()
+	}
 	snapshot, err := reconciler.catalog.Snapshot()
 	if err != nil {
 		return fmt.Errorf("read line catalog: %w", err)

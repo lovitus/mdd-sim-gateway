@@ -63,6 +63,13 @@ func (reconciler *Reconciler) executeExitSelection(lineID string) error {
 }
 
 func (reconciler *Reconciler) runExitSelection(lineID string, manual bool) error {
+	if reconciler.admit != nil {
+		done, err := reconciler.admit()
+		if err != nil {
+			return err
+		}
+		defer done()
+	}
 	config := reconciler.exitRecovery
 	current, err := config.Store.ExitRecovery(lineID)
 	if err != nil {

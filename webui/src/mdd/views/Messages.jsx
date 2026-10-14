@@ -3,6 +3,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api.js'
 import { mergeMessagePages } from '../historyAdapter.js'
 import { canComposeSMS, isSMSSubmitKey } from '../smsAdapter.js'
+import { beginSMS, recordSMSResult, replyLine, smsOperations } from '../smsJournal.js'
 import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
 import AllowancePanel from './AllowancePanel.jsx'
@@ -40,7 +41,12 @@ function Messages({
   const [newTo, setNewTo] = useState('')
   const [transport, setTransport] = useState('')
   const [sending, setSending] = useState(false)
-  const [receiptAvailable,setReceiptAvailable] = useState(false)
+  const [receipts, setReceipts] = useState([])
+  const [journalError, setJournalError] = useState('')
+  const [operation, setOperation] = useState(null)
+  const composeGeneration = useRef(0)
+  const mounted = useRef(false)
+  useEffect(() => { mounted.current = true; return () => {mounted.current = false; composeGeneration.current++} }, [])
   const [selMode, setSelMode] = useState(false)
   const [selIds, setSelIds] = useState(() => new Set())
   const activeId = useRef(id)
@@ -58,21 +64,24 @@ function Messages({
   const historyLineID = historyScope === 'all' ? '' : String(id || '')
   const activeHistory = useRef(historyLineID)
   activeHistory.current=historyLineID
-  const senderLine = conversation
-    ? instances.find(line => String(line.id) === conversation.line_id) : selected
+  const senderLine = conversation ? replyLine(instances, conversation) : selected
   const senderID = senderLine?.id
-  const activeSender = useRef(senderID)
-  activeSender.current=senderID
-  useEffect(() => {
-    try {const saved=JSON.parse(localStorage.getItem(`mdd_sms_operation_${senderID}`)||'null');setReceiptAvailable(saved?.payload?.transport==='cellular')}
-    catch {setReceiptAvailable(false)}
-  }, [senderID])
-  const sendTransport = conversation?.transport || transport
+  const composeTarget = JSON.stringify([senderID, senderLine?.iccid || senderLine?.card_id || '', transport, peer || newTo, text, operation?.id])
+  const activeCompose = useRef(composeTarget)
+  activeCompose.current = composeTarget
+  const readJournal = useCallback(() => {
+    if (!mounted.current) return
+    try { setReceipts(smsOperations(localStorage, String(activeId.current || ''))); setJournalError('') }
+    catch (error) {setJournalError(error.message)}
+  }, [])
+  useEffect(() => { readJournal(); window.addEventListener('storage',readJournal); return () => window.removeEventListener('storage',readJournal) }, [id, readJournal])
+  const sendTransport = transport
   const cellularAvailable = senderLine?.operations?.cellular_sms?.ready === true
   const vowifiAvailable = senderLine?.operations?.vowifi_sms?.ready === true
   const cellularPreferred = cellularAvailable && senderLine?.operations?.vowifi_sms?.ready !== true
 
   const loadThreads = useCallback(async (showLoading = false) => {
+    if (!mounted.current || activeHistory.current !== historyLineID) return
     const failureKey = `threads:${historyLineID}`
     if (!showLoading && Date.now() < (failedReads.current.get(failureKey)?.at || 0)) return
     const request = ++threadsRequest.current
@@ -136,15 +145,16 @@ function Messages({
     void loadThreads(true)
   }, [loadThreads])
   useEffect(() => {
+    composeGeneration.current++
+    setOperation(null)
     setConversation(null); setText(''); setNewTo(''); setTransport('')
     try {
-      const saved = JSON.parse(localStorage.getItem(`mdd_sms_operation_${id}`) || 'null')
-      if (saved?.id && saved.payload) {
-        setText(saved.payload.body || ''); setNewTo(saved.payload.to || '')
-        setTransport(['vowifi', 'cellular'].includes(saved.payload.transport) ? saved.payload.transport : '')
+      const pending = smsOperations(localStorage,String(id || '')).find(row=>row.state !== 'submitted')
+      if (pending) {
+        setOperation(pending);setText(pending.payload.body);setNewTo(pending.payload.to);setTransport(pending.payload.transport)
       }
-    } catch {}
-  }, [id])
+    } catch (error) {setJournalError(error.message)}
+  }, [id, selected?.iccid, selected?.card_id])
   useEffect(() => {
     ++messagesRequest.current
     loadedCursors.current = ['']
@@ -167,66 +177,75 @@ function Messages({
     if (sendingRef.current) return
     const to = String(peer || newTo || '').trim()
     if (!canComposeSMS(senderLine,sendTransport,to,text)) return
-    const forId = senderID
-    const composeKey = activeConversation.current?.key || ''
-    const selectedID = activeId.current
-    const operationKey = `mdd_sms_operation_${forId}`
-    const payload = { to, body: text, transport:sendTransport, cardID: String(senderLine?.iccid || senderLine?.card_id || '') }
-    if (!payload.cardID) { showToast?.(tr('The exact SIM identity is unavailable.')); return }
-    let operationId = ''
-    try {
-      const saved = JSON.parse(localStorage.getItem(operationKey) || 'null')
-      if (saved) {
-        if (JSON.stringify({...saved.payload,to:String(saved.payload?.to || '').trim()}) !== JSON.stringify(payload)) {
-          if ((await dialogs.confirm(tr('Discard only this browser retry identity? This cannot retract a message that may already have been submitted.')))) {
-            localStorage.removeItem(operationKey)
-          }
-          return
-        }
-        operationId = saved.id || ''
-      }
-    } catch { showToast?.(tr('Cannot preserve the SMS request identity.')); return }
-    if (!operationId) operationId = crypto.randomUUID()
-    try { localStorage.setItem(operationKey, JSON.stringify({ id: operationId, payload })) }
-    catch { showToast?.(tr('Cannot preserve the SMS request identity.')); return }
     sendingRef.current = true
     setSending(true)
+    const generation = composeGeneration.current
+    const lineID = String(senderID)
+    const payload = Object.freeze({ to, body: text, transport:sendTransport, cardID: String(senderLine?.iccid || senderLine?.card_id || '') })
+    let owned
     try {
-      await api.sendSms(forId, to, text, payload.transport, operationId, payload.cardID)
-      try { localStorage.removeItem(operationKey) } catch {}
-      if(activeSender.current===forId)setReceiptAvailable(false)
-      // A slow modem submit may finish after the operator selected another line. Never erase
-      // that line's draft or replace its open conversation with the old line's recipient.
-      if (activeId.current === selectedID && (activeConversation.current?.key || '') === composeKey) {
-        setText(''); setNewTo('')
-        setConversation({ key:JSON.stringify([String(forId), payload.transport, to]), line_id:String(forId), transport:payload.transport, peer:to })
-        await loadThreads(); await loadMsgs()
+      if (operation && (operation.lineID !== String(senderID) || JSON.stringify(operation.payload) !== JSON.stringify(payload)))
+        throw new Error(tr('The original SMS is retained. Choose New message for a different request.'))
+      if (!operation) {
+        const unknown = smsOperations(localStorage,lineID).some(row=>row.state !== 'submitted')
+        const warning = unknown ? tr('An earlier SMS may already have been sent. This is a separate request that may incur another charge; it does not cancel the original request.') + '\n\n' : ''
+        const confirmation = tr('Send a new SMS using {name} (ICCID {card}) via {transport} to {to}? This may incur charges.\n\n{body}',
+          {name:senderLine.name || lineID,card:payload.cardID,transport:payload.transport,to:payload.to,body:payload.body})
+        if (!(await dialogs.confirm(warning + confirmation))) return
+        if (!mounted.current || generation !== composeGeneration.current || activeCompose.current !== composeTarget) return
+      }
+      owned = operation || beginSMS(localStorage, lineID, payload)
+      setOperation(owned); readJournal()
+      const result = await api.sendSms(owned.lineID, payload.to, payload.body, payload.transport, owned.id, payload.cardID)
+      const receipt = recordSMSResult(localStorage, owned, result)
+      if (receipt.state !== 'submitted') throw new Error(tr('Submission remains unknown; the original request is retained.'))
+      if (mounted.current && composeGeneration.current === generation) {
+        composeGeneration.current++
+        setOperation(null); setText(''); setNewTo('')
+        setConversation({ key:JSON.stringify([owned.lineID, payload.transport, to]), line_id:owned.lineID, card_id:payload.cardID, transport:payload.transport, peer:to })
       }
       showToast?.(tr('Server accepted the message'))
+      if (mounted.current) { await loadThreads(); await loadMsgs() }
     } catch (e) {
-      if(activeSender.current===forId)setReceiptAvailable(payload.transport==='cellular')
+      if (owned) {
+        try { recordSMSResult(localStorage, owned, null, e.message) }
+        catch (error) { showToast?.(error.message) }
+      }
       const msg = 'SMS failed: ' + [...new Set([e.code,e.data?.diagnostic_code,e.message].filter(Boolean))].join(' · ') + '. ' + tr('Retry uses the same request identity; do not create a second send.')
       showToast ? showToast(msg) : (await dialogs.alert(msg))
     } finally {
       sendingRef.current = false
-      setSending(false)
+      if (mounted.current) {setSending(false); readJournal()}
     }
   }
 
   const toast = (m) => (showToast ? showToast(m) : null)
 
-  const readReceipt = async () => {
-    if (sendingRef.current || !senderID) return
-    const key=`mdd_sms_operation_${senderID}`
+  const readReceipt = async saved => {
+    if (sendingRef.current) return
     sendingRef.current=true;setSending(true)
     try {
-      const saved=JSON.parse(localStorage.getItem(key)||'null')
-      await api.readSmsReceipt(senderID,saved)
-      localStorage.removeItem(key);if(activeSender.current===senderID)setReceiptAvailable(false)
+      const result = await api.readSmsReceipt(saved.lineID,saved)
+      const receipt = recordSMSResult(localStorage,saved,result)
+      if (receipt.state !== 'submitted') throw new Error(tr('Submission remains unknown; the original request is retained.'))
       showToast?.(tr('Stored Agent receipt confirms submission; no SMS was resent.'))
       await loadThreads();await loadMsgs()
     } catch(error){showToast?.(error.code || error.message)}
-    finally{sendingRef.current=false;setSending(false)}
+    finally{sendingRef.current=false;if(mounted.current){setSending(false);readJournal()}}
+  }
+
+  const newMessage = () => {
+    composeGeneration.current++; setOperation(null); setConversation(null)
+    setNewTo(peer || ''); setText(''); setTransport(''); setMsgs([]); setMessagesLoading(false)
+  }
+  const openThread = thread => {
+    composeGeneration.current++; setOperation(null); setConversation(thread); setText('')
+    const line = replyLine(instances,thread)
+    setTransport(line?.operations?.[`${thread.transport}_sms`]?.ready ? thread.transport : '')
+  }
+  const restoreOperation = saved => {
+    composeGeneration.current++; setOperation(saved); setConversation(null)
+    setNewTo(saved.payload.to); setText(saved.payload.body); setTransport(saved.payload.transport)
   }
 
   const toggleSel = (mid) => setSelIds((s) => {
@@ -274,11 +293,11 @@ function Messages({
           setSelected={setSelected} callCoordinator={callCoordinator}
           service="sms" />
       </div>
-      {senderID && <AllowancePanel instanceId={String(senderID)} mode="messages" transport={sendTransport} showToast={showToast} />}
+      {senderID && <AllowancePanel instanceId={String(senderID)} cardID={String(senderLine.iccid || senderLine.card_id || '')} mode="messages" transport={sendTransport} showToast={showToast} />}
       {cellularPreferred && <div className="u-note" style={{ marginBottom: 12 }}>{tr('Cellular SMS is ready. VoWiFi may remain stopped because the host operating system owns this SIM.')}</div>}
       <div className="mdd-message-layout">
       <div className="card" style={{ padding: 12, overflow: 'auto', minHeight: 0 }}>
-        <button className="btn btn-primary" style={{ width: '100%', marginBottom: 8 }} onClick={() => { setConversation(null); setMsgs([]); setMessagesLoading(false); setText('') }}>+ {tr('New message')}</button>
+        <button className="btn btn-primary" style={{ width: '100%', marginBottom: 8 }} onClick={newMessage}>+ {tr('New message')}</button>
         <select aria-label={tr('Message history scope')} value={historyScope} onChange={event => { setHistoryScope(event.target.value); setConversation(null) }}>
           <option value="all">{tr('All lines')}</option><option value="line" disabled={!id}>{tr('Selected line')}</option>
         </select>
@@ -286,7 +305,7 @@ function Messages({
           <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 10, color: '#ef4444', fontSize: 12 }}
             onClick={clearAll}>{tr('Clear all conversations')}</button>}
         {threads.map((t) => (
-          <div key={t.key} onClick={() => { if (conversation?.key !== t.key) { setConversation(t); setText('') } }} className="hover-row"
+          <div key={t.key} onClick={() => { if (conversation?.key !== t.key) openThread(t) }} className="hover-row"
             style={{ padding: 10, borderRadius: 10, cursor: 'pointer', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8,
               background: conversation?.key === t.key ? 'var(--active)' : 'transparent' }}>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -306,7 +325,7 @@ function Messages({
       <div className="card" style={{ display: 'flex', flexDirection: 'column', padding: 0, minHeight: 0 }}>
         <div style={{ padding: 14, borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           {peer ? <span className="mono" style={{ fontWeight: 600, flex: 1 }}>{peer}<small style={{ display:'block' }}>{senderLine?.name || conversation.line_id} · {conversation.transport}</small></span>
-            : <input placeholder={tr('Recipient number e.g. +1...')} value={newTo} onChange={(e) => setNewTo(e.target.value)} style={{ maxWidth: 300, flex: 1 }} />}
+            : <input placeholder={tr('Recipient number e.g. +1...')} value={newTo} disabled={Boolean(operation)} onChange={(e) => {composeGeneration.current++; setNewTo(e.target.value)}} style={{ maxWidth: 300, flex: 1 }} />}
           {peer && msgs.length > 0 && (
             selMode ? (
               <>
@@ -326,6 +345,20 @@ function Messages({
             )
           )}
         </div>
+        {conversation && !senderLine && <div role="status" className="u-note">{tr('The original SIM cannot be verified. Choose New message and explicitly select the sending SIM.')}</div>}
+        {journalError && <div role="alert" className="u-error">{journalError}</div>}
+        {receipts.length > 0 && <details className="u-note"><summary>{tr('SMS request records')} ({receipts.length})</summary>
+          {receipts.map(saved => <div key={saved.id} style={{padding:'8px 0',borderBottom:'1px solid var(--border)'}}>
+            <div>{saved.payload.to} · {saved.payload.transport} · {tr(saved.state === 'submitted' ? 'Sent' : 'Delivery unknown')}</div>
+            <small>{saved.lineID} · ICCID {saved.payload.cardID} · {saved.id}</small>
+            <div style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{saved.payload.body}</div>
+            {saved.error && saved.state !== 'submitted' && <div className="u-error">{saved.error}</div>}
+            {saved.state !== 'submitted' && <>
+              <button className="btn btn-ghost" disabled={sending} onClick={() => restoreOperation(saved)}>{tr('Open original request')}</button>
+              {saved.payload.transport === 'cellular' && <button className="btn btn-ghost" disabled={sending} onClick={() => readReceipt(saved)}>{tr('Read stored SMS receipt')}</button>}
+            </>}
+          </div>)}
+        </details>}
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
           {nextBefore && <button className="btn btn-ghost" disabled={olderLoading || messagesLoading} onClick={() => loadMsgs(undefined, false, nextBefore)}>{tr(olderLoading ? 'Loading messages…' : 'Older messages')}</button>}
           {messagesLoading && <div aria-live="polite" style={{ color: 'var(--text-mute)', fontSize: 13 }}>{tr('Loading messages…')}</div>}
@@ -389,8 +422,8 @@ function Messages({
         <div style={{ display: 'flex', gap: 8, padding: 12, borderTop: '1px solid var(--border)', flexShrink: 0, flexWrap: 'wrap', alignItems: 'center' }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-mute)', whiteSpace: 'nowrap' }}>
             {tr('Send via')}
-            <select value={sendTransport} disabled={sending || Boolean(conversation)}
-              onChange={(e) => setTransport(e.target.value)}
+            <select value={sendTransport} disabled={Boolean(operation)}
+              onChange={(e) => {composeGeneration.current++; setTransport(e.target.value)}}
               aria-label={tr('Send via')}
               title={!cellularAvailable ? tr('This line does not have an available cellular modem.') : ''}
               style={{ width: 'auto', minWidth: 150 }}>
@@ -401,15 +434,14 @@ function Messages({
               </option>
             </select>
           </label>
-          <input placeholder={tr('Type a message…')} value={text} disabled={sending}
-            onChange={(e) => setText(e.target.value)}
+          <input placeholder={tr('Type a message…')} value={text} disabled={Boolean(operation)}
+            onChange={(e) => {composeGeneration.current++; setText(e.target.value)}}
             onKeyDown={(e) => {
               if (!isSMSSubmitKey(e)) return
               e.preventDefault()
               send()
             }} style={{ flex: '1 1 220px' }} />
-          <button className="btn btn-primary" disabled={sending || !canComposeSMS(senderLine,sendTransport,peer || newTo,text)} onClick={send}>{tr('Send')}</button>
-          {receiptAvailable && <button className="btn btn-ghost" disabled={sending} onClick={readReceipt}>{tr('Read stored SMS receipt')}</button>}
+          <button className="btn btn-primary" disabled={sending || Boolean(journalError) || !canComposeSMS(senderLine,sendTransport,peer || newTo,text)} onClick={send}>{tr(operation ? 'Retry original request' : 'Send')}</button>
         </div>
       </div>
       </div>

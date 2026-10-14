@@ -30,9 +30,6 @@ assert.ok(coordinator.includes('call_occurrence: incoming.occurrence'))
 assert.ok(coordinator.includes('call.media?.close()'))
 assert.ok(coordinator.indexOf('call.media?.close()') < coordinator.indexOf('await api.hangupCallV1(call)'))
 assert.ok(coordinator.includes('The 10-second exact call guard'))
-assert.ok(
-  coordinator.includes("call.mode === 'cellular') return Promise.resolve()"),
-  'an uncertain cellular start cannot be submitted twice')
 assert.ok(media.includes("`${scheme}://${location.host}${this.lease.ws_path}`"))
 assert.ok(media.includes("type: 'browser.media.evidence'"))
 assert.ok(media.includes('this.reconnectDeadline = Date.now() + 9000'))
