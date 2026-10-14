@@ -14,6 +14,59 @@ of every platform, hardware combination or failure branch.
 
 ## Delivery And Acceptance
 
+### New-Card Control Flow
+
+The October 13 repair keeps the copied SIM claim/save/provision/apply flow and
+explicit user enable/start actions. Setup reads the existing ICCID IMEI binding;
+both country controls use the existing SIM MCC table, not the roaming network.
+Confirmed controls retain card/attachment identity and revision. Drafts and
+unknown recovery receipts survive unrelated updates; snapshot freshness is
+separate from transport connection. No automatic activation or new Agent wire
+contract. Historical offline attachments expose a separate stop-only intent
+target, never restored hardware routing. Late saves cannot select another SIM.
+Hosted38342258088/6e63731 passed compiled red/green and actual Chromium fixture
+flows; `archive/2026-10-13/new-card-qualified` retains the one-time proof. The
+generated app.js is imported from that run. Source review/full CI and production
+acceptance remain separate; remaining reviewed batches are in the ledger.
+The source review additionally keeps dispatched recovery disconnects unknown,
+stores recovery results by operation and leaves offline receipt reads available.
+Only an existing VoWiFi start intent may bypass the transition lock to stop;
+other transitioning controls retain their original limits. Correction evidence
+is retained by1811eea/CI38344633611 and archive/2026-10-13/new-card-review-proof:
+actual WebSocket and old-page regressions fail, fixed race/browser flows pass.
+That run failed only stale embedded UI; its generated app.js is now imported,
+temporary proof removed, runtime/tests unchanged. Final review/full CI pending.
+
+### Archived Lines And Recovery Export
+
+October13 approved N4/N3/N13 correction reuses the existing catalog lifecycle,
+deletion receipt, SMS store and backup endpoint. Archive requires prior disable/stop;
+restore remains disabled. Recycle Bin is independent of hardware presence, and
+permanent deletion is offered only for archived records with two confirmations.
+The browser retains operation/history intent across reload even after the catalog
+line disappears; only its matching succeeded receipt ends tracking. Unknown outcomes
+do not trigger automatic retry. No eSIM profile operation is added.
+Before any destructive store step, one SMS write transaction rejects unresolved
+or unpersisted submissions and establishes the existing tombstone against Begin.
+Keeping history also keeps SMS operation evidence. Export v2 includes IMEI/pending
+bindings, runtime intent and lifecycle receipts; the SMS snapshot includes barriers.
+Catalog APN passwords/digest key stay excluded. Other snapshots remain sensitive;
+protect the archive. Snapshots are not cross-database atomic, and no online restore,
+automatic startup or operation replay is implemented. Failure boundaries include
+Begin/delete races, missing history, reload/cancel/partial deletion and incomplete
+backup. Full CI38401181375/20c516f proves old/withdrawn behavioral failures and
+fixed race/browser passes; original reviewer approved product source. The exact
+qualification source remains at archive/2026-10-13/line-archive-qualified.
+Final cleanup removes only temporary proof; final-head CI/deployment are separate.
+Four source-text assertions about the old deletion button were removed in favor
+of the mounted browser workflow; no production or paid acceptance is implied.
+
+N12 candidate: the sidebar version link now opens the existing UpdateModal with
+current metadata. Unknown original updates remain readback-only across reopening;
+Core-reported maintenance/worker discrepancies are shown rather than offered as a
+second update. Production-root Chromium confirmation/cancel/target-change coverage
+is added but not yet run. This is not deployment acceptance.
+
 ### IMEI Binding Before Line Creation
 
 October 12 readback follow-up: HardwarePanel now resolves its existing pool
@@ -672,6 +725,21 @@ not external traffic or relaxed TLS verification.
 
 ## Management safety and certificate readback
 
+October13 N7/N8 keeps the existing eSIM page/Agent protocol. Enable/disable
+protects the complete current EID inventory under the existing Core maintenance
+permit, freezes its insertion, and rejects active/unknown business regardless of
+catalog enabled intent. Internal exact-command authority does not reach the wire.
+Unknown mutation replies retain their permit for explicit original-Agent inventory
+readback, not mutation retry. Download records are per EID/operation, contain no
+activation/confirmation code, and distinguish execution terminal from certainty.
+New attempts require explicit confirmation; original unknowns survive refresh and
+location changes, including legacy records whose reader is gone. Late replies
+save only their own record without closing a newer draft. Partial permit release
+retains host protection and resumes exact original Provider generations using
+current catalog evidence; pending readback permits partial read-only inventory.
+Hosted proof and final source review are pending; no real card
+or paid acceptance is asserted. Legacy source-text assertions were removed.
+
 Provider preflight and the locked maintenance entry both reject ringing calls,
 not just active calls. Refused maintenance does not acquire a lease.
 The original Web/security fields read the certificate actually loaded by Core:
@@ -679,3 +747,22 @@ self-signature, DNS names and expiry, with missing evidence remaining unknown.
 This does not expose key paths, enable certificate editing or equate a
 non-self-signed certificate with a validated trust chain. Support bundles keep
 certificate identifiers redacted.
+
+## Communication ownership (October 13)
+
+E/N5/N6 keeps the copied Messages/Allowance and existing call coordinator.
+Browser SMS receipts adopt this repository's Android MessageJournal per-operation
+ownership and exact submission receipt rules; unresolved payloads are retained,
+never auto-sent or discarded to compose a new message. History without original
+card evidence requires an explicit new message; historical transport is not the
+new send route. Incoming-answer ownership follows Android RemoteCall, including
+late acceptance after cancellation; shared active status grants no ownership.
+Allowance confirmation freezes card, rule revision, recipient and body; Core
+checks them before creation, atomically at storage, and at dispatch. Existing
+message route identity checks still apply. No new Agent protocol or Android change.
+Hosted38379711514/36f530f proves old behavior failures and fixed Chromium/Core
+race passes; archive/2026-10-13/communication-qualified. Final CI/review is separate.
+Hosted38382538282/fcb1f71 adds old-scope history race proof and full Chromium pass;
+archive/2026-10-13/communication-history-qualified retains the temporary entry.
+The obsolete SMS/retry source-string assertions are replaced by browser behavior.
+No real allowance SMS, carrier acceptance or production rollout is claimed.

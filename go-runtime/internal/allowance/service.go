@@ -106,6 +106,9 @@ func (service *Service) CreateQuery(ctx context.Context, lineID string,
 	if rule.Recipient == "" || rule.Body == "" {
 		return QueryView{}, false, ErrRuleUnavailable
 	}
+	if request.ExpectedRuleRevision != rule.Revision || request.Recipient != rule.Recipient || request.Body != rule.Body {
+		return QueryView{}, false, ErrQueryChanged
+	}
 	operationID, err := randomID("allowance-sms-")
 	if err != nil {
 		return QueryView{}, false, err

@@ -19,6 +19,13 @@ const maximumRegistrationBytes = 16 << 10
 type RegistrationHandler struct {
 	directory *ProviderDirectory
 	tokenHash [sha256.Size]byte
+	admission func(Provider) (func(), error)
+}
+
+// SetAdmission is configured before the HTTP server starts. The returned token
+// spans directory replacement, closing the race with update admission freeze.
+func (handler *RegistrationHandler) SetAdmission(admission func(Provider) (func(), error)) {
+	handler.admission = admission
 }
 
 type deregistration struct {
@@ -52,6 +59,14 @@ func (handler *RegistrationHandler) ServeHTTP(response http.ResponseWriter, requ
 		if decodeRegistration(request.Body, &provider) != nil {
 			writeRegistration(response, http.StatusBadRequest, "invalid_provider")
 			return
+		}
+		if handler.admission != nil {
+			done, err := handler.admission(provider)
+			if err != nil {
+				writeRegistration(response, http.StatusConflict, "system_update_maintenance")
+				return
+			}
+			defer done()
 		}
 		if err := handler.directory.Replace(provider); err != nil {
 			if errors.Is(err, ErrProviderGenerationReused) {

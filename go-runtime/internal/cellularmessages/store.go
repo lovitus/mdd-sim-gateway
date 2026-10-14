@@ -2,7 +2,9 @@ package cellularmessages
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -10,12 +12,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/boltsnapshot"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 	bolt "go.etcd.io/bbolt"
 )
 
 const operationStoreSchema uint64 = 1
 
 var ErrOperationConflict = errors.New("cellular SMS operation identity conflict")
+var ErrUnresolvedOperation = errors.New("cellular SMS operation requires reconciliation before deletion")
+
+type SubmissionHistory interface {
+	Find(string, string, string) (providermessages.Record, bool, error)
+}
 
 var (
 	operationMetadata = []byte("metadata")
@@ -170,14 +179,69 @@ func (store *OperationStore) Delete(operationID string) error {
 	})
 }
 
+// The same write transaction either sees an earlier Begin or blocks every later
+// Begin. No other database may be purged before this barrier is durable.
+func (store *OperationStore) PrepareLineDeletion(lineID string, history SubmissionHistory) error {
+	if strings.TrimSpace(lineID) == "" || history == nil {
+		return errors.New("invalid cellular SMS deletion protection")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		barriers := tx.Bucket(operationPurged)
+		if barriers.Get([]byte(lineID)) != nil {
+			return nil
+		}
+		if err := tx.Bucket(operationRecords).ForEach(func(_, wire []byte) error {
+			var record OperationRecord
+			if json.Unmarshal(wire, &record) != nil {
+				return errors.New("invalid persisted cellular SMS operation")
+			}
+			if record.LineID != lineID {
+				return nil
+			}
+			if record.State != "submitted" || len(record.References) == 0 {
+				return ErrUnresolvedOperation
+			}
+			for index, reference := range record.References {
+				eventID := "cellular-submit-" + record.OperationID + "-" + stringID(index+1)
+				message, found, err := history.Find(lineID, "cellular", eventID)
+				if err != nil {
+					return err
+				}
+				digest := sha256.Sum256([]byte(message.Body))
+				if !found || message.Kind != providermessages.KindSubmitted || message.State != "submitted" ||
+					message.MessageID != record.MessageID || message.Part != index+1 || message.RPMR != reference ||
+					message.Recipient != record.Recipient || message.ProcessGeneration != record.ProcessGeneration ||
+					message.CallID != messageReferenceID(reference) || hex.EncodeToString(digest[:]) != record.BodySHA256 {
+					return ErrUnresolvedOperation
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		return barriers.Put([]byte(lineID), []byte{1})
+	})
+}
+
+func (store *OperationStore) RetainLine(lineID string) error {
+	return store.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(operationPurged).Get([]byte(lineID)) == nil {
+			return errors.New("cellular SMS deletion barrier missing")
+		}
+		return nil
+	})
+}
+
+func (store *OperationStore) Backup() ([]byte, error) { return boltsnapshot.Read(store.db) }
+
 func (store *OperationStore) PurgeLine(lineID string) error {
 	lineID = strings.TrimSpace(lineID)
 	if lineID == "" {
 		return errors.New("invalid cellular SMS purge line identity")
 	}
 	return store.db.Update(func(tx *bolt.Tx) error {
-		if err := tx.Bucket(operationPurged).Put([]byte(lineID), []byte{1}); err != nil {
-			return err
+		if tx.Bucket(operationPurged).Get([]byte(lineID)) == nil {
+			return errors.New("cellular SMS deletion barrier missing")
 		}
 		bucket := tx.Bucket(operationRecords)
 		var keys [][]byte

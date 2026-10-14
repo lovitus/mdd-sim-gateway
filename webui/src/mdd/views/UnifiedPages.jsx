@@ -11,7 +11,9 @@ import AllowancePanel from './AllowancePanel.jsx'
 import AgentCredentials from './AgentCredentials.jsx'
 import Maintenance from './Maintenance.jsx'
 import AdvancedDiagnostics from './AdvancedDiagnostics.jsx'
-import { saveReaderIMEI } from '../hardwareAdapter.js'
+import { saveReaderIMEI, readerIMEIBinding } from '../hardwareAdapter.js'
+import { useReaderIMEI } from '../useReaderIMEI.js'
+import { simHomeCountry } from '../../simCountry.js'
 import { networkProbeError } from '../networkAdapter.js'
 import { compactReaderName, lineCallReadinessStatus, intentionalLineStop, unavailableCellularLabel, lineFailureReasons } from '../linePresentation.js'
 import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel, agentIssueLabel } from '../agentHealthPresentation.js'
@@ -265,29 +267,87 @@ function SmsAdvisory({ device, refreshDevices, showToast }) {
   const { language } = useI18n()
   const isZh = language === 'zh'
   const [busy, setBusy] = useState('')
+  const commandBusy = useRef(false)
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const recoveryKey = `mdd_modem_recovery_${device.id}_${device.sim?.iccid || ''}`
+  const [receipt, setReceipt] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(recoveryKey) || 'null')
+      if (saved && (typeof saved.operation_id !== 'string' || !saved.operation_id || typeof saved.state !== 'string')) throw new Error('invalid recovery record')
+      return saved
+    }
+    catch { return {state:'unknown',code:'recovery_record_unreadable'} }
+  })
+  const retainReceipt = (value, begin = false) => {
+    const current = JSON.parse(localStorage.getItem(recoveryKey) || 'null')
+    const ownKey = `${recoveryKey}:${value.operation_id}`
+    const prior = JSON.parse(localStorage.getItem(ownKey) || 'null')
+    // Status readback can precede the original POST response. Never regress a
+    // known terminal receipt or let that response replace a newer operation.
+    const next = prior && ['succeeded','failed','reconciled'].includes(prior.state) ? prior : value
+    localStorage.setItem(ownKey, JSON.stringify(next))
+    if (begin || current?.operation_id === value.operation_id) {
+      localStorage.setItem(recoveryKey, JSON.stringify(next))
+      if (mounted.current) setReceipt(next)
+    }
+  }
   const diagnostics = device?.sms_diagnostics
   const advisory = diagnostics?.advisory || []
   const recovery = diagnostics?.recovery || {}
   const refresh = recovery.refresh || {}
   const restart = recovery.soft_restart || {}
-  if (!diagnostics || (!advisory.length && !diagnostics.service_center && !refresh.recommended && !restart.recommended)) return null
+  if (!receipt && (!diagnostics || (!advisory.length && !diagnostics.service_center && !refresh.recommended && !restart.recommended))) return null
   const run = async (kind) => {
-    if (kind === 'restart' && !(await dialogs.confirm(isZh
-      ? '软重启会短暂中断该模块的数据、短信和通话。继续吗？'
-      : 'Soft restart briefly interrupts this modem\'s data, SMS and calls. Continue?'))) return
+    if (commandBusy.current) return
+    if (kind === 'restart' && receipt && !['accepted','succeeded','failed','reconciled'].includes(receipt.state)) {
+      showToast?.(isZh ? '请先读取原操作状态；未知结果不能自动重启' : 'Read the original operation first; an unknown outcome must not be retried')
+      return
+    }
+    commandBusy.current = true
+    const confirmed = structuredClone(device)
+    let operation = ''
     setBusy(kind)
     try {
+      if (kind === 'restart' && !(await dialogs.confirm(isZh
+        ? '软重启会短暂中断该模块的数据、短信和通话。继续吗？'
+        : 'Soft restart briefly interrupts this modem\'s data, SMS and calls. Continue?'))) return
+      operation = kind === 'restart' ? crypto.randomUUID() : ''
+      if (operation) {
+        const current = JSON.parse(localStorage.getItem(recoveryKey) || 'null')
+        if (current && !['accepted','succeeded','failed','reconciled'].includes(current.state)) throw new Error('recovery_requires_reconciliation')
+        retainReceipt({operation_id:operation,state:'unknown'}, true)
+      }
       const result = kind === 'restart'
-        ? await api.softRestartDevice(device.id)
+        ? await api.softRestartDevice(confirmed.id, confirmed, operation)
         : await api.refreshDeviceSms(device.id)
-      showToast?.(kind === 'restart'
-        ? (isZh ? '模块软重启已开始，Agent 会自动恢复原配置' : 'Soft restart started; the Agent will restore desired state')
+      if (kind === 'restart') retainReceipt({...result,operation_id:operation})
+      if (mounted.current) showToast?.(kind === 'restart'
+        ? (result.state === 'accepted'
+          ? (isZh ? 'Agent 已接受模块恢复；实际恢复状态仍需读回' : 'Agent accepted recovery; readback is still required')
+          : (isZh ? '模块恢复结果未知，请读取原操作状态，不要重复重启' : 'Recovery outcome unknown; read the original operation instead of restarting again'))
         : (isZh ? `短信配置已刷新${result.service_center ? `：${result.service_center}` : ''}` : 'SMS configuration refreshed'))
       setTimeout(() => refreshDevices?.(), kind === 'restart' ? 5000 : 500)
-    } catch (error) { showToast?.(error.message) } finally { setBusy('') }
+    } catch (error) {
+      // Only explicit pre-dispatch rejection proves that a fresh operation did
+      // not run. Network/parse/record failures keep the original unknown receipt.
+      if (operation && (error.not_dispatched || ['device_confirmation_changed','invalid_modem_recovery_request',
+        'modem_recovery_target_unavailable','modem_recovery_target_ambiguous'].includes(error.code))) {
+        try { retainReceipt({operation_id:operation,state:'failed',code:error.code || error.message}) } catch {}
+      }
+      if (mounted.current) showToast?.(error.message)
+    } finally { commandBusy.current = false; if (mounted.current) setBusy('') }
   }
   return <div className="u-note" style={{ marginTop: 8 }}>
-    <div>{isZh ? '短信中心' : 'SMS centre'}: <b>{diagnostics.service_center || (isZh ? '未上报' : 'not reported')}</b></div>
+    {receipt && <div role="status"><p>{receipt.state} · <code>{receipt.operation_id}</code>{receipt.code ? ` · ${receipt.code}` : ''}</p><button className="btn btn-ghost" disabled={!!busy || !receipt.operation_id} onClick={async () => {
+      if (commandBusy.current) return
+      commandBusy.current = true; setBusy('receipt')
+      const original = receipt.operation_id
+      try { const result = await api.operationStatus(original); if (result.operation_id !== original) throw new Error('recovery_operation_identity_changed'); retainReceipt(result) }
+      catch (error) { if (mounted.current) showToast?.(error.message) }
+      finally { commandBusy.current = false; if (mounted.current) setBusy('') }
+    }}>{isZh ? '读取原操作状态' : 'Read original operation'}</button></div>}
+    <div>{isZh ? '短信中心' : 'SMS centre'}: <b>{diagnostics?.service_center || (isZh ? '未上报' : 'not reported')}</b></div>
     {advisory.map((item, index) => <p key={index} style={{ margin: '4px 0 0' }}>{item}</p>)}
     {!!refresh.recommended && <><p style={{ margin: '4px 0 0' }}>{refresh.reason}</p>
       <button className="btn btn-ghost" disabled={!!busy} onClick={() => run('refresh')}>{busy === 'refresh' ? (isZh ? '刷新中…' : 'Refreshing…') : (isZh ? '刷新短信配置' : 'Refresh SMS configuration')}</button></>}
@@ -365,33 +425,44 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const isZh = language === 'zh'
   const [submitting, setSubmitting] = useState(false)
   const [pendingTarget, setPendingTarget] = useState(null)
+  const requestBusy = useRef(false)
+  const binding = useReaderIMEI(kind === 'vowifi' ? device : null)
   const c = capability(device, kind)
   const isReader = device.device_type === 'reader'
-  const isImeiMissing = isReader && !device.bound_imei?.is_bound && !device.imei
-  const pending = submitting || c.actual === 'starting' || c.actual === 'stopping'
+  const isImeiMissing = isReader && !binding.imei
+  const needsSetup = kind === 'vowifi' && !device.instance_id && !device.runtime_intent_target
+  const stopIntent = kind === 'vowifi' && c.desired
+  const pending = submitting || (['starting', 'stopping'].includes(c.actual) && !stopIntent)
   const unavailable = device.stale || (!c.available && !isImeiMissing) || c.actual === 'unsupported' || device.compatibilityOnly ||
     device.present === false || (kind === 'cellular' && capability(device, 'flight').desired)
   const title = kind === 'cellular' ? t('Allow data borrowing') : kind === 'connection' ? t('4G connection') : kind === 'flight' ? t('Flight mode') : kind === 'roaming' ? t('Allow data roaming') : t('VoWiFi / WiFi Calling')
   const canRetry = kind === 'vowifi' && c.desired && ['off', 'degraded', 'error'].includes(c.actual) && !unavailable
   const change = async (next, retry = false) => {
+    if (requestBusy.current) return
+    if (needsSetup) { onNavigateToSim?.(device.id); return }
+    if (kind === 'vowifi' && next && (binding.loading || binding.error)) {
+      showToast?.(binding.error || t('Reading…')); return
+    }
     if (kind === 'vowifi' && next && isImeiMissing) {
       showToast?.(isZh ? '该读卡器尚未设置 IMEI，请在「硬件」标签页添加或选择已保存的 IMEI' : 'Please configure an IMEI in the Hardware tab before enabling VoWiFi')
       onNavigateToHardware?.(device.id)
       return
     }
     const impact = retry
-      ? t('Restart the VoWiFi line now? The SIM, ePDG and IMS connection will be rebuilt.')
+      ? t('Retry starting this line? This saves start intent and resets the failure window; a healthy runtime is not restarted.')
       : kind === 'cellular'
       ? t('Change permission for MDD to borrow this SIM’s data? This does not connect a bearer by itself; an active lease must be stopped first.')
       : kind === 'connection'
       ? t('Change the persistent 4G data connection? This may use metered or roaming data; only MDD sockets can use the guarded bearer.')
       : t('{action} {name}? The UI will wait for the real device state.', { action: next ? t('Enable') : t('Disable'), name: title })
-    if (!(await dialogs.confirm(impact))) return
-    setPendingTarget(next)
+    requestBusy.current = true
     setSubmitting(true)
+    const confirmed = structuredClone(device)
     try {
+      if (!(await dialogs.confirm(impact))) return
+      setPendingTarget(next)
       const field = kind === 'flight' ? 'flight_mode' : `${kind}_enabled`
-      await api.patchDeviceCapabilities(device.id, { [field]: next })
+      await api.patchDeviceCapabilities(confirmed.id, { [field]: next }, confirmed)
       showToast?.(t('Request accepted; waiting for device state'))
       await onChanged?.()
     } catch (e) {
@@ -424,7 +495,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
         return
       }
       showToast?.(`${t('Capability change failed')}: ${e.status === 404 ? t('Unified device control is not available on this backend') : e.message}`)
-    } finally { setSubmitting(false); setPendingTarget(null) }
+    } finally { requestBusy.current = false; setSubmitting(false); setPendingTarget(null) }
   }
   const toggle = () => change(!c.desired)
   const displayedDesired = pendingTarget == null ? c.desired : pendingTarget
@@ -436,9 +507,9 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     ? t(kind === 'connection' ? 'Mobile data is connected.' : kind === 'cellular' ? 'Data borrowing is allowed.' : kind === 'flight' ? 'Modem RF is disabled.' : kind === 'roaming' ? 'Mobile data may connect while roaming.' : 'Working — connected to the carrier over Wi-Fi.')
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
-    <div><b>{title}</b><div className="u-cap-detail">{detail}</div></div>
-    <div className="u-cap-actions">{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Restart line')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
-      aria-label={title} disabled={pending || (unavailable && !c.desired)} onClick={toggle}><span /></button></div>
+    <div><b>{title}</b><div className="u-cap-detail">{needsSetup ? t('Line not configured') : detail}</div></div>
+    <div className="u-cap-actions">{needsSetup ? <button className="btn btn-ghost" onClick={() => onNavigateToSim?.(device.id)}>{t('Configure SIM')}</button> : <>{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Retry start')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
+      aria-label={title} disabled={pending || (unavailable && !c.desired)} onClick={toggle}><span /></button></>}</div>
   </div>
 }
 
@@ -617,7 +688,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
         <h3>{isZh ? 'IMEI 池' : 'IMEI Pool'}</h3>
         <p>{isZh ? '集中保存设备身份，并按 ICCID 绑定。读卡器和槽位变化不会改变 SIM 的绑定。' : 'Save device identities centrally and bind them by ICCID. Reader and slot changes do not alter SIM bindings.'}</p>
       </div>
-      <div className="mdd-imei-editor">
+      <fieldset className="mdd-imei-editor" disabled={!!busy} style={{ border: 0, padding: 0, minWidth: 0 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <input value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder={isZh ? '设备名称，例如 Pixel 7 Pro' : 'Device name, e.g. Pixel 7 Pro'} />
           <input className="mono" inputMode="numeric" maxLength={18} disabled={editingUsedBy.length > 0}
@@ -639,7 +710,7 @@ export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast })
             </div>
           })}
         </div>
-      </div>
+      </fieldset>
     </div>
 
     <div className="card u-panel">
@@ -686,18 +757,7 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
     try {
       const data = await api.imeiPool()
       if (!mounted.current || request !== poolRequest.current) return false
-      if (!Number.isSafeInteger(data.revision) || data.revision < 0 ||
-          !Number.isSafeInteger(data.catalog_revision) || data.catalog_revision <= 0 ||
-          !Array.isArray(data.pool) || !Array.isArray(data.unpooled) ||
-          !data.bindings || typeof data.bindings !== 'object' || Array.isArray(data.bindings)) {
-        throw new Error('imei_pool_snapshot_invalid')
-      }
-      const binding = data.bindings?.[cardID]
-      const entry = binding && data.pool.find(item => item.id === binding.imei_id)
-      if (binding && (!entry || entry.imei !== binding.imei)) throw new Error('imei_binding_entry_mismatch')
-      const saved = entry || data.unpooled?.find(item => item.card_id === cardID) || null
-      const validIMEI = entry ? /^\d{15}$/ : /^\d{14,16}$/
-      if (saved && (typeof saved.imei !== 'string' || !validIMEI.test(saved.imei))) throw new Error('imei_binding_value_invalid')
+      const { saved, entry } = readerIMEIBinding(data, cardID)
       setPoolSnapshot(data)
       setSavedIMEI(saved)
       setImei(saved?.imei || '')
@@ -915,32 +975,43 @@ function CellularProfilePanel({ device, showToast, refreshDevices }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [draft, setDraft] = useState({ name: defaultName, apn: '', auth: 'NONE', username: '', password: '' })
+  const [revision, setRevision] = useState(null)
+  const requestEpoch = useRef(0)
+  const edited = useRef(false)
+  const saveBusy = useRef(false)
+  const mounted = useRef(false)
   const load = useCallback(() => {
+    const epoch = ++requestEpoch.current
     setLoading(true); setError('')
     api.deviceCellularProfiles(device.id)
       .then(result => {
+        if (!mounted.current || epoch !== requestEpoch.current) return
+        setRevision(result.revision)
         const suggestions = result.suggested_profiles || (result.suggested_apns || []).map((apn, index) => ({ id: `apn-${index}`, name: apn, apn, auth: 'NONE', username: '' }))
         setProfiles(result.profiles || []); setSuggestedProfiles(suggestions)
         setSupported(result.supported !== false); if (result.error) setError(result.error)
-        if (suggestions.length === 1) setDraft(value => ({ ...value, apn: value.apn || suggestions[0].apn, auth: suggestions[0].auth || 'NONE', username: suggestions[0].username || '' }))
+        if (!edited.current && suggestions.length === 1) setDraft(value => ({ ...value, apn: value.apn || suggestions[0].apn, auth: suggestions[0].auth || 'NONE', username: suggestions[0].username || '' }))
       })
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
+      .catch(e => { if (mounted.current && epoch === requestEpoch.current) setError(e.message) })
+      .finally(() => { if (mounted.current && epoch === requestEpoch.current) setLoading(false) })
   }, [device.id])
   useEffect(() => {
-    setDraft({ name: defaultName, apn: '', auth: 'NONE', username: '', password: '' })
+    mounted.current = true
     load()
-  }, [defaultName, load])
+    return () => { mounted.current = false; ++requestEpoch.current }
+  }, [load])
   const save = async e => {
     e.preventDefault()
-    if (!draft.name.trim() || !draft.apn.trim()) return
+    if (saveBusy.current || loading || revision === null || !draft.name.trim() || !draft.apn.trim()) return
+    saveBusy.current = true
     setSaving(true); setError('')
     try {
-      const result = await api.saveDeviceCellularProfile(device.id, draft)
+      const result = await api.saveDeviceCellularProfile(device.id, draft, structuredClone(device), revision)
+      if (!mounted.current) return
       setDraft(value => ({ ...value, name: result.name || value.name, apn: result.apn || value.apn, password: '' }))
       showToast(t('Mobile broadband profile saved on the Agent host.'))
       load(); await refreshDevices?.()
-    } catch (e) { setError(e.message) } finally { setSaving(false) }
+    } catch (e) { if (mounted.current) setError(e.message) } finally { saveBusy.current = false; if (mounted.current) setSaving(false) }
   }
   const chooseCandidate = id => {
     setCandidateId(id)
@@ -956,7 +1027,7 @@ function CellularProfilePanel({ device, showToast, refreshDevices }) {
     <p className="u-note">{t('The Agent saves this profile in the operating system on the modem host. The gateway never stores or returns the password.')}</p>
     {loading ? <p>{t('Loading…')}</p> : profiles.length ? <div className="u-detail"><span>{t('System profiles')}</span><b>{profiles.map(item => item.name).join(', ')}</b></div> : <p className="u-note">{t('No system profile is configured. MDD will automatically use one unambiguous data APN reported by the modem; otherwise choose a candidate below.')}</p>}
     {error && <p className="u-error">{error}</p>}
-    {supported && <form onSubmit={save}>
+    {supported && <form onSubmit={save} onChange={() => { edited.current = true }}><fieldset disabled={saving} style={{ border: 0, padding: 0, minWidth: 0 }}>
       {suggestedProfiles.length > 0 && <div className="u-profile-source"><label>{t('Configuration source')}</label><select value={candidateId} onChange={e => chooseCandidate(e.target.value)}><option value="custom">{t('Custom configuration')}</option>{suggestedProfiles.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name || candidate.apn} · {candidate.pdp_type || 'IP'} · {candidate.auth || 'NONE'}</option>)}</select><p>{t('Selecting a modem candidate fills every available field. Passwords are never read back and remain empty.')}</p></div>}
       <div className="u-form-grid">
         <div><label>{t('Profile name')}</label><input value={draft.name} maxLength={100} onChange={e => setDraft({ ...draft, name: e.target.value })} required /></div>
@@ -966,7 +1037,7 @@ function CellularProfilePanel({ device, showToast, refreshDevices }) {
         <div><label>{t('Password')}</label><input type="password" value={draft.password} maxLength={500} autoComplete="new-password" onChange={e => setDraft({ ...draft, password: e.target.value })} /></div>
       </div>
       <div className="u-inline"><span className="u-muted">{t('Save the profile, then enable 4G or allow roaming to retry the connection.')}</span><button className="btn btn-primary" disabled={saving || !draft.name.trim() || !draft.apn.trim()}>{t(saving ? 'Saving…' : 'Save profile')}</button></div>
-    </form>}
+    </fieldset></form>}
   </div>
 }
 
@@ -991,6 +1062,11 @@ export function UnifiedOverview({
     vowifi: devices.filter(d => capability(d, 'vowifi').actual === 'on').length,
     attention: devices.filter(d => ['error', 'degraded'].includes(capability(d, 'cellular').actual) || ['error', 'degraded'].includes(capability(d, 'vowifi').actual)).length,
   }), [devices])
+  const openCommunication = (device, view) => {
+    if (device.instance_id) { setSelected(String(device.instance_id)); setView(view); return }
+    setSelected(null); setSelectedDeviceId(device.id); setDeviceTab('sim'); setView('devices')
+    showToast?.(t('Configure this SIM before calling or messaging.'))
+  }
   return <div className="u-page">
     <div className="u-metrics">
       {[[t('Devices'), counts.devices], [t('4G online'), counts.cellular], [t('VoWiFi online'), counts.vowifi], [t('Needs attention'), counts.attention]].map(([l,v]) => <div className="u-metric" key={l}><span>{l}</span><strong>{pending ? '—' : v}</strong></div>)}
@@ -1002,8 +1078,8 @@ export function UnifiedOverview({
         <div className="u-card-body">{supportsCellular(d) && <><CapabilitySwitch device={d} kind="connection" compact onChanged={refreshDevices} showToast={showToast} /><CapabilitySwitch device={d} kind="cellular" compact onChanged={refreshDevices} showToast={showToast} /><CapabilitySwitch device={d} kind="roaming" compact onChanged={refreshDevices} showToast={showToast} /></>}<CapabilitySwitch device={d} kind="vowifi" compact onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => { setSelectedDeviceId(d.id); setDeviceTab('hardware'); setView('devices') }} onNavigateToSim={() => { setSelectedDeviceId(d.id); setDeviceTab('sim'); setView('devices') }} /><LineActivity device={d} compact /><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator} compact />{capability(d, 'vowifi').desired && <VowifiHistory instanceId={d.instance_id} subscribe={subscribe} compact />}
           <div className="u-details"><div className="u-detail"><span>{t('Carrier')}</span><b>{carrierLabel(d, t)}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t) || d.proxy_node || t('Not connected')} /></b></div></div>
           <ImsCapabilityBadges device={d} />
-          {d.instance_id && <AllowancePanel instanceId={String(d.instance_id)} availableTransports={['vowifi','cellular'].filter(transport => instances.find(line => String(line.id) === String(d.instance_id))?.operations?.[`${transport}_sms`]?.ready === true)} showToast={showToast} />}
-        </div><div className="u-card-foot"><button className="btn btn-ghost" onClick={() => { if (d.instance_id) setSelected(String(d.instance_id)); setView('calls') }}>{t('Call')}</button><button className="btn btn-ghost" onClick={() => { if (d.instance_id) setSelected(String(d.instance_id)); setView('messages') }}>{t('Message')}</button><button className="btn btn-primary" onClick={() => { setSelectedDeviceId(d.id); setView('devices') }}>{t('Details')}</button></div>
+          {d.instance_id && <AllowancePanel instanceId={String(d.instance_id)} cardID={String(d.sim?.iccid || '')} availableTransports={['vowifi','cellular'].filter(transport => instances.find(line => String(line.id) === String(d.instance_id))?.operations?.[`${transport}_sms`]?.ready === true)} showToast={showToast} />}
+        </div><div className="u-card-foot"><button className="btn btn-ghost" onClick={() => openCommunication(d, 'calls')}>{t('Call')}</button><button className="btn btn-ghost" onClick={() => openCommunication(d, 'messages')}>{t('Message')}</button><button className="btn btn-primary" onClick={() => { setSelectedDeviceId(d.id); setView('devices') }}>{t('Details')}</button></div>
       </div>)}</div>}
   </div>
 }
@@ -1030,17 +1106,20 @@ export function DevicesPage({
   useEffect(() => { if (active && active !== selectedDeviceId) setSelectedDeviceId(active) }, [active, selectedDeviceId, setSelectedDeviceId])
   const d = devices.find(x => x.id === active)
   useEffect(() => { if (d && !supportsCellular(d) && tab === 'cellular') setTab('status') }, [d, tab])
-  if (!d) return discovering ? <Discovering t={t} /> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} />
   const isZh = language === 'zh'
+  if (!d) return <section className="u-page">
+    <div className="u-tabs"><button className={tab !== 'trash' ? 'active' : ''} onClick={() => setTab('status')}>{t('Devices')}</button><button className={tab === 'trash' ? 'active' : ''} onClick={() => setTab('trash')}>{isZh ? '回收站' : 'Recycle Bin'}</button></div>
+    {tab === 'trash' ? <RecycleBinPanel refresh={refresh} showToast={showToast}/> : discovering ? <Discovering t={t}/> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')}/>}
+  </section>
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network / APN')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['imeis', isZh ? 'IMEI 池' : 'IMEI Pool'],['trash', isZh ? '回收站' : 'Recycle Bin']]
   return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.stale ? 'degraded' : x.present === false ? 'error' : 'on'}>{x.stale ? t('Snapshot unavailable') : x.present === false ? t('Offline') : t('Device online')}</Badge><RuntimeHealth health={x.vowifi?.health} compact /></span></button>)}</aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
       {d.stale && <p role="status" className="u-note">{t('Showing the last device snapshot; hardware actions are unavailable.')}<button className="btn btn-ghost" onClick={refreshDevices}>{t('Refresh')}</button></p>}
-      <fieldset disabled={d.stale && !['imeis','trash'].includes(tab)} style={{border:0,padding:0,minWidth:0}}>
-      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t(unavailableCellularLabel(d))}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} onNavigateToSim={() => setTab('sim')} /><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><SmsAdvisory device={d} refreshDevices={refreshDevices} showToast={showToast}/><FirmwareAdvice advice={d.firmware_advice}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
-      {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d} devices={devices}/></div>}
-      {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<CellularProfilePanel device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}
-      {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{d.facts?.facts?.tunnel?.code || (typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected')))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.facts?.facts?.ims?.code || d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? '—'} {t('minutes')}{d.vowifi?.rekey_state ? ` · ${t(d.vowifi.rekey_state)}` : ''}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      <fieldset disabled={d.stale && !['status','vowifi','imeis','trash'].includes(tab)} style={{border:0,padding:0,minWidth:0}}>
+      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t(unavailableCellularLabel(d))}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} onNavigateToSim={() => setTab('sim')} /><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><SmsAdvisory key={`${d.id}:${d.sim?.iccid || ''}:${d.process_generation || ''}`} device={d} refreshDevices={refreshDevices} showToast={showToast}/><FirmwareAdvice advice={d.firmware_advice}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      {tab==='sim' && <div className="card u-panel"><SimConfig key={`${d.id}:${d.sim?.iccid || ''}:${d.instance_id || ''}`} instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d} devices={devices}/></div>}
+      {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<CellularProfilePanel key={`${d.id}:${d.sim?.iccid || ''}:${d.go_device?.process_generation || d.process_generation || ''}:${d.go_device?.modem?.sim_session_generation || d.go_device?.modem?.sim?.session_generation || ''}`} device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}
+      {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl key={`${d.id}:${d.sim?.iccid || ''}`} device={d} refresh={refresh} showToast={showToast} onConfigure={() => setTab('sim')}/><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{d.facts?.facts?.tunnel?.code || (typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected')))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.facts?.facts?.ims?.code || d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? '—'} {t('minutes')}{d.vowifi?.rekey_state ? ` · ${t(d.vowifi.rekey_state)}` : ''}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='hardware' && <HardwarePanel key={`${d.id}:${d.sim?.iccid || ''}`} device={d} refreshDevices={refreshDevices} showToast={showToast}/>}
       {tab==='imeis' && <ImeiPoolPanel devices={devices} instances={instances} refreshDevices={refreshDevices} showToast={showToast}/>}
       {tab==='trash' && <RecycleBinPanel refresh={refresh} showToast={showToast}/>}
@@ -1056,23 +1135,37 @@ function RecycleBinPanel({ refresh, showToast }) {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [restoring, setRestoring] = useState('')
+  const [requests, setRequests] = useState({})
+  const [retainHistory, setRetainHistory] = useState({})
   const [error, setError] = useState('')
   const inFlight = useRef(false)
+  const mounted = useRef(false)
 
   const load = useCallback(() => {
     setLoading(true)
     api.softDeletedInstances()
-      .then(res => { setItems(res.instances || []); setError('') })
+      .then(res => {
+        const items = new Map((res.instances || []).map(item => [item.id,item])), pending = Object.create(null)
+        const prefix = 'mdd.line-deletion.v1.'
+        // A completed deletion can disappear from catalog before its response arrives.
+        for (const key of Object.keys(localStorage).filter(key => key.startsWith(prefix))) {
+          const request = JSON.parse(localStorage.getItem(key))
+          if (!request || typeof request.lineID !== 'string' || !request.lineID || key !== `${prefix}${request.lineID}` || typeof request.operation !== 'string' || !request.operation || typeof request.deleteHistory !== 'boolean') throw new Error('line_deletion_record_invalid')
+          pending[request.lineID] = {lineID:request.lineID,operation:request.operation,deleteHistory:request.deleteHistory}
+          if (!items.has(request.lineID)) items.set(request.lineID,{id:request.lineID,__catalog_revision:res.revision,__deletion_only:true})
+        }
+        setRequests(pending); setItems([...items.values()]); setError('')
+      })
       .catch(error => setError(error.message))
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { mounted.current = true; load(); return () => { mounted.current = false } }, [load])
 
   const restore = async (id) => {
-    if (inFlight.current) return
+    if (inFlight.current || requests[id]) return
     const item = items.find(value => String(value.id) === String(id))
-    if (!item) return
+    if (!item || item.__deletion_only) return
     inFlight.current = true
     setRestoring(id)
     try {
@@ -1088,59 +1181,105 @@ function RecycleBinPanel({ refresh, showToast }) {
     }
   }
 
+  const remove = async (item) => {
+    if (inFlight.current) return
+    inFlight.current = true
+    setRestoring(item.id)
+    // Freeze the selected line, revision and history choice before either dialog.
+    const request = requests[item.id] || {lineID:item.id, operation:crypto.randomUUID(), deleteHistory:retainHistory[item.id] !== true}
+    const revision = item.__catalog_revision, key = `mdd.line-deletion.v1.${item.id}`
+    const remember = value => {
+      localStorage.setItem(key,JSON.stringify(value))
+      setRequests(previous => ({...previous,[item.id]:value}))
+    }
+    try {
+      const warning = t(request.deleteHistory
+        ? 'Permanently delete this recycled line and its history? This cannot be undone.'
+        : 'Permanently delete this recycled line while retaining ended message and call history? The line cannot be restored.')
+      if (!(await dialogs.confirm(`${item.name || item.id} (${item.id})\n\n${warning}`))) return
+      const typed = await dialogs.prompt(`${t('Type the exact line ID to confirm permanent deletion.')}\n${item.id}`,'')
+      if (typed !== item.id) {
+        if (typed !== null) showToast(t('Permanent deletion was not confirmed.'))
+        return
+      }
+      if (!mounted.current) return
+      remember(request)
+      const result = await api.deleteInstance(request.lineID,request.deleteHistory,revision,request.operation)
+      const receipt = result?.operation
+      if (receipt?.line_id !== request.lineID || receipt.operation_id !== request.operation || receipt.delete_history !== request.deleteHistory || receipt.stage !== 'succeeded') throw new Error('line_deletion_receipt_unconfirmed')
+      localStorage.removeItem(key)
+      setRequests(previous => { const next = {...previous}; delete next[item.id]; return next })
+      setItems(previous => previous.filter(value => value.id !== item.id))
+      showToast(t(request.deleteHistory ? 'Line and retained history were permanently deleted.' : 'Line was permanently deleted; ended message and call history was retained.'))
+      await refresh?.()
+      load()
+    } catch (failure) {
+      showToast(`${t('Error')}: ${t(failure.code || failure.message)}`)
+      load()
+    } finally {
+      inFlight.current = false
+      setRestoring('')
+    }
+  }
+
   if (loading) return <div className="card u-panel"><p>{t('Reading…')}</p></div>
   if (error) return <div className="u-error" role="alert">{error}<button className="btn btn-ghost" onClick={load}>{t('Retry')}</button></div>
-  if (!items.length) return <div className="card u-panel"><Empty title={isZh ? '回收站为空' : 'Recycle Bin is empty'} detail={isZh ? '没有已软删除的 SIM 卡。软删除的卡片会保存在这里，可随时无损恢复。' : 'No soft-deleted SIM lines. Soft-deleted lines are kept here and can be restored anytime.'} /></div>
+  if (!items.length) return <div className="u-panel"><Empty title={isZh ? '回收站为空' : 'Recycle Bin is empty'} detail={isZh ? '没有已归档的线路。归档不会删除卡内的 eSIM。' : 'No archived lines. Archiving does not delete any eSIM profile on the card.'} /></div>
 
-  return <div className="card u-panel">
-    <h3>{isZh ? '回收站 (已软删除卡片)' : 'Recycle Bin (Soft-deleted lines)'}</h3>
+  return <div className="u-panel">
+    <h3>{isZh ? '回收站 (已归档线路)' : 'Recycle Bin (Archived lines)'}</h3>
     <p className="u-note">{isZh ? '线路归档保留配置和历史。恢复后保持停用，不会自动启动。' : 'Archived lines retain settings and history. Restored lines remain disabled and do not start automatically.'}</p>
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 14 }}>
       {items.map(item => (
-        <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', border: '1px solid var(--border)', borderRadius: 10 }}>
+        <div key={item.id} className="u-recycled-line" style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
           <div>
             <div style={{ fontWeight: 700, fontSize: 14 }}>{item.name || `SIM-${item.id}`} <span style={{ fontSize: 12, color: 'var(--text-mute)', fontWeight: 400 }}>({item.id})</span></div>
             <div style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'monospace', marginTop: 3 }}>ICCID: {item.iccid || '—'} · IMSI: {item.imsi || '—'}</div>
           </div>
-          <button className="btn btn-primary" disabled={!!restoring} onClick={() => restore(item.id)}>
-            {restoring === item.id ? (isZh ? '恢复中…' : 'Restoring…') : (isZh ? '恢复' : 'Restore')}
-          </button>
+          {requests[item.id] && <p role="status" className="u-note">{t('An earlier permanent deletion is unconfirmed. Confirm again to check or resume the same operation.')}</p>}
+          <label style={{display:'flex',gap:8,alignItems:'center',margin:'12px 0'}}><input type="checkbox" disabled={!!restoring || !!requests[item.id]} checked={requests[item.id] ? !requests[item.id].deleteHistory : retainHistory[item.id] === true} onChange={event => setRetainHistory(previous => ({...previous,[item.id]:event.target.checked}))}/>{t('Retain ended message and call history')}</label>
+          <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+            {!item.__deletion_only && <button className="btn btn-primary" disabled={!!restoring || !!requests[item.id]} onClick={() => restore(item.id)}>{isZh ? '恢复' : 'Restore'}</button>}
+            <button className="btn btn-danger" disabled={!!restoring} onClick={() => remove(item)}>{t(requests[item.id] ? 'Resume permanent deletion' : 'Delete permanently')}</button>
+          </div>
         </div>
       ))}
     </div>
   </div>
 }
 
-function CountryExitControl({ device, refresh, showToast }) {
+function CountryExitControl({ device, refresh, showToast, onConfigure }) {
 
   const { t, language } = useI18n()
   const [saving, setSaving] = useState(false)
+  const busy = useRef(false)
   const route = device.egress || {}
-  const countries = [...new Set([...(route.available_countries || []), route.detected_country, route.country].filter(Boolean))]
+  const home = simHomeCountry(device.sim?.mcc)
+  const countries = [...new Set([...COUNTRY_CODES, ...(route.available_countries || []), home, route.country].filter(Boolean))]
     .sort((a, b) => countryLabel(a, language).localeCompare(countryLabel(b, language)))
   const select = async (country) => {
-    if (!device.instance_id) return
+    if (!device.instance_id || !country || busy.current) return
+    busy.current = true
     setSaving(true)
     try {
-      const result = await api.setLineCountry(device.instance_id, country)
+      await api.setLineCountry(device.instance_id, country, device.sim?.iccid)
       await refresh()
-      showToast(t(country ? 'Country exit changed to {country}' : 'Country exit returned to automatic detection', {
-        country: country ? countryLabel(result.effective_country || country, language) : '' }))
+      showToast(t('Country saved. Apply the saved configuration in the SIM tab.'))
     } catch (error) { showToast(`${t('Error')}: ${error.message}`) }
-    finally { setSaving(false) }
+    finally { busy.current = false; setSaving(false) }
   }
   return <div className="u-note" style={{ marginBottom: 16 }}>
     <label>{t('Country exit selection')}</label>
     <select value={route.override || ''} disabled={saving || !device.instance_id} onChange={event => select(event.target.value)}>
-      <option value="">{route.detected_country
-        ? t('Automatic — detected {country}', { country: countryLabel(route.detected_country, language) })
-        : t('Automatic — country not detected')}</option>
+      <option value="" disabled>{t('Choose an exit country')}</option>
       {countries.map(country => <option value={country} key={country}>{countryLabel(country, language)}</option>)}
     </select>
+    {home && <button className="btn btn-ghost" disabled={saving || !device.instance_id} onClick={() => select(home)}>{t('Use SIM home country')} ({home.toUpperCase()})</button>}
+    <button className="btn btn-ghost" onClick={onConfigure}>{t(device.instance_id ? 'Open SIM configuration' : 'Configure SIM')}</button>
     <div style={{ fontSize: 12, color: 'var(--text-mute)', marginTop: 6 }}>
       {device.instance_id
-        ? t('The SIM country is detected automatically. Select a country only when the detected route is wrong.')
-        : t('Waiting for the SIM identity before a country exit can be selected.')}
+        ? t('Saved configuration and the active route can differ until protected apply succeeds.')
+        : t('Line not configured')}
     </div>
   </div>
 }

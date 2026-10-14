@@ -36,13 +36,16 @@ type AgentRuntime interface {
 }
 
 type Service struct {
-	deleteMu  sync.Mutex
-	replayMu  sync.Mutex
-	deletions *events.BoltStore
-	agents    AgentRuntime
-	catalog   LineCatalog
-	providers ProviderStatus
-	now       func() time.Time
+	mutationMu       sync.Mutex
+	mutationGuard    func(context.Context, agentlink.ConnectionStatus, []string, string) (func(context.Context) error, error)
+	pendingMutations map[string]*pendingMutation
+	deleteMu         sync.Mutex
+	replayMu         sync.Mutex
+	deletions        *events.BoltStore
+	agents           AgentRuntime
+	catalog          LineCatalog
+	providers        ProviderStatus
+	now              func() time.Time
 }
 
 type LineCatalog interface {
@@ -208,7 +211,7 @@ func (service *Service) refreshInventory(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 400, map[string]string{"code": "invalid_euicc_refresh"})
 		return
 	}
-	result, err := service.agents.ExecuteEUICCProfileCommand(r.Context(), command)
+	result, err := service.refreshProfile(r.Context(), command)
 	if err != nil {
 		writeOperationError(w, err)
 		return
@@ -603,12 +606,13 @@ func (service *Service) mutate(response http.ResponseWriter, request *http.Reque
 				}
 			}
 		}
-		if err := service.profileMutationSafe(request.Context(), command.ICCID); err != nil {
-			writeEUICCError(response, err, "euicc_profile_line_active")
-			return
-		}
 	}
-	result, err := service.agents.ExecuteEUICCProfileCommand(request.Context(), command)
+	var result agentlink.EUICCProfileResponse
+	if action == agentlink.EUICCProfileEnable || action == agentlink.EUICCProfileDisable {
+		result, err = service.mutateProfile(request.Context(), command)
+	} else {
+		result, err = service.agents.ExecuteEUICCProfileCommand(request.Context(), command)
+	}
 	if err != nil {
 		writeOperationError(response, err)
 		return

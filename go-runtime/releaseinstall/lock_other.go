@@ -4,9 +4,9 @@ package releaseinstall
 
 import "errors"
 
-type installLock struct{}
+type ExecutionLock struct{}
 
-func acquireLock(string, int) (*installLock, error) {
+func AcquireExecutionLock(string, int) (*ExecutionLock, error) {
 	return nil, errors.New("release installation is supported only on Linux")
 }
-func (*installLock) Close() error { return nil }
+func (*ExecutionLock) Close() error { return nil }

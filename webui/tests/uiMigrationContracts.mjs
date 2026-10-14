@@ -46,10 +46,7 @@ assert.match(provision, /api\.provisionV1\(request\).*api\.reprovisionV1\(reques
 assert.match(provision, /proof.identity !== identity/)
 assert.match(provision, /api\.reconcileProvisionV1\(reconcile\)/)
 assert.doesNotMatch(provision, /setInterval|setTimeout/, 'synchronous provision must not gain a polling loop')
-assert.match(sim, /prompt\(t\('Type the line ID/)
-assert.match(sim, /deletionRequests.current.get\(forId\)/)
-assert.match(sim, /request.deleteHistory !== deleteHistory/)
-assert.match(sim, /api\.deleteInstance\(forId, deleteHistory, form.__catalog_revision, request.operation\)/)
+// Permanent deletion is covered by mounted DevicesPage/recycle-bin browser behavior.
 assert.match(sim, /preflight_operation_id:preflight/)
 assert.match(sim, /action:saveOnAgent \? 'verify_save' : 'verify'/)
 assert.match(sim, /action:'remove_saved'[\s\S]*expected_config_revision:pinConfiguration.revision/)
@@ -57,7 +54,8 @@ assert.match(lineAdapter, /attempts > 2/)
 assert.doesNotMatch(sim, /new_pin|set_enabled|api\.operationStatus/)
 assert.match(sim, /Actual IMS network[\s\S]*actualNetwork.responderID[\s\S]*actualNetwork.pdnFamily/)
 for (const field of ['imeisv','ims_apn','idr_mode','cp_mode']) assert.ok(lineAdapter.includes(field+':'),field+' must reach provision')
-assert.match(apiSource, /softRestartGoDevice[\s\S]*expected_card_id:[^\n]*modem.sim.iccid/)
+// Recovery identity and unknown outcomes are exercised at the HTTP boundary
+// and through the mounted page in newCardControl/newCardBrowser.
 assert.match(systemAdapter, /go\.registerV1\(lineID, line.card_id\)/)
 assert.match(unified, /sim_apdu_data_active[\s\S]*VoWiFi intent was saved[\s\S]*persistent 4G data connection/)
 assert.match(sim, /providerOnly && targetDevice\?\.go_device\?\.modem\?\.at_control\?\.sim_apdu_on_demand/)
