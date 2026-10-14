@@ -2,6 +2,14 @@
 
 ## October 14 integration and rollout
 
+Final PR35 source `431fa6b` / full Go CI `38516014673` and original review passed;
+normal merge `77f23e0` shares tree `b7f33640` with artifact source `261d8e7`.
+Controlled Core/updater rollout and read-only field reconnection passed; original
+maintenance released, watcher enabled/waiting with no pending request or worker.
+Production browser clicks and business mutations remain unverified. The exact
+[rollout receipt](https://github.com/lovitus/mdd-sim-gateway/pull/35#issuecomment-6161777301)
+and DEPLOYMENT.md supersede the pending-rollout statements in the history below.
+
 PR34 merged normally at `202e5206c47210e3ebd51a9ac5de0d9a3cd74152` after final
 source `639f55a` / full Go CI `38509927202` and original-reviewer approval.
 PR29-33 are closed as integrated, not abandoned; do not merge their old heads again.
