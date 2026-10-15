@@ -5,7 +5,7 @@
 Original audit baseline: `3e6d5db7657e468eedc0c31316bb97c04b2b599b`; tree `f0f6b038519bdce6520ea805c4c77c5aecd0535a`; review 2026-09-20.
 Scope-correction baseline: `19f966f7d673a074e7218680d6c0ed8b1d530e1c`; tree `49935012e44af8e006a01b6795f26a3c94851885`.
 
-October15 PR38 source59f8dd2, full signed38705192004 attempt2 and original review passed; normal merge0d74354 has the same complete tree. Core and the exact signed reader Mac are deployed. Actual Chrome new SIM-only verification and explicit Enable reached IMS200, with the original unknown receipt and IMEI binding preserved; no PIN/eSIM mutation or paid operation. Subsequent runtime interruption remains recorded. A legacy MDD Wi-Fi cron was confirmed actively reconnecting host interfaces; the owner authorized hashed backups and pause. One bounded ten-minute read-only window retained Agent/card connectivity and ended with automatic IMS recovery, but did not meet continuous-ready duration. USER_FLOW_CONSISTENCY remains partial for sustained operation and transient-disconnect editor continuity, not blocked on initialization. Prior scoped acceptance remains valid; full eSIM/updater and unrelated hardware gaps are unchanged. Exact receipt is linked in DEPLOYMENT.md and docs/branches.md.
+Current October15 work is EGRESS_DONOR_RECOVERY: shared-exit partial failure/recovery, per-ICCID borrowing budget UI, and accurate EAP rejection classification. Original source review and hosted behavioral proof38730592952/a82a9df passed; normal full CI/final cleanup review pending, not merged or deployed. PR38 source59f8dd2/full signed38705192004 attempt2 and original review remain accepted and deployed to Core/exact signed reader Mac. Real Chrome initialization/Enable reached IMS200 with original unknown receipt and IMEI retained. Authorized legacy Wi-Fi cron backup/pause retained Agent/card connectivity in one bounded window and ended with automatic IMS recovery, but continuous-ready duration did not pass. Existing HK EAP Failure evidence is not a specific carrier-cause finding or registration success. Other scoped acceptance and open hardware/eSIM/updater gaps remain unchanged; see the workstreams and DEPLOYMENT.md.
 
 ## Reading and updating the ledger
 
@@ -67,6 +67,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 - pending_product: 2
 
 ## Current open work
+
+### EGRESS_DONOR_RECOVERY
+
+**State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.
+
+Acceptance scope / remaining action: Original source review88d5b36 passed. Qualifieda82a9df/38730592952 passed focused Core race, Provider/IKEv2, real HTTP adapters, mounted budget/partial-result/editor journeys, explicit behavioral reds and restored suites. The helper fixture now uses production scopedtoken.Ensure; all original assertions retained. Proof is archived at archive/2026-10-15/egress-budget-qualified. Real Xray namespace test skipped in focused proof; normal full CI and final cleanup review pending. Earlier failures38723406805/38724437155/38724955490/38726533791/38728652155/38729903595 retained. One actual Chrome applied-exit UDP DNS probe passed in216ms; existing HK borrower logs contain EAP Failure, not a specific carrier-cause finding or registration success. No production budget or new paid acceptance; PR38/watchdog receipts preserved separately.
 
 ### USER_FLOW_CONSISTENCY
 

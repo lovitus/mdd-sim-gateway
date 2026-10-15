@@ -297,6 +297,11 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-proxy-kind { justify-self:start; padding:3px 7px; border-radius:999px; background:var(--hover); color:var(--text-dim); font-size:10px; font-weight:700; letter-spacing:.02em; }
 .u-proxy-primary,.u-proxy-secondary { min-width:0; }
 .u-proxy-secondary { display:grid; align-content:end; min-height:38px; }
+.u-donor-budget { grid-column:1 / -1; min-width:0; border-top:1px solid var(--border); padding-top:14px; display:grid; gap:10px; }
+.u-donor-budget .u-kv { display:grid; grid-template-columns:minmax(130px,1fr) minmax(100px,1fr); gap:6px 16px; margin:0; }
+.u-donor-budget dd { margin:0; overflow-wrap:anywhere; }
+.u-donor-budget small { white-space:normal; line-height:1.5; }
+.u-donor-budget input { max-width:320px; }
 .u-number-suffix { display:flex; align-items:center; gap:7px; }
 .u-number-suffix input { width:76px; }
 .u-number-suffix span { color:var(--text-mute); font-size:11px; }

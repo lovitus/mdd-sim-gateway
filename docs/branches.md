@@ -1,6 +1,15 @@
 # Branch disposition and integration record
 
-Current: PR38 `59f8dd2`, original review and full signed `38705192004` attempt 2
+Current candidate: `codex/egress-donor-recovery-budget` from `b9e44e8`, one
+delivery batch. Original source review `88d5b36` passed; the only subsequent test
+fixture correction uses the existing scoped-token generator. Hosted proof
+`a82a9df` / `38730592952` passed behavioral counterexamples, restored focused
+race suites and mounted budget journeys. Exact hosted UI imported; temporary
+proof removed. Tag `archive/2026-10-15/egress-budget-qualified` retains proof,
+not a merge queue. Normal full CI, final cleanup review and deployment pending.
+Real Xray/namespace coverage is deferred to normal CI, not credited to the proof.
+
+Previous delivery: PR38 `59f8dd2`, original review and full signed `38705192004` attempt 2
 passed; normal merge `0d74354` shares tree `5fbdb983`. Core and the exact signed
 reader Mac are deployed. Actual new SIM-only verification/Enable reached IMS200;
 later interruption, authorized legacy Wi-Fi cron pause and bounded automatic

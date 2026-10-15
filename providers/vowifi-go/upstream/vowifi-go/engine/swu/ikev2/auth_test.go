@@ -470,9 +470,11 @@ func TestRunIKEAuthFullCompletesRequiredFinalEAPAuth(t *testing.T) {
 		name          string
 		wrongAuth     bool
 		omitChildSA   bool
+		eapFailure    bool
 		wantErrorText string
 	}{
 		{name: "success"},
+		{name: "typed EAP rejection", eapFailure: true},
 		{name: "rejects wrong responder auth", wrongAuth: true, wantErrorText: "final responder AUTH verification failed"},
 		{name: "requires final child sa", omitChildSA: true, wantErrorText: "final EAP AUTH response without CHILD_SA"},
 	}
@@ -522,7 +524,11 @@ func TestRunIKEAuthFullCompletesRequiredFinalEAPAuth(t *testing.T) {
 					if pkt.Code != eapaka.CodeResponse || pkt.Subtype != eapaka.SubtypeChallenge {
 						t.Fatalf("AKA response=%+v", pkt)
 					}
-					success, err := (eapaka.Packet{Code: eapaka.CodeSuccess, Identifier: pkt.Identifier}).MarshalBinary()
+					code := eapaka.CodeSuccess
+					if tt.eapFailure {
+						code = eapaka.CodeFailure
+					}
+					success, err := (eapaka.Packet{Code: code, Identifier: pkt.Identifier}).MarshalBinary()
 					if err != nil {
 						return nil, err
 					}
@@ -588,6 +594,12 @@ func TestRunIKEAuthFullCompletesRequiredFinalEAPAuth(t *testing.T) {
 				ChildSPI:    localSPI,
 				Random:      bytes.NewReader(bytes.Repeat([]byte{0x74}, 256)),
 			})
+			if tt.eapFailure {
+				if !errors.Is(err, ErrEAPFailure) || !errors.Is(err, ErrInvalidAuthResponse) || exchanges != 2 {
+					t.Fatalf("EAP rejection identity/exchanges: %v / %d", err, exchanges)
+				}
+				return
+			}
 			if tt.wantErrorText != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErrorText) {
 					t.Fatalf("RunIKE_AUTH_Full() error = %v, want %q", err, tt.wantErrorText)

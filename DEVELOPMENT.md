@@ -72,6 +72,40 @@ contract tests importing them. Literal worklet/dynamic imports are included; uns
 Use `node tools/repository-check.mjs --write` to regenerate TODO summaries after editing the acceptance ledger;
 CI checks the generated files, original-criterion preservation and evidence-path integrity.
 
+## Shared exits and donor budgets
+
+The current batch retains one shared sing-box executor and the existing Xray
+bridge. Country-local preparation/render errors omit only that country's route;
+temporary donor-route changes require the existing drained apply. Runtime
+confirmation binds the attempt, full config identity and fresh executor status.
+The apply helper retains its exact maintenance set durably and recovers that
+original attempt after interruption, without acquiring a new lease or publishing
+new desired state. Revoked donor credentials are not rollback candidates.
+
+Donor budgets use the existing egress store, keyed by ICCID. Reservation precedes
+Agent admission, renewal keeps its cap, and unknown Stop retains ownership.
+Interrupted unobserved allowance is explicitly uncertain, not measured usage.
+Reset requires confirmation and no outstanding owner. Limits never enable 4G,
+roaming or borrowing. Earlier/carrier-billed usage is not reconstructed.
+Slow sibling I/O cannot block the existing lease keeper. Revoked owners are not
+renewed; a dead bridge is not permission to replace the healthy shared process.
+Maintenance cleanup persists each original owner's progress independently;
+budget confirmation belongs to the original mounted editor and frozen revision.
+Initial budget loading is serialized with editor operations. Unchanged consumer
+recovery leaves its healthy bridge untouched. A checked rejection whose old donor
+is revoked finishes the already-drained attempt only after confirmed pair stop;
+unknown Stop still retains protection. This terminal failure is not exit health.
+
+Failure checklist: one failed country strands healthy leases; stale status
+acknowledges a new apply; helper restart releases another generation's lease;
+changed temporary credentials bypass maintenance; reset/rename/restart refunds
+an unknown owner; measured bytes are confused with an unused reservation.
+Focused hosted coverage includes real helper/executor publication and listener
+activation, Core SOCKS TCP/UDP through the Agent manager, durable budget restart
+and admission/reset concurrency, and the mounted network page. Proxy, modem and
+carrier peers are synthetic; only the existing field observations are physical
+evidence. No new paid acceptance is implied.
+
 ## Agent control-link status
 
 The owner's missing-connection-warning report is independent of Android and of

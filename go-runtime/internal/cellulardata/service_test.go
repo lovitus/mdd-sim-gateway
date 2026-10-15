@@ -16,12 +16,15 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
 const internalTestToken = "0123456789abcdef0123456789abcdef"
 
 type fakeAgents struct {
+	stopErr  error
+	prepare  func()
 	mu       sync.Mutex
 	requests []agentlink.ModemDataRequest
 	manager  *agentdata.Manager
@@ -36,7 +39,14 @@ func (fake *fakeAgents) ResolveRenewableModemDataTargetForCard(cardID string) (a
 func (fake *fakeAgents) ExecuteModemData(_ context.Context, _, _ string, request agentlink.ModemDataRequest) (agentlink.ModemDataResponse, error) {
 	fake.mu.Lock()
 	fake.requests = append(fake.requests, request)
+	stopErr := fake.stopErr
 	fake.mu.Unlock()
+	if request.Action == agentlink.ModemDataPrepare && fake.prepare != nil {
+		fake.prepare()
+	}
+	if request.Action == agentlink.ModemDataStop && stopErr != nil {
+		return agentlink.ModemDataResponse{}, stopErr
+	}
 	if fake.manager != nil {
 		response := fake.manager.ExecuteModemData(context.Background(), request)
 		if response.Failure != nil {
@@ -57,6 +67,99 @@ func (fake *fakeAgents) ExecuteModemData(_ context.Context, _, _ string, request
 	return agentlink.ModemDataResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
 		CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
 		SessionID: request.SessionID, StreamID: request.StreamID, State: state, Profile: profile, ExpiresAt: expiresAt}, nil
+}
+
+func TestPreparingDonorCannotRenewOrSettleBeforePrepareCompletes(t *testing.T) {
+	catalog, err := linecatalog.Open(t.TempDir()+"/catalog.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
+	const card = "8985200000000000001"
+	_, err = catalog.Put(linecatalog.Line{SchemaVersion: 1, ID: "line-a", Name: "Data SIM", Enabled: true, CardID: card,
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", IMEI: "862547055201716"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgets, err := egressconfig.Open(t.TempDir()+"/egress.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer budgets.Close()
+	broker, err := agentdata.NewBroker(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) { return internalTestToken, nil }), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	agents := &fakeAgents{stopErr: io.ErrUnexpectedEOF, prepare: func() { close(started); <-release }}
+	service, err := New(Config{Context: context.Background(), Catalog: catalog, Agents: agents, Broker: broker, Budgets: budgets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	defer unblock()
+	created := make(chan error, 1)
+	go func() {
+		_, err := service.create(context.Background(), "line-a", "egress:one", "", time.Minute, 4096)
+		created <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prepare did not reach Agent boundary")
+	}
+	renewed := make(chan error, 1)
+	go func() {
+		_, err := service.EnsureOwned(context.Background(), "line-a", "egress:one", "", time.Now().Add(time.Minute), 4096, "renew-during-prepare")
+		renewed <- err
+	}()
+	select {
+	case err := <-renewed:
+		if err == nil {
+			t.Fatal("preparing owner renewed before preparation completed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("renew was admitted while the owner was still preparing")
+	}
+	view, ok := service.Owned("line-a", "egress:one")
+	if !ok || view.State != "preparing" || view.Password != "" || view.ListenPort != 0 {
+		t.Fatal("preparing owner became usable", view)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- service.StopOwned("line-a", view.SessionID, "egress:one") }()
+	select {
+	case err := <-stopped:
+		t.Fatal("stop raced ahead of the pending Prepare", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	unblock()
+	select {
+	case <-created:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prepare did not finish")
+	}
+	select {
+	case err := <-stopped:
+		if err == nil {
+			t.Fatal("unknown stop was reported as settled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not finish")
+	}
+	b, err := budgets.DonorBudget(card)
+	if err != nil || b.Grant == nil || b.Grant.SessionID != view.SessionID {
+		t.Fatal("unknown stop lost the pending reservation", err)
+	}
+	agents.mu.Lock()
+	agents.stopErr = nil
+	for _, request := range agents.requests {
+		if request.Action == agentlink.ModemDataRenew {
+			t.Error("renew reached Agent during Prepare")
+		}
+	}
+	agents.mu.Unlock()
 }
 
 type dialBackend struct {
@@ -119,7 +222,12 @@ func TestExplicitSessionIsMemoryOnlyAndRevocable(t *testing.T) {
 		t.Fatal(err)
 	}
 	agents := &fakeAgents{}
-	service, err := New(Config{Context: context.Background(), Catalog: catalog, Agents: agents, Broker: broker, Listen: "127.0.0.1:0"})
+	budgets, err := egressconfig.Open(t.TempDir()+"/egress.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer budgets.Close()
+	service, err := New(Config{Context: context.Background(), Catalog: catalog, Agents: agents, Broker: broker, Budgets: budgets, Listen: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +256,28 @@ func TestExplicitSessionIsMemoryOnlyAndRevocable(t *testing.T) {
 	if status.Code != http.StatusOK || json.Unmarshal(status.Body.Bytes(), &public) != nil || public.Username != "" || public.Password != "" {
 		t.Fatalf("status HTTP %d exposed invalid state: %s", status.Code, status.Body.String())
 	}
+	agents.mu.Lock()
+	agents.stopErr = io.ErrUnexpectedEOF
+	agents.mu.Unlock()
+	unknown := httptest.NewRecorder()
+	service.ServeHTTP(unknown, httptest.NewRequest(http.MethodDelete, "/v1/lines/line-a/cellular/data/sessions/"+created.SessionID, nil))
+	budget, budgetErr := budgets.DonorBudget(current.target.CardID)
+	active, activeErr := service.ActiveLine("line-a")
+	if unknown.Code != http.StatusConflict || !active || activeErr != nil || budgetErr != nil || budget.Grant == nil || current.ctx.Err() == nil {
+		t.Fatalf("unknown stop released owner: HTTP %d active=%v activeErr=%v budget=%+v err=%v", unknown.Code, active, activeErr, budget, budgetErr)
+	}
+	reset := httptest.NewRecorder()
+	service.ServeHTTP(reset, httptest.NewRequest(http.MethodPut, "/v1/lines/line-a/cellular/data/budget", strings.NewReader(
+		`{"expected_card_id":"8985200000000000001","revision":1,"limit_bytes":4096,"reset":true,"confirm_reset":true}`)))
+	if reset.Code != http.StatusConflict || !strings.Contains(reset.Body.String(), "donor_budget_owner_unconfirmed") {
+		t.Fatal("reset bypassed unknown owner", reset.Body.String())
+	}
+	if _, err := service.create(context.Background(), "line-a", "egress:renamed", "", time.Minute, 4096); err == nil {
+		t.Fatal("profile change duplicated donor allowance")
+	}
+	agents.mu.Lock()
+	agents.stopErr = nil
+	agents.mu.Unlock()
 	stop := httptest.NewRecorder()
 	service.ServeHTTP(stop, httptest.NewRequest(http.MethodDelete,
 		"/v1/lines/line-a/cellular/data/sessions/"+created.SessionID, nil))
@@ -163,8 +293,12 @@ func TestExplicitSessionIsMemoryOnlyAndRevocable(t *testing.T) {
 	agents.mu.Lock()
 	requests := append([]agentlink.ModemDataRequest(nil), agents.requests...)
 	agents.mu.Unlock()
-	if len(requests) != 2 || requests[0].Action != agentlink.ModemDataPrepare || requests[1].Action != agentlink.ModemDataStop {
+	if len(requests) != 3 || requests[0].Action != agentlink.ModemDataPrepare || requests[1].Action != agentlink.ModemDataStop || requests[2].Action != agentlink.ModemDataStop {
 		t.Fatalf("requests=%+v", requests)
+	}
+	budget, budgetErr = budgets.DonorBudget(current.target.CardID)
+	if budgetErr != nil || budget.Grant != nil {
+		t.Fatal("confirmed stop did not settle reservation", budgetErr)
 	}
 	if err := service.Close(); err != nil {
 		t.Fatal(err)
@@ -214,7 +348,15 @@ func TestSOCKSConnectTraversesCoreBrokerAndAgentManager(t *testing.T) {
 		t.Fatal(err)
 	}
 	agents := &fakeAgents{manager: manager}
-	service, err := New(Config{Context: context.Background(), Catalog: catalog, Agents: agents, Broker: broker, Listen: "127.0.0.1:0"})
+	budgets, err := egressconfig.Open(t.TempDir()+"/egress.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer budgets.Close()
+	if _, err := budgets.ConfigureDonor("8985200000000000001", 1, 4096, false); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(Config{Context: context.Background(), Catalog: catalog, Agents: agents, Broker: broker, Budgets: budgets, Listen: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +364,9 @@ func TestSOCKSConnectTraversesCoreBrokerAndAgentManager(t *testing.T) {
 	current, err := service.create(context.Background(), "line-a", "manual", "", time.Minute, 1<<20)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if current.maxBytes != 4096 {
+		t.Fatalf("Agent authorization exceeded donor budget: %d", current.maxBytes)
 	}
 
 	client, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(current.port)))
@@ -263,12 +408,78 @@ func TestSOCKSConnectTraversesCoreBrokerAndAgentManager(t *testing.T) {
 	if lastAddress != net.JoinHostPort(host, strconv.Itoa(echoAddress.Port)) {
 		t.Fatalf("Agent received %q, want unresolved SOCKS domain", lastAddress)
 	}
+	udpEcho, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpEcho.Close()
+	go func() {
+		packet := make([]byte, 2048)
+		n, peer, err := udpEcho.ReadFromUDP(packet)
+		if err == nil {
+			_, _ = udpEcho.WriteToUDP(packet[:n], peer)
+		}
+	}()
+	control, err := net.Dial("tcp", current.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	_ = control.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := authenticateSOCKS(control, current.username, current.password); err != nil {
+		t.Fatal(err)
+	}
+	_, err = control.Write([]byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(control, header); err != nil || header[1] != 0 {
+		t.Fatal("UDP association", header, err)
+	}
+	addressBytes := 4
+	if header[3] == 4 {
+		addressBytes = 16
+	} else if header[3] != 1 {
+		t.Fatal("unexpected relay address", header)
+	}
+	relay := make([]byte, addressBytes+2)
+	if _, err := io.ReadFull(control, relay); err != nil {
+		t.Fatal(err)
+	}
+	relayPort := int(relay[addressBytes])<<8 | int(relay[addressBytes+1])
+	udp, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: relayPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	_ = udp.SetDeadline(time.Now().Add(5 * time.Second))
+	echoPort := udpEcho.LocalAddr().(*net.UDPAddr).Port
+	datagram := append([]byte{0, 0, 0, 1, 127, 0, 0, 1, byte(echoPort >> 8), byte(echoPort)}, payload...)
+	if _, err := udp.Write(datagram); err != nil {
+		t.Fatal(err)
+	}
+	packet := make([]byte, 2048)
+	n, err := udp.Read(packet)
+	if err != nil || n < len(payload) || string(packet[n-len(payload):n]) != string(payload) {
+		t.Fatalf("UDP echo: %x %v", packet[:n], err)
+	}
+	backend.mu.Lock()
+	lastAddress = backend.lastAddress
+	backend.mu.Unlock()
+	if lastAddress != udpEcho.LocalAddr().String() {
+		t.Fatal("UDP bypassed Agent data dial", lastAddress)
+	}
 	current.stop("test")
 	backend.mu.Lock()
 	stops := backend.stops
 	backend.mu.Unlock()
 	if stops != 1 {
 		t.Fatalf("backend stop count=%d, want exactly one", stops)
+	}
+	budget, err := budgets.DonorBudget("8985200000000000001")
+	if err != nil || budget.Grant != nil || budget.UsedBytes != uint64(4*len(payload)) {
+		t.Fatalf("actual SOCKS traffic was not settled: %+v %v", budget, err)
 	}
 }
 

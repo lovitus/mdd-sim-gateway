@@ -3,6 +3,7 @@ package egressexec
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,8 +143,34 @@ func TestSubscriptionRefreshDoesNotRestartHealthyPool(t *testing.T) {
 	document.RefreshID = "explicit-drained-apply"
 	writeEgressDocument(t, runner.settings.DesiredPath, document)
 	runner.reconcile(context.Background())
-	if controller.starts != 1 || controller.processes[0].signals != 1 || controller.processes[0].stops != 0 ||
+	if controller.starts != 2 || controller.processes[0].signals != 0 || controller.processes[0].stops != 1 ||
 		runner.applied != document.Generation || runner.appliedResult.Status.Exits["gb"].Node != "GB Manchester" {
 		t.Fatal("explicit apply did not activate refreshed pool")
+	}
+}
+
+func TestSubscriptionFailedApplyRestoresStillAuthorizedRuntime(t *testing.T) {
+	var feed atomic.Value
+	feed.Store(testSubscription)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(feed.Load().(string))) }))
+	defer server.Close()
+	document := egressDocument(strings.Repeat("d", 64), "")
+	document.Proxy.Profiles["node"] = egressconfig.Profile{Type: "subscription", URL: server.URL, RefreshMinutes: 1}
+	runner, controller, path := newTestExecutor(t, document)
+	now := time.Now()
+	runner.now = func() time.Time { return now }
+	runner.reconcile(context.Background())
+	previous := readExecutorStatus(t, path)
+	feed.Store(strings.ReplaceAll(testSubscription, "192.0.2.1", "192.0.2.9"))
+	now = now.Add(2 * time.Minute)
+	document.Generation, document.AttemptID = strings.Repeat("e", 64), "drained-refresh"
+	writeEgressDocument(t, runner.settings.DesiredPath, document)
+	controller.waitErrors = []error{errors.New("candidate listeners failed"), nil}
+	runner.reconcile(context.Background())
+	actual := readExecutorStatus(t, path)
+	if !actual.RuntimeConfirmed || actual.Outcome != "rolled_back" || !actual.Ready ||
+		actual.ConfigIdentity != previous.ConfigIdentity || actual.RequestedAttempt != document.AttemptID ||
+		controller.starts != 3 || !controller.processes[2].running {
+		t.Fatalf("authorized rollback not confirmed: %+v starts=%d", actual, controller.starts)
 	}
 }

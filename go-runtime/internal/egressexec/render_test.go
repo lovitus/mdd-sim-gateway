@@ -80,7 +80,7 @@ func TestRenderRejectsUnimplementedProfilesInsteadOfFallingBackDirect(t *testing
 		profile := document.Proxy.Profiles["node"]
 		profile.Type = kind
 		document.Proxy.Profiles["node"] = profile
-		if rendered, err := Render(document); err == nil || rendered.Status.Exits["gb"].Ready {
+		if rendered, err := Render(document); err != nil || rendered.Status.Exits["gb"].Ready || len(rendered.Ports) != 0 || rendered.Status.Exits["gb"].Error == "" {
 			t.Fatalf("kind=%s rendered=%+v err=%v", kind, rendered, err)
 		}
 	}

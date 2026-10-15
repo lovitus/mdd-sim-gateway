@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### EGRESS_DONOR_RECOVERY
+
+**State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.
+
+Acceptance scope / remaining action: Original source review88d5b36 passed. Qualifieda82a9df/38730592952 passed focused Core race, Provider/IKEv2, real HTTP adapters, mounted budget/partial-result/editor journeys, explicit behavioral reds and restored suites. The helper fixture now uses production scopedtoken.Ensure; all original assertions retained. Proof is archived at archive/2026-10-15/egress-budget-qualified. Real Xray namespace test skipped in focused proof; normal full CI and final cleanup review pending. Earlier failures38723406805/38724437155/38724955490/38726533791/38728652155/38729903595 retained. One actual Chrome applied-exit UDP DNS probe passed in216ms; existing HK borrower logs contain EAP Failure, not a specific carrier-cause finding or registration success. No production budget or new paid acceptance; PR38/watchdog receipts preserved separately.
+
 ### USER_FLOW_CONSISTENCY
 
 **State: partial; release relevance: current.** NEW_CARD_ONE_ACTION: PR37 UI and PR38 SIM-only readback are reviewed, qualified, merged and deployed. Actual Chrome exact-card initialization and explicit Enable reached IMS200; original unknown and IMEI binding retained. Subsequent runtime interruption is not hidden by the initial success. A confirmed legacy Wi-Fi watchdog was backed up and paused with owner authorization; automatic recovery occurred at the end of one bounded window. Sustained operation and transient-disconnect editor continuity remain open.

@@ -14,6 +14,36 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
+func TestRuntimeConfirmationRequiresFreshExactAttempt(t *testing.T) {
+	document := Document{Generation: strings.Repeat("a", 64), AttemptID: "attempt-new"}
+	path := filepath.Join(t.TempDir(), "status.json")
+	for _, scenario := range []struct {
+		name, attempt   string
+		age             time.Duration
+		confirmed, want bool
+	}{
+		{"old attempt with same generation", "attempt-old", 0, true, false},
+		{"stale executor", "attempt-new", 3 * time.Minute, true, false},
+		{"unconfirmed", "attempt-new", 0, false, false},
+		{"confirmed partial", "attempt-new", 0, true, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			value := RuntimeConfirmation{AttemptID: scenario.attempt, RequestedAttempt: scenario.attempt,
+				DesiredGeneration: document.Generation, RequestedGeneration: document.Generation, Outcome: "partial",
+				ConfigIdentity: strings.Repeat("b", 64), ExecutorID: "executor", RuntimeConfirmed: scenario.confirmed,
+				ObservedAt: time.Now().Add(-scenario.age)}
+			payload, _ := json.Marshal(value)
+			if err := os.WriteFile(path, payload, 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := WaitForAttempt(context.Background(), path, document, 25*time.Millisecond)
+			if (err == nil) != scenario.want {
+				t.Fatalf("confirmation=%v want %t", err, scenario.want)
+			}
+		})
+	}
+}
+
 func TestExistingSourceContentParticipatesInApplyGeneration(t *testing.T) {
 	config, catalog, _ := desiredInput()
 	path := filepath.Join(t.TempDir(), "source.json")

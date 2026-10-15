@@ -50,7 +50,7 @@ func TestExistingOutboundPreservesProtocolAndScopesDetour(t *testing.T) {
 	if err := os.WriteFile(path, append(payload, ' '), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := Render(document); err == nil || changed.Status.Exits["gb"].Ready {
+	if changed, err := Render(document); err != nil || changed.Status.Exits["gb"].Ready || changed.Status.Exits["gb"].Error == "" || len(changed.Ports) != 0 {
 		t.Fatal("unapplied source change accepted")
 	}
 }

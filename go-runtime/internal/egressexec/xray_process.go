@@ -52,6 +52,7 @@ func (runner *executor) stopPair() error {
 			failures = append(failures, errors.New("sing-box could not stop"))
 		} else {
 			runner.child = nil
+			runner.consumerUnconfirmed = false
 		}
 	}
 	if runner.xrayChild != nil {
@@ -91,6 +92,36 @@ func (runner *executor) restoreXrayBridge(ctx context.Context, generation string
 		}
 	}
 	runner.failWithCandidate(generation, "Xray bridge recovery failed", false, result.Status)
+}
+
+// Only the missing consumer is replaced; the exact unchanged bridge stays owned.
+func (runner *executor) restoreSingBoxConsumer(ctx context.Context, generation string, result Rendered) {
+	path := filepath.Join(runner.settings.StateDir, "sing-box.json")
+	err := atomicWrite(path, result.Config, 0o600)
+	if err == nil {
+		err = runner.controller.Check(ctx, runner.settings.SingBoxPath, path)
+	}
+	if err == nil {
+		runner.consumerUnconfirmed = true
+		runner.child, err = runner.controller.Start(runner.settings.SingBoxPath, path)
+	}
+	if err == nil {
+		err = runner.controller.WaitReady(ctx, result.Ports, runner.child, 8*time.Second)
+	}
+	if err == nil && runner.child != nil && runner.child.Running() && runner.xrayChild != nil && runner.xrayChild.Running() {
+		runner.consumerUnconfirmed = false
+		runner.commit(generation, result)
+		return
+	}
+	if runner.child != nil {
+		if stopErr := runner.child.Stop(5 * time.Second); stopErr == nil || !runner.child.Running() {
+			runner.child = nil
+		}
+	}
+	if runner.child == nil {
+		runner.consumerUnconfirmed = false
+	}
+	runner.failWithCandidate(generation, "sing-box consumer recovery failed", false, result.Status)
 }
 
 func (runner *executor) startPair(ctx context.Context, result Rendered) error {
@@ -152,6 +183,7 @@ func (runner *executor) activateXrayPair(ctx context.Context, generation string,
 		_ = os.Remove(path)
 		if err != nil {
 			runner.failWithCandidate(generation, item.name+" candidate rejected", runner.runtimeReady(), result.Status)
+			runner.confirmRejected(generation, result)
 			return
 		}
 	}
@@ -170,17 +202,18 @@ func (runner *executor) activateXrayPair(ctx context.Context, generation string,
 		runner.failWithCandidate(generation, "failed exit process pair could not stop", false, result.Status)
 		return
 	}
-	if wasReady && previousGeneration != "" {
+	if wasReady && previousGeneration != "" && runner.rollbackAllowed(result) {
 		if err := runner.startPair(ctx, previous); err == nil {
 			runner.applied, runner.appliedResult = previousGeneration, previous
 			runner.appliedConfig = append([]byte(nil), previous.Config...)
 			runner.blocked = generation
 			runner.fail(generation, "exit process activation failed; previous generation restored", true)
+			runner.confirmRollback(generation)
 			return
 		}
 	}
 	_ = runner.stopPair()
 	_ = os.Remove(filepath.Join(runner.settings.StateDir, "sing-box.json"))
 	_ = os.Remove(filepath.Join(runner.settings.StateDir, "xray.json"))
-	runner.failWithCandidate(generation, "exit process activation and recovery failed", false, result.Status)
+	runner.confirmStopped(generation, result, "exit process activation and recovery failed")
 }

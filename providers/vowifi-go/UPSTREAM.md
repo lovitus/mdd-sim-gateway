@@ -1,5 +1,14 @@
 # Upstream source and MDD patch
 
+## EAP Failure classification
+
+The existing full IKE AUTH parser now preserves both ErrInvalidAuthResponse and
+a typed ErrEAPFailure for an actual EAP Failure packet. The adapter reports the
+existing swu_authentication_failed category and retains its backoff; this neither
+retries AKA immediately nor attributes a carrier rejection to the exit network.
+The full encrypted exchange fixture covers the parsed failure and error chain.
+Hosted qualification and deployment remain pending in the current ledger.
+
 ## Held-call client continuity
 
 Provider WebSocket PCM padding starts after one second without live downlink,

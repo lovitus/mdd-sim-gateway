@@ -146,6 +146,19 @@ jobs:
         working-directory: webui
         run: npm run test:communication-browser
 
+      - name: Real browser donor budget and partial egress
+        working-directory: webui
+        run: npm run test:egress-browser
+
+      - name: Retain donor budget browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: egress-budget-browser-${{ github.sha }}
+          path: webui/browser-evidence/egress-budget
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Retain communication browser evidence
         if: always()
         uses: actions/upload-artifact@v7

@@ -42,7 +42,11 @@ func TestProbeStopRetainsUnconfirmedCleanupError(t *testing.T) {
 			t.Fatalf("cleanup error lost: %v", err)
 		}
 	}
-	if agents.stops != 1 || len(service.byID) != 0 || ctx.Err() == nil {
+	if agents.stops != 2 || service.byID[current.id] != current || service.byLine["line"] != current || ctx.Err() == nil {
 		t.Fatalf("stops=%d remaining=%d", agents.stops, len(service.byID))
+	}
+	agents.failure = nil
+	if err := current.stop("probe_cleanup_retry"); err != nil || len(service.byID) != 0 || len(service.byLine) != 0 {
+		t.Fatalf("confirmed cleanup retained owner: %v", err)
 	}
 }

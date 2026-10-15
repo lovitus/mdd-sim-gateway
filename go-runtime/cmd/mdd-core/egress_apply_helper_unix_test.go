@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,10 +18,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellulardata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
 func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T) {
@@ -32,8 +36,9 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	defer egressStore.Close()
 	egressDesired := egressconfig.Config{SchemaVersion: egressconfig.SchemaVersion, Enabled: true, MissingPolicy: "error",
 		RefreshMinutes: 30, Profiles: map[string]egressconfig.Profile{
-			"node": {Name: "London", Type: "node", Value: "ss://secret"},
-		}, Exits: map[string]egressconfig.Exit{"gb": {Enabled: true, ProfileID: "node"}}}
+			"node":   {Name: "London", Type: "node", Value: "ss://aes-128-gcm:fixture@192.0.2.1:8388"},
+			"broken": {Name: "Unavailable", Type: "node", Value: "unsupported://fixture"},
+		}, Exits: map[string]egressconfig.Exit{"gb": {Enabled: true, ProfileID: "node"}, "hk": {Enabled: true, ProfileID: "broken"}}}
 	if err := egressStore.ImportEmpty(egressDesired, egressconfig.ImportReceipt{SourceSHA256: strings.Repeat("a", 64), ImportedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -52,10 +57,46 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	mux := http.NewServeMux()
 	mux.Handle(egressconfig.SnapshotIPCPath, egressSnapshotHandler)
 	mux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshotHandler)
+	mux.HandleFunc(cellulardata.InternalPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var input struct {
+			CardID    string    `json:"card_id"`
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		port := 32123
+		if input.CardID == "8985200000000000002" {
+			port++
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"session_id": "owner-" + input.CardID, "line_id": "donor",
+			"state": "ready", "listen_port": port, "username": "fixture", "password": "fixture",
+			"expires_at": input.ExpiresAt, "max_bytes": uint64(1 << 40), "used_bytes": 0})
+	})
 	var maintenanceBlocked atomic.Bool
 	var changeConfigOnDrain atomic.Bool
 	var maintenanceMu sync.Mutex
 	var maintenanceTrace []bool
+	var maintenanceLease string
+	mux.HandleFunc(providerapply.Path, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(401)
+			return
+		}
+		snapshot, _ := catalogStore.Snapshot()
+		maintenanceMu.Lock()
+		lease := maintenanceLease
+		maintenanceMu.Unlock()
+		json.NewEncoder(w).Encode(providerapply.Snapshot{SchemaVersion: 1, CatalogRevision: snapshot.Revision,
+			Lines: []providerapply.LineStatus{{LineID: "line-1", ProviderPresent: true, Code: "provider_reachable",
+				ProcessGeneration: "provider-1", Maintenance: vowifiipc.MaintenanceStatus{Draining: lease != "", LeaseID: lease}}}})
+	})
 	maintenanceRequests := func() []bool {
 		maintenanceMu.Lock()
 		defer maintenanceMu.Unlock()
@@ -101,9 +142,17 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 				ready = false
 				w.WriteHeader(409)
 			}
+			maintenanceMu.Lock()
+			if ready && begin {
+				maintenanceLease = input.LeaseID
+			}
+			if !begin && maintenanceLease == input.LeaseID {
+				maintenanceLease = ""
+			}
+			maintenanceMu.Unlock()
 			result := providerapply.DrainResult{SchemaVersion: 1, CatalogRevision: input.CatalogRevision, LeaseID: input.LeaseID, Ready: ready, Code: code}
 			for _, id := range input.LineIDs {
-				result.Lines = append(result.Lines, providerapply.DrainLineResult{LineID: id, Code: code})
+				result.Lines = append(result.Lines, providerapply.DrainLineResult{LineID: id, Code: code, ProcessGeneration: "provider-1"})
 			}
 			json.NewEncoder(w).Encode(result)
 		}
@@ -153,17 +202,23 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	statusPayload, _ := json.Marshal(map[string]any{"desired_generation": expected.Generation})
-	if err := os.WriteFile(statusPath, statusPayload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	stopExecutor := startEgressFixture(t, directory, desiredPath, statusPath, server.URL)
 	result, err := service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
-	if err != nil || result.Code != "runtime_confirmed" || result.Generation != expected.Generation || result.State != "applied" {
+	if err != nil || result.Code != "runtime_confirmed" || result.Generation != expected.Generation || result.State != "partial" || len(result.FailedCountries) != 1 || result.FailedCountries[0] != "hk" {
 		t.Fatalf("apply result=%+v err=%v", result, err)
 	}
 	if trace := maintenanceRequests(); len(trace) != 3 || !trace[1] || trace[2] {
 		t.Fatalf("maintenance order=%v", trace)
 	}
+	runtime, err := egressdesired.ReadRuntime(statusPath)
+	if err != nil || !runtime.Exits["gb"].Ready || runtime.Exits["hk"].Ready || runtime.Exits["hk"].ProxyPort != 0 {
+		t.Fatalf("partial result lost healthy exit or exposed failed exit: %+v %v", runtime, err)
+	}
+	connection, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(runtime.Exits["gb"].ProxyPort)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.Close()
 	document, err := egressdesired.Read(desiredPath)
 	if err != nil || document.Version != 2 || document.EgressConfigRevision != egressSnapshot.Revision ||
 		document.CatalogRevision != catalogSnapshot.Revision || len(document.Hardware) != 0 || len(document.Lines) != 0 {
@@ -175,7 +230,7 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	}
 
 	result, err = service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
-	if err != nil || result.State != "unchanged" {
+	if err != nil || result.State != "partial" {
 		t.Fatalf("unchanged apply=%+v err=%v", result, err)
 	}
 
@@ -187,7 +242,7 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 		t.Fatalf("missing desired status=%+v err=%v", status, err)
 	}
 	result, err = service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
-	if err != nil || result.State != "applied" || result.Generation != expected.Generation {
+	if err != nil || result.State != "partial" || result.Generation != expected.Generation {
 		t.Fatalf("first clean apply=%+v err=%v", result, err)
 	}
 	beforeConcurrent, err := os.ReadFile(desiredPath)
@@ -211,6 +266,7 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	stopExecutor()
 	if err := os.Remove(statusPath); err != nil {
 		t.Fatal(err)
 	}
@@ -223,6 +279,68 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	}
 	if trace := maintenanceRequests(); len(trace) != beforeTimeout+1 || !trace[len(trace)-1] {
 		t.Fatal("unconfirmed application resumed admission")
+	}
+	// A restarted helper must resume the durable original lease, not invent a
+	// new lease or reapply the same request while its result is still unknown.
+	beforeRecovery := len(maintenanceRequests())
+	startEgressFixture(t, directory, desiredPath, statusPath, server.URL)
+	restarted := &providerApplyService{settings: settings, uid: os.Getuid(), gid: os.Getgid(), desiredUID: os.Getuid()}
+	recovered, err := restarted.recoverEgressAttempt(context.Background(), server.URL)
+	if err != nil || recovered == nil || recovered.Code != "runtime_confirmed" {
+		t.Fatalf("original attempt recovery: %+v %v", recovered, err)
+	}
+	if trace := maintenanceRequests(); len(trace) != beforeRecovery+1 || trace[len(trace)-1] {
+		t.Fatalf("recovery acquired a new lease: %v", trace)
+	}
+
+	// Replace a donor during an explicit drained apply, then reject its native
+	// config. The real executor/helper must settle the attempt, not strand GB.
+	egressSnapshot, _ = egressStore.Snapshot()
+	egressSnapshot.Config.Profiles["donor"] = egressconfig.Profile{Name: "Donor fixture", Type: "cellular_sim", SIMICCID: "8985200000000000001"}
+	egressSnapshot.Config.Exits["hk"] = egressconfig.Exit{Enabled: true, ProfileID: "donor"}
+	egressSnapshot, err = egressStore.PutExpected(egressSnapshot.Config, egressSnapshot.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = restarted.ApplyEgress(t.Context(), egressSnapshot.Revision, catalogSnapshot.Revision)
+	if err != nil || result.State != "applied" {
+		t.Fatal("initial donor did not apply", result, err)
+	}
+	egressSnapshot.Config.Profiles["donor"] = egressconfig.Profile{Name: "Donor fixture", Type: "cellular_sim", SIMICCID: "8985200000000000002"}
+	egressSnapshot, err = egressStore.PutExpected(egressSnapshot.Config, egressSnapshot.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectFile := filepath.Join(directory, "reject-check")
+	if err := os.WriteFile(rejectFile, []byte("reject native check"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = restarted.ApplyEgress(t.Context(), egressSnapshot.Revision, catalogSnapshot.Revision)
+	if err != nil || result.State != "unavailable" {
+		t.Fatal("rejected donor attempt did not finish fail closed", result, err)
+	}
+	confirmed, err := egressdesired.ReadRuntime(statusPath)
+	if err != nil || confirmed.Outcome != "unavailable" || confirmed.Exits["gb"].Ready || confirmed.Exits["hk"].ProxyPort != 0 {
+		t.Fatal("rejected candidate lacks stopped confirmation", confirmed, err)
+	}
+	journal, err := restarted.readEgressAttempt()
+	maintenanceMu.Lock()
+	retainedLease := maintenanceLease
+	maintenanceMu.Unlock()
+	if err != nil || journal.Phase != "complete" || retainedLease != "" {
+		t.Fatal("GB maintenance retained after confirmed stop", journal, err)
+	}
+	again := &providerApplyService{settings: settings, uid: os.Getuid(), gid: os.Getgid(), desiredUID: os.Getuid()}
+	beforeResume := len(maintenanceRequests())
+	if _, err := again.recoverEgressAttempt(t.Context(), server.URL); err != nil || len(maintenanceRequests()) != beforeResume {
+		t.Fatal("restart repeated completed rejection cleanup", err)
+	}
+	if err := os.Remove(rejectFile); err != nil {
+		t.Fatal(err)
+	}
+	result, err = again.ApplyEgress(t.Context(), egressSnapshot.Revision, catalogSnapshot.Revision)
+	if err != nil || result.State != "applied" {
+		t.Fatal("rejected old attempt blocked subsequent explicit apply", result, err)
 	}
 }
 
@@ -255,5 +373,67 @@ func TestEgressDesiredBoundaryIsReadOnlyToExecutorAndAllowsFirstApply(t *testing
 	}
 	if err := validateProviderApplyRoots(settings, os.Getuid(), os.Getgid()); err == nil {
 		t.Fatal("executor-unreadable desired file was accepted")
+	}
+}
+
+func TestEgressMaintenanceReleasesHealthySubsetAndRetainsUnknownOwner(t *testing.T) {
+	root := t.TempDir()
+	settings := config{}
+	settings.ProviderApply.ReceiptPath = root
+	settings.Local.Token = strings.Repeat("t", 32)
+	service := &providerApplyService{settings: settings}
+	lease := "egress-original"
+	attempt := &egressAttempt{Document: egressdesired.Document{AttemptID: lease}, Phase: "confirmed",
+		Drain: providerapply.DrainRequest{SchemaVersion: 1, CatalogRevision: 2, LeaseID: lease, LineIDs: []string{"gb", "hk"},
+			ExpectedGenerations: map[string]string{"gb": "gb-original", "hk": "hk-original"}}}
+	var mu sync.Mutex
+	var resumed []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case providerapply.Path:
+			_ = json.NewEncoder(w).Encode(providerapply.Snapshot{SchemaVersion: 1, CatalogRevision: 3, Lines: []providerapply.LineStatus{
+				{LineID: "gb", ProviderPresent: true, Code: "provider_reachable", ProcessGeneration: "gb-original", Maintenance: vowifiipc.MaintenanceStatus{Draining: true, LeaseID: lease}},
+				{LineID: "hk", ProviderPresent: true, Code: "provider_reachable", ProcessGeneration: "hk-replacement", Maintenance: vowifiipc.MaintenanceStatus{Draining: true, LeaseID: "foreign-lease"}},
+			}})
+		case providerapply.ResumePath:
+			var input providerapply.DrainRequest
+			if json.NewDecoder(r.Body).Decode(&input) != nil {
+				w.WriteHeader(400)
+				return
+			}
+			result := providerapply.DrainResult{SchemaVersion: 1, CatalogRevision: input.CatalogRevision, LeaseID: input.LeaseID, Ready: true, Code: "resumed"}
+			for _, id := range input.LineIDs {
+				resumed = append(resumed, id)
+				result.Lines = append(result.Lines, providerapply.DrainLineResult{LineID: id, Code: "resumed", ProcessGeneration: input.ExpectedGenerations[id]})
+			}
+			_ = json.NewEncoder(w).Encode(result)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	if err := service.releaseEgressAttempt(t.Context(), server.URL, attempt); err == nil {
+		t.Fatal("replacement generation was considered cleaned")
+	}
+	mu.Lock()
+	received := append([]string(nil), resumed...)
+	mu.Unlock()
+	if len(received) != 1 || received[0] != "gb" {
+		t.Fatal("unknown sibling stranded healthy maintenance", received)
+	}
+	restarted := &providerApplyService{settings: settings}
+	stored, err := restarted.readEgressAttempt()
+	if err != nil || stored.Phase == "complete" || len(stored.Drain.LineIDs) != 1 || stored.Drain.LineIDs[0] != "hk" || stored.Drain.ExpectedGenerations["hk"] != "hk-original" {
+		t.Fatal("remaining original owner was not persisted", stored, err)
+	}
+	if _, err := restarted.recoverEgressAttempt(t.Context(), server.URL); err == nil {
+		t.Fatal("unknown owner lost on helper restart")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(resumed) != 1 {
+		t.Fatal("recovery resumed foreign owner or repeated completed cleanup", resumed)
 	}
 }
