@@ -1,0 +1,65 @@
+name: Current card activation proof (temporary)
+on:
+  push:
+    branches: [codex/current-card-apply-proof]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+          package-manager-cache: false
+      - run: npm ci
+        working-directory: webui
+      - name: Cancelled admitted application counterexample
+        working-directory: webui
+        shell: bash
+        run: |
+          set -euo pipefail
+          restore() { git show HEAD:webui/src/mdd/views/ReaderSetupActions.jsx > src/mdd/views/ReaderSetupActions.jsx; }
+          trap restore EXIT
+          node - <<'NODE'
+          const fs=require('node:fs'), file='src/mdd/views/ReaderSetupActions.jsx', text=fs.readFileSync(file,'utf8');
+          const before='check(context,true);setPendingApply(pendingProviderApply());setWiderApply(false)';
+          if(!text.includes(before))throw new Error('cancelled apply proof mutation missing');
+          fs.writeFileSync(file,text.replace(before,'check(context);setPendingApply(pendingProviderApply());setWiderApply(false)'));
+          NODE
+          mkdir -p browser-evidence
+          set +e
+          timeout 120s env MDD_BROWSER_EVIDENCE=browser-evidence/cancelled-apply node tests/readerSetupBrowser.mjs > browser-evidence/cancelled-apply.log 2>&1
+          code=$?
+          set -e
+          cat browser-evidence/cancelled-apply.log
+          test "$code" -ne 0
+          test "$code" -ne 124
+          grep -F 'SETUP_CANCELLED_APPLY: admitted successful apply must retire cancelled continuation' browser-evidence/cancelled-apply.log
+          restore
+      - name: Fixed mounted current-card journey and adjacent saved editor
+        working-directory: webui
+        run: |
+          timeout 120s node tests/readerSetupBrowser.mjs
+          timeout 120s node tests/newCardBrowser.mjs
+      - name: Generate exact UI assets
+        working-directory: webui
+        run: MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: current-card-proof-${{ github.sha }}
+          path: webui/browser-evidence
+      - uses: actions/upload-artifact@v7
+        with:
+          name: current-card-ui-${{ github.sha }}
+          path: |
+            webui/.go-dist
+            go-runtime/internal/webui/assets/licenses
+          include-hidden-files: true
