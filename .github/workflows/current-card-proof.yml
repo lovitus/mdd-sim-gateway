@@ -1,0 +1,77 @@
+name: Current card activation proof (temporary)
+on:
+  push:
+    branches: [codex/current-card-activation]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+          package-manager-cache: false
+      - run: npm ci
+        working-directory: webui
+      - name: Behavioral counterexamples for review corrections
+        working-directory: webui
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p browser-evidence
+          restore() {
+            git show HEAD:webui/src/mdd/views/ReaderSetupActions.jsx > src/mdd/views/ReaderSetupActions.jsx
+            git show HEAD:webui/src/mdd/views/SimConfig.jsx > src/mdd/views/SimConfig.jsx
+          }
+          trap restore EXIT
+          counterexample() {
+            set +e
+            timeout 120s env MDD_BROWSER_EVIDENCE="browser-evidence/$1" node tests/readerSetupBrowser.mjs > "browser-evidence/$1.log" 2>&1
+            code=$?
+            set -e
+            cat "browser-evidence/$1.log"
+            test "$code" -ne 0
+            test "$code" -ne 124
+            grep -F "$2" "browser-evidence/$1.log"
+            restore
+          }
+          git show e7e9ba8341073259492919daefc94935de9c5388:webui/src/mdd/views/SimConfig.jsx > src/mdd/views/SimConfig.jsx
+          counterexample cancel SETUP_CANCEL_AVAILABLE
+          node - <<'NODE'
+          const fs=require('node:fs'), file='src/mdd/views/ReaderSetupActions.jsx', text=fs.readFileSync(file,'utf8');
+          const before="intentCode:observationCurrent && intent?.fresh===true ? intent.code : ''";
+          if(!text.includes(before))throw new Error('intent proof mutation missing');
+          fs.writeFileSync(file,text.replace(before,"intentCode:''"));
+          NODE
+          counterexample stop SETUP_NEWER_STOP
+          node - <<'NODE'
+          const fs=require('node:fs'), file='src/mdd/views/ReaderSetupActions.jsx', text=fs.readFileSync(file,'utf8');
+          const before='archiveProviderApply(pending,{observed_applied:true});setWiderApply(false)';
+          if(!text.includes(before))throw new Error('apply proof mutation missing');
+          fs.writeFileSync(file,text.replace(before,'archiveProviderApply(pending,{observed_applied:true})'));
+          NODE
+          counterexample apply SETUP_SAME_VIEW_APPLY
+      - name: Fixed mounted current-card journey
+        working-directory: webui
+        run: timeout 120s node tests/readerSetupBrowser.mjs
+      - name: Generate exact UI assets
+        working-directory: webui
+        run: MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: current-card-proof-${{ github.sha }}
+          path: webui/browser-evidence
+      - uses: actions/upload-artifact@v7
+        with:
+          name: current-card-ui-${{ github.sha }}
+          path: webui/.go-dist
+          include-hidden-files: true
