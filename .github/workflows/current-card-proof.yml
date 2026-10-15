@@ -1,0 +1,55 @@
+name: Current card activation proof (temporary)
+on:
+  push:
+    branches: [codex/current-card-activation]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+          package-manager-cache: false
+      - run: npm ci
+        working-directory: webui
+      - name: Behavioral counterexample on deployed source
+        working-directory: webui
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(src/mdd/views/ReaderSetupActions.jsx src/mdd/views/SimConfig.jsx src/mdd/views/UnifiedPages.jsx src/mdd/i18n.jsx)
+          for file in "${files[@]}"; do git show "1f6046f99aedb0f53f09c9a87db1089e010d73b9:webui/$file" > "$file"; done
+          mkdir -p browser-evidence
+          set +e
+          MDD_BROWSER_EVIDENCE=browser-evidence/baseline node tests/readerSetupBrowser.mjs > browser-evidence/baseline.log 2>&1
+          code=$?
+          set -e
+          for file in "${files[@]}"; do git show "HEAD:webui/$file" > "$file"; done
+          cat browser-evidence/baseline.log
+          test "$code" -ne 0
+          grep -F 'SETUP_ACTIVATION: current card needs one save-and-enable action' browser-evidence/baseline.log
+      - name: Fixed mounted current-card journey
+        working-directory: webui
+        run: node tests/readerSetupBrowser.mjs
+      - name: Generate exact UI assets
+        working-directory: webui
+        run: MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: current-card-proof-${{ github.sha }}
+          path: webui/browser-evidence
+      - uses: actions/upload-artifact@v7
+        with:
+          name: current-card-ui-${{ github.sha }}
+          path: webui/.go-dist
+          include-hidden-files: true
