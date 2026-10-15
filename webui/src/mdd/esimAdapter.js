@@ -192,6 +192,7 @@ async function inventory(reader, notifications) {
     const matches=devices.filter(device=>!device.stale&&!device.observed_only&&device.present===true&&device.go_device?.agent_id===agentID&&device.go_device?.reader?.reader_name===readerName)
     if(matches.length!==1 || !(matches[0].sim?.iccid || matches[0].go_device?.reader?.card_id))throw new Error('Update the Agent to refresh this eUICC inventory.')
     const refreshed=await go.readerReadback(matches[0])
+    if(refreshed.scope)throw new Error('reader_readback_scope_mismatch')
     if(refreshed.state!=='applied'||refreshed.reader?.reader_name!==readerName)throw new Error(refreshed.error_code || 'reader_readback_unconfirmed')
     const fact=refreshed.reader
     const slots=fact.secure_elements?.length ? fact.secure_elements : fact.euicc ? [{euicc:fact.euicc}] : []

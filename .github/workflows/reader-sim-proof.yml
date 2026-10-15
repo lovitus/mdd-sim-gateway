@@ -1,0 +1,47 @@
+name: Reader SIM readback proof (temporary)
+on:
+  push:
+    branches: [codex/reader-sim-readback]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+          package-manager-cache: false
+      - run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libasound2-dev
+      - run: npm ci
+        working-directory: webui
+      - name: Behavioral counterexamples and restored regression suites
+        run: node tools/reader-sim-proof.mjs
+      - name: Generate exact hosted UI
+        working-directory: webui
+        run: MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-sim-proof-${{ github.sha }}
+          path: |
+            reader-sim-evidence
+            webui/browser-evidence
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-sim-ui-${{ github.sha }}
+          path: |
+            webui/.go-dist
+            go-runtime/internal/webui/assets/licenses
+          include-hidden-files: true

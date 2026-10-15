@@ -160,7 +160,7 @@ async function goDeviceDiagnostics(id) {
   return { ...result, ok: checks.length > 0 && checks.every(check => check.ok), checks }
 }
 
-async function goReaderReadback(device) {
+async function goReaderReadback(device, {scope = ''} = {}) {
 	const identity = readerOperationIdentity(device)
 	return j('POST', '/v1/readers/readback', {
 		operation_id: operationID('react-reader-readback'),
@@ -168,6 +168,7 @@ async function goReaderReadback(device) {
 		reader_name: identity.readerName,
 		card_id: identity.cardID,
 		sim_session_generation: identity.sessionGeneration,
+		...(scope ? {scope} : {}),
 	}, { 'X-MDD-Agent-ID': identity.agentID })
 }
 
@@ -185,13 +186,14 @@ function readerOperationIdentity(device) {
 	return { agentID, readerName, cardID, sessionGeneration, processGeneration }
 }
 
-async function goReaderProvision(device, lineID, expectedCatalogRevision, retainedOperationID) {
+async function goReaderProvision(device, lineID, expectedCatalogRevision, retainedOperationID, {scope = ''} = {}) {
 	const identity = readerOperationIdentity(device)
 	return j('POST', '/v1/readers/provision', {
 		schema_version: 1,
 		operation_id: retainedOperationID || operationID('react-reader-provision'),
 		line_id: String(lineID || ''),
 		expected_catalog_revision: Number(expectedCatalogRevision),
+		...(scope ? {scope} : {}),
 		process_generation: identity.processGeneration,
 		reader_name: identity.readerName,
 		card_id: identity.cardID,

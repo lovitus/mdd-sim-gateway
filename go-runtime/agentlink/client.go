@@ -105,6 +105,9 @@ func (client Client) Run(ctx context.Context) (result error) {
 	}
 	if client.ReaderReadback != nil {
 		capabilities = append(capabilities, readerReadbackFeature)
+		if scoped, ok := client.ReaderReadback.(ReaderSIMIdentityExecutor); ok && scoped.SupportsReaderSIMIdentity() {
+			capabilities = append(capabilities, readerSIMIdentityFeature)
+		}
 	}
 	if client.HostHealth {
 		capabilities = append(capabilities, agentHostHealthFeature)
@@ -504,6 +507,7 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 	if message.Kind == kindReaderReadbackRequest {
 		request := *message.ReaderReadbackRequest
 		result := ReaderReadbackResponse{
+			Scope:       request.Scope,
 			OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
 			ReaderName: request.ReaderName, CardID: request.CardID,
 			SIMSessionGeneration: request.SIMSessionGeneration, State: "unknown",
@@ -514,6 +518,7 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 		}
 		if err := result.ValidateFor(request); err != nil {
 			result = ReaderReadbackResponse{
+				Scope:       request.Scope,
 				OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
 				ReaderName: request.ReaderName, CardID: request.CardID,
 				SIMSessionGeneration: request.SIMSessionGeneration, State: "failed",
