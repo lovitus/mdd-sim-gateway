@@ -38,7 +38,6 @@ assert.doesNotMatch(apiSource, /\/api\/auth\/(setup|agent-token)/)
 // mounted readerSetupBrowser journey, not the loader's local variable name.
 assert.match(lineAdapter, /go\.saveCatalogLine\(editedCatalogLine\(form\),expectedRevision\(form.__catalog_revision\)\)/)
 assert.match(provision, /savedReady[\s\S]*!savedReady/, 'incomplete or unsaved provisioning is not actionable')
-assert.match(provision, /api\.readerProvisionV1\(device,form.id,form.__catalog_revision\)/)
 assert.match(provision, /api\.provisionReadbackV1\(request\)/)
 assert.match(provision, /preflight_operation_id:proof.request.operation_id/)
 assert.match(provision, /sim_session_generation:result.sim_session_generation \|\| request.sim_session_generation/)

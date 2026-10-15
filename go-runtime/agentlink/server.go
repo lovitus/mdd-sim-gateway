@@ -47,10 +47,12 @@ var (
 	ErrAgentOffline              = errors.New("Agent is offline")
 	ErrGenerationMismatch        = errors.New("Agent process generation does not match")
 	ErrReaderReadbackUnsupported = errors.New("Agent does not support reader readback")
-	ErrCardOffline               = errors.New("card is not present on an Agent")
-	ErrCardAmbiguous             = errors.New("card identity is present on multiple Agents")
-	ErrModemOffline              = errors.New("modem or SIM is not present on an Agent")
-	ErrModemAmbiguous            = errors.New("modem and SIM identity is present on multiple Agents")
+	// Returned only before dispatch, on the exact authenticated connection.
+	ErrReaderSIMIdentityUnsupported = errors.New("Agent does not support SIM-only reader readback")
+	ErrCardOffline                  = errors.New("card is not present on an Agent")
+	ErrCardAmbiguous                = errors.New("card identity is present on multiple Agents")
+	ErrModemOffline                 = errors.New("modem or SIM is not present on an Agent")
+	ErrModemAmbiguous               = errors.New("modem and SIM identity is present on multiple Agents")
 )
 
 type Server struct {
@@ -272,6 +274,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	if readerReadbackCapable {
 		features = append(features, readerReadbackFeature)
+		if featureEnabled(request.Header.Get(agentCapabilitiesHeader), readerSIMIdentityFeature) {
+			features = append(features, readerSIMIdentityFeature)
+		}
 	}
 	if agentHostHealthCapable {
 		features = append(features, agentHostHealthFeature)
@@ -824,6 +829,9 @@ func (server *Server) ReadReader(ctx context.Context, agentID, processGeneration
 	}
 	if connection.hello.ProcessGeneration != processGeneration {
 		return ReaderReadbackResponse{}, ErrGenerationMismatch
+	}
+	if request.Scope == ReaderReadbackSIMIdentity && !featureEnabled(strings.Join(connection.capabilities, ","), readerSIMIdentityFeature) {
+		return ReaderReadbackResponse{}, ErrReaderSIMIdentityUnsupported
 	}
 	if !featureEnabled(strings.Join(connection.capabilities, ","), readerReadbackFeature) {
 		return ReaderReadbackResponse{}, ErrReaderReadbackUnsupported
