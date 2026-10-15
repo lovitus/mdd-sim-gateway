@@ -124,7 +124,7 @@ export const lineAPI = {
     if (!line) throw new Error('line_not_found')
     return lineForm(line,snapshot.revision)
   },
-  async saveInstance(form, device, claimState, onClaimed) {
+  async saveInstance(form, device, claimState, onClaimed, beforeDispatch = () => {}) {
     if(form.pin)throw new Error('use_explicit_agent_pin_action')
     if(!form.__catalog_line && device && claimState) {
       const key=JSON.stringify([device.id,device.sim?.iccid])
@@ -136,16 +136,19 @@ export const lineAPI = {
         claimState.request={id:crypto.randomUUID(),candidate:candidate.candidate_id,name:form.name || candidate.observed?.msisdn || '',revision:snapshot.catalog_revision}
       }
       const request=claimState.request
+      beforeDispatch()
       const result=await go.claimLineCandidate(request.candidate,request.name,request.revision,request.id)
       form=claimedDraftForm(result,form)
       try {
         // Transfer the exact claimed baseline before the following PUT can race
         // discovery. An editor that has left its target must not continue saving.
         if(onClaimed && !onClaimed(form))throw new Error('line_save_target_changed')
+        beforeDispatch()
         const saved=await go.saveCatalogLine(editedCatalogLine(form),expectedRevision(form.__catalog_revision))
         return lineForm(saved.line,saved.revision)
       } catch(error) {error.createdDraft=form;throw error}
     }
+    beforeDispatch()
     const result = await go.saveCatalogLine(editedCatalogLine(form),expectedRevision(form.__catalog_revision))
     return lineForm(result.line,result.revision)
   },

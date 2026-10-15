@@ -1,5 +1,14 @@
 # Branch disposition and integration record
 
+Current-card activation source `35c3cb2` is retained at
+`archive/2026-10-15/current-card-source-proof`; hosted `38693765905` proves the
+three original-review counterexamples red and the corrected mounted journey
+green. The exact hosted UI is imported; the temporary proof workflow is removed.
+Earlier `e7e9ba8` / `38690177573` and cancelled `683fba1` / `38691912859` remain
+at `archive/2026-10-15/current-card-proof1` and `current-card-proof2` respectively.
+These tags preserve evidence, not merge queues. Final normal qualification,
+source approval and production startup acceptance are separate pending gates.
+
 PR36 source `96e7dd9` is retained at
 `archive/2026-10-14/reader-setup-source-approved`; original source review passed.
 Hosted `38542327466` proves the pending-claim behavioral red and complete green
