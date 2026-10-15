@@ -105,6 +105,9 @@ func (client Client) Run(ctx context.Context) (result error) {
 	}
 	if client.ReaderReadback != nil {
 		capabilities = append(capabilities, readerReadbackFeature)
+		if scoped, ok := client.ReaderReadback.(ReaderSIMIdentityExecutor); ok && scoped.SupportsReaderSIMIdentity() {
+			capabilities = append(capabilities, readerSIMIdentityFeature)
+		}
 	}
 	if client.HostHealth {
 		capabilities = append(capabilities, agentHostHealthFeature)
@@ -398,6 +401,14 @@ func (client Client) timeoutFor(message envelope) time.Duration {
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
 	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindReaderReadbackRequest {
+		request := *message.ReaderReadbackRequest
+		result := ReaderReadbackResponse{Scope: request.Scope, OperationID: request.OperationID,
+			ProcessGeneration: request.ProcessGeneration, ReaderName: request.ReaderName,
+			CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
+			State: "failed", ErrorCode: failure.Code}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindReaderReadbackResponse, RequestID: requestID, ReaderReadbackResult: &result})
+	}
 	if message.Kind == kindPolicyRequest {
 		request := *message.PolicyRequest
 		result := ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
@@ -504,6 +515,7 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 	if message.Kind == kindReaderReadbackRequest {
 		request := *message.ReaderReadbackRequest
 		result := ReaderReadbackResponse{
+			Scope:       request.Scope,
 			OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
 			ReaderName: request.ReaderName, CardID: request.CardID,
 			SIMSessionGeneration: request.SIMSessionGeneration, State: "unknown",
@@ -514,6 +526,7 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 		}
 		if err := result.ValidateFor(request); err != nil {
 			result = ReaderReadbackResponse{
+				Scope:       request.Scope,
 				OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
 				ReaderName: request.ReaderName, CardID: request.CardID,
 				SIMSessionGeneration: request.SIMSessionGeneration, State: "failed",
