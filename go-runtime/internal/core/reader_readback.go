@@ -93,32 +93,34 @@ func (handler *ReaderReadbackHandler) ServeHTTP(w http.ResponseWriter, r *http.R
 		}
 	}
 	result, err := handler.runtime.ReadReader(r.Context(), target.AgentID, target.ProcessGeneration, request)
-	if err != nil {
-		if handler.store != nil {
-			receipt.State = linecatalog.OperationUnknown
-			receipt.ErrorCode = "reader_readback_unconfirmed"
-			receipt.UpdatedAt = time.Now().UTC()
-			_ = handler.store.UpdateOperationCAS(receipt, linecatalog.OperationInProgress, receipt.RequestDigest)
+	status, body := http.StatusOK, any(result)
+	switch {
+	case errors.Is(err, agentlink.ErrReaderSIMIdentityUnsupported):
+		receipt.State, receipt.ErrorCode = linecatalog.OperationFailed, "reader_sim_identity_unsupported"
+		receipt.Step = "reader_readback_not_dispatched"
+		status, body = http.StatusConflict, map[string]any{"code": receipt.ErrorCode, "not_dispatched": true}
+	case err != nil:
+		receipt.State, receipt.ErrorCode = linecatalog.OperationUnknown, "reader_readback_unconfirmed"
+		status, body = http.StatusAccepted, map[string]string{"code": receipt.ErrorCode}
+	case result.ValidateFor(request) != nil:
+		receipt.State, receipt.ErrorCode = linecatalog.OperationUnknown, "invalid_reader_readback_result"
+		status, body = http.StatusBadGateway, map[string]string{"code": receipt.ErrorCode}
+	case result.State != "applied":
+		receipt.State, receipt.ErrorCode = linecatalog.OperationUnknown, result.ErrorCode
+		status = http.StatusAccepted
+		if result.State == "failed" {
+			receipt.State = linecatalog.OperationFailed
 		}
-		writeJSON(w, http.StatusAccepted, map[string]string{"code": "reader_readback_unconfirmed"})
-		return
-	}
-	if err := result.ValidateFor(request); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "invalid_reader_readback_result"})
-		return
-	}
-	if result.State != "applied" {
-		writeJSON(w, http.StatusAccepted, result)
-		return
-	}
-	if handler.store != nil {
+	default:
 		receipt.State = linecatalog.OperationSucceeded
 		receipt.OutcomeCode = "reader_readback_verified"
+	}
+	if handler.store != nil {
 		receipt.UpdatedAt = time.Now().UTC()
 		if err := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationInProgress, receipt.RequestDigest); err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"code": "reader_readback_operation_race"})
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, status, body)
 }

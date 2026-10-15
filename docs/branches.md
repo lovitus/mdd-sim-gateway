@@ -1,5 +1,23 @@
 # Branch disposition and integration record
 
+Current follow-up: `codex/reader-sim-readback` from `cda6b03`, implementing the
+original reviewer's approved explicit SIM-identity scope. Full eSIM readback is
+unchanged; scoped dispatch requires negotiated capability. Hosted proof
+`058a0fe` / `38704067945` passes all nine behavioral counterexamples, restored
+Agent/Core race suites, real HTTP adapters and current-card/adjacent browser
+journeys. Its exact UI is imported and temporary proof removed. The original
+review found one pre-existing readback-overload panic path, now corrected and
+covered by the same WSS test. Final review/full signed CI/rollout remain pending.
+
+Proof archives (evidence only, never merge these temporary workflows):
+`archive/2026-10-15/reader-sim-proof1` (`58aef3d`, `38702040756`, WSS fixture
+missing URL path); `reader-sim-proof2` (`16b834b`, `38702300514`, Detect fixture
+missing present flag); `reader-sim-qualified1` (`e82f112`, `38702702304`, passed);
+`reader-sim-overload-proof1` (`fdbd683`, `38703751348`, all restored suites passed,
+but the proof expected panic text instead of the observed lost response/offline
+failure); `reader-sim-qualified` (`058a0fe`, `38704067945`, passed). The last change
+corrected only that proof marker, not the permanent test or product expectation.
+
 PR37 final `6c0177c` / full normal `38696701616` and original review passed;
 normal merge `fd1847a` shares complete tree `562205eb` with deployed `a1755279`.
 Core-only cutover restored six original Agent generations and unchanged unrelated

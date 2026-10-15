@@ -24,6 +24,7 @@ const (
 	simPINFeature              = "sim-pin-v1"
 	simPINConfigFeature        = "sim-pin-config-v1"
 	readerReadbackFeature      = "reader-readback-v1"
+	readerSIMIdentityFeature   = "reader-sim-identity-v1"
 	agentHostHealthFeature     = "agent-host-health-v1"
 )
 

@@ -2,9 +2,12 @@ package agentlink
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -25,6 +28,7 @@ func validReaderReadbackRequest() ReaderReadbackRequest {
 
 func validReaderReadbackResponse(request ReaderReadbackRequest) ReaderReadbackResponse {
 	return ReaderReadbackResponse{
+		Scope:       request.Scope,
 		OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
 		ReaderName: request.ReaderName, CardID: request.CardID,
 		SIMSessionGeneration: request.SIMSessionGeneration, State: "applied",
@@ -33,6 +37,181 @@ func validReaderReadbackResponse(request ReaderReadbackRequest) ReaderReadbackRe
 			SessionGeneration: request.SIMSessionGeneration, CardID: request.CardID,
 			IdentityState: CardIdentified,
 		},
+	}
+}
+
+func TestReaderSIMIdentityResponseScopeAndInnerIdentity(t *testing.T) {
+	request := validReaderReadbackRequest()
+	for _, state := range []string{"applied", "unknown", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			request.Scope = ReaderReadbackSIMIdentity
+			response := validReaderReadbackResponse(request)
+			response.State = state
+			if state != "applied" {
+				response.Reader = nil
+				response.ErrorCode = "readback_failed"
+			}
+			if err := response.ValidateFor(request); err != nil {
+				t.Fatal(err)
+			}
+			response.Scope = ""
+			if response.ValidateFor(request) == nil {
+				t.Fatal("scope echo missing")
+			}
+		})
+	}
+	for _, field := range []string{"reader", "card", "generation", "euicc"} {
+		response := validReaderReadbackResponse(request)
+		switch field {
+		case "reader":
+			response.Reader.ReaderName = "other-reader"
+		case "card":
+			response.Reader.CardID = "8944000000000000002"
+		case "generation":
+			response.Reader.SessionGeneration = "other-session"
+		case "euicc":
+			response.Reader.EUICC = &EUICCFact{}
+		}
+		if response.ValidateFor(request) == nil {
+			t.Fatalf("accepted invalid %s observation", field)
+		}
+	}
+	request.Scope = ""
+	for _, value := range []any{request, validReaderReadbackResponse(request)} {
+		data, _ := json.Marshal(value)
+		var fields map[string]any
+		_ = json.Unmarshal(data, &fields)
+		if _, found := fields["scope"]; found {
+			t.Fatal("empty scope breaks old strict decoder")
+		}
+	}
+}
+
+type readerReadbackFunc func(context.Context, ReaderReadbackRequest) ReaderReadbackResponse
+
+func (fn readerReadbackFunc) ReadReader(ctx context.Context, request ReaderReadbackRequest) ReaderReadbackResponse {
+	return fn(ctx, request)
+}
+
+type scopedReaderReadbackExecutor struct{ readerReadbackFunc }
+
+func (scopedReaderReadbackExecutor) SupportsReaderSIMIdentity() bool { return true }
+
+func TestReaderSIMIdentityNegotiationDoesNotDispatchToLegacyAgent(t *testing.T) {
+	for _, capable := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy", true: "scoped"}[capable], func(t *testing.T) {
+			server, err := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			host := httptest.NewServer(server)
+			defer host.Close()
+			var calls atomic.Int32
+			entered, release := make(chan struct{}, maximumConcurrentRequests), make(chan struct{})
+			fn := readerReadbackFunc(func(ctx context.Context, request ReaderReadbackRequest) ReaderReadbackResponse {
+				calls.Add(1)
+				if strings.HasPrefix(request.OperationID, "busy-") {
+					entered <- struct{}{}
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				}
+				return validReaderReadbackResponse(request)
+			})
+			var executor ReaderReadbackExecutor = fn
+			if capable {
+				executor = scopedReaderReadbackExecutor{fn}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				done <- (Client{URL: strings.Replace(host.URL, "http://", "ws://", 1) + "/v1/agent/ws", Token: testToken,
+					Hello: Hello{SchemaVersion: SchemaVersion, AgentID: "agent-1", ProcessGeneration: "process-1"}, Authenticator: &fakeAuthenticator{},
+					ReaderReadback: executor, Health: func() TopologySnapshot {
+						return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
+					}, OperationTimeout: 10 * time.Second}).Run(ctx)
+			}()
+			defer func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					t.Error("Agent failed to stop")
+				}
+			}()
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				if _, found := server.Status("agent-1"); found {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("Agent did not connect")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			request := validReaderReadbackRequest()
+			request.Scope = ReaderReadbackSIMIdentity
+			result, err := server.ReadReader(context.Background(), "agent-1", "process-1", request)
+			if capable {
+				if err != nil || result.ValidateFor(request) != nil || calls.Load() != 1 {
+					t.Fatalf("negotiated read result=%+v err=%v", result, err)
+				}
+			} else if !errors.Is(err, ErrReaderSIMIdentityUnsupported) || calls.Load() != 0 {
+				t.Fatalf("SIM_SCOPE_DISPATCH: legacy received scoped frame: calls=%d err=%v", calls.Load(), err)
+			}
+			if capable {
+				completed := make(chan error, maximumConcurrentRequests)
+				for index := 0; index < maximumConcurrentRequests; index++ {
+					busy := request
+					busy.OperationID = fmt.Sprintf("busy-%d", index)
+					go func() { _, err := server.ReadReader(ctx, "agent-1", "process-1", busy); completed <- err }()
+				}
+				for index := 0; index < maximumConcurrentRequests; index++ {
+					select {
+					case <-entered:
+					case <-time.After(2 * time.Second):
+						t.Fatal("readback executor slots did not fill")
+					}
+				}
+				before := calls.Load()
+				for _, scope := range []ReaderReadbackScope{"", ReaderReadbackSIMIdentity} {
+					overload := request
+					overload.Scope = scope
+					overload.OperationID = "overload"
+					result, err := server.ReadReader(ctx, "agent-1", "process-1", overload)
+					if err != nil || result.ValidateFor(overload) != nil || result.State != "failed" || result.ErrorCode != "agent_operation_limit" || calls.Load() != before {
+						t.Fatalf("invalid readback overload: %+v %v", result, err)
+					}
+				}
+				close(release)
+				for index := 0; index < maximumConcurrentRequests; index++ {
+					if err := <-completed; err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			request.Scope = ""
+			result, err = server.ReadReader(context.Background(), "agent-1", "process-1", request)
+			if err != nil || result.State != "applied" || result.Scope != "" {
+				t.Fatalf("legacy full read/connection broken: %+v %v", result, err)
+			}
+		})
+	}
+}
+
+func TestReaderSIMIdentitySyntheticFailuresEchoScope(t *testing.T) {
+	request := validReaderReadbackRequest()
+	request.Scope = ReaderReadbackSIMIdentity
+	for _, executor := range []ReaderReadbackExecutor{nil, readerReadbackFunc(func(_ context.Context, req ReaderReadbackRequest) ReaderReadbackResponse {
+		result := validReaderReadbackResponse(req)
+		result.Scope = ""
+		return result
+	})} {
+		result := (Client{ReaderReadback: executor}).execute(context.Background(), envelope{Kind: kindReaderReadbackRequest, ReaderReadbackRequest: &request}).ReaderReadbackResult
+		if result.ValidateFor(request) != nil || result.State == "applied" {
+			t.Fatalf("invalid synthetic result=%+v", result)
+		}
 	}
 }
 

@@ -70,7 +70,8 @@ try{
       Object.assign(other,body);return route.fulfill({json:{line:other,revision:++revision}})
     }
     if(path==='/v1/readers/provision'){
-      if(rejectInitialization){const code=rejectInitialization;rejectInitialization='';return route.fulfill({status:409,json:{code}})}
+      assert.equal(body.scope,'sim_identity','SIM_SCOPE_PROVISION: initialization must request SIM identity only')
+      if(rejectInitialization){const code=rejectInitialization;rejectInitialization='';return route.fulfill({status:409,json:{code,not_dispatched:true}})}
       if(body.sim_session_generation!==session)return route.fulfill({status:409,json:{code:'reader_provision_target_unavailable'}})
       if(body.expected_catalog_revision!==revision)return route.fulfill({status:409,json:{code:'reader_provision_requires_disabled_draft'}})
       assert.equal(body.expected_catalog_revision,revision);assert.equal(body.card_id,card);assert.equal(body.sim_session_generation,session)
@@ -206,7 +207,7 @@ try{
   await setup.getByRole('alert').filter({hasText:'Configuration changed elsewhere'}).waitFor()
   assert.equal(hardwareReads,0,'cannot silently rebase to a newer catalog')
   await details();await setup.getByRole('button',{name:'Reload configuration',exact:true}).click();await idle()
-  for(const code of ['reader_provision_requires_disabled_draft','reader_provision_target_unavailable']){
+  for(const code of ['reader_provision_requires_disabled_draft','reader_provision_target_unavailable','reader_sim_identity_unsupported']){
     rejectInitialization=code
     await setup.getByRole('button',{name:'Enable VoWiFi',exact:true}).click();await confirm();await idle()
     assert.equal(await setup.getByRole('button',{name:'Check original result',exact:true}).count(),0)
@@ -216,6 +217,7 @@ try{
   }
   await setup.getByRole('button',{name:'Enable VoWiFi',exact:true}).click();await confirm();await idle()
   assert.equal(hardwareReads,1);assert.equal(line.enabled,false)
+  assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('mdd_provision_recovery_new-line')).scope),'sim_identity')
   await setup.getByRole('button',{name:'Check original result',exact:true}).click();await idle()
   await setup.getByRole('button',{name:'New read-only SIM verification',exact:true}).waitFor()
   const originalUnknown=[...receipts.keys()][0]
