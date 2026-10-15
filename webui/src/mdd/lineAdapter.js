@@ -106,7 +106,8 @@ export const lineAPI = {
     if (!device || device.present !== true) throw new Error('current_sim_device_required')
     let sim = device.sim || {}
     if (device.device_type === 'reader') {
-      const result = await go.readerReadback(device)
+      const result = await go.readerReadback(device,{scope:'sim_identity'})
+      if (result.scope !== 'sim_identity') throw new Error('reader_readback_scope_mismatch')
       if (result.state !== 'applied' || !result.reader) throw new Error(result.error_code || 'reader_readback_unconfirmed')
       sim = {...result.reader.sim,iccid:result.reader.card_id,present:result.reader.card_present}
     } else {

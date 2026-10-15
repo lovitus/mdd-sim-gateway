@@ -16,14 +16,15 @@ import (
 )
 
 type readerProvisionRequest struct {
-	SchemaVersion           int    `json:"schema_version"`
-	OperationID             string `json:"operation_id"`
-	LineID                  string `json:"line_id"`
-	ExpectedCatalogRevision uint64 `json:"expected_catalog_revision"`
-	ProcessGeneration       string `json:"process_generation"`
-	ReaderName              string `json:"reader_name"`
-	CardID                  string `json:"card_id"`
-	SIMSessionGeneration    string `json:"sim_session_generation"`
+	Scope                   agentlink.ReaderReadbackScope `json:"scope,omitempty"`
+	SchemaVersion           int                           `json:"schema_version"`
+	OperationID             string                        `json:"operation_id"`
+	LineID                  string                        `json:"line_id"`
+	ExpectedCatalogRevision uint64                        `json:"expected_catalog_revision"`
+	ProcessGeneration       string                        `json:"process_generation"`
+	ReaderName              string                        `json:"reader_name"`
+	CardID                  string                        `json:"card_id"`
+	SIMSessionGeneration    string                        `json:"sim_session_generation"`
 }
 
 type readerProvisionResponse struct {
@@ -128,9 +129,20 @@ func (handler *ReaderProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.
 	if readErr != nil {
 		receipt.State = linecatalog.OperationUnknown
 		receipt.ErrorCode = "reader_provision_unconfirmed"
+		unsupported := errors.Is(readErr, agentlink.ErrReaderSIMIdentityUnsupported)
+		if unsupported {
+			receipt.State = linecatalog.OperationFailed
+			receipt.Step = "reader_readback_not_dispatched"
+			receipt.ErrorCode = "reader_sim_identity_unsupported"
+		}
 		receipt.UpdatedAt = handler.now().UTC()
 		if handler.store.PutOperation(receipt) != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "reader_provision_operation_record_failed"})
+			return
+		}
+		if unsupported {
+			writeJSON(w, http.StatusConflict, map[string]any{"code": receipt.ErrorCode, "not_dispatched": true,
+				"operation_id": input.OperationID, "state": string(receipt.State)})
 			return
 		}
 		writeJSON(w, http.StatusAccepted, readerProvisionResponse{SchemaVersion: 1, OperationID: input.OperationID,
@@ -141,8 +153,12 @@ func (handler *ReaderProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.
 		result.Reader.CardID != input.CardID || result.Reader.ReaderName != input.ReaderName ||
 		result.Reader.SessionGeneration != input.SIMSessionGeneration {
 		state, code, status := linecatalog.OperationUnknown, "reader_provision_response_invalid", http.StatusAccepted
-		if result.ValidateFor(readback) == nil && result.State == "failed" {
-			state, code, status = linecatalog.OperationFailed, result.ErrorCode, http.StatusBadGateway
+		if result.ValidateFor(readback) == nil {
+			if result.State == "unknown" {
+				code = result.ErrorCode
+			} else if result.State == "failed" {
+				state, code, status = linecatalog.OperationFailed, result.ErrorCode, http.StatusBadGateway
+			}
 		}
 		receipt.State, receipt.ErrorCode, receipt.ErrorDetail, receipt.UpdatedAt = state, code, code, handler.now().UTC()
 		err = handler.store.PutOperation(receipt)
@@ -192,5 +208,5 @@ func (handler *ReaderProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.
 
 func (input readerProvisionRequest) readback() agentlink.ReaderReadbackRequest {
 	return agentlink.ReaderReadbackRequest{OperationID: input.OperationID, ProcessGeneration: input.ProcessGeneration,
-		ReaderName: input.ReaderName, CardID: input.CardID, SIMSessionGeneration: input.SIMSessionGeneration}
+		ReaderName: input.ReaderName, CardID: input.CardID, SIMSessionGeneration: input.SIMSessionGeneration, Scope: input.Scope}
 }

@@ -153,17 +153,19 @@ export default function ReaderSetupActions({form, device, save, saveConfiguratio
     check(context)
     if(prior)archiveInitialization(prior,{state:'unknown',superseded_by_explicit_verification:true})
     const reader=context.device.go_device
-    const request={kind:'reader',operation_id:crypto.randomUUID(),line_id:line.id,card_id:line.card_id,
+    const request={kind:'reader',scope:'sim_identity',operation_id:crypto.randomUUID(),line_id:line.id,card_id:line.card_id,
       agent_id:reader.agent_id,process_generation:reader.process_generation,reader_name:reader.reader?.reader_name || context.device.reader,
       sim_session_generation:reader.reader?.session_generation,catalog_revision:String(context.form.__catalog_revision)}
     rememberProvision(request);setReceipt(request);setProgress('Checking SIM...')
     let result
-    try {result=await api.readerProvisionV1(context.device,line.id,context.form.__catalog_revision,request.operation_id)}
+    try {result=await api.readerProvisionV1(context.device,line.id,context.form.__catalog_revision,request.operation_id,{scope:request.scope})}
     catch(error){
-      if(['reader_provision_target_unavailable','reader_provision_requires_disabled_draft','reader_provision_smsc_required','invalid_reader_provision_request'].includes(error.code)){
+      const unsupported=error.code==='reader_sim_identity_unsupported' && error.status===409 && error.data?.not_dispatched===true
+      if(unsupported || ['reader_provision_target_unavailable','reader_provision_requires_disabled_draft','reader_provision_smsc_required','invalid_reader_provision_request'].includes(error.code)){
         archiveInitialization(request,{rejected:error.code})
         if(mounted.current && current.current.physical===context.physical){setReceipt(null);setReceiptState('')}
       }
+      if(unsupported)error.message=t('Update the Agent before verifying this SIM. No card request was sent.')
       throw error
     }
     if(result.operation_id!==request.operation_id || (result.line_id && result.line_id!==line.id) ||
