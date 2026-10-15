@@ -1,13 +1,21 @@
 # Branch disposition and integration record
 
-Current follow-up: `codex/reader-sim-readback` from `cda6b03`, implementing the
+Current: PR38 `59f8dd2`, original review and full signed `38705192004` attempt 2
+passed; normal merge `0d74354` shares tree `5fbdb983`. Core and the exact signed
+reader Mac are deployed. Actual new SIM-only verification/Enable reached IMS200;
+later interruption, authorized legacy Wi-Fi cron pause and bounded automatic
+recovery are separately recorded in the [receipt](https://github.com/lovitus/mdd-sim-gateway/pull/38#issuecomment-6188828740).
+Continuous-ready duration did not pass; no paid-operation acceptance is claimed.
+The source branch is integrated; proof branches/tags below are evidence only.
+
+PR38 history: `codex/reader-sim-readback` from `cda6b03`, implementing the
 original reviewer's approved explicit SIM-identity scope. Full eSIM readback is
 unchanged; scoped dispatch requires negotiated capability. Hosted proof
 `058a0fe` / `38704067945` passes all nine behavioral counterexamples, restored
 Agent/Core race suites, real HTTP adapters and current-card/adjacent browser
 journeys. Its exact UI is imported and temporary proof removed. The original
 review found one pre-existing readback-overload panic path, now corrected and
-covered by the same WSS test. Final review/full signed CI/rollout remain pending.
+covered by the same WSS test. Final review/full signed CI/rollout are recorded above.
 Normal `38704451287` at `d9b4491` failed the existing Agent-host exact capability
 assertion, which still expected three features. The real Manager now advertises
 the reviewed fourth `reader-sim-identity-v1` feature; the assertion is updated to
