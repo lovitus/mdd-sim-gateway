@@ -1,5 +1,10 @@
 # Branch disposition and integration record
 
+Current follow-up: `codex/reader-sim-readback` from `cda6b03`, implementing the
+original reviewer's approved explicit SIM-identity scope. Full eSIM readback is
+unchanged; scoped dispatch requires negotiated capability. Source verification,
+hosted red/green, final review and target Core/Agent rollout remain pending.
+
 PR37 final `6c0177c` / full normal `38696701616` and original review passed;
 normal merge `fd1847a` shares complete tree `562205eb` with deployed `a1755279`.
 Core-only cutover restored six original Agent generations and unchanged unrelated

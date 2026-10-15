@@ -311,6 +311,10 @@ func (manager *Manager) Sessions() []SessionView {
 // ReadCardIdentity performs a fresh transaction on the exact live session.
 // A reader name alone is never sufficient: generation and ICCID must match.
 func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, generation, cardID string) (CardReadback, error) {
+	return manager.readCardIdentity(ctx, readerName, generation, cardID, "")
+}
+
+func (manager *Manager) readCardIdentity(ctx context.Context, readerName, generation, cardID string, scope agentlink.ReaderReadbackScope) (CardReadback, error) {
 	if readerName == "" || generation == "" || cardID == "" {
 		return CardReadback{}, readbackFailure("reader_readback_identity_invalid", errors.New("reader readback requires exact session identity"))
 	}
@@ -322,10 +326,14 @@ func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, genera
 	}
 	current.operation.Lock()
 	defer current.operation.Unlock()
-	return manager.readCardIdentityLocked(ctx, current, readerName, generation, cardID)
+	return manager.readCardScopedLocked(ctx, current, readerName, generation, cardID, scope)
 }
 
 func (manager *Manager) readCardIdentityLocked(ctx context.Context, current *session, readerName, generation, cardID string) (CardReadback, error) {
+	return manager.readCardScopedLocked(ctx, current, readerName, generation, cardID, "")
+}
+
+func (manager *Manager) readCardScopedLocked(ctx context.Context, current *session, readerName, generation, cardID string, scope agentlink.ReaderReadbackScope) (CardReadback, error) {
 	if !current.active.Load() {
 		return CardReadback{}, readbackFailure("reader_readback_identity_stale", errors.New("reader session is no longer active"))
 	}
@@ -338,7 +346,11 @@ func (manager *Manager) readCardIdentityLocked(ctx context.Context, current *ses
 		identity := readReaderSIMIdentity(ctx, current.card)
 		simIdentity = &identity
 	}
-	secureElements, secureErr := inspectSecureElements(ctx, current.card)
+	var secureElements []secureElement
+	var secureErr error
+	if scope != agentlink.ReaderReadbackSIMIdentity {
+		secureElements, secureErr = inspectSecureElements(ctx, current.card)
+	}
 	endErr := current.card.EndTransaction()
 	if endErr != nil {
 		return CardReadback{}, readbackFailure("reader_readback_transaction_release_failed", fmt.Errorf("end readback transaction: %w", endErr))
@@ -368,12 +380,20 @@ func (manager *Manager) readCardIdentityLocked(ctx context.Context, current *ses
 		return CardReadback{}, readbackFailure("reader_readback_metadata_invalid", err)
 	}
 	manager.mu.Lock()
+	// The optional SIM reads can return partial facts after cancellation. They
+	// must not commit metadata after this request's observation window closed.
+	if scope == agentlink.ReaderReadbackSIMIdentity && ctx.Err() != nil {
+		manager.mu.Unlock()
+		return CardReadback{}, readbackFailure("reader_readback_interrupted", ctx.Err())
+	}
 	if manager.sessions[generation] != current || !current.active.Load() {
 		manager.mu.Unlock()
 		return CardReadback{}, readbackFailure("reader_readback_identity_stale", errors.New("reader session changed before metadata commit"))
 	}
 	current.simIdentity = simIdentity
-	current.secureElements = cloneSecureElements(secureElements)
+	if scope != agentlink.ReaderReadbackSIMIdentity {
+		current.secureElements = cloneSecureElements(secureElements)
+	}
 	manager.mu.Unlock()
 	atr := append([]byte(nil), current.atr...)
 	digest := sha256.Sum256(atr)
@@ -391,6 +411,7 @@ func (manager *Manager) readCardIdentityLocked(ctx context.Context, current *ses
 // wire contract. It never exposes PIN material or raw APDU responses.
 func (manager *Manager) ReadReader(ctx context.Context, request agentlink.ReaderReadbackRequest) agentlink.ReaderReadbackResponse {
 	response := agentlink.ReaderReadbackResponse{
+		Scope:       request.Scope,
 		OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
 		ReaderName: request.ReaderName, CardID: request.CardID,
 		SIMSessionGeneration: request.SIMSessionGeneration, State: "unknown",
@@ -401,7 +422,7 @@ func (manager *Manager) ReadReader(ctx context.Context, request agentlink.Reader
 		response.ErrorCode = "invalid_reader_readback_request"
 		return response
 	}
-	readback, err := manager.ReadCardIdentity(ctx, request.ReaderName, request.SIMSessionGeneration, request.CardID)
+	readback, err := manager.readCardIdentity(ctx, request.ReaderName, request.SIMSessionGeneration, request.CardID, request.Scope)
 	if err != nil {
 		response.ErrorCode = readerReadbackErrorCode(err)
 		return response
@@ -417,6 +438,8 @@ func (manager *Manager) ReadReader(ctx context.Context, request agentlink.Reader
 	}
 	return response
 }
+
+func (manager *Manager) SupportsReaderSIMIdentity() bool { return true }
 
 // ExecuteSIMPIN verifies PIN1 on one live PC/SC session. The reader name,
 // card identity and session generation are all checked before the APDU is

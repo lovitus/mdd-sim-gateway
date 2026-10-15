@@ -118,6 +118,23 @@ assert.equal(storage.has('mdd_euicc_download_reader-legacy'),false)
 assert.equal(downloadRejectedBeforeDispatch({status:400,code:'invalid_euicc_download_request'}),true)
 assert.equal(downloadRejectedBeforeDispatch({status:502,code:'invalid_euicc_download_request'}),false)
 assert.equal(downloadRejectedBeforeDispatch({status:409,code:'euicc_download_conflict'}),false)
+
+// Legacy inventory refresh still uses the real full-readback HTTP builder.
+go.euiccs=async()=>({euiccs:[]})
+go.devices=async()=>({devices:[{present:true,sim:{iccid:'8944000000000000001'},
+  go_device:{agent_id:'agent-a',process_generation:'process-a',reader:{reader_name:'Same reader',card_id:'8944000000000000001',session_generation:'session-a'}}}]})
+let responseScope='', inventoryRequests=0
+globalThis.fetch=async(path,options)=>{
+  assert.equal(path,'/v1/readers/readback')
+  const body=JSON.parse(options.body);inventoryRequests++
+  assert.equal(Object.hasOwn(body,'scope'),false,'eSIM fallback must retain full readback')
+  return new Response(JSON.stringify({...body,scope:responseScope,state:'applied',reader:{reader_name:body.reader_name,
+    euicc:{eid:freshEID,profiles_available:true,profiles:[]}}}))
+}
+assert.equal((await esimAPI.esimChip(euiccReaderKey({agent_id:'agent-a',name:'Same reader'}))).ses[0].eid,freshEID)
+responseScope='sim_identity'
+await assert.rejects(esimAPI.esimChip(euiccReaderKey({agent_id:'agent-a',name:'Same reader'})),/reader_readback_scope_mismatch/)
+assert.equal(inventoryRequests,2)
 globalThis.localStorage.setItem=()=>{throw new Error('storage unavailable')}
 assert.throws(()=>rememberDownload('reader-a',pointer),/could not be saved/)
 delete globalThis.localStorage
