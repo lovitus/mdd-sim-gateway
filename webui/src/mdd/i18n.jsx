@@ -334,6 +334,8 @@ const zh = {
   'Last report': '最近上报',
   'No connected Agents.': '没有已连接的 Agent。',
   sim_apdu_data_active: '请先关闭持续 4G 数据连接，释放 SIM 后 VoWiFi 会自动启动',
+  reader_sim_identity_unsupported: '请先升级该读卡器的 Agent，再验证 SIM。本次未向卡片发送请求。',
+  'Update the Agent before verifying this SIM. No card request was sent.': '请先升级该读卡器的 Agent，再验证 SIM。本次未向卡片发送请求。',
   sim_apdu_on_demand: 'SIM APDU 将在启用 VoWiFi 时按需准备',
   'SIM APDU is available on demand. Automatic setup must prepare it and read the card identity before VoWiFi can start; this is not an unsupported modem.': '此模块支持按需准备 SIM APDU。自动配卡须先完成准备并读取卡片身份，才能启动 VoWiFi；并非模块不支持。',
   sim_apdu_preparing: '正在安全准备 SIM APDU',

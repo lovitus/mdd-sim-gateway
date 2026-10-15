@@ -191,7 +191,7 @@ function SimConfig({ instances, selected, refresh, cards, setSelected, targetDev
       if (port) patch.reader_port = port
       upd(patch)
       setPinMsg(c.imsi ? t('Card read.') : t('Card present; enter PIN to read IMSI. ICCID {iccid}, {tries} tries left.', { iccid: c.iccid || '?', tries: c.pin_tries ?? '?' }))
-    } catch (e) { if(current())setPinMsg(`${t('Error')}: ${e.message}`) }
+    } catch (e) { if(current())setPinMsg(`${t('Error')}: ${t(e.message)}`) }
     finally {mutationBusy.current=false;setDetecting(false)}
   }
 

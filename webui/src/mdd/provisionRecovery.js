@@ -1,5 +1,5 @@
 // Browser continuity only; Go's durable operation receipt remains authoritative.
-const fields = ['operation_id','line_id','line_name','equipment_id','card_id','attachment_id','sim_session_generation','imsi','mcc','mnc','imei','imeisv','msisdn','smsc','reader_port','apn','ims_apn','egress_country','idr_mode','cp_mode','preflight_operation_id','kind','agent_id','process_generation','reader_name','catalog_revision']
+const fields = ['operation_id','line_id','line_name','equipment_id','card_id','attachment_id','sim_session_generation','imsi','mcc','mnc','imei','imeisv','msisdn','smsc','reader_port','apn','ims_apn','egress_country','idr_mode','cp_mode','preflight_operation_id','kind','agent_id','process_generation','reader_name','catalog_revision','scope']
 const key = lineID => `mdd_provision_recovery_${lineID}`
 export const provisionTerminal = state => ['succeeded','failed','reconciled'].includes(state)
 export function rememberProvision(request, storage = sessionStorage) {
