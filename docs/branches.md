@@ -1,5 +1,13 @@
 # Branch disposition and integration record
 
+PR37 final `6c0177c` / full normal `38696701616` and original review passed;
+normal merge `fd1847a` shares complete tree `562205eb` with deployed `a1755279`.
+Core-only cutover restored six original Agent generations and unchanged unrelated
+processes/configuration. Actual current-card browser startup reached an existing
+readback failure, not acceptance; exact boundary and retained first admission
+failure are in the [receipt](https://github.com/lovitus/mdd-sim-gateway/pull/37#issuecomment-6186935747).
+The activation/proof branches are integrated or archived evidence, not merge queues.
+
 PR37 follow-up source `eeb8472` is retained at
 `archive/2026-10-15/current-card-cancelled-apply-proof`; hosted `38696184712`
 proves cancelled admitted-apply bookkeeping red/green and both mounted current-card

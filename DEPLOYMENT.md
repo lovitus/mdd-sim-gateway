@@ -10,6 +10,20 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-15 PR37 当前卡一次启用入口
+
+`6c0177c` / 完整 CI `38696701616` 及原评审通过，正常合并 `fd1847a`；
+部署工件 `a1755279` 与其完整 tree 相同。只重启 Core，6 个原 Agent 代际恢复，
+其他组件进程、配置及待应用状态保留，维护锁和更新监听器恢复。
+首次维护准入返回 `line_not_drained`，未切换程序，已确认部分租约释放；
+有界只读等待后一次受保护部署成功。首次逐线拒绝原因缺失，不补造原因。
+真实 Chrome 已登录并按 ICCID/Agent 选中目标卡，新保存/启用入口可用。
+一次启用在只读核验处返回 `unknown/reader_provision_response_invalid`；
+读取原回执未重发，独立检测返回 `reader_readback_secure_element_failed`。
+卡仍在场，线路仍为停用草稿；没有继续启用、应用、启动、PIN/eSIM 修改或付费操作。
+新卡启动未验收，需修正 SIM 核验对 eUICC 信息读取的耦合及错误覆盖。
+精确摘要、备份和边界见 [部署回执](https://github.com/lovitus/mdd-sim-gateway/pull/37#issuecomment-6186935747)。
+
 ## 2026-10-14 PR36 新卡配置流程
 
 `df63ab6` / 完整 CI `38543615650` 和原评审通过，正常合并 `8fe8dbe`；
