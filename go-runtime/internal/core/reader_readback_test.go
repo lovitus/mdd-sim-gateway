@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -29,6 +30,7 @@ func (s *readerReadbackStub) ReadReader(_ context.Context, _, _ string, req agen
 		return agentlink.ReaderReadbackResponse{}, s.err
 	}
 	result := s.result
+	result.Scope = req.Scope
 	result.OperationID, result.ProcessGeneration, result.ReaderName, result.CardID, result.SIMSessionGeneration = req.OperationID, req.ProcessGeneration, req.ReaderName, req.CardID, req.SIMSessionGeneration
 	if result.Reader != nil {
 		result.Reader.ReaderName, result.Reader.CardID = req.ReaderName, req.CardID
@@ -221,8 +223,10 @@ func TestUnknownReaderProvisionDoesNotBlockFreshReadOnlyAttempt(t *testing.T) {
 
 func TestReaderProvisionRejectsMissingOrMismatchedFreshSIMIdentity(t *testing.T) {
 	for name, sim := range map[string]*agentlink.ReaderSIMFact{
-		"missing":  nil,
-		"mismatch": {IdentityState: "ready", IMSI: "234100000000002", MCC: "234", MNC: "10"},
+		"missing":      nil,
+		"PIN required": {IdentityState: "pin_required", ErrorCode: "reader_sim_pin_required"},
+		"partial":      {IdentityState: "partial", IMSI: "234100000000001", MCC: "234", ErrorCode: "reader_sim_mnc_length_unavailable"},
+		"mismatch":     {IdentityState: "ready", IMSI: "234100000000002", MCC: "234", MNC: "10"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
@@ -255,5 +259,82 @@ func TestReaderProvisionRejectsMissingOrMismatchedFreshSIMIdentity(t *testing.T)
 				t.Fatalf("receipt=%+v found=%v error=%v", receipt, found, err)
 			}
 		})
+	}
+}
+
+func TestReaderReadbackOutcomePreservesOriginalCauseAndDispatchCertainty(t *testing.T) {
+	for _, kind := range []string{"readback", "provision"} {
+		for _, outcome := range []string{"unknown", "failed", "unsupported"} {
+			t.Run(kind+"/"+outcome, func(t *testing.T) {
+				store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer store.Close()
+				line := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", CardID: "89010000000000000001",
+					HardwareProvisionState: "draft", SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", SMSC: "+447785016005"}}
+				if _, _, err := store.PutExpected(line, 1); err != nil {
+					t.Fatal(err)
+				}
+				code, state := "reader_readback_secure_element_failed", outcome
+				stub := &readerReadbackStub{result: agentlink.ReaderReadbackResponse{State: outcome, ErrorCode: code}}
+				if outcome == "unsupported" {
+					stub.err = agentlink.ErrReaderSIMIdentityUnsupported
+					code, state = "reader_sim_identity_unsupported", "failed"
+				}
+				var handler http.Handler
+				payload := map[string]any{"operation_id": "scoped-outcome", "process_generation": "process-1",
+					"reader_name": "reader-1", "card_id": line.CardID, "sim_session_generation": "session-1"}
+				if outcome == "unsupported" {
+					payload["scope"] = "sim_identity"
+				}
+				if kind == "provision" {
+					payload["schema_version"], payload["line_id"], payload["expected_catalog_revision"] = 1, line.ID, 2
+					handler, err = NewReaderProvisionHandler(stub, store)
+				} else {
+					handler, err = NewReaderReadbackHandler(stub, store)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, _ := json.Marshal(payload)
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(data))))
+				var body map[string]any
+				if json.Unmarshal(response.Body.Bytes(), &body) != nil {
+					t.Fatal(response.Body.String())
+				}
+				if body["error_code"] != code && body["code"] != code {
+					t.Fatalf("READBACK_CAUSE: lost original cause: %s", response.Body.String())
+				}
+				if outcome == "unsupported" && (response.Code != http.StatusConflict || body["not_dispatched"] != true) {
+					t.Fatalf("dispatch certainty: %s", response.Body.String())
+				}
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.SetPathValue("operationID", "scoped-outcome")
+				status := httptest.NewRecorder()
+				linecatalog.NewOperationHandler(store).ServeHTTP(status, req)
+				var saved map[string]any
+				_ = json.Unmarshal(status.Body.Bytes(), &saved)
+				if status.Code != 200 || saved["state"] != state || saved["error_code"] != code {
+					t.Fatalf("READBACK_CAUSE: durable result=%s", status.Body.String())
+				}
+				stored, revision, err := store.GetWithRevision(line.ID)
+				if err != nil || revision != 2 || stored.Enabled || stored.HardwareProvisionState != "draft" {
+					t.Fatal("failed observation promoted catalog")
+				}
+				if outcome == "unsupported" {
+					delete(payload, "scope")
+				} else {
+					payload["scope"] = "sim_identity"
+				}
+				changed, _ := json.Marshal(payload)
+				retry := httptest.NewRecorder()
+				handler.ServeHTTP(retry, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(changed))))
+				if retry.Code != http.StatusConflict || stub.calls != 1 {
+					t.Fatal("existing operation reinterpreted under a different scope")
+				}
+			})
+		}
 	}
 }

@@ -265,6 +265,86 @@ func TestReaderPINStatusReleaseFailureRemainsCredentialFreeAndRetryable(t *testi
 	}
 }
 
+func TestReaderSIMIdentitySkipsSecureElementProbeWithoutWeakeningContinuity(t *testing.T) {
+	for _, scenario := range []string{"scoped", "full", "pin", "partial", "cancel", "removed", "replaced", "iccid", "end"} {
+		t.Run(scenario, func(t *testing.T) {
+			manager, current, _ := metadataRecoveryFixture(t)
+			length := 2
+			if scenario == "partial" {
+				length = 0
+			}
+			card := readerIdentityCard(t, "234100000000001", length, "+447785016005", scenario == "pin", nil)
+			current.card = card
+			oldSIM := current.simIdentity
+			cached := &agentlink.EUICCFact{EID: testEID}
+			current.secureElements = []secureElement{{fact: cached}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			probes := 0
+			original := card.handler
+			card.handler = func(command []byte) ([]byte, error) {
+				if len(command) > 1 && command[1] == 0x70 {
+					probes++
+					return nil, errors.New("secure-element probe unavailable")
+				}
+				value, err := original(command)
+				if scenario == "iccid" && len(command) == 5 && command[1] == 0xB0 && command[4] == 10 {
+					return append(encodeICCID("8944000000000000002"), 0x90, 0), nil
+				}
+				if len(command) == 5 && command[1] == 0xB2 && command[4] == 0x1C {
+					switch scenario {
+					case "cancel":
+						cancel()
+					case "removed":
+						current.active.Store(false)
+					case "replaced":
+						manager.sessions[current.generation] = &session{}
+					}
+				}
+				return value, err
+			}
+			if scenario == "end" {
+				card.endErrAt = 1
+			}
+			request := agentlink.ReaderReadbackRequest{OperationID: "scoped-readback", ProcessGeneration: "process",
+				ReaderName: current.readerName, CardID: current.cardID, SIMSessionGeneration: current.generation, Scope: agentlink.ReaderReadbackSIMIdentity}
+			if scenario == "full" {
+				request.Scope = ""
+			}
+			result := manager.ReadReader(ctx, request)
+			success := scenario == "scoped" || scenario == "pin" || scenario == "partial"
+			if success {
+				if result.State != "applied" || result.Reader == nil || result.Reader.SIM == nil {
+					t.Fatalf("SIM_SCOPE_INDEPENDENT: fresh SIM identity blocked by secure-element probe: %+v", result)
+				}
+				want := "ready"
+				if scenario == "pin" {
+					want = "pin_required"
+				}
+				if scenario == "partial" {
+					want = "partial"
+				}
+				if result.Reader.SIM.IdentityState != want || current.simIdentity == oldSIM || result.ValidateFor(request) != nil {
+					t.Fatalf("fresh scoped result=%+v SIM=%+v", result, result.Reader.SIM)
+				}
+			} else {
+				want := map[string]string{"full": "reader_readback_secure_element_failed", "cancel": "reader_readback_interrupted",
+					"removed": "reader_readback_identity_stale", "replaced": "reader_readback_identity_stale",
+					"iccid": "reader_readback_identity_changed", "end": "reader_readback_transaction_release_failed"}[scenario]
+				if result.State != "unknown" || result.ErrorCode != want || current.simIdentity != oldSIM {
+					t.Fatalf("failed observation committed or lost cause: %+v", result)
+				}
+			}
+			if current.secureElements[0].fact != cached || (result.Reader != nil && (result.Reader.EUICC != nil || len(result.Reader.SecureElements) != 0)) {
+				t.Fatal("SIM read erased retained eUICC metadata or asserted it as fresh")
+			}
+			if scenario == "full" && probes == 0 || scenario != "full" && probes != 0 {
+				t.Fatalf("scope=%q secure probes=%d", request.Scope, probes)
+			}
+		})
+	}
+}
+
 func TestReaderReadbackFailureCodes(t *testing.T) {
 	const cardID = "8944000000000000001"
 	request := agentlink.ReaderReadbackRequest{

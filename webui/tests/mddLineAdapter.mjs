@@ -127,3 +127,24 @@ assert.throws(() => modemProvisionIntent(saved,{...device,sim:{iccid:'changed'}}
 assert.deepEqual(runtimeNetworkSelection([{id:'a',facts:{facts:{vowifi_runtime:{detail:'pdn_family=ipv6; idr=ims'}}}}],'a'),{pdnFamily:'ipv6',responderID:'ims'})
 assert.deepEqual(runtimeNetworkSelection([],'a'),{pdnFamily:'',responderID:''})
 console.log('Customized MDD catalog preservation, stopped-line and PIN preflight contracts passed')
+
+// Exercise the real HTTP adapter; SIM detection must not request eUICC inventory.
+const readerTarget={device_type:'reader',reader:'reader-a',sim:{iccid:'8944000000000000001'},
+  go_device:{agent_id:'agent-a',process_generation:'process-a',reader:{reader_name:'reader-a',session_generation:'session-a',card_id:'8944000000000000001'}}}
+const readRequests=[]
+globalThis.fetch=async(path,options)=>{
+  const body=JSON.parse(options.body);readRequests.push({path,body})
+  return new Response(JSON.stringify({...body,state:'applied',reader:{reader_name:body.reader_name,card_id:body.card_id,
+    session_generation:body.sim_session_generation,card_present:true,sim:{identity_state:'ready',imsi:'234100000000001',mcc:'234',mnc:'10'}}}))
+}
+assert.equal((await lineAPI.detect(readerTarget)).imsi,'234100000000001')
+assert.equal(readRequests[0].body.scope,'sim_identity','SIM_SCOPE_DETECT: detection must not require secure elements')
+await go.readerReadback(readerTarget)
+assert.equal(Object.hasOwn(readRequests[1].body,'scope'),false,'full readback remains the default')
+await go.readerProvisionV1(readerTarget,'line-a',2,'new-operation',{scope:'sim_identity'})
+assert.equal(readRequests[2].body.scope,'sim_identity')
+assert.equal(readRequests[2].body.operation_id,'new-operation')
+const scopedRequest={...pendingProvision,scope:'sim_identity'}
+rememberProvision(scopedRequest,recoveryStorage)
+assert.equal(recalledProvision('line',recoveryStorage).scope,'sim_identity')
+assert.throws(()=>rememberProvision(pendingProvision,recoveryStorage),/request_changed/)

@@ -105,7 +105,7 @@ export default function ProvisionActions({form,device,onSaved,refresh,operationL
     let result
     if (device?.device_type === 'reader') {
       if (device.sim?.iccid !== form.iccid) throw new Error('reader_card_identity_changed')
-      result = await api.readerProvisionV1(device,form.id,form.__catalog_revision)
+      result = await api.readerProvisionV1(device,form.id,form.__catalog_revision,undefined,{scope:'sim_identity'})
     } else {
       if (!proof || proof.identity !== identity) throw new Error('provision_preflight_required')
       const request = {...proof.request,operation_id:crypto.randomUUID(),preflight_operation_id:proof.request.operation_id}
