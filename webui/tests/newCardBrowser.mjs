@@ -25,6 +25,13 @@ try {
   await page.route('**/v1/**',async route=>{
     const request=route.request(), path=new URL(request.url()).pathname
     if (path==='/v1/catalog/lines' && request.method()==='GET') return route.fulfill({json:{revision:2,lines:catalogLines}})
+    if (path==='/v1/system/provider-config' && request.method()==='GET') return route.fulfill({json:{catalog_revision:2,applied_revision:1,pending:true,applying:false}})
+    for(const line of catalogLines){
+      if(request.method()!=='GET')continue
+      if(path===`/v1/lines/${line.id}`)return route.fulfill({json:{line_id:line.id,facts:[{layer:'vowifi_intent',fresh:true,available:false,code:'vowifi_disabled',condition:'inactive'}]}})
+      if(path===`/v1/lines/${line.id}/vowifi/status`)return route.fulfill({status:503,json:{code:'provider_unavailable'}})
+      if(path===`/v1/lines/${line.id}/recovery`)return route.fulfill({json:{line_id:line.id}})
+    }
     if (path==='/v1/catalog/lines/saved-line' && request.method()==='PUT') {
       saveRequested(); await saveReleased
       return route.fulfill({json:{revision:3,line:request.postDataJSON()}})
@@ -114,7 +121,7 @@ try {
   await page.getByRole('button',{name:'Saved SIM editor',exact:true}).click()
   const savedName=page.getByPlaceholder('Telus')
   await savedName.fill('Edited original SIM')
-  await page.getByRole('button',{name:'Save',exact:true}).click()
+  await page.getByRole('button',{name:'Save configuration',exact:true}).click()
   await saveSeen
   await page.getByRole('button',{name:'Replacement SIM editor',exact:true}).click()
   await savedName.fill('Keep replacement draft')

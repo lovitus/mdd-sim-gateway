@@ -1,5 +1,23 @@
 # Branch disposition and integration record
 
+PR37 follow-up source `eeb8472` is retained at
+`archive/2026-10-15/current-card-cancelled-apply-proof`; hosted `38696184712`
+proves cancelled admitted-apply bookkeeping red/green and both mounted current-card
+and adjacent editor journeys green. Exact hosted assets are imported and the
+temporary proof workflow removed. Normal `38694169307` failed on an obsolete Save
+button locator; its fixture now uses the actual label/read contracts without
+weakening assertions. `89967b8` is retained at `current-card-normal1` under the
+same dated archive prefix. The proof branch is evidence only, not a merge queue.
+
+Current-card activation source `35c3cb2` is retained at
+`archive/2026-10-15/current-card-source-proof`; hosted `38693765905` proves the
+three original-review counterexamples red and the corrected mounted journey
+green. The exact hosted UI is imported; the temporary proof workflow is removed.
+Earlier `e7e9ba8` / `38690177573` and cancelled `683fba1` / `38691912859` remain
+at `archive/2026-10-15/current-card-proof1` and `current-card-proof2` respectively.
+These tags preserve evidence, not merge queues. Final normal qualification,
+source approval and production startup acceptance are separate pending gates.
+
 PR36 source `96e7dd9` is retained at
 `archive/2026-10-14/reader-setup-source-approved`; original source review passed.
 Hosted `38542327466` proves the pending-claim behavioral red and complete green
