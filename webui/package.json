@@ -15,6 +15,7 @@
     "test:legacy-surface": "node tests/legacySurfaceContracts.mjs",
     "test:go-call-media": "node tests/goCallMedia.mjs && node tests/goCallStability.mjs && node tests/advancedDiagnostics.mjs",
     "test:communication-browser": "node tests/communicationBrowser.mjs",
+    "test:egress-browser": "node tests/egressBudgetBrowser.mjs",
     "test:vowifi-media": "node tests/vowifiMediaGate.mjs",
     "test:native-incoming-coordinator": "node tests/nativeIncomingCoordinator.mjs",
     "test:update-progress": "node tests/updateProgress.mjs",

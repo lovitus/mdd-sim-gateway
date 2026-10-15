@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
@@ -25,7 +26,61 @@ const maximumDocumentBytes = 1 << 20
 
 var ErrRuntimeConfirmationTimeout = errors.New("country exit runtime confirmation timed out")
 
+type RuntimeConfirmation struct {
+	AttemptID           string                       `json:"attempt_id"`
+	RequestedAttempt    string                       `json:"requested_attempt"`
+	ExecutorID          string                       `json:"executor_id"`
+	ConfigIdentity      string                       `json:"config_identity"`
+	DesiredGeneration   string                       `json:"desired_generation"`
+	RequestedGeneration string                       `json:"requested_generation"`
+	RuntimeConfirmed    bool                         `json:"runtime_confirmed"`
+	ObservedAt          time.Time                    `json:"observed_at"`
+	PendingApply        bool                         `json:"pending_apply"`
+	Ready               bool                         `json:"ready"`
+	Outcome             string                       `json:"outcome"`
+	Exits               map[string]egressstatus.Exit `json:"exits"`
+}
+
+func ReadRuntime(path string) (RuntimeConfirmation, error) {
+	var result RuntimeConfirmation
+	payload, err := readRegular(path)
+	if err != nil {
+		return result, err
+	}
+	if json.Unmarshal(payload, &result) != nil || len(result.DesiredGeneration) != 64 ||
+		len(result.ConfigIdentity) != 64 || result.ExecutorID == "" || !result.RuntimeConfirmed || result.PendingApply ||
+		result.ObservedAt.IsZero() || time.Since(result.ObservedAt) > 2*time.Minute || time.Until(result.ObservedAt) > 5*time.Second {
+		return result, errors.New("country exit runtime is not confirmed")
+	}
+	return result, nil
+}
+
+func WaitForAttempt(ctx context.Context, path string, document Document, timeout time.Duration) (RuntimeConfirmation, error) {
+	if document.AttemptID == "" || len(document.Generation) != 64 {
+		return RuntimeConfirmation{}, errors.New("invalid apply attempt")
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		result, err := ReadRuntime(path)
+		if err == nil && result.RequestedAttempt == document.AttemptID && result.RequestedGeneration == document.Generation &&
+			(result.Outcome == "rolled_back" || result.Outcome == "not_applied" || result.AttemptID == document.AttemptID && result.DesiredGeneration == document.Generation) {
+			return result, nil
+		}
+		select {
+		case <-ctx.Done():
+			return RuntimeConfirmation{}, ctx.Err()
+		case <-deadline.C:
+			return RuntimeConfirmation{}, ErrRuntimeConfirmationTimeout
+		case <-ticker.C:
+		}
+	}
+}
+
 type Document struct {
+	AttemptID            string                                  `json:"attempt_id,omitempty"`
 	RecoverySelections   map[string]egressconfig.RecoveryRequest `json:"recovery_selections,omitempty"`
 	RefreshID            string                                  `json:"refresh_id,omitempty"`
 	ExistingConfigSHA256 string                                  `json:"existing_config_sha256,omitempty"`
@@ -121,7 +176,7 @@ func publish(path string, document Document, uid, gid int, mode os.FileMode) (bo
 	}
 	if current, err := Read(path); err == nil {
 		if current.Generation == document.Generation && current.EgressConfigRevision == document.EgressConfigRevision &&
-			current.CatalogRevision == document.CatalogRevision {
+			current.CatalogRevision == document.CatalogRevision && current.AttemptID == document.AttemptID {
 			return false, nil
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

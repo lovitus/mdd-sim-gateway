@@ -529,6 +529,8 @@ Object.assign(api, {
 	testEgressProfile: (profileID, revision, profile) => j('POST', `/v1/egress/profiles/${encodeURIComponent(profileID)}/test`, profile ? {profile} : {},
 		{ 'If-Match': `"${Number(revision)}"` }, 90000),
   cellularSims: goCellularSIMs,
+  donorBudget: lineID => j('GET', `/v1/lines/${encodeURIComponent(lineID)}/cellular/data/budget`),
+  saveDonorBudget: (lineID, budget) => j('PUT', `/v1/lines/${encodeURIComponent(lineID)}/cellular/data/budget`, budget),
   setLineCountry: async (lineID, country) => {
     const catalog = await j('GET', '/v1/catalog/lines')
     const line = (catalog.lines || []).find(value => String(value.id) === String(lineID))

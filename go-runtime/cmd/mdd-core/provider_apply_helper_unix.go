@@ -117,6 +117,12 @@ func runProviderApplyHelper(arguments []string) error {
 	server := &http.Server{Handler: handlerWithAuth, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	recoveryDone := make(chan struct{})
+	go func() {
+		defer close(recoveryDone)
+		service.resumeEgressAttempts(ctx)
+	}()
+	defer func() { stop(); <-recoveryDone }()
 	result := make(chan error, 1)
 	go func() {
 		err := server.Serve(listener)
@@ -150,11 +156,19 @@ func (service *providerApplyService) EgressStatus(ctx context.Context) (egressco
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return egressconfig.ApplyStatus{}, egressFailure(http.StatusConflict, "egress_desired_invalid", err)
 	}
-	runtimeGeneration, runtimeErr := egressdesired.StatusGeneration(service.settings.ProviderApply.EgressStatusPath)
-	confirmed := runtimeErr == nil && runtimeGeneration == applied.Generation
+	runtime, runtimeErr := egressdesired.ReadRuntime(service.settings.ProviderApply.EgressStatusPath)
+	document, _ := egressdesired.Read(service.settings.ProviderApply.EgressDesiredPath)
+	confirmed := runtimeErr == nil && runtime.DesiredGeneration == applied.Generation && runtime.AttemptID == document.AttemptID
+	var failedCountries []string
+	for country, exit := range runtime.Exits {
+		if !exit.Ready {
+			failedCountries = append(failedCountries, country)
+		}
+	}
 	return egressconfig.ApplyStatus{
-		SchemaVersion:  egressconfig.SchemaVersion,
-		ConfigRevision: configSnapshot.Revision, CatalogRevision: catalogSnapshot.Revision,
+		SchemaVersion:   egressconfig.SchemaVersion,
+		FailedCountries: failedCountries,
+		ConfigRevision:  configSnapshot.Revision, CatalogRevision: catalogSnapshot.Revision,
 		AppliedConfig: applied.ConfigRevision, AppliedCatalog: applied.CatalogRevision,
 		DesiredGeneration: applied.Generation, RuntimeConfirmed: confirmed,
 		Pending:  configSnapshot.Revision != applied.ConfigRevision || catalogSnapshot.Revision != applied.CatalogRevision || !confirmed,
@@ -182,6 +196,18 @@ func (service *providerApplyService) applyEgress(ctx context.Context, configRevi
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_apply_in_progress", nil)
 	}
 	defer service.egressApplying.Store(false)
+	address, err := providerCoreAddress(service.settings.Local.Listen)
+	if err != nil {
+		return result, egressFailure(http.StatusServiceUnavailable, "egress_maintenance_unavailable", err)
+	}
+	if previous, err := service.recoverEgressAttempt(ctx, address); err != nil {
+		return result, err
+	} else if previous != nil {
+		if previous.ConfigRevision == configRevision && previous.CatalogRevision == catalogRevision {
+			return *previous, nil
+		}
+		return result, egressFailure(http.StatusConflict, "egress_previous_apply_recovered", nil)
+	}
 	configSnapshot, err := service.egressSnapshot(ctx)
 	if err != nil {
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusServiceUnavailable, "egress_config_snapshot_unavailable", err)
@@ -196,10 +222,6 @@ func (service *providerApplyService) applyEgress(ctx context.Context, configRevi
 	document, err := egressdesired.Render(configSnapshot, catalogSnapshot, time.Now())
 	if err != nil {
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_desired_render_failed", err)
-	}
-	address, err := providerCoreAddress(service.settings.Local.Listen)
-	if err != nil {
-		return result, egressFailure(http.StatusServiceUnavailable, "egress_maintenance_unavailable", err)
 	}
 	if recoveryRequest != nil {
 		var confirmed *egressconfig.ApplyResult
@@ -225,34 +247,33 @@ func (service *providerApplyService) applyEgress(ctx context.Context, configRevi
 	for _, line := range catalogSnapshot.Lines {
 		drain.LineIDs = append(drain.LineIDs, line.ID)
 	}
+	document.AttemptID = drain.LeaseID
+	attempt, err := service.prepareEgressAttempt(ctx, address, document, drain)
+	if err != nil {
+		return result, egressFailure(http.StatusConflict, "egress_attempt_prepare_failed", err)
+	}
+	drain = attempt.Drain
 	safeToResume := true
+	defer func() {
+		if !safeToResume {
+			resultErr = egressFailure(http.StatusConflict, "egress_apply_unconfirmed_maintenance_retained", resultErr)
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := service.releaseEgressAttempt(cleanup, address, attempt); err != nil {
+			resultErr = egressFailure(http.StatusConflict, "egress_maintenance_resume_unconfirmed", errors.Join(resultErr, err))
+		}
+	}()
 	if len(drain.LineIDs) > 0 {
-		drained, err := providerapply.RequestMaintenance(ctx, address, service.settings.Local.Token, drain, true, nil)
+		_, err := providerapply.RequestMaintenance(ctx, address, service.settings.Local.Token, drain, true, nil)
 		if err != nil {
 			return result, egressFailure(http.StatusConflict, "egress_maintenance_blocked", err)
 		}
-		// Only resume Providers that acknowledged this exact lease. Absent
-		// Providers acquired nothing; a new Provider must never inherit it.
-		drain.LineIDs = nil
-		for _, line := range drained.Lines {
-			if line.Code == "drained" {
-				drain.LineIDs = append(drain.LineIDs, line.LineID)
-			}
-		}
-		defer func() {
-			if len(drain.LineIDs) == 0 {
-				return
-			}
-			if !safeToResume {
-				resultErr = egressFailure(http.StatusConflict, "egress_apply_unconfirmed_maintenance_retained", resultErr)
-				return
-			}
-			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if _, err := providerapply.RequestMaintenance(cleanup, address, service.settings.Local.Token, drain, false, nil); err != nil {
-				resultErr = egressFailure(http.StatusConflict, "egress_maintenance_resume_unconfirmed", errors.Join(resultErr, err))
-			}
-		}()
+	}
+	attempt.Phase = "drained"
+	if err := service.saveEgressAttempt(attempt); err != nil {
+		return result, err
 	}
 	if recoveryRequest != nil {
 		if err := service.validateRecoveryPeers(ctx, address, catalogSnapshot, drain.LeaseID, *recoveryRequest); err != nil {
@@ -282,36 +303,27 @@ func (service *providerApplyService) applyEgress(ctx context.Context, configRevi
 	if err != nil || latestCatalog.Revision != catalogRevision {
 		return result, egressFailure(http.StatusPreconditionFailed, "egress_apply_revision_changed", err)
 	}
+	attempt.Document, attempt.Phase = document, "publishing"
+	if err := service.saveEgressAttempt(attempt); err != nil {
+		return result, err
+	}
 	safeToResume = false
-	changed, err := egressdesired.PublishOwned(service.settings.ProviderApply.EgressDesiredPath, document,
+	_, err = egressdesired.PublishOwned(service.settings.ProviderApply.EgressDesiredPath, document,
 		service.desiredUID, service.gid, 0o640)
 	if err != nil {
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusInternalServerError, "egress_desired_publish_failed", err)
 	}
-	if err := egressdesired.WaitForRuntime(ctx, service.settings.ProviderApply.EgressStatusPath,
-		document.Generation, 30*time.Second, 200*time.Millisecond); err != nil {
-		code := "egress_runtime_confirmation_cancelled"
-		if errors.Is(err, egressdesired.ErrRuntimeConfirmationTimeout) {
-			code = "egress_runtime_confirmation_timeout"
-		}
-		return egressconfig.ApplyResult{}, egressFailure(http.StatusGatewayTimeout, code, err)
+	if err := service.confirmEgressAttempt(ctx, attempt); err != nil {
+		return result, err
 	}
+	safeToResume = true
 	if recoveryRequest != nil {
 		actual, err := egressstatus.Load(service.settings.ProviderApply.EgressStatusPath)
 		if err != nil || actual.DesiredGeneration != document.Generation || !actual.Exits[recoveryRequest.Country].Ready || actual.Exits[recoveryRequest.Country].Node != recoveryRequest.ToNode {
 			return result, egressFailure(http.StatusConflict, "egress_recovery_selection_unconfirmed", err)
 		}
 	}
-	safeToResume = true
-	state := "unchanged"
-	if changed {
-		state = "applied"
-	}
-	return egressconfig.ApplyResult{
-		SchemaVersion: egressconfig.SchemaVersion, ConfigRevision: configRevision,
-		CatalogRevision: catalogRevision, Generation: document.Generation,
-		State: state, Code: "runtime_confirmed",
-	}, nil
+	return attempt.Result, nil
 }
 
 func (service *providerApplyService) egressSnapshot(ctx context.Context) (egressconfig.Snapshot, error) {

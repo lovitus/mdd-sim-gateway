@@ -5,6 +5,7 @@
 package egressexec
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
@@ -33,6 +35,14 @@ type ExitStatus struct {
 }
 
 type Status struct {
+	AttemptID           string                `json:"attempt_id,omitempty"`
+	RequestedAttempt    string                `json:"requested_attempt,omitempty"`
+	Outcome             string                `json:"outcome,omitempty"`
+	ExecutorID          string                `json:"executor_id,omitempty"`
+	ConfigIdentity      string                `json:"config_identity,omitempty"`
+	RuntimeConfirmed    bool                  `json:"runtime_confirmed"`
+	ObservedAt          time.Time             `json:"observed_at"`
+	PendingApply        bool                  `json:"pending_apply,omitempty"`
 	SchemaVersion       int                   `json:"schema_version"`
 	DesiredGeneration   string                `json:"desired_generation,omitempty"`
 	RequestedGeneration string                `json:"requested_generation,omitempty"`
@@ -42,11 +52,14 @@ type Status struct {
 }
 
 type Rendered struct {
-	Config     []byte
-	XrayConfig []byte
-	XrayPorts  []int
-	Status     Status
-	Ports      []int
+	PolicyIdentity  string
+	CountryIdentity map[string]string
+	XrayCountries   map[string]bool
+	Config          []byte
+	XrayConfig      []byte
+	XrayPorts       []int
+	Status          Status
+	Ports           []int
 }
 
 func Render(document egressdesired.Document) (Rendered, error) {
@@ -60,8 +73,13 @@ func RenderAtBase(document egressdesired.Document, portBase int) (Rendered, erro
 func renderAtBase(document egressdesired.Document, portBase int, feeds map[string][]subscriptionNode, running map[string]string) (Rendered, error) {
 	result := Rendered{Status: Status{
 		SchemaVersion: 1, RequestedGeneration: document.Generation,
-		Exits: map[string]ExitStatus{},
+		AttemptID: document.AttemptID,
+		Exits:     map[string]ExitStatus{},
 	}}
+	result.CountryIdentity = map[string]string{}
+	result.XrayCountries = map[string]bool{}
+	policy, _ := json.Marshal(document.Proxy)
+	result.PolicyIdentity = fmt.Sprintf("%x", sha256.Sum256(policy))
 	if (document.Version != 1 && document.Version != 2) || len(document.Generation) != 64 ||
 		portBase < 1024 || portBase+675 > 65535 {
 		return result, errors.New("country exit desired document is invalid")
@@ -96,6 +114,7 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 		status := ExitStatus{HostProxyHost: "127.0.0.1", ProxyPort: countryProxyPort(country, portBase)}
 		profile, mode, err := effectiveProfile(document.Proxy, exit)
 		status.Mode = mode
+		countryBridges := bridges.clone()
 		if err == nil {
 			var built []map[string]any
 			if profile.Type == "existing" {
@@ -106,12 +125,19 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 					// Exact runtime choice, not a rewrite of the user's pin policy.
 					pinned, pinMode = selection.ToNode, "lock"
 				}
-				built, status.Candidates, status.Node, err = subscriptionPoolWithBridges(feeds[exit.ProfileID], exit.Keywords, "exit-"+country, pinned, pinMode, running[country], bridges)
+				built, status.Candidates, status.Node, err = subscriptionPoolWithBridges(feeds[exit.ProfileID], exit.Keywords, "exit-"+country, pinned, pinMode, running[country], countryBridges)
 				status.CandidateCount = len(status.Candidates)
 			} else {
-				built, status.Node, err = renderProfileWithBridges(profile, mode, "exit-"+country, bridges)
+				built, status.Node, err = renderProfileWithBridges(profile, mode, "exit-"+country, countryBridges)
 			}
 			if err == nil {
+				result.XrayCountries[country] = len(countryBridges.outbounds) > len(bridges.outbounds)
+				identity, _ := json.Marshal(struct {
+					Outbounds []map[string]any
+					Xray      []map[string]any
+				}{built, countryBridges.outbounds[len(bridges.outbounds):]})
+				result.CountryIdentity[country] = fmt.Sprintf("%x", sha256.Sum256(identity))
+				bridges = countryBridges
 				outbounds = append(outbounds, built...)
 				inboundTag := "proxy-" + country
 				inbounds = append(inbounds, map[string]any{
@@ -138,7 +164,7 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 	}
 	result.Status.Ready = allReady
 	if !allReady {
-		return result, errors.New("one or more country exits could not be rendered")
+		result.Status.Error = "one or more country exits are unavailable"
 	}
 	config := baseConfig(inbounds, outbounds, rules)
 	payload, err := json.MarshalIndent(config, "", "  ")
@@ -180,6 +206,9 @@ func effectiveProfile(config egressconfig.Config, exit egressconfig.Exit) (egres
 	profile, ok := config.Profiles[exit.ProfileID]
 	if !ok {
 		return profile, "", errors.New("country exit references an unknown profile")
+	}
+	if profile.RuntimeError != "" {
+		return profile, "cellular_sim", errors.New(profile.RuntimeError)
 	}
 	if profile.RuntimeMode == "cellular_sim" {
 		return profile, "cellular_sim", nil

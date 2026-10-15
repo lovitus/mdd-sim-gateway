@@ -38,8 +38,8 @@ export const networkAPI = {
   async refreshEgress(revision = saved?.__revision) {
     if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('egress_revision_missing')
     const result = await go.applyEgress(revision)
-    if (result.config_revision !== revision || !['applied','unchanged'].includes(result.state) || result.code !== 'runtime_confirmed') {
-      throw new Error('egress_runtime_unconfirmed')
+    if (result.config_revision !== revision || !['applied','unchanged','partial'].includes(result.state) || result.code !== 'runtime_confirmed') {
+      throw new Error(result.code && result.code !== 'runtime_confirmed' ? result.code : 'egress_runtime_unconfirmed')
     }
     return result
   },

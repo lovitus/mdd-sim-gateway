@@ -1,0 +1,44 @@
+name: Egress budget behavioral proof (temporary)
+on:
+  push:
+    branches: [codex/egress-donor-recovery-budget]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            providers/vowifi-go/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Native test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev libopencore-amrnb-dev
+      - name: Browser dependencies
+        working-directory: webui
+        run: npm ci
+      - name: Complete focused batch and behavioral counterexamples
+        run: node tools/egress-budget-proof.mjs
+      - name: Generate exact embedded UI
+        working-directory: webui
+        run: MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: egress-budget-proof-${{ github.sha }}
+          path: |
+            egress-proof/
+            webui/browser-evidence/egress-budget/
+            go-runtime/internal/webui/assets/
+          if-no-files-found: error
+          retention-days: 14

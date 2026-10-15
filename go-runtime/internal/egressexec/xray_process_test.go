@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 )
@@ -145,5 +147,91 @@ func TestFailedBridgeRecoveryKeepsHealthySingBoxButDoesNotReportReady(t *testing
 	}
 	if !runner.nextAttempt.After(runner.now()) {
 		t.Fatal("failed recovery omitted backoff")
+	}
+}
+
+func TestUnchangedXrayPairRestoresMissingSingBoxOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(xhttpFixture))
+	}))
+	defer server.Close()
+	document := egressDocument(strings.Repeat("e", 64), "")
+	document.AttemptID = "unchanged-apply"
+	document.Proxy.Profiles["node"] = egressconfig.Profile{Type: "subscription", URL: server.URL, RefreshMinutes: 1}
+	runner, sing, path := newTestExecutor(t, document)
+	xray := &fakeController{}
+	runner.xrayController = xray
+	runner.reconcile(t.Context())
+	before := readExecutorStatus(t, path)
+	if !runner.runtimeReady() {
+		t.Fatal("fixture pair did not activate")
+	}
+	sing.processes[0].running = false
+	runner.reconcile(t.Context())
+	after := readExecutorStatus(t, path)
+	if !runner.runtimeReady() || !after.RuntimeConfirmed || after.PendingApply || after.AttemptID != before.AttemptID ||
+		after.ConfigIdentity != before.ConfigIdentity || sing.starts != 2 || xray.starts != 1 || xray.processes[0].stops != 0 {
+		t.Fatal("unchanged consumer did not recover without replacing its bridge", after)
+	}
+	sing.processes[1].running = false
+	sing.waitErrors = []error{errors.New("consumer listeners unavailable")}
+	sing.stopError = errors.New("consumer stop unconfirmed")
+	runner.reconcile(t.Context())
+	unconfirmed := runner.child
+	runner.reconcile(t.Context())
+	after = readExecutorStatus(t, path)
+	if after.RuntimeConfirmed || after.Ready || runner.runtimeReady() || runner.child != unconfirmed || !unconfirmed.Running() ||
+		sing.starts != 3 || xray.starts != 1 || xray.processes[0].stops != 0 {
+		t.Fatal("unconfirmed consumer was certified or discarded on the next tick", after)
+	}
+	sing.stopError, sing.processes[2].stopError = nil, nil
+	deadline := runner.nextAttempt
+	runner.now = func() time.Time { return deadline.Add(time.Second) }
+	runner.reconcile(t.Context())
+	if !runner.runtimeReady() || !readExecutorStatus(t, path).RuntimeConfirmed || sing.starts != 4 || xray.starts != 1 ||
+		sing.processes[2].running || xray.processes[0].stops != 0 {
+		t.Fatal("confirmed consumer cleanup did not allow scoped recovery")
+	}
+}
+
+func TestDeadXrayAndChangedFeedRequireNewMaintenanceAttempt(t *testing.T) {
+	var mu sync.Mutex
+	feed := xhttpFixture
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = w.Write([]byte(feed))
+	}))
+	defer server.Close()
+	document := egressDocument(strings.Repeat("d", 64), "")
+	document.AttemptID = "initial-apply"
+	document.Proxy.Profiles["node"] = egressconfig.Profile{Type: "subscription", URL: server.URL, RefreshMinutes: 1}
+	document.Proxy.Exits["hk"] = document.Proxy.Exits["gb"]
+	document.Proxy.Exits["gb"] = egressconfig.Exit{Enabled: true, Mode: "direct"}
+	runner, sing, path := newTestExecutor(t, document)
+	xray := &fakeController{}
+	runner.xrayController = xray
+	now := time.Now()
+	runner.now = func() time.Time { return now }
+	runner.reconcile(t.Context())
+	if !runner.runtimeReady() {
+		t.Fatal("fixture pair did not activate")
+	}
+	xray.processes[0].running = false
+	mu.Lock()
+	feed = strings.ReplaceAll(feed, "/transport", "/replacement")
+	mu.Unlock()
+	now = now.Add(2 * time.Minute)
+	runner.reconcile(t.Context())
+	status := readExecutorStatus(t, path)
+	if !status.PendingApply || status.RuntimeConfirmed || !status.Exits["gb"].Ready || status.Exits["hk"].Ready ||
+		sing.starts != 1 || sing.processes[0].stops != 0 {
+		t.Fatalf("dead bridge authorized interruption of healthy country: %+v starts=%d stops=%d", status, sing.starts, sing.processes[0].stops)
+	}
+	document.AttemptID = "explicit-drained-apply"
+	writeEgressDocument(t, runner.settings.DesiredPath, document)
+	runner.reconcile(t.Context())
+	if !runner.runtimeReady() || sing.starts != 2 || !readExecutorStatus(t, path).RuntimeConfirmed {
+		t.Fatal("new maintenance attempt did not apply")
 	}
 }

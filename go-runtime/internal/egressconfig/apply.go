@@ -19,15 +19,16 @@ const (
 )
 
 type ApplyStatus struct {
-	SchemaVersion     int    `json:"schema_version"`
-	ConfigRevision    uint64 `json:"config_revision"`
-	CatalogRevision   uint64 `json:"catalog_revision"`
-	AppliedConfig     uint64 `json:"applied_config_revision"`
-	AppliedCatalog    uint64 `json:"applied_catalog_revision"`
-	DesiredGeneration string `json:"desired_generation,omitempty"`
-	RuntimeConfirmed  bool   `json:"runtime_confirmed"`
-	Pending           bool   `json:"pending"`
-	Applying          bool   `json:"applying"`
+	FailedCountries   []string `json:"failed_countries,omitempty"`
+	SchemaVersion     int      `json:"schema_version"`
+	ConfigRevision    uint64   `json:"config_revision"`
+	CatalogRevision   uint64   `json:"catalog_revision"`
+	AppliedConfig     uint64   `json:"applied_config_revision"`
+	AppliedCatalog    uint64   `json:"applied_catalog_revision"`
+	DesiredGeneration string   `json:"desired_generation,omitempty"`
+	RuntimeConfirmed  bool     `json:"runtime_confirmed"`
+	Pending           bool     `json:"pending"`
+	Applying          bool     `json:"applying"`
 }
 
 type ApplyRequest struct {
@@ -37,12 +38,13 @@ type ApplyRequest struct {
 }
 
 type ApplyResult struct {
-	SchemaVersion   int    `json:"schema_version"`
-	ConfigRevision  uint64 `json:"config_revision"`
-	CatalogRevision uint64 `json:"catalog_revision"`
-	Generation      string `json:"generation"`
-	State           string `json:"state"`
-	Code            string `json:"code"`
+	FailedCountries []string `json:"failed_countries,omitempty"`
+	SchemaVersion   int      `json:"schema_version"`
+	ConfigRevision  uint64   `json:"config_revision"`
+	CatalogRevision uint64   `json:"catalog_revision"`
+	Generation      string   `json:"generation"`
+	State           string   `json:"state"`
+	Code            string   `json:"code"`
 }
 
 type ApplyService interface {

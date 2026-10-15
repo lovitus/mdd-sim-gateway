@@ -46,6 +46,10 @@ func TestSWuOpenFailurePreservesTypedAuthenticationFailure(t *testing.T) {
 	if result.Code != "swu_authentication_failed" || !errors.Is(result, ikev2.ErrNotifyAuthenticationFailed) {
 		t.Fatal("authentication failure lost its identity", result)
 	}
+	eap := errors.Join(ikev2.ErrInvalidAuthResponse, ikev2.ErrEAPFailure)
+	if got := swuOpenFailure(eap); got.Code != "swu_authentication_failed" || !errors.Is(got, ikev2.ErrInvalidAuthResponse) || !errors.Is(got, ikev2.ErrEAPFailure) {
+		t.Fatal("explicit EAP rejection lost its typed authentication classification", got)
+	}
 	for _, cause := range []error{context.DeadlineExceeded, context.Canceled, errors.New("AUTHENTICATION_FAILED text without typed evidence")} {
 		if got := swuOpenFailure(cause); got.Code != "swu_open_failed" || !errors.Is(got, cause) {
 			t.Fatal("untyped error was reclassified", got)

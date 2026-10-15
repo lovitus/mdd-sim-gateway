@@ -605,7 +605,7 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	cellularData, err := cellulardata.New(cellulardata.Config{Context: ctx, Catalog: catalog, Agents: agents, Broker: agentData, Admit: updateAdmission.Enter})
+	cellularData, err := cellulardata.New(cellulardata.Config{Context: ctx, Catalog: catalog, Agents: agents, Broker: agentData, Budgets: egressStore, Admit: updateAdmission.Enter})
 	if err != nil {
 		return err
 	}

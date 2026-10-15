@@ -21,6 +21,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	socks5 "github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/bufferpool"
@@ -44,6 +45,7 @@ type AgentRuntime interface {
 }
 
 type Config struct {
+	Budgets *egressconfig.Store
 	Admit   func() (func(), error)
 	Context context.Context
 	Catalog Catalog
@@ -54,36 +56,44 @@ type Config struct {
 }
 
 type Service struct {
-	config Config
-	ctx    context.Context
-	cancel context.CancelFunc
-	mu     sync.Mutex
-	byLine map[string]*session
-	byID   map[string]*session
-	wait   sync.WaitGroup
+	admission sync.Mutex
+	config    Config
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	byLine    map[string]*session
+	byID      map[string]*session
+	wait      sync.WaitGroup
 }
 
 type session struct {
-	service    *Service
-	id         string
-	lineID     string
-	purpose    string
-	target     agentlink.ModemTarget
-	profile    string
-	username   string
-	password   string
-	expiresAt  time.Time
-	maxBytes   uint64
-	used       atomic.Uint64
-	listener   net.Listener
-	port       int
-	ctx        context.Context
-	cancel     context.CancelFunc
-	mu         sync.Mutex
-	streams    map[string]net.Conn
-	expiryWake chan struct{}
-	stopOnce   sync.Once
-	stopError  error
+	requestedMax uint64
+	usageMu      sync.Mutex
+	recorded     uint64
+	ioWait       sync.WaitGroup
+	stopMu       sync.Mutex
+	stopDone     bool
+	ready        bool
+	service      *Service
+	id           string
+	lineID       string
+	purpose      string
+	target       agentlink.ModemTarget
+	profile      string
+	username     string
+	password     string
+	expiresAt    time.Time
+	maxBytes     uint64
+	used         atomic.Uint64
+	listener     net.Listener
+	port         int
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.Mutex
+	streams      map[string]net.Conn
+	expiryWake   chan struct{}
+	stopOnce     sync.Once
+	stopError    error
 }
 
 type sessionView struct {
@@ -135,6 +145,10 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		default:
 			writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
 		}
+		return
+	}
+	if len(parts) == 6 && parts[5] == "budget" {
+		service.budgetHTTP(response, request, lineID)
 		return
 	}
 	if len(parts) == 7 && parts[5] == "sessions" && request.Method == http.MethodDelete {
@@ -192,11 +206,16 @@ func (service *Service) stopHTTP(response http.ResponseWriter, lineID, sessionID
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_data_session_not_found"})
 		return
 	}
-	current.stop("explicit")
+	if err := current.stop("explicit"); err != nil {
+		writeServiceError(response, err)
+		return
+	}
 	response.WriteHeader(http.StatusNoContent)
 }
 
 func (service *Service) create(ctx context.Context, lineID, purpose, profile string, ttl time.Duration, maxBytes uint64) (*session, error) {
+	service.admission.Lock()
+	defer service.admission.Unlock()
 	if service.config.Admit != nil {
 		done, err := service.config.Admit()
 		if err != nil {
@@ -211,6 +230,9 @@ func (service *Service) create(ctx context.Context, lineID, purpose, profile str
 	cardID := strings.TrimSpace(line.CardID)
 	if cardID == "" {
 		return nil, errors.New("line has no exact cellular modem target")
+	}
+	if err := service.recoverDonor(cardID); err != nil {
+		return nil, err
 	}
 	var target agentlink.ModemTarget
 	if purpose == "manual" {
@@ -248,6 +270,50 @@ func (service *Service) create(ctx context.Context, lineID, purpose, profile str
 	if err != nil {
 		return nil, err
 	}
+	listener, err := net.Listen("tcp", service.config.Listen)
+	if err != nil {
+		return nil, err
+	}
+	requestedMax := maxBytes
+	if service.config.Budgets != nil {
+		targetJSON, _ := json.Marshal(target)
+		budget, err := service.config.Budgets.ReserveDonor(cardID, egressconfig.DonorGrant{SessionID: sessionID,
+			LineID: lineID, Purpose: purpose, Target: targetJSON, MaxBytes: maxBytes})
+		if err != nil {
+			_ = listener.Close()
+			return nil, err
+		}
+		maxBytes = budget.Grant.MaxBytes
+	}
+	_, portText, _ := net.SplitHostPort(listener.Addr().String())
+	port, _ := net.LookupPort("tcp", portText)
+	sessionContext, sessionCancel := context.WithCancel(service.ctx)
+	current := &session{service: service, id: sessionID, lineID: lineID, purpose: purpose,
+		target: target, profile: profile, requestedMax: requestedMax,
+		username: username, password: password, expiresAt: expiresAt, maxBytes: maxBytes,
+		listener: listener, port: port, ctx: sessionContext, cancel: sessionCancel,
+		streams: map[string]net.Conn{}, expiryWake: make(chan struct{}, 1)}
+	// Publish only after taking the lifetime lock: Stop must not settle this
+	// owner before its Prepare request has even been issued.
+	current.stopMu.Lock()
+	service.mu.Lock()
+	if service.byLine[lineID] != nil || service.ctx.Err() != nil {
+		service.mu.Unlock()
+		current.stopMu.Unlock()
+		_ = listener.Close()
+		sessionCancel()
+		// No prepare was sent, so this reservation has no remote owner.
+		if service.config.Budgets != nil {
+			_ = service.config.Budgets.RecordDonor(cardID, sessionID, 0, true, false)
+		}
+		return nil, errors.New("cellular data ownership changed")
+	}
+	service.byLine[lineID], service.byID[sessionID] = current, current
+	service.mu.Unlock()
+	if err := current.ctx.Err(); err != nil {
+		current.stopMu.Unlock()
+		return nil, errors.Join(err, current.stop("cancelled_before_prepare"))
+	}
 	operationContext, cancel := context.WithTimeout(ctx, 45*time.Second)
 	prepared, err := service.config.Agents.ExecuteModemData(operationContext, target.AgentID, target.ProcessGeneration, agentlink.ModemDataRequest{
 		OperationID: operation, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID, CardID: target.CardID,
@@ -257,33 +323,19 @@ func (service *Service) create(ctx context.Context, lineID, purpose, profile str
 	})
 	cancel()
 	if err != nil {
-		service.stopAgent(target, sessionID, purpose)
-		return nil, err
+		current.stopMu.Unlock()
+		return nil, errors.Join(err, current.stop("prepare_failed"))
 	}
-	listener, err := net.Listen("tcp", service.config.Listen)
-	if err != nil {
-		service.stopAgent(target, sessionID, purpose)
-		return nil, err
+	current.mu.Lock()
+	current.profile = prepared.Profile
+	current.ready = true
+	closed := current.ctx.Err() != nil
+	current.mu.Unlock()
+	current.stopMu.Unlock()
+	if closed {
+		return nil, errors.Join(context.Canceled, current.stop("prepare_cancelled"))
 	}
-	_, portText, _ := net.SplitHostPort(listener.Addr().String())
-	port, _ := net.LookupPort("tcp", portText)
-	sessionContext, sessionCancel := context.WithCancel(service.ctx)
-	current := &session{service: service, id: sessionID, lineID: lineID, purpose: purpose,
-		target: target, profile: prepared.Profile,
-		username: username, password: password, expiresAt: expiresAt, maxBytes: maxBytes,
-		listener: listener, port: port, ctx: sessionContext, cancel: sessionCancel,
-		streams: map[string]net.Conn{}, expiryWake: make(chan struct{}, 1)}
-	service.mu.Lock()
-	if service.byLine[lineID] != nil || service.ctx.Err() != nil {
-		service.mu.Unlock()
-		_ = listener.Close()
-		sessionCancel()
-		service.stopAgent(target, sessionID, purpose)
-		return nil, errors.New("cellular data ownership changed")
-	}
-	service.byLine[lineID], service.byID[sessionID] = current, current
 	service.wait.Add(2)
-	service.mu.Unlock()
 	go current.serve()
 	go func() { defer service.wait.Done(); current.watchExpiry() }()
 	return current, nil
@@ -305,8 +357,20 @@ func (service *Service) EnsureOwned(ctx context.Context, lineID, purpose, profil
 		}
 		return created.view(true), nil
 	}
-	if current.purpose != purpose || current.maxBytes != maxBytes || profile != "" && current.profile != profile {
+	current.mu.Lock()
+	ownedProfile, ready := current.profile, current.ready
+	current.mu.Unlock()
+	if current.purpose != purpose || current.requestedMax != maxBytes || profile != "" && ownedProfile != profile {
 		return sessionView{}, errors.New("another cellular data owner is active")
+	}
+	if current.ctx.Err() != nil {
+		if err := current.stop("owner_cleanup"); err != nil {
+			return sessionView{}, err
+		}
+		return service.EnsureOwned(ctx, lineID, purpose, profile, expiresAt, maxBytes, operationID)
+	}
+	if !ready {
+		return sessionView{}, errors.New("cellular data owner is preparing")
 	}
 	if err := current.renew(ctx, operationID, expiresAt); err != nil {
 		return sessionView{}, err
@@ -333,9 +397,8 @@ func (service *Service) Owned(lineID, purpose string) (sessionView, bool) {
 	return current.view(true), true
 }
 
-// ActiveLine reports whether any live cellular data session owns the line.
-// Expired sessions are treated as inactive and are cleaned by the normal
-// expiry path; this method never tears down a session as a side effect.
+// ActiveLine includes preparing and unconfirmed-stop owners. Expiry alone does
+// not release ownership; this read never tears down a session as a side effect.
 func (service *Service) ActiveLine(lineID string) (bool, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
@@ -343,7 +406,7 @@ func (service *Service) ActiveLine(lineID string) (bool, error) {
 	if current == nil {
 		return false, nil
 	}
-	return current.expiresAt.After(service.config.Now().UTC()), nil
+	return true, nil
 }
 
 func (service *Service) OwnedCard(cardID, purpose string) (sessionView, bool) {
@@ -372,8 +435,7 @@ func (service *Service) StopOwned(lineID, sessionID, purpose string) error {
 	if current.lineID != lineID || current.purpose != purpose {
 		return errors.New("cellular data owner changed")
 	}
-	current.stop("owner_stop")
-	return nil
+	return current.stop("owner_stop")
 }
 
 func (service *Service) StopOwnedCard(cardID, sessionID, purpose string) error {
@@ -386,8 +448,7 @@ func (service *Service) StopOwnedCard(cardID, sessionID, purpose string) error {
 	if current.target.CardID != cardID || current.purpose != purpose {
 		return errors.New("cellular data owner changed")
 	}
-	current.stop("owner_stop")
-	return nil
+	return current.stop("owner_stop")
 }
 
 func (service *Service) lineForCard(cardID string) (string, error) {
@@ -418,6 +479,11 @@ func (service *Service) lineForCard(cardID string) (string, error) {
 }
 
 func (current *session) renew(ctx context.Context, operationID string, expiresAt time.Time) error {
+	current.stopMu.Lock()
+	defer current.stopMu.Unlock()
+	if current.ctx.Err() != nil {
+		return errors.New("cellular data owner is closing")
+	}
 	request := agentlink.ModemDataRequest{OperationID: operationID, AttachmentID: current.target.AttachmentID,
 		EquipmentID: current.target.EquipmentID, CardID: current.target.CardID,
 		SIMSessionGeneration: current.target.SIMSessionGeneration,
@@ -568,6 +634,10 @@ type quotaConn struct {
 }
 
 func (conn *quotaConn) Read(buffer []byte) (int, error) {
+	if !conn.beginIO() {
+		return 0, net.ErrClosed
+	}
+	defer conn.session.ioWait.Done()
 	n, err := conn.Conn.Read(buffer)
 	if n > 0 && conn.consume(uint64(n)) != nil {
 		return n, errors.New("cellular data quota exceeded")
@@ -575,17 +645,59 @@ func (conn *quotaConn) Read(buffer []byte) (int, error) {
 	return n, err
 }
 func (conn *quotaConn) Write(payload []byte) (int, error) {
-	if conn.consume(uint64(len(payload))) != nil {
+	if !conn.beginIO() {
+		return 0, net.ErrClosed
+	}
+	defer conn.session.ioWait.Done()
+	current := conn.session
+	current.usageMu.Lock()
+	defer current.usageMu.Unlock()
+	if uint64(len(payload)) > current.maxBytes-current.used.Load() {
+		go current.stop("quota")
 		return 0, errors.New("cellular data quota exceeded")
 	}
-	return conn.Conn.Write(payload)
+	n, err := conn.Conn.Write(payload)
+	if n > 0 {
+		err = errors.Join(err, conn.recordUsageLocked(uint64(n)))
+	}
+	return n, err
 }
 func (conn *quotaConn) consume(size uint64) error {
-	if conn.session.used.Add(size) > conn.session.maxBytes {
-		go conn.session.stop("quota")
-		return errors.New("quota exceeded")
+	current := conn.session
+	current.usageMu.Lock()
+	defer current.usageMu.Unlock()
+	return conn.recordUsageLocked(size)
+}
+
+func (conn *quotaConn) recordUsageLocked(size uint64) error {
+	current := conn.session
+	used := current.used.Load()
+	var quotaErr error
+	if size > current.maxBytes-used {
+		size = current.maxBytes - used
+		quotaErr = errors.New("quota exceeded")
+		go current.stop("quota")
 	}
-	return nil
+	used += size
+	current.used.Store(used)
+	if current.service.config.Budgets != nil && used-current.recorded >= 64<<10 {
+		if err := current.service.config.Budgets.RecordDonor(current.target.CardID, current.id, used, false, false); err != nil {
+			go current.stop("budget_write_failed")
+			return err
+		}
+		current.recorded = used
+	}
+	return quotaErr
+}
+
+func (conn *quotaConn) beginIO() bool {
+	conn.session.mu.Lock()
+	defer conn.session.mu.Unlock()
+	if conn.session.ctx.Err() != nil {
+		return false
+	}
+	conn.session.ioWait.Add(1)
+	return true
 }
 func (conn *quotaConn) Close() error {
 	var err error
@@ -600,15 +712,14 @@ func (conn *quotaConn) Close() error {
 }
 
 func (current *session) stop(_ string) error {
+	current.stopMu.Lock()
+	defer current.stopMu.Unlock()
+	if current.stopDone {
+		return nil
+	}
 	current.stopOnce.Do(func() {
 		current.cancel()
 		_ = current.listener.Close()
-		current.service.mu.Lock()
-		if current.service.byLine[current.lineID] == current {
-			delete(current.service.byLine, current.lineID)
-		}
-		delete(current.service.byID, current.id)
-		current.service.mu.Unlock()
 		current.mu.Lock()
 		streams := make([]net.Conn, 0, len(current.streams))
 		for _, stream := range current.streams {
@@ -620,8 +731,30 @@ func (current *session) stop(_ string) error {
 		for _, stream := range streams {
 			_ = stream.Close()
 		}
-		current.stopError = current.service.stopAgent(current.target, current.id, current.purpose)
+		current.ioWait.Wait()
 	})
+	current.stopError = current.service.stopAgent(current.target, current.id, current.purpose)
+	if current.stopError != nil {
+		return current.stopError
+	}
+	if current.service.config.Budgets != nil {
+		budget, err := current.service.config.Budgets.DonorBudget(current.target.CardID)
+		if err != nil {
+			return err
+		}
+		if budget.Grant != nil {
+			if err := current.service.config.Budgets.RecordDonor(current.target.CardID, current.id, current.used.Load(), true, false); err != nil {
+				return err
+			}
+		}
+	}
+	current.service.mu.Lock()
+	if current.service.byLine[current.lineID] == current {
+		delete(current.service.byLine, current.lineID)
+	}
+	delete(current.service.byID, current.id)
+	current.service.mu.Unlock()
+	current.stopDone = true
 	return current.stopError
 }
 
@@ -645,7 +778,15 @@ func (current *session) view(credentials bool) sessionView {
 	result := sessionView{SessionID: current.id, LineID: current.lineID, Purpose: current.purpose,
 		State: "ready", Profile: current.profile, ListenPort: current.port,
 		ExpiresAt: current.expiresAt, MaxBytes: current.maxBytes, UsedBytes: current.used.Load()}
-	if credentials {
+	if !current.ready {
+		result.State = "preparing"
+		result.ListenPort = 0
+	}
+	if current.ctx.Err() != nil {
+		result.State = "closing"
+		result.ListenPort = 0
+	}
+	if credentials && result.State == "ready" {
 		result.Username, result.Password = current.username, current.password
 	}
 	current.mu.Unlock()
@@ -653,6 +794,8 @@ func (current *session) view(credentials bool) sessionView {
 }
 
 func (service *Service) Close() error {
+	service.admission.Lock()
+	defer service.admission.Unlock()
 	service.cancel()
 	service.mu.Lock()
 	sessions := make([]*session, 0, len(service.byID))
@@ -727,6 +870,16 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 func writeServiceError(response http.ResponseWriter, err error) {
 	status := http.StatusConflict
 	code := "cellular_data_unavailable"
+	switch {
+	case errors.Is(err, egressconfig.ErrDonorOwner):
+		code = "donor_budget_owner_unconfirmed"
+	case errors.Is(err, egressconfig.ErrDonorCommitted):
+		code = "donor_budget_limit_committed"
+	case errors.Is(err, egressconfig.ErrDonorExhausted):
+		code = "donor_budget_exhausted"
+	case errors.Is(err, egressconfig.ErrRevision):
+		code = "donor_budget_revision_changed"
+	}
 	var remote *agentlink.RemoteError
 	if errors.As(err, &remote) {
 		code = remote.Code

@@ -569,6 +569,8 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("DELETE /v1/lines/{lineID}/allowance/query/{queryID}", server.protect(server.allowance))
 	}
 	if server.cellularData != nil {
+		server.mux.Handle("GET /v1/lines/{lineID}/cellular/data/budget", server.protect(server.cellularData))
+		server.mux.Handle("PUT /v1/lines/{lineID}/cellular/data/budget", server.protect(server.cellularData))
 		server.mux.Handle("GET /v1/lines/{lineID}/cellular/data/sessions", server.protect(server.cellularData))
 		server.mux.Handle("POST /v1/lines/{lineID}/cellular/data/sessions", server.protect(server.cellularData))
 		server.mux.Handle("DELETE /v1/lines/{lineID}/cellular/data/sessions/{sessionID}", server.protect(server.cellularData))

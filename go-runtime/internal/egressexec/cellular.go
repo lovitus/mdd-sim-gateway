@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellulardata"
@@ -43,14 +43,18 @@ type cellularLease struct {
 	MaxBytes   uint64    `json:"max_bytes"`
 	UsedBytes  uint64    `json:"used_bytes"`
 	nextRenew  time.Time
+	stopping   bool
 }
 
 type cellularClient struct {
+	mu        sync.Mutex
+	locks     sync.Map // Stable per-profile locks also serialize stop with renewal.
 	base      string
 	tokenPath string
 	http      *http.Client
 	now       func() time.Time
 	leases    map[string]*cellularLease
+	retry     map[string]time.Time
 }
 
 func newCellularClient(coreURL, tokenPath string) (*cellularClient, error) {
@@ -104,11 +108,9 @@ func (client *cellularClient) prepare(ctx context.Context, config egressconfig.C
 		}
 		lease, err := client.ensure(ctx, id, profile)
 		if err != nil {
-			// Egress is one applied runtime. If any required cellular profile
-			// cannot be prepared, sing-box will not start; retaining another
-			// lease would only block modem calls/SMS/policy without an exit.
-			client.stopUnused(ctx, map[string]struct{}{})
-			return copy, fmt.Errorf("cellular profile %s: %w", id, err)
+			profile.RuntimeError = "cellular_lease_unavailable"
+			copy.Profiles[id] = profile
+			continue
 		}
 		copy.Profiles[id] = egressconfig.Profile{Name: profile.Name, Type: "socks5", Server: "127.0.0.1",
 			Port: lease.ListenPort, Username: lease.Username, Password: lease.Password, RuntimeMode: "cellular_sim"}
@@ -118,14 +120,39 @@ func (client *cellularClient) prepare(ctx context.Context, config egressconfig.C
 }
 
 func (client *cellularClient) ensure(ctx context.Context, profileID string, profile egressconfig.Profile) (*cellularLease, error) {
+	lock := client.profileLock(profileID)
+	lock.Lock()
+	defer lock.Unlock()
+	return client.ensureLocked(ctx, profileID, profile)
+}
+
+func (client *cellularClient) profileLock(id string) *sync.Mutex {
+	lock, _ := client.locks.LoadOrStore(id, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
+func (client *cellularClient) ensureLocked(ctx context.Context, profileID string, profile egressconfig.Profile) (*cellularLease, error) {
 	now := client.now().UTC()
-	if current := client.leases[profileID]; current != nil {
-		if current.CardID != profile.SIMICCID {
+	client.mu.Lock()
+	retry, current := client.retry[profileID], client.leases[profileID]
+	client.mu.Unlock()
+	if now.Before(retry) {
+		return nil, errors.New("cellular lease retry pending")
+	}
+	if current != nil {
+		if current.stopping || current.CardID != profile.SIMICCID {
+			closing := *current
+			closing.stopping = true
+			client.mu.Lock()
+			client.leases[profileID] = &closing
+			client.mu.Unlock()
 			if err := client.stop(ctx, current); err != nil {
 				return nil, err
 			}
+			client.mu.Lock()
 			delete(client.leases, profileID)
-		} else if now.Before(current.nextRenew) {
+			client.mu.Unlock()
+		} else if now.Before(current.nextRenew) && now.Before(current.ExpiresAt) {
 			return current, nil
 		}
 	}
@@ -148,10 +175,12 @@ func (client *cellularClient) ensure(ctx context.Context, profileID string, prof
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.http.Do(request)
 	if err != nil {
+		client.deferRetry(profileID)
 		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		client.deferRetry(profileID)
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return nil, errors.New("Core rejected cellular egress lease")
 	}
@@ -164,17 +193,92 @@ func (client *cellularClient) ensure(ctx context.Context, profileID string, prof
 		return nil, errors.New("Core returned an invalid cellular egress lease")
 	}
 	lease.ProfileID, lease.CardID, lease.Purpose, lease.nextRenew = profileID, profile.SIMICCID, purpose, now.Add(cellularRenewEvery)
+	client.mu.Lock()
 	client.leases[profileID] = &lease
+	delete(client.retry, profileID)
+	client.mu.Unlock()
 	return &lease, nil
 }
 
+func (client *cellularClient) deferRetry(profileID string) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.retry == nil {
+		client.retry = map[string]time.Time{}
+	}
+	client.retry[profileID] = client.now().Add(cellularRenewEvery)
+}
+
 func (client *cellularClient) stopUnused(ctx context.Context, used map[string]struct{}) {
-	for id, lease := range client.leases {
+	client.mu.Lock()
+	ids := make([]string, 0, len(client.leases))
+	for id := range client.leases {
+		ids = append(ids, id)
+	}
+	client.mu.Unlock()
+	for _, id := range ids {
 		if _, keep := used[id]; keep {
 			continue
 		}
-		_ = client.stop(ctx, lease)
-		delete(client.leases, id)
+		lock := client.profileLock(id)
+		lock.Lock()
+		client.mu.Lock()
+		lease := client.leases[id]
+		if lease != nil {
+			closing := *lease
+			closing.stopping = true
+			lease = &closing
+			client.leases[id] = lease
+		}
+		client.mu.Unlock()
+		if err := client.stop(ctx, lease); err == nil {
+			client.mu.Lock()
+			delete(client.leases, id)
+			delete(client.retry, id)
+			client.mu.Unlock()
+		}
+		lock.Unlock()
+	}
+}
+
+// Renew existing owners independently of slow sibling prepares, subscriptions
+// and process checks. It neither publishes configs nor starts new profiles.
+func (client *cellularClient) keepAlive(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var pending sync.WaitGroup
+	defer pending.Wait()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		client.mu.Lock()
+		due := map[string]*cellularLease{}
+		for id, lease := range client.leases {
+			if !lease.stopping && !client.now().Before(lease.nextRenew) {
+				due[id] = lease
+			}
+		}
+		client.mu.Unlock()
+		for id, lease := range due {
+			lock := client.profileLock(id)
+			if !lock.TryLock() {
+				continue
+			}
+			pending.Add(1)
+			go func() {
+				defer pending.Done()
+				defer lock.Unlock()
+				client.mu.Lock()
+				current := client.leases[id]
+				client.mu.Unlock()
+				if current == lease && ctx.Err() == nil {
+					_, _ = client.ensureLocked(ctx, id, egressconfig.Profile{SIMICCID: lease.CardID})
+				}
+			}()
+		}
 	}
 }
 

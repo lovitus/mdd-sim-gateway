@@ -135,7 +135,10 @@ func (runner *executor) subscriptions(ctx context.Context, config egressconfig.C
 		}
 		nodes, err := runner.feedCache.load(ctx, profile, runner.now())
 		if err != nil {
-			return nil, err
+			// A failed source has no usable pool. The country renderer records
+			// its failure without suppressing independent profiles.
+			feeds[exit.ProfileID] = nil
+			continue
 		}
 		feeds[exit.ProfileID] = nodes
 	}

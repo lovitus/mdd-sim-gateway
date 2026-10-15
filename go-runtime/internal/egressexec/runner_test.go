@@ -14,9 +14,10 @@ import (
 )
 
 type fakeProcess struct {
-	running bool
-	signals int
-	stops   int
+	running   bool
+	signals   int
+	stops     int
+	stopError error
 }
 
 func (process *fakeProcess) Running() bool { return process != nil && process.running }
@@ -29,6 +30,9 @@ func (process *fakeProcess) Signal(os.Signal) error {
 }
 func (process *fakeProcess) Stop(time.Duration) error {
 	process.stops++
+	if process.stopError != nil {
+		return process.stopError
+	}
 	process.running = false
 	return nil
 }
@@ -38,6 +42,7 @@ type fakeController struct {
 	checks     int
 	waits      int
 	checkError error
+	stopError  error
 	startError error
 	waitErrors []error
 	processes  []*fakeProcess
@@ -52,7 +57,7 @@ func (controller *fakeController) Start(string, string) (managedProcess, error) 
 	if controller.startError != nil {
 		return nil, controller.startError
 	}
-	process := &fakeProcess{running: true}
+	process := &fakeProcess{running: true, stopError: controller.stopError}
 	controller.processes = append(controller.processes, process)
 	return process, nil
 }
@@ -119,26 +124,23 @@ func TestExecutorStartsOnceAndDoesNotReloadUnchangedGeneration(t *testing.T) {
 	}
 }
 
-func TestExecutorRestoresPreviousGenerationAfterFailedReload(t *testing.T) {
+func TestExecutorDoesNotRestoreRevokedPolicyAfterFailedReload(t *testing.T) {
 	first := egressDocument(strings.Repeat("2", 64), "ss://aes-128-gcm:one@192.0.2.2:8388")
 	runner, controller, statusPath := newTestExecutor(t, first)
 	runner.reconcile(context.Background())
-	oldConfig := append([]byte(nil), runner.appliedConfig...)
 	second := egressDocument(strings.Repeat("3", 64), "ss://aes-128-gcm:two@192.0.2.3:8388")
 	writeEgressDocument(t, runner.settings.DesiredPath, second)
 	controller.waitErrors = []error{errors.New("new listeners failed"), nil}
 	runner.reconcile(context.Background())
 	status := readExecutorStatus(t, statusPath)
-	current, err := os.ReadFile(filepath.Join(runner.settings.StateDir, "sing-box.json"))
-	if err != nil || !strings.Contains(status.Error, "previous generation restored") || !status.Ready ||
-		status.DesiredGeneration != first.Generation || status.RequestedGeneration != second.Generation ||
-		runner.applied != first.Generation || controller.starts != 2 || !controller.processes[1].running ||
-		string(current) != string(oldConfig) {
-		t.Fatalf("status=%+v applied=%s starts=%d currentErr=%v", status, runner.applied, controller.starts, err)
+	_, err := os.ReadFile(filepath.Join(runner.settings.StateDir, "sing-box.json"))
+	if !os.IsNotExist(err) || status.Ready || status.Outcome != "unavailable" || !status.RuntimeConfirmed ||
+		status.DesiredGeneration != second.Generation || controller.starts != 2 || controller.processes[1].running {
+		t.Fatalf("revoked policy restored: status=%+v starts=%d currentErr=%v", status, controller.starts, err)
 	}
 	runner.nextAttempt = time.Time{}
 	runner.reconcile(context.Background())
-	if controller.starts != 2 || controller.processes[1].signals != 0 {
+	if controller.starts != 2 || controller.processes[1].signals != 0 || !readExecutorStatus(t, statusPath).RuntimeConfirmed {
 		t.Fatalf("failed desired generation disrupted restored runtime again: starts=%d signals=%d",
 			controller.starts, controller.processes[1].signals)
 	}
@@ -153,6 +155,22 @@ func TestExecutorRecoversCrashedChildWithoutRestartingItsService(t *testing.T) {
 	status := readExecutorStatus(t, statusPath)
 	if controller.starts != 2 || !controller.processes[1].running || !status.Ready || status.DesiredGeneration != document.Generation {
 		t.Fatalf("starts=%d status=%+v", controller.starts, status)
+	}
+}
+
+func TestExecutorUnconfirmedStopCannotConfirmFailClosed(t *testing.T) {
+	document := egressDocument(strings.Repeat("a", 64), "ss://aes-128-gcm:secret@192.0.2.4:8388")
+	runner, controller, statusPath := newTestExecutor(t, document)
+	controller.waitErrors = []error{errors.New("listener check failed")}
+	controller.stopError = errors.New("process did not exit")
+	runner.reconcile(context.Background())
+	status := readExecutorStatus(t, statusPath)
+	if status.RuntimeConfirmed || status.Ready || runner.child == nil || !runner.child.Running() || controller.starts != 1 {
+		t.Fatalf("live unconfirmed process was discarded: status=%+v child=%v starts=%d", status, runner.child, controller.starts)
+	}
+	controller.processes[0].stopError = nil
+	if err := runner.stopPair(); err != nil {
+		t.Fatal(err)
 	}
 }
 

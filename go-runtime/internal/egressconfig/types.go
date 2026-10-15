@@ -25,7 +25,8 @@ type Profile struct {
 	// RuntimeMode preserves the source type after an executor resolves a
 	// durable profile into a temporary loopback transport. It is never
 	// serialized into desired state or exposed as a credential-bearing field.
-	RuntimeMode string `json:"-"`
+	RuntimeMode  string `json:"-"`
+	RuntimeError string `json:"-"`
 }
 
 type Exit struct {
