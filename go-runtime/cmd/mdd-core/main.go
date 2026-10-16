@@ -793,6 +793,9 @@ func run(ctx context.Context, settings config) error {
 		agentMedia.DisconnectAgent(agentID)
 		agentData.DisconnectAgent(agentID)
 		agentUSBIP.DisconnectAgent(agentID)
+	}), adminauth.WithKnownAgentIdentity(func(agentID string) bool {
+		_, present := agents.Status(agentID)
+		return present
 	}))
 	if err != nil {
 		return err

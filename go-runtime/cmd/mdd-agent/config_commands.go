@@ -46,12 +46,20 @@ func defaultConfigPath() (string, error) {
 }
 
 func runConfigCommand(arguments []string, input io.Reader, output io.Writer) error {
+	requested, args, err := explicitConfigPath(arguments)
+	if err != nil {
+		return err
+	}
+	if len(args) == 1 && args[0] == "setup" {
+		_, _, err := runSetupCLI(requested, input, output)
+		return err
+	}
 	path, arguments, err := extractConfigPath(arguments)
 	if err != nil {
 		return err
 	}
 	if len(arguments) == 0 {
-		return errors.New("usage: mdd-agent config <init|show|set>")
+		return errors.New("usage: mdd-agent config <setup|init|show|set>")
 	}
 	switch arguments[0] {
 	case "init":
@@ -88,29 +96,51 @@ func runConfigCommand(arguments []string, input io.Reader, output io.Writer) err
 }
 
 func extractConfigPath(arguments []string) (string, []string, error) {
-	path, err := defaultConfigPath()
+	path, cleaned, err := explicitConfigPath(arguments)
 	if err != nil {
 		return "", nil, err
 	}
+	path, err = resolveConfigPath(path, nil)
+	return path, cleaned, err
+}
+
+func explicitConfigPath(arguments []string) (string, []string, error) {
+	path := ""
+	provided := false
 	cleaned := make([]string, 0, len(arguments))
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		switch {
 		case argument == "-config" || argument == "--config":
+			if provided {
+				return "", nil, errors.New("-config was provided more than once")
+			}
+			provided = true
 			index++
 			if index >= len(arguments) {
 				return "", nil, errors.New("-config requires a path")
 			}
 			path = arguments[index]
 		case strings.HasPrefix(argument, "-config="):
+			if provided {
+				return "", nil, errors.New("-config was provided more than once")
+			}
+			provided = true
 			path = strings.TrimPrefix(argument, "-config=")
 		case strings.HasPrefix(argument, "--config="):
+			if provided {
+				return "", nil, errors.New("-config was provided more than once")
+			}
+			provided = true
 			path = strings.TrimPrefix(argument, "--config=")
 		default:
 			cleaned = append(cleaned, argument)
 		}
 	}
 	path = strings.TrimSpace(path)
+	if !provided {
+		return "", cleaned, nil
+	}
 	if !filepath.IsAbs(path) {
 		return "", nil, errors.New("configuration path must be absolute")
 	}
@@ -155,6 +185,15 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 			return errors.New("tls_sha256 requires one SHA-256 certificate fingerprint")
 		}
 		settings.Agent.TLSFingerprint, err = normalizeSHA256(valueArguments[0])
+		settings.Agent.TLSMode = "pin"
+	case "tls_mode":
+		if len(valueArguments) != 1 || (valueArguments[0] != "system" && valueArguments[0] != "pin") {
+			return errors.New("tls_mode requires system or pin")
+		}
+		settings.Agent.TLSMode = valueArguments[0]
+		if settings.Agent.TLSMode == "system" {
+			settings.Agent.TLSFingerprint = ""
+		}
 	case "sim_pin":
 		if len(valueArguments) != 2 || valueArguments[1] != "--stdin" || !digits(valueArguments[0], 1, 64) {
 			return errors.New("sim_pin requires one numeric ICCID and --stdin")

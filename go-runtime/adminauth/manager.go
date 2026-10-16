@@ -40,6 +40,8 @@ var (
 	ErrAuthentication     = errors.New("authentication required")
 	ErrCSRF               = errors.New("invalid CSRF token")
 	ErrAgentCredential    = errors.New("Agent credential unavailable")
+	ErrEnrollmentConflict = errors.New("Agent enrollment conflicts with an existing identity or retired request")
+	ErrCredentialPending  = errors.New("credential publication is unconfirmed; retry the original enrollment")
 )
 
 const (
@@ -52,33 +54,41 @@ type ThrottleError struct{ RetryAfter int }
 func (failure *ThrottleError) Error() string { return "too many login attempts" }
 
 type credentialFile struct {
-	Version        int               `json:"version"`
-	Username       string            `json:"username"`
-	Salt           string            `json:"salt"`
-	PasswordHash   string            `json:"password_hash"`
-	AgentToken     string            `json:"agent_token"`
-	AgentTokenMode string            `json:"agent_token_mode,omitempty"`
-	AgentTokens    map[string]string `json:"agent_tokens,omitempty"`
+	Version          int                        `json:"version"`
+	Username         string                     `json:"username"`
+	Salt             string                     `json:"salt"`
+	PasswordHash     string                     `json:"password_hash"`
+	AgentToken       string                     `json:"agent_token"`
+	AgentTokenMode   string                     `json:"agent_token_mode,omitempty"`
+	AgentTokens      map[string]string          `json:"agent_tokens,omitempty"`
+	AgentEnrollments map[string]agentEnrollment `json:"agent_enrollments,omitempty"`
+}
+
+type agentEnrollment struct {
+	Request   string `json:"request"`
+	TokenHash string `json:"token_hash"`
 }
 
 type Manager struct {
-	mu               sync.Mutex
-	credentialPath   string
-	username         string
-	salt             []byte
-	passwordHash     []byte
-	agentToken       string
-	agentTokenMode   string
-	agentTokens      map[string]string
-	secureCookies    bool
-	now              func() time.Time
-	sessions         map[[32]byte]sessionRecord
-	failures         map[string][]time.Time
-	persister        CredentialPersister
-	passwordEpoch    uint64
-	loginInFlight    map[string]bool
-	derivePassword   func(password, salt []byte) ([]byte, error)
-	lastFailureSweep time.Time
+	mu                sync.Mutex
+	credentialPath    string
+	username          string
+	salt              []byte
+	passwordHash      []byte
+	agentToken        string
+	agentTokenMode    string
+	agentTokens       map[string]string
+	agentEnrollments  map[string]agentEnrollment
+	pendingEnrollment *credentialFile
+	secureCookies     bool
+	now               func() time.Time
+	sessions          map[[32]byte]sessionRecord
+	failures          map[string][]time.Time
+	persister         CredentialPersister
+	passwordEpoch     uint64
+	loginInFlight     map[string]bool
+	derivePassword    func(password, salt []byte) ([]byte, error)
+	lastFailureSweep  time.Time
 }
 
 type CredentialPersister interface {
@@ -166,9 +176,12 @@ func NewManager(path string, secureCookies bool, now func() time.Time, options .
 	if now == nil {
 		now = time.Now
 	}
+	if err := validateEnrollments(stored.AgentEnrollments); err != nil {
+		return nil, err
+	}
 	manager := &Manager{credentialPath: path, username: username, salt: salt, passwordHash: passwordHash,
 		agentToken: strings.TrimSpace(stored.AgentToken), secureCookies: secureCookies,
-		agentTokenMode: mode, agentTokens: agentTokens,
+		agentTokenMode: mode, agentTokens: agentTokens, agentEnrollments: cloneEnrollments(stored.AgentEnrollments),
 		now: now, sessions: make(map[[32]byte]sessionRecord),
 		failures: make(map[string][]time.Time), persister: &fileCredentialPersister{path: path, uid: -1, gid: -1}}
 	manager.loginInFlight = make(map[string]bool)
@@ -368,10 +381,18 @@ func (manager *Manager) credentialLocked() credentialFile {
 	}
 	return credentialFile{Version: 1, Username: manager.username,
 		Salt: hex.EncodeToString(manager.salt), PasswordHash: hex.EncodeToString(manager.passwordHash),
-		AgentToken: manager.agentToken, AgentTokenMode: manager.agentTokenMode, AgentTokens: tokens}
+		AgentToken: manager.agentToken, AgentTokenMode: manager.agentTokenMode, AgentTokens: tokens,
+		AgentEnrollments: cloneEnrollments(manager.agentEnrollments)}
 }
 
 func (manager *Manager) writeCredentialLocked(stored credentialFile) error {
+	if manager.pendingEnrollment != nil {
+		return ErrCredentialPending
+	}
+	return manager.persistCredentialLocked(stored)
+}
+
+func (manager *Manager) persistCredentialLocked(stored credentialFile) error {
 	payload, err := json.Marshal(stored)
 	if err != nil {
 		return err
