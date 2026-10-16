@@ -1,0 +1,168 @@
+name: Agent setup candidate qualification
+on:
+  push:
+    branches: [codex/agent-first-run-setup]
+permissions:
+  contents: read
+concurrency:
+  group: agent-setup-candidate-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpcsclite-dev libasound2-dev libgl1-mesa-dev xorg-dev expect
+      - name: Exact candidate behavior and compile
+        run: |
+          set -o pipefail
+          go -C go-runtime build -o "$RUNNER_TEMP/mdd-agent" ./cmd/mdd-agent
+          MDD_AGENT_SETUP_BINARY="$RUNNER_TEMP/mdd-agent" go -C go-runtime test -json -race -count=1 -timeout 3m ./adminauth ./agentlink ./internal/pintls ./cmd/mdd-agent | tee setup-green.jsonl
+          go -C go-runtime vet ./adminauth ./internal/pintls ./cmd/mdd-agent ./cmd/mdd-core
+      - name: Pre-feature HTTP and explicit-path counterexamples
+        run: |
+          mkdir "$RUNNER_TEMP/setup-baseline"
+          git archive 6b3fddcd0fb7c3a79709470a9b2ffb888d9d7b23 | tar -x -C "$RUNNER_TEMP/setup-baseline"
+          cp go-runtime/adminauth/enrollment_test.go "$RUNNER_TEMP/setup-baseline/go-runtime/adminauth/"
+          cp go-runtime/cmd/mdd-agent/config_path_regression_test.go "$RUNNER_TEMP/setup-baseline/go-runtime/cmd/mdd-agent/"
+          set +e
+          go -C "$RUNNER_TEMP/setup-baseline/go-runtime" test -json -count=1 -run '^TestAgentSetup' ./adminauth ./cmd/mdd-agent > setup-red.jsonl 2> setup-red.stderr
+          result=$?
+          set -e
+          test "$result" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'; import assert from 'node:assert/strict'
+          const rows=fs.readFileSync('setup-red.jsonl','utf8').trim().split('\n').map(line=>JSON.parse(line))
+          const failures=rows.filter(row=>row.Action==='fail'&&row.Test).map(row=>row.Test).sort()
+          assert.deepEqual(failures,['TestAgentSetupHTTPDelivery','TestAgentSetupLostHelperReceipt','TestAgentSetupPathSelection'].sort())
+          assert.ok(!rows.some(row=>row.Action==='build-fail'))
+          JS
+      - name: Final publication counterexample
+        run: |
+          mkdir "$RUNNER_TEMP/setup-unprotected"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/setup-unprotected"
+          git -C "$RUNNER_TEMP/setup-unprotected" apply "$GITHUB_WORKSPACE/go-runtime/scripts/agent-setup-publication-negative.patch"
+          set +e
+          go -C "$RUNNER_TEMP/setup-unprotected/go-runtime" test -json -count=1 -run '^TestAgentSetupFlow$' ./cmd/mdd-agent > setup-publication-red.jsonl 2> setup-publication-red.stderr
+          result=$?
+          set -e
+          test "$result" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'; import assert from 'node:assert/strict'
+          const rows=fs.readFileSync('setup-publication-red.jsonl','utf8').trim().split('\n').map(line=>JSON.parse(line))
+          assert.ok(rows.some(row=>row.Test==='TestAgentSetupFlow'&&row.Action==='fail'))
+          assert.ok(rows.some(row=>row.Output?.includes('OVERWROTE_NEW_CONFIG')))
+          assert.ok(!rows.some(row=>row.Action==='build-fail'))
+          JS
+      - name: Existing mutation recovery counterexample
+        run: |
+          mkdir "$RUNNER_TEMP/setup-first-candidate"
+          git archive 80f411b5960a8fa27a443264dc9a7262582443e2 | tar -x -C "$RUNNER_TEMP/setup-first-candidate"
+          cp go-runtime/adminauth/enrollment_test.go "$RUNNER_TEMP/setup-first-candidate/go-runtime/adminauth/"
+          set +e
+          go -C "$RUNNER_TEMP/setup-first-candidate/go-runtime" test -json -count=1 -run '^TestAgentSetupLostHelperReceipt$' ./adminauth > setup-mutation-red.jsonl 2> setup-mutation-red.stderr
+          result=$?
+          set -e
+          test "$result" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'; import assert from 'node:assert/strict'
+          const rows=fs.readFileSync('setup-mutation-red.jsonl','utf8').trim().split('\n').map(line=>JSON.parse(line))
+          assert.ok(rows.some(row=>row.Test==='TestAgentSetupLostHelperReceipt'&&row.Action==='fail'))
+          assert.ok(rows.some(row=>row.Output?.includes('EXISTING_MUTATION_RETRY')))
+          assert.ok(!rows.some(row=>row.Action==='build-fail'))
+          JS
+      - name: Agent admission counterexample
+        run: |
+          git -C "$RUNNER_TEMP/setup-unprotected" apply "$GITHUB_WORKSPACE/go-runtime/scripts/agent-setup-admission-negative.patch"
+          set +e
+          go -C "$RUNNER_TEMP/setup-unprotected/go-runtime" test -json -count=1 -run '^TestAgentSetupEnrollmentAdmission$' ./agentlink > setup-admission-red.jsonl 2> setup-admission-red.stderr
+          result=$?
+          set -e
+          test "$result" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'; import assert from 'node:assert/strict'
+          const rows=fs.readFileSync('setup-admission-red.jsonl','utf8').trim().split('\n').map(line=>JSON.parse(line))
+          assert.ok(rows.some(row=>row.Test==='TestAgentSetupEnrollmentAdmission'&&row.Action==='fail'))
+          assert.ok(rows.some(row=>row.Output?.includes('ENROLLMENT_STOLE_INFLIGHT_IDENTITY')))
+          assert.ok(!rows.some(row=>row.Action==='build-fail'))
+          JS
+      - name: Remaining mode and cancellation counterexamples
+        run: |
+          mkdir "$RUNNER_TEMP/setup-second-candidate"
+          git archive 55f7116183bf06162da6212d685effd0a1ce714e | tar -x -C "$RUNNER_TEMP/setup-second-candidate"
+          cp go-runtime/adminauth/enrollment_test.go "$RUNNER_TEMP/setup-second-candidate/go-runtime/adminauth/"
+          cp go-runtime/cmd/mdd-agent/setup_test.go "$RUNNER_TEMP/setup-second-candidate/go-runtime/cmd/mdd-agent/"
+          go -C "$RUNNER_TEMP/setup-second-candidate/go-runtime" build -o "$RUNNER_TEMP/mdd-agent-second-candidate" ./cmd/mdd-agent
+          set +e
+          MDD_AGENT_SETUP_BINARY="$RUNNER_TEMP/mdd-agent-second-candidate" go -C "$RUNNER_TEMP/setup-second-candidate/go-runtime" test -json -count=1 -timeout 2m -run '^TestAgentSetup(Flow|LostHelperReceipt)$' ./adminauth ./cmd/mdd-agent > setup-final-boundaries-red.jsonl 2> setup-final-boundaries-red.stderr
+          result=$?
+          set -e
+          test "$result" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'; import assert from 'node:assert/strict'
+          const rows=fs.readFileSync('setup-final-boundaries-red.jsonl','utf8').trim().split('\n').map(line=>JSON.parse(line))
+          for (const marker of ['PENDING_MODE_REPORTED_NOOP','CLI_CANCEL_STARTED_RUNTIME']) assert.ok(rows.some(row=>row.Output?.includes(marker)),marker)
+          assert.ok(!rows.some(row=>row.Action==='build-fail'))
+          JS
+      - name: Browser and generated assets
+        working-directory: webui
+        run: |
+          npm ci
+          node tests/agentSetupBrowser.mjs
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - name: Pre-feature browser counterexample
+        run: |
+          cp webui/tests/agentSetup* "$RUNNER_TEMP/setup-baseline/webui/tests/"
+          ln -s "$GITHUB_WORKSPACE/webui/node_modules" "$RUNNER_TEMP/setup-baseline/webui/node_modules"
+          cd "$RUNNER_TEMP/setup-baseline/webui"
+          set +e
+          node tests/agentSetupBrowser.mjs > "$GITHUB_WORKSPACE/setup-browser-red.log" 2>&1
+          result=$?
+          set -e
+          test "$result" -ne 0
+          grep -F 'AGENT_ADD_ENTRY' "$GITHUB_WORKSPACE/setup-browser-red.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: agent-setup-candidate-${{ github.sha }}
+          path: |
+            setup-*.jsonl
+            setup-*.stderr
+            setup-*.log
+            webui/browser-evidence/agent-setup
+            webui/.go-dist
+            go-runtime/internal/webui/assets
+          include-hidden-files: true
+          retention-days: 7
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - name: Platform setup and GUI compile
+        working-directory: go-runtime
+        run: go test -tags "gui ci" -count=1 -timeout 3m -run "TestAgentSetup|TestConfigCommands|TestAgentConfig" ./cmd/mdd-agent
