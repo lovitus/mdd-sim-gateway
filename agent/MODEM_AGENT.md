@@ -4,11 +4,44 @@
 `MDD Agent.app`。它按平台能力管理 PC/SC/eUICC reader、蜂窝 Modem、短信、通话、音频和受隔离
 数据；不再存在独立 Card Agent、Python Agent、Android VPCD App 或明文 35963 入口。
 
+## 首次接入（当前候选，待统一验证）
+
+交互终端执行 `mdd-agent` 或 `mdd-agent run`，没有配置时进入向导。
+`mdd-agent config setup -config /absolute/path/config.json` 只配置、不启动硬件；
+GUI 在同一窗口完成配置后进入原平台运行入口。无 TTY 的 run、服务、cron 和 status
+不会等待输入；原 `config init/show/set`、`-config` 和已有 JSON 继续兼容。
+
+- 显式 `-config` 优先，其次 `MDD_AGENT_CONFIG`，最后有界发现。
+  Linux 发现 XDG `mdd-agent/config.json`、`/var/lib/mdd-agent/config.json`、
+  `/etc/mdd-agent/config.json`；macOS 发现用户/系统 Application Support 的
+  `MDD Agent/config.json` 及 `/etc/mdd-agent/config.json`；Windows 发现
+  用户 AppData 的 `MDD Agent/config.json` 和 ProgramData 的 `MDD/GoAgent/config.json`。
+  多份配置要求选择；损坏或无权限不是缺失。默认路径不可写时可以指定自定义绝对路径，
+  不自动提权、覆盖、移动配置。state 始终是配置父目录下的 `state`。
+- 接入方式：Core URL + 网页用户名/密码，或网页“安全 → 添加 Agent”的接入 JSON，
+  或原有 Agent ID/token。管理员密码和临时 session 不落盘；正常结束尝试注销，
+  网络中断时明确报告未确认并依赖原 session 过期。已创建 Agent 不因取消而撤销。
+- 系统 CA 模式严格验证链、主机名和有效期。自签证书使用可信网页/管理渠道提供的
+  leaf DER SHA-256；反向代理地址必须使用代理实际证书，不能误用内部 Core pin。
+  旧配置不含 `tls_mode` 时仍严格使用原 pin；空 pin 不变成系统模式，也没有失败降级。
+- 新配置生成独立 ID 和本机控制密钥，保留 modem/raw 关闭。网页添加不轮换、断开或
+  接管现有 Agent；旧“轮换/撤销/共享回退”仍是明确的独立管理操作。
+- `.setup-pending` 是私有恢复记录，不含管理员密码。回执丢失或最终落盘失败时，
+  使用同一路径继续原接入；不要删除它再生成身份。撤销、轮换或解除 enrollment 后
+  原请求不能恢复权限。已完成配置不再次签发；未完成 init 配置保留原 ID 和控制密钥。
+- 手改 ID/token 后仍需原运行入口重启，不热重载、不自动轮换或清空 state。未完成
+  raw handoff 等现有身份门禁保持。嵌入式手动运行不要求 systemd，保活由用户自行配置。
+
+本批失败清单：显式路径被坏环境变量阻断、文件被并发覆盖、重复创建、helper 已写但
+回执未知、失效凭据被重放、错误 pin/重定向泄密、管理员 session 混入 runtime、GUI
+双 owner、配置换目录绕过旧 state、无 TTY 挂起。使用既有 handler/persister/TLS 与
+浏览器边界验证；候选通过不等于生产已部署或真实硬件业务已验收。
+
 ## 共同安全边界
 
 - 每台主机使用稳定 `agent_id` 和服务端为该 ID 单独签发的随机 token。不要在不同 Agent 间复制 token。
 - token 只通过 stdin 或 GUI 写入 owner-only 配置，不放入 argv、环境日志、Git、镜像或支持包。
-- Agent 在发送 token 前校验服务端证书 pin；不得使用 TOFU、跳过 TLS 校验或先发凭据后验指纹。
+- Agent 在发送 token 前校验服务端证书 pin 或显式系统 CA 策略；不得使用 TOFU、跳过 TLS 校验或先发凭据后验指纹。
 - Core 的 scoped 模式拒绝未知和 revoked Agent ID。轮换或撤销会关闭该 ID 的 control、媒体、数据和
   USB/IP 会话；旧连接不能继续使用。
 - PC/SC reader 名、COM/tty 路径、网卡名和枚举顺序只作 attachment 信息，不能替代 card、equipment、
