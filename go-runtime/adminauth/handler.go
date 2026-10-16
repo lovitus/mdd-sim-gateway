@@ -12,11 +12,22 @@ import (
 )
 
 type Handler struct {
-	manager    *Manager
-	invalidate func(string)
+	manager         *Manager
+	invalidate      func(string)
+	admitEnrollment func(string) (func(), bool)
 }
 
 type HandlerOption func(*Handler) error
+
+func WithAgentEnrollmentAdmission(admit func(string) (func(), bool)) HandlerOption {
+	return func(handler *Handler) error {
+		if admit == nil {
+			return errors.New("known Agent identity lookup is required")
+		}
+		handler.admitEnrollment = admit
+		return nil
+	}
+}
 
 func WithAgentCredentialInvalidator(invalidate func(string)) HandlerOption {
 	return func(handler *Handler) error {
@@ -73,6 +84,21 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		handler.password(response, request)
 	case "/api/auth/agent-credentials":
 		handler.agentCredentials(response, request)
+	case "/api/auth/agent-credentials/check":
+		var input struct {
+			AgentID    string `json:"agent_id"`
+			AgentToken string `json:"agent_token"`
+		}
+		if request.Method != http.MethodPost || decodeStrict(request, &input, 4096) != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+			return
+		}
+		token, err := handler.manager.TokenForAgent(request.Context(), input.AgentID)
+		if err != nil || !secureEqual(token, input.AgentToken) {
+			writeJSON(response, http.StatusUnauthorized, map[string]string{"code": "agent_credential_rejected"})
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]bool{"ok": true})
 	default:
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "auth_route_not_found"})
 	}
@@ -96,15 +122,32 @@ func (handler *Handler) agentCredentials(response http.ResponseWriter, request *
 		return
 	}
 	var input struct {
-		Action  string `json:"action"`
-		AgentID string `json:"agent_id,omitempty"`
-		Mode    string `json:"mode,omitempty"`
+		Action       string `json:"action"`
+		AgentID      string `json:"agent_id,omitempty"`
+		Mode         string `json:"mode,omitempty"`
+		EnrollmentID string `json:"enrollment_id,omitempty"`
 	}
 	if err := decodeStrict(request, &input, 4096); err != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
 		return
 	}
+	if input.Action != "create" && input.EnrollmentID != "" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+		return
+	}
 	switch strings.TrimSpace(input.Action) {
+	case "create":
+		if input.Mode != "" {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+			return
+		}
+		token, err := handler.manager.CreateAgentToken(input.AgentID, input.EnrollmentID, handler.admitEnrollment)
+		if err != nil {
+			handler.writeAgentCredentialError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "agent_id": input.AgentID,
+			"agent_token": token, "credentials": handler.manager.AgentCredentials()})
 	case "issue":
 		if strings.TrimSpace(input.Mode) != "" {
 			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
@@ -169,6 +212,14 @@ func (handler *Handler) agentCredentials(response http.ResponseWriter, request *
 }
 
 func (handler *Handler) writeAgentCredentialError(response http.ResponseWriter, err error) {
+	if errors.Is(err, ErrEnrollmentConflict) {
+		writeJSON(response, http.StatusConflict, map[string]string{"code": "agent_enrollment_conflict"})
+		return
+	}
+	if errors.Is(err, ErrCredentialPending) {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"code": "agent_enrollment_unconfirmed"})
+		return
+	}
 	if errors.Is(err, ErrAgentCredential) {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
 		return

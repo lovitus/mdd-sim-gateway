@@ -1,0 +1,19 @@
+diff --git a/go-runtime/cmd/mdd-agent/setup_files.go b/go-runtime/cmd/mdd-agent/setup_files.go
+--- a/go-runtime/cmd/mdd-agent/setup_files.go
++++ b/go-runtime/cmd/mdd-agent/setup_files.go
+@@ -180,14 +180,11 @@
+ 	if err := settings.validate(); err != nil {
+ 		return config{}, err
+ 	}
+-	if err := tx.checkOriginal(); err != nil {
+-		return config{}, err
+-	}
+ 	payload, err := json.MarshalIndent(settings, "", "  ")
+ 	if err != nil {
+ 		return config{}, err
+ 	}
+-	if err = writeSetupFile(tx.path, append(payload, '\n'), tx.pending.OriginalSHA256 == ""); err != nil {
++	if err = writeSetupFile(tx.path, append(payload, '\n'), false); err != nil {
+ 		return config{}, err
+ 	}
+ 	settings.configPath = tx.path
