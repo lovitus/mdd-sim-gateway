@@ -33,8 +33,11 @@ func (persister *fileCredentialPersister) PersistCredential(payload []byte) erro
 }
 
 type RemoteCredentialPersister struct {
-	token string
-	http  *http.Client
+	token   string
+	http    *http.Client
+	mu      sync.Mutex
+	pending []byte
+	base    string
 }
 
 func NewRemoteCredentialPersister(socketPath, token string) (*RemoteCredentialPersister, error) {
@@ -55,6 +58,19 @@ func (persister *RemoteCredentialPersister) PersistCredential(payload []byte) er
 	if err := validateCredentialDocument(payload); err != nil {
 		return err
 	}
+	persister.mu.Lock()
+	defer persister.mu.Unlock()
+	if persister.pending != nil && !bytes.Equal(persister.pending, payload) {
+		return ErrCredentialPending
+	}
+	if persister.pending == nil {
+		base, err := persister.currentDigest()
+		if err != nil {
+			return err
+		}
+		persister.base = base
+		persister.pending = append([]byte(nil), payload...)
+	}
 	request, err := http.NewRequest(http.MethodPost, "http://mdd-provider-apply"+CredentialPersistencePath,
 		bytes.NewReader(payload))
 	if err != nil {
@@ -62,10 +78,12 @@ func (persister *RemoteCredentialPersister) PersistCredential(payload []byte) er
 	}
 	request.Header.Set(localTokenHeader, persister.token)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("If-Match", `"`+persister.base+`"`)
 	expected := sha256.Sum256(payload)
 	response, err := persister.http.Do(request)
 	if err != nil {
 		if persister.confirmDigest(expected) {
+			persister.pending = nil
 			return nil
 		}
 		return err
@@ -77,31 +95,46 @@ func (persister *RemoteCredentialPersister) PersistCredential(payload []byte) er
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 4097))
 	if response.StatusCode == http.StatusOK && decoder.Decode(&result) == nil &&
 		result.SHA256 == hex.EncodeToString(expected[:]) {
+		persister.pending = nil
 		return nil
 	}
 	if persister.confirmDigest(expected) {
+		persister.pending = nil
 		return nil
 	}
 	return errors.New("privileged administrator credential persistence failed")
 }
 
 func (persister *RemoteCredentialPersister) confirmDigest(expected [sha256.Size]byte) bool {
+	digest, err := persister.currentDigest()
+	return err == nil && digest == hex.EncodeToString(expected[:])
+}
+
+func (persister *RemoteCredentialPersister) currentDigest() (string, error) {
 	request, err := http.NewRequest(http.MethodGet, "http://mdd-provider-apply"+CredentialPersistencePath, nil)
 	if err != nil {
-		return false
+		return "", err
 	}
 	request.Header.Set(localTokenHeader, persister.token)
 	response, err := persister.http.Do(request)
 	if err != nil {
-		return false
+		return "", err
 	}
 	defer response.Body.Close()
 	var result struct {
 		SHA256 string `json:"sha256"`
 	}
-	return response.StatusCode == http.StatusOK &&
-		json.NewDecoder(io.LimitReader(response.Body, 4097)).Decode(&result) == nil &&
-		result.SHA256 == hex.EncodeToString(expected[:])
+	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 4097)).Decode(&result) != nil {
+		return "", errors.New("administrator credential digest unavailable")
+	}
+	if result.SHA256 == "missing" {
+		return result.SHA256, nil
+	}
+	digest, err := hex.DecodeString(result.SHA256)
+	if err != nil || len(digest) != sha256.Size {
+		return "", errors.New("invalid credential digest")
+	}
+	return result.SHA256, nil
 }
 
 type CredentialPersistenceHandler struct {
@@ -135,6 +168,18 @@ func (handler *CredentialPersistenceHandler) ServeHTTP(response http.ResponseWri
 		return
 	}
 	handler.mu.Lock()
+	// Serialize readback with publication. Retrying an unacknowledged write may
+	// publish only against its original base, never against a newer document.
+	if expected := request.Header.Get("If-Match"); expected != "" {
+		current, readErr := os.ReadFile(handler.path)
+		actual, next := sha256.Sum256(current), sha256.Sum256(payload)
+		missingBase := errors.Is(readErr, os.ErrNotExist) && expected == `"missing"`
+		if !missingBase && (readErr != nil || (`"`+hex.EncodeToString(actual[:])+`"` != expected && actual != next)) {
+			handler.mu.Unlock()
+			http.Error(response, "admin_credential_publication_conflict", http.StatusConflict)
+			return
+		}
+	}
 	err = persistCredentialFile(handler.path, payload, handler.uid, handler.gid)
 	handler.mu.Unlock()
 	if err != nil {
@@ -155,6 +200,11 @@ func (handler *CredentialPersistenceHandler) writeCurrentDigest(response http.Re
 		err = errors.Join(err, file.Close())
 	}
 	handler.mu.Unlock()
+	if errors.Is(err, os.ErrNotExist) {
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(map[string]string{"sha256": "missing"})
+		return
+	}
 	if err != nil || len(payload) > maxAuthBytes || validateCredentialDocument(payload) != nil {
 		http.Error(response, "admin_credential_digest_unavailable", http.StatusInternalServerError)
 		return
@@ -194,7 +244,7 @@ func validateCredentialDocument(payload []byte) error {
 			return errors.New("administrator credential document has an invalid Agent token")
 		}
 	}
-	return nil
+	return validateEnrollments(stored.AgentEnrollments)
 }
 
 func persistCredentialFile(path string, payload []byte, uid, gid int) error {

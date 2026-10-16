@@ -1,0 +1,84 @@
+name: Agent setup integration qualification
+on:
+  push:
+    branches: [codex/agent-first-run-refresh-proof]
+permissions:
+  contents: read
+concurrency:
+  group: agent-setup-refresh-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Integrated enrollment and current-card journeys
+        working-directory: webui
+        run: |
+          npm ci
+          node tests/newCardControl.mjs
+          node tests/readerSetupBrowser.mjs
+          node tests/agentSetupBrowser.mjs
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: agent-setup-integrated-ui-${{ github.sha }}
+          path: |
+            webui/browser-evidence/agent-setup
+            webui/browser-evidence/reader-setup
+            webui/.go-dist
+            go-runtime/internal/webui/assets
+          include-hidden-files: true
+          retention-days: 7
+  gui:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Native form regression against the previously qualified form
+        run: |
+          set -euo pipefail
+          path=go-runtime/cmd/mdd-agent/setup_gui.go
+          trap 'git restore --source=HEAD -- "$path"' EXIT
+          git show 1382a64fec6f57402f10e49cfca77da39c7611a8:"$path" > "$path"
+          set +e
+          go -C go-runtime test -tags 'gui ci' -json -count=1 -timeout 2m -run '^TestGUISetupModeShowsOnlyApplicableRows$' ./cmd/mdd-agent > gui-red.jsonl 2> gui-red.stderr
+          result=$?
+          set -e
+          test "$result" -ne 0
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'; import assert from 'node:assert/strict'
+          const rows = fs.readFileSync('gui-red.jsonl','utf8').trim().split('\n').map(JSON.parse)
+          assert.deepEqual(rows.filter(x=>x.Action==='fail'&&x.Test).map(x=>x.Test),['TestGUISetupModeShowsOnlyApplicableRows'])
+          assert.ok(rows.some(x=>x.Output?.includes('ORPHAN_SETUP_ROW')))
+          assert.ok(!rows.some(x=>x.Action==='build-fail'))
+          JS
+      - name: Restored form regression
+        run: |
+          set -euo pipefail
+          go -C go-runtime test -tags 'gui ci' -json -count=1 -timeout 2m -run '^TestGUISetupModeShowsOnlyApplicableRows$' ./cmd/mdd-agent | tee gui-green.jsonl
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: agent-setup-form-proof-${{ github.sha }}
+          path: |
+            gui-*.jsonl
+            gui-*.stderr
+          retention-days: 7
