@@ -31,8 +31,10 @@ func TestRecoverySelectionIsExactWithoutChangingUserPin(t *testing.T) {
 	}
 	request.ToNode = "missing"
 	document.RecoverySelections["gb"] = request
-	if _, err := renderAtBase(document, 22000, map[string][]subscriptionNode{"node": nodes}, nil); err == nil {
-		t.Fatal("missing recovery target fell back")
+	result, err = renderAtBase(document, 22000, map[string][]subscriptionNode{"node": nodes}, nil)
+	failed := result.Status.Exits["gb"]
+	if err != nil || failed.Ready || failed.Error == "" || failed.Node != "" || failed.ProxyPort != 0 || len(result.Ports) != 0 {
+		t.Fatalf("missing recovery target was not isolated without fallback: %+v ports=%v err=%v", failed, result.Ports, err)
 	}
 	request.ToNode = "GB Manchester"
 	document.RecoverySelections["gb"] = request

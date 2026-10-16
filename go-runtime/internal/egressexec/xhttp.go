@@ -95,6 +95,21 @@ type xhttpBridges struct {
 	rules        []map[string]any
 }
 
+func (bridges *xhttpBridges) clone() *xhttpBridges {
+	copy := *bridges
+	copy.ports, copy.reserved = map[string]int{}, map[int]bool{}
+	for key, value := range bridges.ports {
+		copy.ports[key] = value
+	}
+	for key, value := range bridges.reserved {
+		copy.reserved[key] = value
+	}
+	copy.inbounds = append([]map[string]any(nil), bridges.inbounds...)
+	copy.outbounds = append([]map[string]any(nil), bridges.outbounds...)
+	copy.rules = append([]map[string]any(nil), bridges.rules...)
+	return &copy
+}
+
 func (bridges *xhttpBridges) outbound(node subscriptionNode, tag, runtimeID string) (map[string]any, error) {
 	if runtimeID == "" {
 		return nil, errors.New("XHTTP bridge requires a stable runtime identity")

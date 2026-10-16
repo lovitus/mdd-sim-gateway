@@ -3,6 +3,8 @@ package egressexec
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,21 +58,24 @@ func (systemProcessController) WaitReady(ctx context.Context, ports []int, child
 }
 
 type executor struct {
-	settings       Settings
-	controller     processController
-	xrayController processController
-	now            func() time.Time
-	child          managedProcess
-	xrayChild      managedProcess
-	applied        string
-	appliedConfig  []byte
-	appliedResult  Rendered
-	requested      string
-	blocked        string
-	failures       int
-	nextAttempt    time.Time
-	cellular       *cellularClient
-	feedCache      *subscriptionCache
+	identity            string
+	requestedAttempt    string
+	settings            Settings
+	controller          processController
+	xrayController      processController
+	now                 func() time.Time
+	child               managedProcess
+	consumerUnconfirmed bool
+	xrayChild           managedProcess
+	applied             string
+	appliedConfig       []byte
+	appliedResult       Rendered
+	requested           string
+	blocked             string
+	failures            int
+	nextAttempt         time.Time
+	cellular            *cellularClient
+	feedCache           *subscriptionCache
 }
 
 func Run(ctx context.Context, settings Settings) error {
@@ -93,10 +98,16 @@ func Run(ctx context.Context, settings Settings) error {
 	if err != nil {
 		return err
 	}
-	runner := &executor{settings: settings, controller: systemProcessController{}, xrayController: xrayProcessController{}, now: time.Now, cellular: cellular}
+	runner := &executor{identity: rand.Text(), settings: settings, controller: systemProcessController{}, xrayController: xrayProcessController{}, now: time.Now, cellular: cellular}
+	leaseContext, stopRenewal := context.WithCancel(ctx)
+	renewalDone := make(chan struct{})
+	go func() { cellular.keepAlive(leaseContext); close(renewalDone) }()
 	ticker := time.NewTicker(settings.Poll)
 	defer ticker.Stop()
 	defer func() {
+		stopRenewal()
+		<-renewalDone
+		runner.publishFailure("country exit executor stopped", runner.requested, false)
 		if runner.child != nil {
 			_ = runner.child.Stop(5 * time.Second)
 		}
@@ -126,12 +137,22 @@ func (runner *executor) reconcile(ctx context.Context) {
 		runner.publishFailure("desired state unavailable", runner.requested, runner.runtimeReady())
 		return
 	}
-	if document.Generation != runner.requested {
+	if document.Generation != runner.requested || document.AttemptID != runner.requestedAttempt {
 		runner.requested, runner.blocked = document.Generation, ""
+		runner.requestedAttempt = document.AttemptID
 		runner.failures, runner.nextAttempt = 0, time.Time{}
 	}
-	if runner.now().Before(runner.nextAttempt) {
-		return
+	if runner.consumerUnconfirmed {
+		if runner.now().Before(runner.nextAttempt) {
+			return
+		}
+		if runner.child != nil {
+			if err := runner.child.Stop(5 * time.Second); err != nil && runner.child.Running() {
+				runner.fail(document.Generation, "unconfirmed consumer cleanup pending", false)
+				return
+			}
+		}
+		runner.child, runner.consumerUnconfirmed = nil, false
 	}
 	runtimeProxy := document.Proxy
 	var cellularErr error
@@ -139,15 +160,9 @@ func (runner *executor) reconcile(ctx context.Context) {
 		runtimeProxy, cellularErr = runner.cellular.prepare(ctx, document.Proxy)
 	}
 	if cellularErr != nil {
-		if runner.child != nil {
-			_ = runner.child.Stop(5 * time.Second)
-			runner.child = nil
+		if stopErr := runner.stopPair(); stopErr == nil {
+			_ = os.Remove(filepath.Join(runner.settings.StateDir, "sing-box.json"))
 		}
-		if runner.xrayChild != nil {
-			_ = runner.xrayChild.Stop(5 * time.Second)
-			runner.xrayChild = nil
-		}
-		_ = os.Remove(filepath.Join(runner.settings.StateDir, "sing-box.json"))
 		runner.fail(document.Generation, "prepare cellular exit: "+cellularErr.Error(), false)
 		return
 	}
@@ -158,30 +173,40 @@ func (runner *executor) reconcile(ctx context.Context) {
 		runner.fail(document.Generation, feedErr.Error(), runner.runtimeReady())
 		return
 	}
-	if len(feeds) == 0 && document.Generation == runner.applied && (runner.runtimeReady() || !document.Proxy.Enabled) {
-		status := cloneStatus(runner.appliedResult.Status)
-		status.RequestedGeneration, status.Error = document.Generation, ""
-		_ = writeStatus(runner.settings.StatusPath, status)
-		return
-	}
-	if runner.applied != "" && !runner.runtimeReady() {
-		runner.publishFailure("country exit process is not running", document.Generation, false)
-	}
-	if len(feeds) == 0 && document.Generation == runner.blocked && runner.runtimeReady() {
-		return
-	}
 	running := map[string]string{}
 	for country, exit := range runner.appliedResult.Status.Exits {
 		running[country] = exit.Node
 	}
 	result, renderErr := renderAtBase(runtimeDocument, runner.settings.PortBase, feeds, running)
+	policy, _ := json.Marshal(document.Proxy)
+	result.PolicyIdentity = fmt.Sprintf("%x", sha256.Sum256(policy))
 	if renderErr != nil {
 		runner.failWithCandidate(document.Generation, "render country exits: "+renderErr.Error(),
 			runner.runtimeReady(), result.Status)
 		return
 	}
+	if document.Generation == runner.blocked {
+		if previous, err := os.ReadFile(runner.settings.StatusPath); err == nil {
+			var status Status
+			if json.Unmarshal(previous, &status) == nil && status.ExecutorID == runner.identity {
+				runner.invalidateDependencies(&status, result)
+				_ = writeStatus(runner.settings.StatusPath, status)
+			}
+		}
+		return
+	}
+	if runner.applied != "" && !runner.runtimeReady() {
+		runner.publishFailure("country exit process is not running", document.Generation, false)
+	}
 	if runner.runtimeReady() && bytes.Equal(result.Config, runner.appliedConfig) && bytes.Equal(result.XrayConfig, runner.appliedResult.XrayConfig) {
 		runner.commit(document.Generation, result)
+		return
+	}
+	if (runner.child == nil || !runner.child.Running()) && runner.xrayChild != nil && runner.xrayChild.Running() &&
+		bytes.Equal(result.Config, runner.appliedConfig) && bytes.Equal(result.XrayConfig, runner.appliedResult.XrayConfig) {
+		if !runner.now().Before(runner.nextAttempt) {
+			runner.restoreSingBoxConsumer(ctx, document.Generation, result)
+		}
 		return
 	}
 	if runner.child != nil && runner.child.Running() && len(result.XrayConfig) > 0 &&
@@ -190,14 +215,29 @@ func (runner *executor) reconcile(ctx context.Context) {
 		runner.restoreXrayBridge(ctx, document.Generation, result)
 		return
 	}
-	// A feed refresh is not authority to interrupt another line's active
-	// tunnel or call. Keep the applied pool until a new explicit desired
-	// generation is coordinated by the control plane.
-	if len(feeds) > 0 && document.Generation == runner.applied && runner.runtimeReady() {
-		runner.publishFailure("subscription refresh pending coordinated apply", document.Generation, true)
+	// A changed feed OR temporary donor route needs the existing coordinated
+	// apply. A lease renewal alone never authorizes interrupting healthy calls.
+	if document.Generation == runner.applied && document.AttemptID == runner.appliedResult.Status.AttemptID &&
+		(runner.child != nil && runner.child.Running() || runner.xrayChild != nil && runner.xrayChild.Running()) {
+		status := cloneStatus(runner.appliedResult.Status)
+		status.PendingApply, status.RuntimeConfirmed, status.Ready = true, false, false
+		status.Error = "runtime route changed; coordinated apply required"
+		runner.invalidateDependencies(&status, result)
+		for country, exit := range status.Exits {
+			if result.CountryIdentity[country] != runner.appliedResult.CountryIdentity[country] {
+				exit.Ready = false
+				exit.Error = "runtime route changed; coordinated apply required"
+				exit.HostProxyHost, exit.ProxyPort = "", 0
+				status.Exits[country] = exit
+			}
+		}
+		_ = writeStatus(runner.settings.StatusPath, status)
 		return
 	}
-	if !document.Proxy.Enabled {
+	if runner.now().Before(runner.nextAttempt) {
+		return
+	}
+	if !document.Proxy.Enabled || len(result.Ports) == 0 {
 		if err = runner.stopPair(); err != nil {
 			runner.fail(document.Generation, "stop exit processes: "+err.Error(), runner.runtimeReady())
 			return
@@ -221,6 +261,7 @@ func (runner *executor) reconcile(ctx context.Context) {
 	if err != nil {
 		runner.failWithCandidate(document.Generation, "sing-box configuration rejected: "+err.Error(),
 			runner.runtimeReady(), result.Status)
+		runner.confirmRejected(document.Generation, result)
 		return
 	}
 	if err = atomicWrite(currentPath, result.Config, 0o600); err != nil {
@@ -234,8 +275,16 @@ func (runner *executor) reconcile(ctx context.Context) {
 	previousResult := runner.appliedResult
 	previousGeneration := runner.applied
 	if previousWasRunning {
-		err = runner.child.Signal(syscall.SIGHUP)
-	} else {
+		// SIGHUP plus old listening ports cannot prove the candidate loaded.
+		// The apply owner already drained Providers; replace the exact child.
+		err = runner.child.Stop(5 * time.Second)
+		if err != nil && runner.child.Running() {
+			runner.fail(document.Generation, "previous exit process could not stop", true)
+			return
+		}
+		runner.child = nil
+	}
+	if err == nil {
 		runner.child, err = runner.controller.Start(runner.settings.SingBoxPath, currentPath)
 	}
 	if err == nil {
@@ -248,12 +297,12 @@ func (runner *executor) reconcile(ctx context.Context) {
 	}
 
 	activationErr := err
-	if runner.child != nil {
-		_ = runner.child.Stop(5 * time.Second)
-		runner.child = nil
+	if stopErr := runner.stopPair(); stopErr != nil {
+		runner.failWithCandidate(document.Generation, "failed exit process could not stop", false, result.Status)
+		return
 	}
 	rolledBack := false
-	if previousWasRunning && previousGeneration != "" && len(previousConfig) != 0 {
+	if previousWasRunning && previousGeneration != "" && len(previousConfig) != 0 && runner.rollbackAllowed(result) {
 		if restoreErr := atomicWrite(currentPath, previousConfig, 0o600); restoreErr == nil {
 			runner.child, restoreErr = runner.controller.Start(runner.settings.SingBoxPath, currentPath)
 			if restoreErr == nil {
@@ -261,9 +310,9 @@ func (runner *executor) reconcile(ctx context.Context) {
 			}
 			if restoreErr == nil {
 				rolledBack = true
-			} else if runner.child != nil {
-				_ = runner.child.Stop(5 * time.Second)
-				runner.child = nil
+			} else if stopErr := runner.stopPair(); stopErr != nil {
+				runner.failWithCandidate(document.Generation, "failed rollback process could not stop", false, result.Status)
+				return
 			}
 		}
 	}
@@ -271,22 +320,36 @@ func (runner *executor) reconcile(ctx context.Context) {
 		runner.applied, runner.appliedConfig, runner.appliedResult = previousGeneration, previousConfig, previousResult
 		runner.blocked = document.Generation
 		runner.fail(document.Generation, "activate sing-box configuration: "+activationErr.Error()+"; previous generation restored", true)
+		runner.confirmRollback(document.Generation)
 		return
 	}
 	_ = os.Remove(currentPath)
-	runner.failWithCandidate(document.Generation, "activate sing-box configuration: "+activationErr.Error(), false, result.Status)
+	runner.confirmStopped(document.Generation, result, "activate sing-box configuration failed")
 }
 
 func (runner *executor) runtimeReady() bool {
-	return runner.child != nil && runner.child.Running() &&
+	return !runner.consumerUnconfirmed && runner.child != nil && runner.child.Running() &&
 		(len(runner.appliedResult.XrayConfig) == 0 || (runner.xrayChild != nil && runner.xrayChild.Running()))
 }
 
 func (runner *executor) commit(generation string, result Rendered) {
 	result.Status.DesiredGeneration = generation
 	result.Status.RequestedGeneration = generation
-	result.Status.Ready = true
-	result.Status.Error = ""
+	result.Status.RuntimeConfirmed = true
+	result.Status.RequestedAttempt = runner.requestedAttempt
+	result.Status.Outcome = "applied"
+	if !result.Status.Ready {
+		result.Status.Outcome = "partial"
+	}
+	if len(result.Ports) == 0 && !result.Status.Ready {
+		result.Status.Outcome = "unavailable"
+	}
+	if runner.identity == "" {
+		runner.identity = rand.Text()
+	}
+	result.Status.ExecutorID = runner.identity
+	result.Status.ConfigIdentity = fmt.Sprintf("%x", sha256.Sum256(append(append([]byte(nil), result.Config...), result.XrayConfig...)))
+	runner.appliedConfig = append([]byte(nil), result.Config...)
 	runner.applied, runner.appliedResult = generation, result
 	runner.failures, runner.nextAttempt = 0, time.Time{}
 	_ = writeStatus(runner.settings.StatusPath, result.Status)
@@ -314,19 +377,93 @@ func (runner *executor) publishFailure(detail, requested string, runtimeStillRea
 	var status Status
 	if runtimeStillReady && runner.applied != "" {
 		status = cloneStatus(runner.appliedResult.Status)
-		status.Ready = true
 	} else {
 		status = unavailableStatus(runner.appliedResult.Status)
 	}
 	status.SchemaVersion = 1
 	status.RequestedGeneration = requested
+	status.RequestedAttempt = runner.requestedAttempt
+	status.RuntimeConfirmed = false
 	status.Error = detail
 	_ = writeStatus(runner.settings.StatusPath, status)
+}
+
+func (runner *executor) rollbackAllowed(candidate Rendered) bool {
+	previous := runner.appliedResult
+	if previous.PolicyIdentity == "" || previous.PolicyIdentity != candidate.PolicyIdentity {
+		return false
+	}
+	for country, exit := range previous.Status.Exits {
+		if exit.Ready && exit.Mode == "cellular_sim" && previous.CountryIdentity[country] != candidate.CountryIdentity[country] {
+			return false
+		}
+	}
+	return true
+}
+
+func (runner *executor) confirmRollback(requested string) {
+	status := cloneStatus(runner.appliedResult.Status)
+	status.Outcome, status.RuntimeConfirmed = "rolled_back", true
+	status.RequestedGeneration, status.RequestedAttempt = requested, runner.requestedAttempt
+	status.Error = "new configuration failed; previous authorized configuration restored"
+	_ = writeStatus(runner.settings.StatusPath, status)
+}
+
+// Retain healthy countries, but never refresh a dead process/temporary route
+// into a fresh confirmation merely because the previous config file is intact.
+func (runner *executor) invalidateDependencies(status *Status, candidate Rendered) {
+	for country, exit := range status.Exits {
+		if !exit.Ready {
+			continue
+		}
+		if runner.child == nil || !runner.child.Running() ||
+			runner.appliedResult.XrayCountries[country] && (runner.xrayChild == nil || !runner.xrayChild.Running()) ||
+			exit.Mode == "cellular_sim" && runner.appliedResult.CountryIdentity[country] != candidate.CountryIdentity[country] {
+			exit.Ready, exit.HostProxyHost, exit.ProxyPort = false, "", 0
+			exit.Error = "previous runtime dependency is unavailable"
+			status.Exits[country] = exit
+			status.Ready, status.RuntimeConfirmed = false, false
+			status.Error = exit.Error
+		}
+	}
+}
+
+func (runner *executor) confirmRejected(requested string, candidate Rendered) {
+	if !runner.runtimeReady() || runner.appliedResult.Status.ConfigIdentity == "" {
+		runner.confirmStopped(requested, candidate, "configuration rejected; prior runtime unavailable")
+		return
+	}
+	status := cloneStatus(runner.appliedResult.Status)
+	status.Outcome, status.RuntimeConfirmed = "not_applied", true
+	status.RequestedGeneration, status.RequestedAttempt = requested, runner.requestedAttempt
+	status.Error = "configuration rejected; running configuration unchanged"
+	runner.invalidateDependencies(&status, candidate)
+	if !status.RuntimeConfirmed {
+		// This drained attempt cannot confirm revoked donor credentials. Finish
+		// by proving the pair stopped, so the helper can release its exact leases.
+		runner.confirmStopped(requested, candidate, "configuration rejected; prior dependency unavailable")
+		return
+	}
+	runner.blocked = requested
+	_ = writeStatus(runner.settings.StatusPath, status)
+}
+
+func (runner *executor) confirmStopped(generation string, result Rendered, detail string) {
+	if err := runner.stopPair(); err != nil {
+		runner.failWithCandidate(generation, detail, false, result.Status)
+		return
+	}
+	result.Status = unavailableStatus(result.Status)
+	result.Status.Error = detail
+	result.Ports, result.XrayPorts, result.Config, result.XrayConfig = nil, nil, nil, nil
+	runner.commit(generation, result)
+	runner.blocked = generation
 }
 
 func unavailableStatus(previous Status) Status {
 	status := cloneStatus(previous)
 	status.Ready = false
+	status.RuntimeConfirmed = false
 	status.DesiredGeneration = ""
 	for country, exit := range status.Exits {
 		exit.Ready = false
@@ -503,6 +640,7 @@ func waitPorts(ctx context.Context, ports []int, child managedProcess, timeout t
 }
 
 func writeStatus(path string, status Status) error {
+	status.ObservedAt = time.Now().UTC()
 	payload, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		return err

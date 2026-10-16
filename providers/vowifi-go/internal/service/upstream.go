@@ -508,7 +508,7 @@ func pdnFamilyOrder(mode, mcc, mnc string) []string {
 
 func swuOpenFailure(err error) *StageError {
 	code := "swu_open_failed"
-	if errors.Is(err, ikev2.ErrNotifyAuthenticationFailed) {
+	if errors.Is(err, ikev2.ErrNotifyAuthenticationFailed) || errors.Is(err, ikev2.ErrEAPFailure) {
 		code = "swu_authentication_failed"
 	} else if errors.Is(err, outerudp.ErrProxyDNSUnavailable) {
 		code = "swu_proxy_dns_unavailable"

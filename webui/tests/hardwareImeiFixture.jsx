@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { DevicesPage } from '../src/mdd/views/UnifiedPages.jsx'
 import { UnifiedOverview } from '../src/mdd/views/UnifiedPages.jsx'
+import { EgressPage } from '../src/mdd/views/UnifiedPages.jsx'
 import DialogHost from '../src/DialogHost.jsx'
 import { lineForm } from '../src/mdd/lineAdapter.js'
 import { mapGoSnapshot } from '../src/goV1Adapter.js'
@@ -97,6 +98,13 @@ function SetupFixture() {
 }
 
 localStorage.setItem('mdd-language','en')
+function EgressFixture() {
+  const [toast,setToast]=useState('')
+  const [visible,setVisible]=useState(true)
+  return <><DialogHost language="en"/><output aria-label="Toast">{toast}</output>
+    <button onClick={()=>{setVisible(value=>!value);setToast('')}}>{visible?'Leave budget page':'Return to budget page'}</button>
+    {visible&&<EgressPage showToast={setToast}/>}</>
+}
 // The control-flow fixture uses the same root as main.jsx. Keep the existing
 // Hardware readback stress fixture's separate StrictMode coverage unchanged.
-createRoot(document.getElementById('root')).render(<I18nProvider>{new URLSearchParams(location.search).has('setup') ? <SetupFixture/> : new URLSearchParams(location.search).has('flow') ? <FlowFixture/> : <React.StrictMode><Fixture/></React.StrictMode>}</I18nProvider>)
+createRoot(document.getElementById('root')).render(<I18nProvider>{new URLSearchParams(location.search).has('egress') ? <EgressFixture/> : new URLSearchParams(location.search).has('setup') ? <SetupFixture/> : new URLSearchParams(location.search).has('flow') ? <FlowFixture/> : <React.StrictMode><Fixture/></React.StrictMode>}</I18nProvider>)

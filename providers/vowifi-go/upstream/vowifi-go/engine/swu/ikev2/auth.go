@@ -18,6 +18,7 @@ import (
 var (
 	ErrInvalidAuthConfig   = errors.New("invalid ikev2 auth config")
 	ErrInvalidAuthResponse = errors.New("invalid ikev2 auth response")
+	ErrEAPFailure          = errors.New("EAP failure")
 )
 
 const (
@@ -359,7 +360,7 @@ func RunIKE_AUTH_Full(ctx context.Context, cfg FullAuthConfig) (FullAuthResult, 
 			return out, nil
 		}
 		if next.Code == eapaka.CodeFailure {
-			return out, fmt.Errorf("%w: EAP failure", ErrInvalidAuthResponse)
+			return out, fmt.Errorf("%w: %w", ErrInvalidAuthResponse, ErrEAPFailure)
 		}
 		if next.Code != eapaka.CodeRequest {
 			return out, fmt.Errorf("%w: unexpected EAP code %d", ErrInvalidAuthResponse, next.Code)
