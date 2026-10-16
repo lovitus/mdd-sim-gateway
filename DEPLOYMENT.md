@@ -10,6 +10,21 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-16 ARM64 reader Agent
+
+PR40 候选 `5552ebe` 及原评审通过；正常 CI `38860462972` 在一次同源码失败任务重跑后成功。
+首次失败是既有读卡并发测试的槽位等待超时，保留原证据；调度竞争只是待证解释，未修改门禁。
+已验证工件源 `83af89c3` 与候选 tree 同为 `147ebb73`，保留于
+`archive/2026-10-16/linux-arm64-reader-qualified`。PR 尚未合并，不改写 main 的部署版本。
+仅新授权 Debian 13 ARM64 主机安装 PC/SC 依赖及现有 headless Agent；独立 scoped 凭据、
+固定证书 pin、0700/0600 配置和单一 systemd owner，modem/raw USB 关闭。
+06:50-06:51 UTC 本机与 Core 新鲜读回确认唯一当前读卡位置、卡身份、EID 和三个 profile；
+真实 Chrome 设备/eSIM 页面指向新主机。原英国线路配置未变且自动恢复注册，另一英国线路亦就绪。
+这不等于新通话、短信、profile 修改或耐久验收；未输入 PIN，未升级/重启其他 Agent 或服务端。
+Tar SHA-256 `57247e826390fa24343e468f2a449ae30b68e109cab3f1d3b51fd358e5d398c0`；
+实际 Agent 映像 `a8b9edbdc5e36a2d7e320ba5169535560d72af2ee4f678defe06892a6fd0a414`。
+包和实机逐项哈希相符，unit enabled/active，重启次数为 0；原始主机/凭据证据仅存私有记录。
+
 ## 2026-10-16 PR39 出口恢复与借用额度
 
 `d267b527` 原评审及完整 CI `38731761585` 通过，正常合并 `521067f`；

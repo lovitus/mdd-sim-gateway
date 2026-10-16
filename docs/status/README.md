@@ -143,6 +143,14 @@ Acceptance scope / remaining action: The original separate-report/durable-identi
 
 ## Accepted, deferred, excluded and separately prioritized work
 
+### LINUX_ARM64_READER
+
+**State: completed; release relevance: current.** Owner requests existing Agent access for a newly attached reader on ARM64 Linux. Add one native hosted Agent-only build/package and reuse existing manual deployment; no Go, Core, protocol or UI changes. Modem/raw USB stay disabled.
+
+Acceptance scope / remaining action: Original source review approved5552ebe; normal CI38860462972 passed after one unchanged failed-job rerun. Attempt1 liveness reader_readback_test.go174 slot-fill timeout is retained, not an expected negative or proven root cause. Same-tree artifact83af89c3/tree147ebb73 is archived at archive/2026-10-16/linux-arm64-reader-qualified. New Debian13 ARM64 host installed this artifact and PCSC dependencies; actual process hash matches, service enabled/running with0 restarts and private config. Fresh06:50-06:51UTC local/Core reports identify the single live reader/card/EID and three profiles. Actual Chrome device and eSIM pages show the new attachment and preserved existing GB line; both current GB lines have fresh route/tunnel/IMS/messaging readiness. Catalog unchanged, unique new scoped credential only; no existing Agent restart, PIN, profile mutation or paid test. Registration is not call/endurance acceptance. PR40 remains pending merge; this closeout changes documentation only. Nonblocking !grep errexit detail and the unconfirmed fixture scheduling cause remain future CI-maintenance notes, not changes to this qualified artifact.
+
+Resolution (implementation_evidence): Existing Agent-only ARM64 build, original source review, hosted qualification and the owner-requested new-host reader/Core/actual-page readback are complete. This does not qualify ARM64 modem/audio, paid communication, endurance or an unperformed profile mutation.
+
 ### INBOUND_HOLD_CONTINUITY
 
 **State: completed; release relevance: current.** Owner-requested PR23 follow-up: Provider-only live WebSocket silence padding preserves held-call transport without changing Android, Core, protocol, real carrier evidence or client-heartbeat hangup protection.

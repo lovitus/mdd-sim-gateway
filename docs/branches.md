@@ -1,5 +1,13 @@
 # Branch disposition and integration record
 
+PR40 `codex/linux-arm64-reader-agent` is an open, scoped ARM64 reader packaging
+delivery from main6b3fddc, not a runtime rewrite or a main deployment. Reviewed
+candidate5552ebe and same-tree artifact83af89c3 passed CI38860462972 after one
+unchanged failed-job rerun; archive/2026-10-16/linux-arm64-reader-qualified retains
+that source. The one authorized new-host reader deployment and actual Chrome
+acceptance are recorded in DEPLOYMENT.md. Final closeout changes documentation
+only; no new artifact or whole-fleet rollout is implied. Do not restore old branches.
+
 Current delivery: PR39 `d267b527`, original source/final cleanup reviews and normal
 full CI `38731761585` passed, including real Xray namespace coverage. Normal merge
 `521067f` and deployed artifact `756558dc` share tree `5b3ad521`. Core/apply/egress

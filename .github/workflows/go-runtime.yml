@@ -505,6 +505,107 @@ jobs:
     name: Validate full VoWiFi recovery chains
     uses: ./.github/workflows/review-liveness.yml
 
+  release-linux-arm64-agent:
+    name: Build and verify Linux arm64 reader Agent
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+
+      - name: Install native PC/SC dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential binutils pkg-config libpcsclite-dev pcscd
+          test "$(uname -m)" = aarch64
+          test "$(go env GOOS)/$(go env GOARCH)" = linux/arm64
+          pkg-config --exists libpcsclite
+
+      - name: Validate existing headless reader and control paths on ARM64
+        working-directory: go-runtime
+        run: |
+          go test -race -count=1 -timeout 5m ./cmd/mdd-agent ./agentlink \
+            ./internal/agenthost ./internal/agentconnection ./internal/agentcontrol \
+            ./internal/agentsim ./internal/pcscmonitor ./internal/agentpin
+
+      - name: Assemble Agent-only candidate
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-arm64-agent
+        run: |
+          set -euo pipefail
+          payload="$BUILD_ROOT/MDD-Agent-Linux-arm64"
+          mkdir -p "$payload/THIRD-PARTY-LICENSES" "$BUILD_ROOT/tools"
+          go -C go-runtime build -trimpath -o "$payload/mdd-agent" ./cmd/mdd-agent
+          GOBIN="$BUILD_ROOT/tools" go install github.com/google/go-licenses/v2@v2.0.1
+          (
+            cd go-runtime
+            "$BUILD_ROOT/tools/go-licenses" save ./cmd/mdd-agent \
+              --ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+              --ignore github.com/sagernet/sing/common \
+              --ignore github.com/sagernet/sing-mux \
+              --ignore github.com/sagernet/sing-usbip \
+              --save_path "$payload/THIRD-PARTY-LICENSES/go-cli"
+          )
+          cp -R go-runtime/licenses "$payload/THIRD-PARTY-LICENSES/curated"
+          cp LICENSE NOTICE THIRD_PARTY_LICENSES.md "$payload/"
+          cp agent/MODEM_AGENT.md "$payload/"
+          cp go-runtime/release/mdd-agent.service "$payload/"
+          git archive --format=tar HEAD | gzip -n > "$payload/mdd-source.tar.gz"
+          readelf -h "$payload/mdd-agent" > "$payload/ELF.txt"
+          readelf -l "$payload/mdd-agent" >> "$payload/ELF.txt"
+          grep -Eq 'Machine: +AArch64' "$payload/ELF.txt"
+          ldd "$payload/mdd-agent" > "$payload/DYNAMIC-LIBRARIES.txt"
+          ! grep -Fq 'not found' "$payload/DYNAMIC-LIBRARIES.txt"
+          {
+            printf 'source_revision=%s\nsource_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+            printf 'platform=linux/arm64\ncgo=1\nbuild_tags=none\nqualification=reader-only\n'
+            go version
+            getconf GNU_LIBC_VERSION
+            go version -m "$payload/mdd-agent"
+          } > "$payload/BUILD.txt"
+          printf '%s\n' \
+            'MDD Linux ARM64 headless Agent candidate, qualified for PC/SC readers only.' \
+            'Not a Core/Provider release. No installer, audio helper or cellular guard is included.' \
+            'Requires glibc 2.39 or newer, libpcsclite1, pcscd and a compatible reader driver (libccid).' \
+            'See MODEM_AGENT.md for manual deployment; modem and raw USB must remain disabled.' \
+            'The optional unit uses /usr/libexec/mdd/mdd-agent and /var/lib/mdd-agent/config.json.' \
+            'Use one supervisor only. Keep config/state private and retain them across upgrades.' \
+            'Verify the archive checksum and SHA256SUMS before installation.' \
+            > "$payload/README.txt"
+          smoke="$BUILD_ROOT/config-smoke.json"
+          "$payload/mdd-agent" config init --config "$smoke" > "$BUILD_ROOT/config-view.json"
+          jq -e '.ready == false and .settings.agent.modem_enabled == false and
+            (.settings.agent.raw_usb_source_enabled // false) == false and
+            (.settings.agent.raw_usb_importer_enabled // false) == false and
+            .settings.control.listen == "127.0.0.1:35964"' "$BUILD_ROOT/config-view.json"
+          test "$(stat -c %a "$smoke")" = 600
+          (
+            cd "$payload"
+            find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > "$BUILD_ROOT/SHA256SUMS"
+            mv "$BUILD_ROOT/SHA256SUMS" .
+            sha256sum --check SHA256SUMS
+          )
+          tar -C "$BUILD_ROOT" -czf "$BUILD_ROOT/MDD-Agent-Linux-arm64.tar.gz" MDD-Agent-Linux-arm64
+          (cd "$BUILD_ROOT" && sha256sum MDD-Agent-Linux-arm64.tar.gz > MDD-Agent-Linux-arm64.tar.gz.sha256)
+
+      - name: Upload ARM64 reader Agent candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-agent-linux-arm64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/mdd-arm64-agent/MDD-Agent-Linux-arm64.tar.gz
+            ${{ runner.temp }}/mdd-arm64-agent/MDD-Agent-Linux-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
   release-linux-amd64:
     name: Build verified Linux amd64 release
     needs:
