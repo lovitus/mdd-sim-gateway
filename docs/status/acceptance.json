@@ -1421,6 +1421,21 @@
   ],
   "workstreams": [
     {
+      "id": "AGENT_FIRST_RUN_SETUP",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "First-run CLI/GUI setup and Web Add Agent are implemented as one reviewed batch. Existing -config, identities, config-parent/state, modem/raw defaults and isolation remain unchanged. Create-only enrollment uses trusted TLS and private pending recovery; not deployed.",
+      "acceptance": "Original source review closed at ccb5391. Qualified 63476b7 / hosted 38890087413, retained at archive/2026-10-16/agent-first-run-qualified: behavioral red/green, real CLI PTY success and cancellation, browser creation/recovery and desktop/portrait screenshots, Windows/macOS shared setup tests and GUI compile passed. Hosted embedded assets imported; temporary proof removed. Normal full CI is tracked by the delivery PR. Actual native Fyne interaction and production credential/hardware acceptance remain unverified.",
+      "evidence": [
+        "agent/MODEM_AGENT.md",
+        "go-runtime/adminauth/enrollment.go",
+        "go-runtime/cmd/mdd-agent/setup.go",
+        "go-runtime/cmd/mdd-agent/setup_test.go",
+        "webui/tests/agentSetupBrowser.mjs",
+        "docs/branches.md"
+      ]
+    },
+    {
       "id": "EGRESS_DONOR_RECOVERY",
       "state": "needs_verification",
       "releaseRelevance": "current",

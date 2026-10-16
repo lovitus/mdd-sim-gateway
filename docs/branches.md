@@ -1,5 +1,14 @@
 # Branch disposition and integration record
 
+Active candidate: `codex/agent-first-run-setup`, one batch from `6b3fddc`;
+not merged or deployed. Source review closed at `ccb5391`, qualified `63476b7`
+passed hosted `38890087413`. Exact proof is retained at
+`archive/2026-10-16/agent-first-run-qualified`; earlier
+`archive/agent-setup-candidate-*` tags are evidence, not merge queues.
+Delivery imports those hosted UI assets and removes temporary proofs. Normal
+full CI belongs to the delivery PR; native GUI and field acceptance remain open.
+PR40's ARM64 packaging branch and existing production receipts are unchanged.
+
 Current delivery: PR39 `d267b527`, original source/final cleanup reviews and normal
 full CI `38731761585` passed, including real Xray namespace coverage. Normal merge
 `521067f` and deployed artifact `756558dc` share tree `5b3ad521`. Core/apply/egress

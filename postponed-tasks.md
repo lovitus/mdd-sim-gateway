@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### AGENT_FIRST_RUN_SETUP
+
+**State: needs_verification; release relevance: current.** First-run CLI/GUI setup and Web Add Agent are implemented as one reviewed batch. Existing -config, identities, config-parent/state, modem/raw defaults and isolation remain unchanged. Create-only enrollment uses trusted TLS and private pending recovery; not deployed.
+
+Acceptance scope / remaining action: Original source review closed at ccb5391. Qualified 63476b7 / hosted 38890087413, retained at archive/2026-10-16/agent-first-run-qualified: behavioral red/green, real CLI PTY success and cancellation, browser creation/recovery and desktop/portrait screenshots, Windows/macOS shared setup tests and GUI compile passed. Hosted embedded assets imported; temporary proof removed. Normal full CI is tracked by the delivery PR. Actual native Fyne interaction and production credential/hardware acceptance remain unverified.
+
 ### EGRESS_DONOR_RECOVERY
 
 **State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.
