@@ -53,6 +53,7 @@ type config struct {
 		ServerURL                 string `json:"server_url"`
 		ServerToken               string `json:"server_token"`
 		TLSFingerprint            string `json:"tls_sha256"`
+		TLSMode                   string `json:"tls_mode,omitempty"`
 		// advertise_host is retained for compatibility with legacy Shadow
 		// configuration files; Go Agent routing uses the authenticated server
 		// connection and never trusts this display-only value.
@@ -92,6 +93,8 @@ func main() {
 	if len(arguments) == 0 {
 		if command := defaultLaunchCommand(); command != "" {
 			arguments = []string{command}
+		} else if interactiveTerminal(os.Stdin) {
+			arguments = []string{"run"}
 		}
 	}
 	if len(arguments) == 0 {
@@ -132,15 +135,36 @@ func main() {
 		return
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
-	defaultPath, err := defaultConfigPath()
+	requested, flagArguments, err := explicitConfigPath(arguments[1:])
+	if err != nil {
+		fatalf("parse config path: %v", err)
+	}
+	if err := flags.Parse(flagArguments); err != nil {
+		fatalf("parse command: %v", err)
+	}
+	if command == "gui" {
+		if err := runGUI(config{}, requested); err != nil {
+			fatalf("gui: %v", err)
+		}
+		return
+	}
+	var choose func([]configCandidate) (string, error)
+	interactiveRun := command == "run" && os.Getenv("INVOCATION_ID") == "" && interactiveTerminal(os.Stdin)
+	if interactiveRun {
+		ui, _ := newSetupTerminal(os.Stdin, os.Stdout)
+		choose = ui.choose
+	}
+	configPath, err := resolveConfigPath(requested, choose)
 	if err != nil {
 		fatalf("resolve config path: %v", err)
 	}
-	configPath := flags.String("config", defaultPath, "path to the 0600 Agent JSON configuration")
-	if err := flags.Parse(arguments[1:]); err != nil {
-		fatalf("parse command: %v", err)
+	settings, err := loadConfig(configPath)
+	if errors.Is(err, os.ErrNotExist) && interactiveRun {
+		settings, configPath, err = runSetupCLI(requested, os.Stdin, os.Stdout)
+		if err == nil {
+			fmt.Fprintln(os.Stdout, "Starting Agent using the saved configuration.")
+		}
 	}
-	settings, err := loadConfig(*configPath)
 	if err != nil {
 		fatalf("load config: %v", err)
 	}
@@ -163,18 +187,12 @@ func main() {
 		}
 		return
 	}
-	if command == "gui" {
-		if err := runGUI(settings, *configPath); err != nil {
-			fatalf("gui: %v", err)
-		}
-		return
-	}
 	if command == "service" || strings.HasPrefix(command, "service-") {
 		if command == "service-restart" {
 			deadline := time.AfterFunc(90*time.Second, func() { os.Exit(1) })
 			defer deadline.Stop()
 		}
-		if err := runOSService(command, *configPath, settings, os.Stdout); err != nil {
+		if err := runOSService(command, configPath, settings, os.Stdout); err != nil {
 			fatalf("%s: %v", command, err)
 		}
 		return
@@ -324,7 +342,7 @@ func (settings *config) validate() error {
 			return errors.New("PIN revisions must match configured ICCIDs and contain 16 random bytes")
 		}
 	}
-	if _, err := pintls.NewHTTPClient(settings.Agent.ServerURL, settings.Agent.TLSFingerprint, 10*time.Second); err != nil {
+	if _, err := pintls.NewPolicyHTTPClient(settings.Agent.ServerURL, settings.Agent.TLSMode, settings.Agent.TLSFingerprint, 10*time.Second); err != nil {
 		return err
 	}
 	if _, err := agentcontrol.NewClient("http://"+settings.Control.Listen, settings.Control.Token, nil); err != nil {
@@ -339,7 +357,7 @@ func (settings *config) validate() error {
 }
 
 func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
-	httpClient, err := pintls.NewHTTPClient(settings.Agent.ServerURL, settings.Agent.TLSFingerprint, 10*time.Second)
+	httpClient, err := pintls.NewPolicyHTTPClient(settings.Agent.ServerURL, settings.Agent.TLSMode, settings.Agent.TLSFingerprint, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
