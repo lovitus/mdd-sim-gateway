@@ -1,13 +1,15 @@
 # Branch disposition and integration record
 
-Current candidate: `codex/egress-donor-recovery-budget` from `b9e44e8`, one
-delivery batch. Original source review `88d5b36` passed; the only subsequent test
-fixture correction uses the existing scoped-token generator. Hosted proof
-`a82a9df` / `38730592952` passed behavioral counterexamples, restored focused
-race suites and mounted budget journeys. Exact hosted UI imported; temporary
-proof removed. Tag `archive/2026-10-15/egress-budget-qualified` retains proof,
-not a merge queue. Normal full CI, final cleanup review and deployment pending.
-Real Xray/namespace coverage is deferred to normal CI, not credited to the proof.
+Current delivery: PR39 `d267b527`, original source/final cleanup reviews and normal
+full CI `38731761585` passed, including real Xray namespace coverage. Normal merge
+`521067f` and deployed artifact `756558dc` share tree `5b3ad521`. Core/apply/egress
+and nine Providers updated; six original Agent generations and user settings kept.
+`codex/egress-donor-recovery-budget` is integrated, not another merge queue.
+Proof `a82a9df` / `38730592952` remains at
+`archive/2026-10-15/egress-budget-qualified`; do not restore its temporary workflow.
+Actual Chrome budget refresh passed; live fault injection, budget writes/exhaustion
+and HK registration remain unaccepted. Failed private deployment attempts and exact
+scope are retained in the [receipt](https://github.com/lovitus/mdd-sim-gateway/pull/39#issuecomment-6206543093).
 
 Previous delivery: PR38 `59f8dd2`, original review and full signed `38705192004` attempt 2
 passed; normal merge `0d74354` shares tree `5fbdb983`. Core and the exact signed

@@ -10,6 +10,20 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-16 PR39 出口恢复与借用额度
+
+`d267b527` 原评审及完整 CI `38731761585` 通过，正常合并 `521067f`；
+工件 `756558dc` 与批准源码及合并的完整 tree 均为 `5b3ad521`。
+已更新 Core/apply/egress 和 9 个 Provider；6 个原 Agent 进程代际、用户开关及配置保留。
+原 donor 由原 owner 关闭并确认远端清理后才停止 Core；离线备份留存、未倒灌，
+维护租约释放、更新监听器恢复。私有脚本先前误查已停服务的两次失败均在安装前回退。
+真实 Chrome 登录、额度读取及用量增长已验；保留原隐含 1 TiB，活动 owner 时禁止重置。
+三个国家出口 ready，两条英国线路 IMS 200；不代表真实通话或耐久通过。
+香港两条仍未恢复：一条读卡器在系统 USB/智能卡枚举中亦消失，原因未定；
+另一条为 `swu_authentication_failed`，不能推定具体运营商策略。
+生产额度写入/耗尽、跨国故障注入未验；没有付费、SIM 操作或 Agent 升级。
+精确哈希、备份、失败及验收边界见 [PR39 回执](https://github.com/lovitus/mdd-sim-gateway/pull/39#issuecomment-6206543093)。
+
 ## 2026-10-15 PR38 SIM 核验与实际启动
 
 `59f8dd2` / 完整 signed CI `38705192004` attempt 2 及原评审通过，正常合并
