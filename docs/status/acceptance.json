@@ -1421,6 +1421,20 @@
   ],
   "workstreams": [
     {
+      "id": "AGENT_FIRST_RUN_SETUP",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Owner approved one batch for first-run CLI/GUI setup and Web Add Agent. Existing -config, identities, config-parent/state, modem/raw defaults and isolation remain unchanged. Create-only enrollment, trusted TLS and private pending recovery are implemented in the candidate, not deployed.",
+      "acceptance": "Original reviewer approved the narrowed plan. Exact candidate source review, hosted behavioral red/green and normal CI, browser flow and platform setup checks remain pending; no production credential or hardware acceptance is claimed.",
+      "evidence": [
+        "agent/MODEM_AGENT.md",
+        "go-runtime/adminauth/enrollment.go",
+        "go-runtime/cmd/mdd-agent/setup.go",
+        "go-runtime/cmd/mdd-agent/setup_test.go",
+        "webui/tests/agentSetupBrowser.mjs"
+      ]
+    },
+    {
       "id": "EGRESS_DONOR_RECOVERY",
       "state": "needs_verification",
       "releaseRelevance": "current",

@@ -3,9 +3,10 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
 import {agentCredentialChange} from '../systemAdapter.js'
+import AgentEnrollment from './AgentEnrollment.jsx'
 
 // Adapted from SystemV1's scoped credential workflow; never read or set a shared token.
-export default function AgentCredentials({ showToast }) {
+export default function AgentCredentials({ showToast, fingerprint }) {
   const { t } = useI18n()
   const [credentials, setCredentials] = useState(null)
   const [agents, setAgents] = useState([])
@@ -26,9 +27,9 @@ export default function AgentCredentials({ showToast }) {
     let command
     try { command=agentCredentialChange(action,id,credentials?.mode) }
     catch (failure) {setError(failure.message);return}
-    if (!(await dialogs.confirm(t(command.confirmation,{agent:id})))) return
     inFlight.current = true; setBusy(true); setError(''); setIssued(null)
     try {
+      if (!(await dialogs.confirm(t(command.confirmation,{agent:id})))) return
       const result = await api.updateAgentCredentials(command.payload)
       setAgents(current => action === 'set_mode' ? [] : current.filter(agent => agent.agent_id !== id.trim()))
       if (result.agent_token) setIssued({id:id.trim(),token:result.agent_token})
@@ -41,10 +42,11 @@ export default function AgentCredentials({ showToast }) {
   const ids = [...new Set([...(credentials?.active || []), ...(credentials?.revoked || []), ...agents.map(agent => agent.agent_id)])].sort()
   return <section>
     <h3>{t('Agent credentials')}</h3>
+    <AgentEnrollment fingerprint={fingerprint} onCreated={setCredentials} showToast={showToast} operationLock={inFlight} disabled={busy || !credentials}/>
     {error && <p role="alert" className="u-error">{error}</p>}
     <div className="u-detail"><span>{t('Authentication mode')}</span><b>{credentials?.mode || t('Unknown')}</b></div>
     <button className="btn btn-ghost" disabled={busy || !credentials} onClick={() => change('set_mode')}>{t(credentials?.mode === 'scoped' ? 'Enable transition mode' : 'Disable shared fallback')}</button>
-    <div className="u-inline"><input aria-label={t('Agent ID')} value={agentID} onChange={event => setAgentID(event.target.value)} disabled={busy}/>
+    <div className="u-inline"><label>{t('Existing Agent ID')}<input aria-label={t('Agent ID')} value={agentID} onChange={event => setAgentID(event.target.value)} disabled={busy}/></label>
       <button className="btn btn-primary" disabled={busy || !credentials || !agentID.trim()} onClick={() => change('issue', agentID)}>{t('Issue or rotate credential')}</button>
       <button className="btn btn-ghost" disabled={busy} onClick={load}>{t('Refresh')}</button></div>
     {issued && <div className="u-note"><label>{issued.id} · {t('Shown once')}</label><input type="password" readOnly value={issued.token} autoComplete="off"/>
