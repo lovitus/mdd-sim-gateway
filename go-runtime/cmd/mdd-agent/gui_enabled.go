@@ -56,67 +56,82 @@ func runGUI(settings config, configPath string) error {
 	window := application.NewWindow("MDD Agent")
 	window.SetIcon(icon)
 	window.Resize(fyne.NewSize(760, 520))
-	summary := widget.NewLabel("正在读取 Agent 状态…")
-	summary.TextStyle = fyne.TextStyle{Bold: true}
-	connection := widget.NewLabel("Core 控制连接：状态未知")
-	connection.Wrapping = fyne.TextWrapWord
-	connection.Importance = widget.WarningImportance
-	details := widget.NewMultiLineEntry()
-	details.Disable()
-	details.Wrapping = fyne.TextWrapOff
-	controller := &guiController{
-		settings: settings, configPath: configPath, window: window,
-		summary: summary, connection: connection, details: details, ctx: ctx, refresh: make(chan struct{}, 1),
-	}
-
-	buttons := controller.buttons()
-	window.SetContent(container.NewBorder(
-		container.NewVBox(summary, connection, buttons), nil, nil, nil, details,
-	))
-	window.SetCloseIntercept(window.Hide)
-	quit := func() {
-		cancel()
-		application.Quit()
-	}
-	if desk, ok := application.(desktop.App); ok {
-		quitLabel := "退出 GUI（Agent 服务继续运行）"
-		if runtime.GOOS == "darwin" {
-			quitLabel = "退出 MDD Agent"
-		}
-		desk.SetSystemTrayIcon(icon)
-		desk.SetSystemTrayWindow(window)
-		desk.SetSystemTrayMenu(fyne.NewMenu("MDD Agent",
-			fyne.NewMenuItem("打开 MDD Agent", window.Show),
-			fyne.NewMenuItem("刷新", controller.requestRefresh),
-			fyne.NewMenuItemSeparator(),
-			fyne.NewMenuItem(quitLabel, quit),
-		))
-	}
 	hostResult := make(chan guiHostResult, 1)
-	if runtime.GOOS == "darwin" {
-		application.Lifecycle().SetOnStarted(func() {
+	started := false
+	start := func(ready config, path string) {
+		if started || ctx.Err() != nil {
+			return
+		}
+		started = true
+		settings, configPath = ready, path
+		summary := widget.NewLabel("正在读取 Agent 状态…")
+		summary.TextStyle = fyne.TextStyle{Bold: true}
+		connection := widget.NewLabel("Core 控制连接：状态未知")
+		connection.Wrapping = fyne.TextWrapWord
+		connection.Importance = widget.WarningImportance
+		details := widget.NewMultiLineEntry()
+		details.Disable()
+		details.Wrapping = fyne.TextWrapOff
+		controller := &guiController{
+			settings: settings, configPath: configPath, window: window,
+			summary: summary, connection: connection, details: details, ctx: ctx, refresh: make(chan struct{}, 1),
+		}
+
+		buttons := controller.buttons()
+		window.SetContent(container.NewBorder(
+			container.NewVBox(summary, connection, buttons), nil, nil, nil, details,
+		))
+		window.SetCloseIntercept(window.Hide)
+		quit := func() {
+			cancel()
+			application.Quit()
+		}
+		if desk, ok := application.(desktop.App); ok {
+			quitLabel := "退出 GUI（Agent 服务继续运行）"
+			if runtime.GOOS == "darwin" {
+				quitLabel = "退出 MDD Agent"
+			}
+			desk.SetSystemTrayIcon(icon)
+			desk.SetSystemTrayWindow(window)
+			desk.SetSystemTrayMenu(fyne.NewMenu("MDD Agent",
+				fyne.NewMenuItem("打开 MDD Agent", window.Show),
+				fyne.NewMenuItem("刷新", controller.requestRefresh),
+				fyne.NewMenuItemSeparator(),
+				fyne.NewMenuItem(quitLabel, quit),
+			))
+		}
+		if runtime.GOOS == "darwin" {
 			go func() {
 				host, err := startGUIHost(settings)
+				if ctx.Err() != nil && host != nil {
+					_ = host.stop(serviceStopTimeout(settings))
+					host = nil
+				}
 				hostResult <- guiHostResult{host: host, err: err}
-				if err != nil {
+				if err != nil && ctx.Err() == nil {
 					fyne.Do(func() { dialog.ShowError(err, window) })
 				}
 				controller.requestRefresh()
 			}()
-		})
+		}
+		go controller.refreshLoop()
+		controller.requestRefresh()
 	}
-	go controller.refreshLoop()
-	controller.requestRefresh()
+	window.SetCloseIntercept(func() { cancel(); application.Quit() })
+	application.Lifecycle().SetOnStarted(func() {
+		fyne.Do(func() { showGUISetup(ctx, window, configPath, start) })
+	})
 	window.ShowAndRun()
 	cancel()
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" && started {
 		select {
 		case result := <-hostResult:
 			if result.host != nil {
 				return result.host.stop(serviceStopTimeout(settings))
 			}
 			return result.err
-		default:
+		case <-time.After(serviceStopTimeout(settings) + 6*time.Second):
+			return errors.New("Agent startup did not finish before GUI shutdown")
 		}
 	}
 	return nil

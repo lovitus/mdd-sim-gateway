@@ -69,6 +69,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### AGENT_FIRST_RUN_SETUP
+
+**State: needs_verification; release relevance: current.** Owner approved one batch for first-run CLI/GUI setup and Web Add Agent. Existing -config, identities, config-parent/state, modem/raw defaults and isolation remain unchanged. Create-only enrollment, trusted TLS and private pending recovery are implemented in the candidate, not deployed.
+
+Acceptance scope / remaining action: Original reviewer approved the narrowed plan. Exact candidate source review, hosted behavioral red/green and normal CI, browser flow and platform setup checks remain pending; no production credential or hardware acceptance is claimed.
+
 ### EGRESS_DONOR_RECOVERY
 
 **State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.
