@@ -793,7 +793,7 @@ func run(ctx context.Context, settings config) error {
 		agentMedia.DisconnectAgent(agentID)
 		agentData.DisconnectAgent(agentID)
 		agentUSBIP.DisconnectAgent(agentID)
-	}))
+	}), adminauth.WithAgentEnrollmentAdmission(agents.ReserveEnrollment))
 	if err != nil {
 		return err
 	}
