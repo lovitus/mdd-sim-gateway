@@ -7,8 +7,12 @@ and nine Providers updated; six original Agent generations and user settings kep
 `codex/egress-donor-recovery-budget` is integrated, not another merge queue.
 Proof `a82a9df` / `38730592952` remains at
 `archive/2026-10-15/egress-budget-qualified`; do not restore its temporary workflow.
-Actual Chrome budget refresh passed; live fault injection, budget writes/exhaustion
-and HK registration remain unaccepted. Failed private deployment attempts and exact
+Actual Chrome budget refresh passed; live fault injection and budget writes/exhaustion
+remain unverified. The owner confirmed intentional HKmobile removal and accepted the
+other HK authentication rejection; HK registration is no longer a restoration gate.
+Both current GB cards were ready in pinned readback and actual Chrome at02:38UTC.
+Clear authentication-rejection copy remains a frontend follow-up, not another rollout.
+Failed private deployment attempts and exact
 scope are retained in the [receipt](https://github.com/lovitus/mdd-sim-gateway/pull/39#issuecomment-6206543093).
 
 Previous delivery: PR38 `59f8dd2`, original review and full signed `38705192004` attempt 2
