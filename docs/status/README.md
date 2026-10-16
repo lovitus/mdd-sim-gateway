@@ -69,6 +69,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### LINUX_ARM64_READER
+
+**State: needs_verification; release relevance: current.** Owner requests existing Agent access for a newly attached reader on ARM64 Linux. Add one native hosted Agent-only build/package and reuse existing manual deployment; no Go, Core, protocol or UI changes. Modem/raw USB stay disabled.
+
+Acceptance scope / remaining action: Original reviewer approved the bounded plan at base6b3fddc. Candidate source review, exact hosted CI/artifact and new-host PCSC/Core/browser identity readback remain pending. USB enumeration and matching Core certificate connectivity alone are not card acceptance. No PIN, eSIM mutation, paid operation, existing Agent restart or user-intent change is included. Raw host/credential evidence stays private.
+
 ### EGRESS_DONOR_RECOVERY
 
 **State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.

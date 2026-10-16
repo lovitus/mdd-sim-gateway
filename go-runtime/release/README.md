@@ -1,5 +1,23 @@
 # Go Agent desktop candidates
 
+## Linux ARM64 reader candidate
+
+The normal Go workflow adds an `ubuntu-24.04-arm` headless Agent job using the
+unchanged `cmd/mdd-agent`, CGO and native PC/SC. It runs the existing reader,
+Agent control and link race suites and executes the packaged CLI's private-config
+initialization. This is not an ARM64 Core/Provider, modem, audio or GUI release.
+No hardware is present in CI; empty topology is not reader acceptance.
+
+The `mdd-agent-linux-arm64-<sha>` Actions artifact contains an Agent-only tar and
+its SHA-256. The payload retains per-file hashes, exact source/tree/build identity,
+ELF/loader/dependency reports, licenses, complete repository source and the existing
+optional unit. It requires glibc 2.39 or newer and compatible PC/SC runtime/driver
+packages. This candidate is not automatically added to tagged releases or consumed
+by the server updater. Follow the existing
+[manual deployment instructions](../../agent/MODEM_AGENT.md#嵌入式设备手动部署),
+preserving reader-only defaults and using one supervisor. Architecture qualification
+and physical attachment acceptance remain separate ledger entries.
+
 ## GitHub Developer ID signing
 
 The macOS job imports `BUILD_CERTIFICATE_BASE64` (a base64 PKCS#12 containing the

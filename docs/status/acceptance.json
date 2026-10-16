@@ -1421,6 +1421,14 @@
   ],
   "workstreams": [
     {
+      "id": "LINUX_ARM64_READER",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Owner requests existing Agent access for a newly attached reader on ARM64 Linux. Add one native hosted Agent-only build/package and reuse existing manual deployment; no Go, Core, protocol or UI changes. Modem/raw USB stay disabled.",
+      "acceptance": "Original reviewer approved the bounded plan at base6b3fddc. Candidate source review, exact hosted CI/artifact and new-host PCSC/Core/browser identity readback remain pending. USB enumeration and matching Core certificate connectivity alone are not card acceptance. No PIN, eSIM mutation, paid operation, existing Agent restart or user-intent change is included. Raw host/credential evidence stays private.",
+      "evidence": [".github/workflows/go-runtime.yml", "go-runtime/release/README.md", "agent/MODEM_AGENT.md"]
+    },
+    {
       "id": "EGRESS_DONOR_RECOVERY",
       "state": "needs_verification",
       "releaseRelevance": "current",
