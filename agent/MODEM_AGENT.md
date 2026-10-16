@@ -118,9 +118,10 @@ bearer 或未完成宿主隔离的设备必须 typed fail closed；不得因为�
 
 **先确认范围和依赖：**
 
-- 使用对应架构和 libc 的 GitHub workflow 工件。当前 Linux 发布 job 只有 amd64；ARM64、ARMv7、
-  OpenWrt/musl 不能使用 amd64/glibc 包，也没有因本说明而获得已验证支持。ARM64 需先提供经过
-  GitHub-hosted 构建验证的匹配工件；不在目标板上现场构建或下载不明来源替代品。
+- 使用对应架构和 libc 的 GitHub workflow 工件。Linux 完整服务端包仍为 amd64；新增原生
+  `ubuntu-24.04-arm` job 提供独立 `MDD-Agent-Linux-arm64.tar.gz` 候选，仅验证 headless reader
+  路径，需要 glibc 2.39 或更新版本。以精确 workflow 的成功结果为准，不把新增 job 当成已验收。
+  ARMv7、OpenWrt/musl 不在此范围；不在目标板上现场构建或下载不明来源替代品。
 - Reader 需要系统提供匹配的 PC/SC 库、`pcscd` 和读卡器驱动（例如 libccid），并允许运行用户访问
   pcscd。由用户按发行版方式启动和保活 pcscd；已有实例不要重复启动。Agent 和 pcscd 都不必由
   systemd 管理。缺少依赖/权限时保留真实错误，不把进程存在当作读卡正常。
@@ -141,6 +142,14 @@ Linux tar 和同一发布的 `SHA256SUMS`，先用 `sha256sum` 比对所选 tar 
 源码归档，按 `manifest.json` 的 `agent` role 找到 `mdd-agent`，核对其 SHA-256。使用 `file`/`readelf`
 检查 ELF 架构、动态加载器和依赖；不要把缺库、glibc 版本不兼容当成配置故障。
 
+ARM64 Agent-only 候选从成功 workflow 的 `mdd-agent-linux-arm64-<sha>` artifact 下载，
+不是完整 server release，也暂不自动发布到 tagged release。先核对同包 tar 的 `.sha256`，解包后
+进入 `MDD-Agent-Linux-arm64` 执行 `sha256sum --check SHA256SUMS`。该包使用自己的校验清单，
+不冒用完整 release 的 `manifest.json`；`BUILD.txt`、`ELF.txt`、`DYNAMIC-LIBRARIES.txt` 和
+`mdd-source.tar.gz` 分别保存源码/构建、架构/加载器、动态依赖和完整对应仓库源码。整个目录
+放入下面的版本目录，不能只复制二进制后丢弃来源与许可证。目标 Debian/Ubuntu 按发行版安装
+`pcscd libccid libpcsclite1`，不需要安装编译工具、Core、Provider 或 ModemManager。
+
 下面以 `/opt/mdd-agent` 为例：由用户选择固定运行账户，并提前创建归该账户所有的本地持久目录，
 权限 `0700`；不要用易失 `/tmp`、网络文件系统或与另一实例共享的配置目录。之后所有命令和
 `crontab -e` 均由同一账户执行，路径可以自行替换：
@@ -157,6 +166,13 @@ Linux tar 和同一发布的 `SHA256SUMS`，先用 `sha256sum` 比对所选 tar 
 
 放置完成后将 `current` 指向所选版本，保留程序执行权限；不要覆盖正在运行的程序。
 目录不需要处于默认安装器的 `/usr/lib/mdd` 下。
+
+若目标已有 systemd，可以只选用包内现有 `mdd-agent.service`，而不使用后面的 cron。该 unit
+以 root 运行，执行路径固定为 `/usr/libexec/mdd/mdd-agent`，配置固定为
+`/var/lib/mdd-agent/config.json`。先确认没有已有 Agent owner，再让执行路径指向已核对的版本，
+由 root 初始化 `0700` 持久目录和 `0600` 配置，填齐后启用这一 unit；不要另开前台或 cron owner。
+unit 对 cellular guard 只有顺序引用，reader-only 不要求部署 modem guard。没有 systemd 的设备
+继续使用下述同账户手动/cron 流程，不能据此启用未验收的 modem。
 
 **2. 初始化并手动配置。**
 
@@ -227,7 +243,7 @@ Agent 没有活动通话/读卡操作后，通过进程列表核对精确可执�
 Core 读回检查，成功后恢复这一条 cron。回退也先停进程；仅使用确认兼容现有配置/状态的旧版，不
 丢弃或盲目回滚 operation/state 数据来强行启动。已有正式安装器部署不改走此流程。
 
-本节是现有 CLI 的手动操作说明，不是新的安装器或实机验收报告；尚未据此完成嵌入式/ARM64 验收。
+本节是现有 CLI 的手动操作说明，不是新的安装器或实机验收报告；构建资格和实卡接入分别记入台账。
 参考：[PC/SC Lite](https://pcsclite.apdu.fr/)、[flock](https://man7.org/linux/man-pages/man1/flock.1.html)、
 [crontab](https://man7.org/linux/man-pages/man5/crontab.5.html)。
 
