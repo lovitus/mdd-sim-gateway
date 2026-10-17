@@ -69,6 +69,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ## Current open work
 
+### AGENT_FIRST_RUN_SETUP
+
+**State: needs_verification; release relevance: current.** First-run CLI/GUI setup and Web Add Agent are implemented as one reviewed batch. Existing -config, identities, config-parent/state, modem/raw defaults and isolation remain unchanged. Create-only enrollment uses trusted TLS and private pending recovery; not deployed.
+
+Acceptance scope / remaining action: Original review and normal CI38890810681 passed at1382a64, retained at archive/2026-10-17/agent-first-run-reviewed; behavioral qualification63476b7/38890087413 remains valid. Native macOS first-run clicks verified path rejection and exit without config/runtime, but reproduced inactive-field orphan labels. Integrated2a78d41/39015231214 passed compiled old-form failure, restored GUI regression and existing new-card/enrollment browser journeys; archive/2026-10-17/agent-setup-refresh-qualified retains proof. Exact hosted assets imported, temporary workflow removed. Final review/full CI, corrected native-window and live enrollment/hardware acceptance remain pending.
+
 ### EGRESS_DONOR_RECOVERY
 
 **State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.
@@ -77,7 +83,7 @@ Acceptance scope / remaining action: Proofa82a9df/38730592952 behavioral reds/re
 
 ### USER_FLOW_CONSISTENCY
 
-**State: partial; release relevance: current.** October17 Android SIM-only readback/SMSP and accurate Web guidance source57b49d5 passed original review and hosted39012883696; archive/2026-10-17/android-sim-qualified retains behavioral reds and restored unit/native TLS/Go contract/mounted draft greens. Exact identity, late publication, reconnect-cache withdrawal, existing draft/manual settings and explicit Enable are preserved. Hosted UI imported; temporary proof removed. Normal full CI/signing and exact-device/browser startup remain pending. PR37/38 scoped acceptance stays valid; PR41 first-run setup remains separate and frozen until this blocker is resolved.
+**State: partial; release relevance: current.** PR42 ba6fc803 passed original review, Go39013478171 and signed Android39013483690, merged dbf6baa. Exact-device v174 installation and actual Chrome Detect/Save/Enable reached IMS200, preserving original line/IMEI/country and all unrelated catalog rows. This accepts new-card startup, not voice/endurance. Core Web-copy rollout remains pending the active donor lease decision; PR42 receipt records the boundary. Proof57b49d5/39012883696 stays at archive/2026-10-17/android-sim-qualified. PR37/38 evidence remains valid; PR41 resumes separately.
 
 Acceptance scope / remaining action: PR38 source59f8dd2/full signed38705192004 attempt2/original review passed; normal merge0d74354 has identical tree5fbdb983. Core and exact signed Mac installed; first Mac script checked other reconnects prematurely and rolled back, then its corrected bounded wait accepted the same artifact. Configuration, other Agent generations, maintenance and updater watcher preserved. Actual Chrome selected by host/current card, read the original unknown without resubmission, explicitly performed a NEW SIM-only verification, then enabled the provisioned draft. Catalog/applied25, IMS200 and voice/SMS capabilities became ready; IMEI value/preset read back correctly. No PIN/eSIM mutation or paid action. Later tunnel failure preceded observed Agent/card-route loss; old cron logs prove repeated host Wi-Fi disconnect/reconnect, not physical card removal. Owner-authorized backup/pause at09:10UTC retained hashes/rollback. Ten-minute observation kept the same Agent/card route and ended with automatic IMS200 recovery; its continuous-ready criterion timed out, not passed. First PumpError cause and later IKE failure attribution remain unresolved. Subsequent real Chrome device/SMS views were ready. Preserve earlier scoped acceptance and failed receipts; see PR38 deployment receipt.
 

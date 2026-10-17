@@ -62,6 +62,8 @@ type Server struct {
 	tokens               TokenResolver
 	mu                   sync.RWMutex
 	agents               map[string]*serverConnection
+	admitting            map[string]int
+	enrolling            map[string]bool
 	credentialEpoch      uint64
 	modemAdmission       ModemRouteAdmission
 	events               ModemEventSink
@@ -175,8 +177,25 @@ func NewServer(tokens TokenResolver) (*Server, error) {
 	}
 	return &Server{
 		tokens: tokens, agents: make(map[string]*serverConnection),
+		admitting: make(map[string]int), enrolling: make(map[string]bool),
 		pingEvery: defaultPingEvery, pingWait: defaultPingWait,
 	}, nil
+}
+
+// ReserveEnrollment serializes create-only publication with both established
+// and pre-hello connections. No auth lookup is made while holding server.mu.
+func (server *Server) ReserveEnrollment(id string) (func(), bool) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.agents[id] != nil || server.admitting[id] != 0 || server.enrolling[id] {
+		return nil, false
+	}
+	server.enrolling[id] = true
+	return func() {
+		server.mu.Lock()
+		delete(server.enrolling, id)
+		server.mu.Unlock()
+	}, true
 }
 
 // SetModemRouteAdmission installs the immutable Core-side modem route owner.
@@ -220,9 +239,23 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	// Capture before credential lookup; revocation and insertion share mu.
-	server.mu.RLock()
+	server.mu.Lock()
+	if server.enrolling[agentID] {
+		server.mu.Unlock()
+		http.Error(response, "agent_enrollment_pending", http.StatusServiceUnavailable)
+		return
+	}
+	server.admitting[agentID]++
 	credentialEpoch := server.credentialEpoch
-	server.mu.RUnlock()
+	server.mu.Unlock()
+	defer func() {
+		server.mu.Lock()
+		server.admitting[agentID]--
+		if server.admitting[agentID] == 0 {
+			delete(server.admitting, agentID)
+		}
+		server.mu.Unlock()
+	}()
 	token, err := server.tokens.TokenForAgent(request.Context(), agentID)
 	if err != nil || len(token) < minimumTokenBytes || !bearerMatches(request.Header.Get("Authorization"), token) {
 		http.Error(response, "unauthorized", http.StatusUnauthorized)

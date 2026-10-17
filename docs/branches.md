@@ -1,14 +1,25 @@
 # Branch disposition and integration record
 
-Android SIM-only readback: `57b49d5` passed the original source review and hosted
-qualification `39012883696`; retained at `archive/2026-10-17/android-sim-qualified`.
-The old SMSP/handler/reconnect behaviors and removed guards fail behaviorally;
-restored unit/native TLS, Go wire contract and mounted draft journey pass.
-Native insertion delivery and physical card startup are not claimed by fixtures.
-Final cleanup imports the exact hosted UI and removes temporary proof entrypoints;
-normal full CI, signed APK and exact-device/browser acceptance remain pending.
-Earlier proof tags preserve failures and intermediate qualification, not merge queues.
-PR41 first-run setup remains separate and frozen until this blocker is resolved.
+PR41 resumes on `dbf6baa` after the Android startup blocker was resolved.
+Reviewed `1382a64` / normal CI `38890810681` is retained at
+`archive/2026-10-17/agent-first-run-reviewed`; behavioral qualification remains
+`63476b7` / `38890087413` / `archive/2026-10-16/agent-first-run-qualified`.
+Native macOS first-run clicks reproduced orphan labels after mode selection;
+the scoped correction removes whole inactive form rows without changing enrollment.
+Integrated source `2a78d41` / hosted `39015231214` passed the compiled GUI
+counterexample/restored regression and existing new-card/enrollment browser journeys.
+Proof is retained at `archive/2026-10-17/agent-setup-refresh-qualified`; its exact
+hosted UI is imported and temporary workflow removed. Final review/full CI remain
+pending. PR41 is not merged or deployed; PR40 and production receipts are unchanged.
+
+PR42 `ba6fc803` passed original review, Go `39013478171` and signed Android
+`39013483690`, then merged normally as `dbf6baa`. Exact-phone v174 installation
+and actual Chrome Detect/Save/Enable reached IMS200 with the original line,
+IMEI/country and all unrelated catalog rows preserved. This is startup, not voice
+or endurance acceptance. Core Web-copy rollout remains pending an active donor
+lease decision; see the [receipt](https://github.com/lovitus/mdd-sim-gateway/pull/42#issuecomment-6231337969).
+Proof `57b49d5` / `39012883696` remains at
+`archive/2026-10-17/android-sim-qualified`; earlier proof tags are evidence only.
 
 Current delivery: PR39 `d267b527`, original source/final cleanup reviews and normal
 full CI `38731761585` passed, including real Xray namespace coverage. Normal merge
