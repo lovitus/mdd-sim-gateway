@@ -10,6 +10,23 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-17 PR41 首次接入与 PR42 新卡修复
+
+PR41 `0ababe4` / 完整 CI `39015455331` 及原评审通过，正常合并 `160c52a`；
+部署工件 `aa89ce241f5f` 同树，归档 `archive/2026-10-17/agent-setup-delivery`。
+真实 Chrome 添加 Agent、macOS 接入包导入及配置落盘、退出后同身份重连通过。
+测试身份已撤销并确认旧 token 返回 401；原 9 份有效凭据、其他进程及业务配置不变。
+原 donor 已恢复，维护与临时启动保护移除、守卫与更新监听器正常。
+初次恢复路由 apply 的 409 留存，随后原恢复路径完成；没有重复安装或放宽门禁。
+Mac 使用隔离路径的开发签名工件，未覆盖生产签名 App；无硬件、付费或耐久验收。
+哈希与完整边界见 [PR41 回执](https://github.com/lovitus/mdd-sim-gateway/pull/41#issuecomment-6234721009)。
+
+PR42 `ba6fc803` / Go `39013478171` / Android `39013483690` 已部署：目标手机
+v174 的真实 Detect/Save/Enable 达到 IMS200，Core 文案及借用恢复也已完成。
+先前失败与回滚见 [PR42 回执](https://github.com/lovitus/mdd-sim-gateway/pull/42#issuecomment-6231895384)。
+后续在 PR41 部署前，手机 USB 重新连接后缺少 MDD 授权，Core 已无 reader；
+已请求用户在 Readers 重新连接授权，不改共享开关、不把历史验收当作当前在线。
+
 ## 2026-10-16 PR39 出口恢复与借用额度
 
 `d267b527` 原评审及完整 CI `38731761585` 通过，正常合并 `521067f`；

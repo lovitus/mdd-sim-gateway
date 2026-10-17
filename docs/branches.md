@@ -1,23 +1,19 @@
 # Branch disposition and integration record
 
-PR41 resumes on `dbf6baa` after the Android startup blocker was resolved.
-Reviewed `1382a64` / normal CI `38890810681` is retained at
-`archive/2026-10-17/agent-first-run-reviewed`; behavioral qualification remains
-`63476b7` / `38890087413` / `archive/2026-10-16/agent-first-run-qualified`.
-Native macOS first-run clicks reproduced orphan labels after mode selection;
-the scoped correction removes whole inactive form rows without changing enrollment.
-Integrated source `2a78d41` / hosted `39015231214` passed the compiled GUI
-counterexample/restored regression and existing new-card/enrollment browser journeys.
-Proof is retained at `archive/2026-10-17/agent-setup-refresh-qualified`; its exact
-hosted UI is imported and temporary workflow removed. Final review/full CI remain
-pending. PR41 is not merged or deployed; PR40 and production receipts are unchanged.
+PR41 `0ababe4` / normal full CI `39015455331` and original final review passed;
+normal merge `160c52a` and deployed `aa89ce241f5f` share tree `c9cede66`.
+`archive/2026-10-17/agent-setup-delivery` preserves the reviewed head; the source
+branch is integrated, not another merge queue. Real enrollment and restart reuse,
+cleanup and scoped limitations are recorded in [DEPLOYMENT.md](../DEPLOYMENT.md).
+Earlier `1382a64` / `38890810681`, `63476b7` / `38890087413`, and `2a78d41` /
+`39015231214` proof tags remain evidence only. PR40 remains separate and unmerged.
 
 PR42 `ba6fc803` passed original review, Go `39013478171` and signed Android
 `39013483690`, then merged normally as `dbf6baa`. Exact-phone v174 installation
 and actual Chrome Detect/Save/Enable reached IMS200 with the original line,
 IMEI/country and all unrelated catalog rows preserved. This is startup, not voice
-or endurance acceptance. Core Web-copy rollout remains pending an active donor
-lease decision; see the [receipt](https://github.com/lovitus/mdd-sim-gateway/pull/42#issuecomment-6231337969).
+or endurance acceptance. Authorized Core Web-copy deployment and donor restoration
+completed; see the [receipt](https://github.com/lovitus/mdd-sim-gateway/pull/42#issuecomment-6231895384).
 Proof `57b49d5` / `39012883696` remains at
 `archive/2026-10-17/android-sim-qualified`; earlier proof tags are evidence only.
 

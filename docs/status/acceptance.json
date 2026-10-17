@@ -4,7 +4,7 @@
   "baselineTree": "f0f6b038519bdce6520ea805c4c77c5aecd0535a",
   "reviewDate": "2026-09-20",
   "issue": "https://github.com/lovitus/mdd-sim-gateway/issues/3",
-  "scope": "October16: PR39 EGRESS_DONOR_RECOVERY is reviewed, qualified by normal full CI38731761585, normally merged521067f and deployed from same-tree756558dc to Core/apply/egress and nine Providers. Six original Agent generations and user settings preserved. Actual Chrome budget refresh/usage growth passed. Owner confirmed intentional HKmobile removal and accepted the other HK authentication rejection; neither is a restoration blocker. Both current GB cards were ready in pinned readback and actual Chrome at02:38UTC, not fresh call/endurance acceptance. Clear rejection copy remains a frontend follow-up. Production budget writes/exhaustion and cross-country fault injection remain unverified, not newly authorized. PR38 initialization and legacy-watchdog acceptance remain valid. Other hardware/eSIM/updater gaps unchanged; see DEPLOYMENT.md and the existing workstreams.",
+  "scope": "October17: PR42 new-card startup and Core Web-copy deployment are accepted within their recorded scope. PR41 reviewed 0ababe4 / full CI39015455331 is merged as160c52a and deployed from same-tree aa89ce241f5f. Real Chrome Add Agent, native macOS package import, saved configuration and same-identity restart/reconnect passed; the isolated credential was revoked afterward. Existing Agent credentials, processes, user settings and isolation were preserved; original donor restored. Historical PR38/39 and hardware/eSIM/updater evidence remains valid. The target Android reader later reconnected without a current USB grant before PR41 deployment; owner action is pending. Track this separately without claiming current readiness or attributing it to PR42. No paid, PIN or profile action. See DEPLOYMENT.md and the existing workstreams.",
   "archives": [
     {
       "original": "TODO.md",
@@ -1422,18 +1422,25 @@
   "workstreams": [
     {
       "id": "AGENT_FIRST_RUN_SETUP",
-      "state": "needs_verification",
+      "state": "completed",
       "releaseRelevance": "current",
-      "summary": "First-run CLI/GUI setup and Web Add Agent are implemented as one reviewed batch. Existing -config, identities, config-parent/state, modem/raw defaults and isolation remain unchanged. Create-only enrollment uses trusted TLS and private pending recovery; not deployed.",
-      "acceptance": "Original review and normal CI38890810681 passed at1382a64, retained at archive/2026-10-17/agent-first-run-reviewed; behavioral qualification63476b7/38890087413 remains valid. Native macOS first-run clicks verified path rejection and exit without config/runtime, but reproduced inactive-field orphan labels. Integrated2a78d41/39015231214 passed compiled old-form failure, restored GUI regression and existing new-card/enrollment browser journeys; archive/2026-10-17/agent-setup-refresh-qualified retains proof. Exact hosted assets imported, temporary workflow removed. Final review/full CI, corrected native-window and live enrollment/hardware acceptance remain pending.",
+      "summary": "First-run CLI/GUI setup and Web Add Agent are reviewed, merged and deployed. Existing -config, identities, config-parent/state, modem/raw defaults and isolation remain unchanged. Create-only enrollment uses trusted TLS and private pending recovery.",
+      "acceptance": "Final 0ababe4 / normal full CI39015455331 / original reviewer passed; merge160c52a and deployed aa89ce241f5f share treec9cede66. Delivery tag archive/2026-10-17/agent-setup-delivery; earlier red/green proof tags remain valid. Actual Chrome created one isolated identity using the trusted pin; exact hosted macOS GUI imported its masked package, saved mode0600 configuration without administrator credentials, and connected. Core/Agent Hosts confirmed build and heartbeat with zero hardware. GUI exit, existing-config recognition and CLI restart reused identity/token with a new process generation. Test credential revoked, old token rejected401, original persisted credentials/configuration/processes unchanged. Initial donor-route apply409 is retained; original recovery completed, maintenance/pins removed and watcher restored. No production signed Mac replacement, Windows power-loss, hardware or paid acceptance is implied. See PR41 deployment receipt in DEPLOYMENT.md.",
       "evidence": [
         "agent/MODEM_AGENT.md",
         "go-runtime/adminauth/enrollment.go",
         "go-runtime/cmd/mdd-agent/setup.go",
         "go-runtime/cmd/mdd-agent/setup_test.go",
         "webui/tests/agentSetupBrowser.mjs",
-        "docs/branches.md"
-      ]
+        "docs/branches.md",
+        "DEPLOYMENT.md"
+      ],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Reviewed implementation, hosted behavior qualification and authorized real enrollment/persistence/reconnect delivery completed; broader hardware and endurance claims remain separate.",
+        "decisionRefs": [],
+        "evidence": ["DEPLOYMENT.md", "agent/MODEM_AGENT.md", "docs/branches.md"]
+      }
     },
     {
       "id": "EGRESS_DONOR_RECOVERY",
@@ -1448,7 +1455,7 @@
       "id": "USER_FLOW_CONSISTENCY",
       "state": "partial",
       "releaseRelevance": "current",
-      "summary": "PR42 ba6fc803 passed original review, Go39013478171 and signed Android39013483690, merged dbf6baa. Exact-device v174 installation and actual Chrome Detect/Save/Enable reached IMS200, preserving original line/IMEI/country and all unrelated catalog rows. This accepts new-card startup, not voice/endurance. Core Web-copy rollout remains pending the active donor lease decision; PR42 receipt records the boundary. Proof57b49d5/39012883696 stays at archive/2026-10-17/android-sim-qualified. PR37/38 evidence remains valid; PR41 resumes separately.",
+      "summary": "PR42 ba6fc803 passed original review, Go39013478171 and signed Android39013483690, merged dbf6baa. Exact-device v174 and real Chrome Detect/Save/Enable reached IMS200, preserving line/IMEI/country and unrelated rows. Authorized Core Web-copy62827c56 deployment and donor restoration completed; target automatically recovered at08:41UTC. This accepts startup, not voice/endurance. Before later PR41 deployment the same Android process reported zero readers; USB remained enumerated without a current permission grant, and owner action was requested. Do not erase historical acceptance or claim current readiness. Proof57b49d5/39012883696 remains at archive/2026-10-17/android-sim-qualified. PR37/38 evidence is preserved; receipts are in DEPLOYMENT.md.",
       "acceptance": "PR38 source59f8dd2/full signed38705192004 attempt2/original review passed; normal merge0d74354 has identical tree5fbdb983. Core and exact signed Mac installed; first Mac script checked other reconnects prematurely and rolled back, then its corrected bounded wait accepted the same artifact. Configuration, other Agent generations, maintenance and updater watcher preserved. Actual Chrome selected by host/current card, read the original unknown without resubmission, explicitly performed a NEW SIM-only verification, then enabled the provisioned draft. Catalog/applied25, IMS200 and voice/SMS capabilities became ready; IMEI value/preset read back correctly. No PIN/eSIM mutation or paid action. Later tunnel failure preceded observed Agent/card-route loss; old cron logs prove repeated host Wi-Fi disconnect/reconnect, not physical card removal. Owner-authorized backup/pause at09:10UTC retained hashes/rollback. Ten-minute observation kept the same Agent/card route and ended with automatic IMS200 recovery; its continuous-ready criterion timed out, not passed. First PumpError cause and later IKE failure attribution remain unresolved. Subsequent real Chrome device/SMS views were ready. Preserve earlier scoped acceptance and failed receipts; see PR38 deployment receipt.",
       "implementation": "PR38 explicit negotiated sim_identity skips secure-element probing without changing full eSIM/cache behavior. Exact scope/identity, cancellation/session/transaction guards, unsupported rejection, original unknown codes and frozen browser receipts remain protected. Readback overload returns a valid bounded failure and preserves the WSS connection. Hosted058a0fe/38704067945 proves nine behavioral reds and restored Agent/Core race, real HTTP adapters and mounted journeys. Temporary proof archived/removed, exact UI imported. Normal signed38705192004 attempt1 hit Chrome startup timeout before its recording test; one failed-job rerun passed with unchanged gates. Merged/deployed59f8dd2; no new product code for the authorized legacy-cron pause. No Android/modem/paid scope expansion. Follow-up remains limited to recorded runtime continuity and editor behavior during transient disconnection, not another initialization redesign.",
       "evidence": ["webui/src/mdd/views/UnifiedPages.jsx", "webui/src/mdd/views/SimConfig.jsx", "webui/src/mdd/views/ReaderSetupActions.jsx", "webui/src/mdd/views/ProvisionActions.jsx", "webui/tests/readerSetupBrowser.mjs", "webui/src/mdd/lineAdapter.js", "webui/src/mdd/App.jsx", "go-runtime/internal/linebootstrap/service.go", "go-runtime/internal/core/reader_provision.go", "go-runtime/internal/core/device_policy.go", "go-runtime/internal/runtimereconcile/reconciler.go", "go-runtime/internal/linecatalog/store.go", "DEVELOPMENT.md"]
