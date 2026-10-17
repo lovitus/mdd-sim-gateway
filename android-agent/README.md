@@ -4,6 +4,20 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
+October 17 new-card repair candidate: Android now negotiates the existing
+`sim_identity` readback and reads the default EF_SMSP record, ported from
+`go-runtime/internal/agentsim/reader_identity.go` and TS 31.102 section 4.2.27.
+The existing serialized reader owner checks connection, insertion and ICCID
+before publishing fresh facts. Full eSIM readback, PIN writes and arbitrary APDUs
+are not added. Missing SMSC stays missing; saved manual values remain user-owned.
+The same observation retains its time/deadline and original entry through queued
+cache/wire publication. Confirmed replacement withdraws only that old identity;
+ordinary SMSC absence or transport failure does not reset the reader.
+Failure checklist: old Agent silently times out; stale queued work touches a new
+card; cancelled facts replace current topology; invalid SMSP invents a number;
+Detect creates another draft or starts the line. Hosted and field acceptance are
+tracked in `USER_FLOW_CONSISTENCY`; this paragraph does not claim deployment.
+
 October 9 presentation correction (review candidate, signed v116 installed): the shared
 Calls/Messages line row shows a bold availability summary beside the SIM name.
 Entire route labels are colored: green ready, gray off/offline, red unavailable,

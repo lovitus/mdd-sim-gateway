@@ -41,6 +41,7 @@ jobs:
           github.ref == 'refs/heads/codex/android-client-focused' ||
           github.ref == 'refs/heads/codex/android-production-adaptation' ||
           github.ref == 'refs/heads/codex/android-status-messages-ux' ||
+          github.ref == 'refs/heads/codex/android-sim-readback' ||
           github.ref == 'refs/heads/codex/android-dial-prefix'))
         shell: bash
         env:

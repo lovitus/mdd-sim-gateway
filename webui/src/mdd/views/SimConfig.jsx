@@ -190,7 +190,15 @@ function SimConfig({ instances, selected, refresh, cards, setSelected, targetDev
       const port = c.reader_port || portForIdx(readerIdx())
       if (port) patch.reader_port = port
       upd(patch)
-      setPinMsg(c.imsi ? t('Card read.') : t('Card present; enter PIN to read IMSI. ICCID {iccid}, {tries} tries left.', { iccid: c.iccid || '?', tries: c.pin_tries ?? '?' }))
+      if(c.identity_state==='pin_required' || c.error_code==='reader_sim_pin_required'){
+        setPinMsg(t('This SIM requires PIN verification. Detection did not submit a PIN.'))
+      }else if(c.identity_state && c.identity_state!=='ready' || !c.imsi){
+        setPinMsg(`${t('SIM identity is incomplete; detection did not verify a PIN.')} ${t(c.error_code || 'reader_sim_identity_unavailable')} (${c.error_code || c.identity_state || 'unavailable'})`)
+      }else if(!c.smsc && !form.smsc){
+        setPinMsg(t('SIM identity read, but no SMS centre was returned. Select Manual and enter the carrier SMSC, then save and enable VoWiFi.'))
+      }else{
+        setPinMsg(t('Current SIM read. Save the configuration, then enable VoWiFi.'))
+      }
     } catch (e) { if(current())setPinMsg(`${t('Error')}: ${t(e.message)}`) }
     finally {mutationBusy.current=false;setDetecting(false)}
   }

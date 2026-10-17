@@ -206,6 +206,10 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
     last_observed_at: device?.last_observed_at || '',
     remote_modem: device?.kind === 'modem',
     reader: device?.reader?.reader_name || '',
+    reader_sim_identity_supported: device?.kind === 'reader' && !device?.observed_only &&
+      !!device?.process_generation && agent?.agent_id === device?.agent_id &&
+      agent?.process_generation === device.process_generation
+      ? ['reader-readback-v1','reader-sim-identity-v1'].every(feature => (agent.capabilities || []).includes(feature)) : null,
     stable_path: modem?.attachment_id || device?.reader?.reader_name || device?.id || '',
     instance_id: lineID,
     line_configuration: line ? {enabled:line.enabled === true, provisioning_state:line.hardware_provision_state || ''} : null,

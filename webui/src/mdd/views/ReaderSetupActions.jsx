@@ -55,6 +55,8 @@ export default function ReaderSetupActions({form, device, save, saveConfiguratio
     !!(raw.reader?.reader_name || device.reader) && (!baseline || baseline.card_id===device.sim.iccid)
   const disabled=baseline?.enabled!==true
   const draft=baseline?.hardware_provision_state==='draft'
+  const upgradeRequired=device?.reader_sim_identity_supported===false
+  const verificationBlocked=upgradeRequired && (!baseline || draft)
   const intent=facts?.facts?.vowifi_intent
   const intentOn=observationCurrent && intent?.fresh===true && intent.code==='vowifi_enabled'
   const intentOff=observationCurrent && intent?.fresh===true && intent.code==='vowifi_disabled'
@@ -208,6 +210,7 @@ export default function ReaderSetupActions({form, device, save, saveConfiguratio
     return observed.value
   }
   const activate=(wide=false)=>run(async context=>{
+    if(verificationBlocked)throw new Error(t('Update the Agent before verifying this SIM. No card request was sent.'))
     if(!exact || !imeiReady || missing.length || recalledProvision(form.id) || pendingProviderApply())throw new Error(t('Current reader identity or saved configuration is incomplete.'))
     // A revision-wide consent never covers a revision created after that consent.
     if(wide && (!baseline?.enabled || draft || dirty))throw new Error(t('Save configuration before reviewing its application.'))
@@ -271,21 +274,23 @@ export default function ReaderSetupActions({form, device, save, saveConfiguratio
   })
   let stage=!baseline ? 'Configuration not saved' : running ? 'VoWiFi runtime running' : intentOn && !disabled && applied ? 'Start requested; waiting for runtime' : 'Ready to configure VoWiFi'
   if(!exact)stage='Current reader identity is not confirmed'
+  if(verificationBlocked)stage='Agent update required for SIM verification'
   if(receipt)stage='Initialization result requires confirmation'
   return <section className="u-setup" aria-label={t('Current SIM setup')}>
     <strong>{t(progress || stage)}</strong>
     <div>{form.name || t('SIM')} · ICCID {form.iccid || device?.sim?.iccid}</div>
+    {upgradeRequired && <p role="status" className="u-error">{t('This Agent cannot verify the current SIM. Update it before detecting or initializing this card. Saved configuration is retained.')} · {raw.agent_id}</p>}
     {!!missing.length && <div className="u-inline">{t('Missing information')}: {missing.map(([field,label])=><button key={field} className="btn btn-ghost" onClick={()=>onFocusField?.(field)}>{label}</button>)}<button className="btn btn-ghost" disabled={busy || !exact} onClick={onReadIdentity}>{t('Detect card')}</button></div>}
     {!imeiReady && <p>{t('Set the current SIM IMEI in the Hardware tab before enabling VoWiFi.')} <button className="btn btn-ghost" disabled={busy || !exact} onClick={openHardware}>{t(!baseline || dirty ? 'Save configuration and set IMEI' : 'Set SIM IMEI')}</button></p>}
     <div className="u-inline">
       <button className="btn btn-ghost" disabled={busy || !exact} onClick={save}>{t('Save configuration')}</button>
       {receipt ? <button className="btn btn-primary" disabled={busy} onClick={readOriginal}>{t('Check original result')}</button>
         : pendingApply || (intentOn && applied && !disabled && !dirty && !running) ? <button className="btn btn-primary" disabled={busy} onClick={()=>run(observe)}>{t('Read current state')}</button>
-        : !running && <button className="btn btn-primary" disabled={busy || !exact || !imeiReady || !!missing.length || (widerApply && dirty)} onClick={()=>activate(widerApply)}>{t(widerApply ? 'Review pending configuration and enable' : !baseline || dirty ? 'Save and enable VoWiFi' : 'Enable VoWiFi')}</button>}
+        : !running && <button className="btn btn-primary" disabled={busy || !exact || verificationBlocked || !imeiReady || !!missing.length || (widerApply && dirty)} onClick={()=>activate(widerApply)}>{t(widerApply ? 'Review pending configuration and enable' : !baseline || dirty ? 'Save and enable VoWiFi' : 'Enable VoWiFi')}</button>}
       {working && <button className="btn btn-ghost" onClick={()=>{if(active.current)active.current.cancelled=true;setProgress('Cancelling remaining steps...')}}>{t('Cancel remaining steps')}</button>}
     </div>
     {running && dirty && <p>{t('Save configuration without interrupting this call path. Review application separately after saving.')}</p>}
-    {receipt?.kind==='reader' && receiptState==='unknown' && <button className="btn btn-ghost" disabled={busy || dirty || !exact || !!missing.length} onClick={()=>run(async context=>{
+    {receipt?.kind==='reader' && receiptState==='unknown' && <button className="btn btn-ghost" disabled={busy || dirty || !exact || verificationBlocked || !!missing.length} onClick={()=>run(async context=>{
       if(!(await dialogs.confirm(t('Verify this exact SIM and complete initialization? The line remains disabled; no PIN or SIM write is submitted.'))))return
       check(context);await initialize(context,true)
     })}>{t('New read-only SIM verification')}</button>}
