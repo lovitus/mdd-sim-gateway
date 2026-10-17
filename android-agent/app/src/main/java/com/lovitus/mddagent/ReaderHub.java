@@ -102,6 +102,70 @@ final class ReaderHub implements AutoCloseable {
         readers.put(Json.obj("reader_name",e.name,"card_present",true,"session_generation",e.generation,"card_id",e.id,"identity_state","identified","sim",e.sim));}
         return Json.obj("reader_condition","ready","readers",readers,"modem_condition","disabled");
     }
+    private static final class ReadbackFailure extends java.io.IOException {
+        final String code;
+        ReadbackFailure(String code){super(code);this.code=code;}
+    }
+    synchronized JSONObject readback(JSONObject q,String process,long deadline,java.util.function.BooleanSupplier current){
+        JSONObject result=Json.obj("scope",q.optString("scope"),"operation_id",q.optString("operation_id"),
+            "process_generation",q.optString("process_generation"),"reader_name",q.optString("reader_name"),
+            "card_id",q.optString("card_id"),"sim_session_generation",q.optString("sim_session_generation"),
+            "state","failed","error_code","invalid_reader_readback_request");
+        try{
+            Set<String> fields=new HashSet<>(Arrays.asList("scope","operation_id","process_generation","reader_name","card_id","sim_session_generation"));
+            for(Iterator<String> keys=q.keys();keys.hasNext();){String key=keys.next();if(!fields.remove(key)||!(q.opt(key) instanceof String))return result;}
+            fields.remove("scope"); // Omitted scope is the old full-read request, not SIM-only.
+            if(!fields.isEmpty()||!q.getString("operation_id").matches("[A-Za-z0-9_.:-]{1,128}")||
+                !q.getString("process_generation").matches("[A-Za-z0-9_.:-]{1,128}")||
+                !q.getString("sim_session_generation").matches("[A-Za-z0-9_.:-]{1,128}")||
+                !q.getString("card_id").matches("[0-9]{1,64}"))return result;
+            if(!q.optString("scope").equals("sim_identity"))return result.put("error_code","reader_readback_scope_unsupported");
+            if(!q.getString("process_generation").equals(process))return result.put("error_code","reader_readback_process_changed");
+            Entry entry=entries.get(q.getString("reader_name"));
+            if(closed||entry==null||!entry.id.equals(q.getString("card_id"))||!entry.generation.equals(q.getString("sim_session_generation")))
+                return result.put("error_code","reader_readback_identity_stale");
+            // Guard every fixed APDU and the final publication, not only the socket reply.
+            // An in-flight native transfer may finish after cancellation; its facts cannot commit.
+            final ReadbackFailure[] transport={null};
+            RunnableCheck check=()->{
+                if(transport[0]!=null)throw transport[0];
+                if(!current.getAsBoolean()||Thread.currentThread().isInterrupted()||android.os.SystemClock.elapsedRealtime()>=deadline)
+                    throw new ReadbackFailure("reader_readback_interrupted");
+                if(closed||entries.get(entry.name)!=entry||!entry.generation.equals(q.optString("sim_session_generation"))||
+                    entry.card instanceof UsbCard&&((UsbCard)entry.card).insertion.get()!=entry.insertion)
+                    throw new ReadbackFailure("reader_readback_identity_stale");
+            };
+            SimProtocol.Card guarded=new SimProtocol.Card(){
+                public byte[] transmit(byte[] command)throws Exception{
+                    check.run();byte[] response;
+                    try{response=entry.card.transmit(command);}catch(Exception failure){transport[0]=new ReadbackFailure("reader_readback_transport_failed");throw transport[0];}
+                    check.run();return response;
+                }
+                public void select(String application)throws Exception{
+                    check.run();
+                    if(entry.card instanceof OmapiCard)entry.card.select(application);
+                    else SimProtocol.selectApplication(this,application);
+                    check.run();
+                }
+                public void close(){}
+            };
+            check.run();
+            if(!SimProtocol.iccid(guarded).equals(entry.id))throw new ReadbackFailure("reader_readback_identity_changed");
+            JSONObject observed=SimProtocol.identity(guarded);
+            if(!observed.getString("card_id").equals(entry.id)||!SimProtocol.iccid(guarded).equals(entry.id))
+                throw new ReadbackFailure("reader_readback_identity_changed");
+            check.run();
+            JSONObject sim=observed.getJSONObject("sim");
+            entry.sim=sim;
+            result.put("reader",Json.obj("reader_name",entry.name,"card_present",true,"session_generation",entry.generation,
+                "card_id",entry.id,"identity_state","identified","sim",sim));
+            result.put("state","applied");result.remove("error_code");return result;
+        }catch(ReadbackFailure failure){return Json.obj("scope",q.optString("scope"),"operation_id",q.optString("operation_id"),
+            "process_generation",q.optString("process_generation"),"reader_name",q.optString("reader_name"),
+            "card_id",q.optString("card_id"),"sim_session_generation",q.optString("sim_session_generation"),"state","unknown","error_code",failure.code);
+        }catch(Exception failure){try{result.put("state","unknown").put("error_code","reader_readback_failed");}catch(JSONException ignored){}return result;}
+    }
+    private interface RunnableCheck {void run()throws ReadbackFailure;}
     synchronized JSONObject authenticate(JSONObject q){String op=q.optString("operation_id"),gen=q.optString("session_generation");JSONObject fail=Json.obj("operation_id",op,"session_generation",gen,"failure",Json.obj("kind","not_ready","code","reader_unavailable","retryable",false));
         if(closed)return fail;
         String fp=Json.sha(q.toString().getBytes(StandardCharsets.UTF_8));Receipt old=receipts.get(op);if(old!=null)return old.fingerprint.equals(fp)?old.response:Json.obj("operation_id",op,"session_generation",gen,"failure",Json.obj("kind","conflict","code","operation_identity_conflict","retryable",false));

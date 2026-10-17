@@ -515,7 +515,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     ? t(kind === 'connection' ? 'Mobile data is connected.' : kind === 'cellular' ? 'Data borrowing is allowed.' : kind === 'flight' ? 'Modem RF is disabled.' : kind === 'roaming' ? 'Mobile data may connect while roaming.' : 'Working — connected to the carrier over Wi-Fi.')
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
-    <div><b>{title}</b><div className="u-cap-detail">{needsSetup ? t(device.line_configuration ? 'Configuration saved; open SIM to enable VoWiFi' : 'Line not configured') : detail}</div></div>
+    <div><b>{title}</b><div className="u-cap-detail">{needsSetup ? t(device.line_configuration ? 'Configuration saved; open SIM to review remaining steps and enable VoWiFi' : 'Line not configured') : detail}</div></div>
     <div className="u-cap-actions">{needsSetup ? <><button className="btn btn-primary" onClick={() => onNavigateToSim?.(device.id)}>{t('Configure SIM')}</button>{stopIntent && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(false)}>{t('Cancel pending start')}</button>}</> : <>{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Retry start')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
       aria-label={title} disabled={pending || (unavailable && !c.desired)} onClick={toggle}><span /></button></>}</div>
   </div>
