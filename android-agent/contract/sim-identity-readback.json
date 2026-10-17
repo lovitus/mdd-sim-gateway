@@ -1,0 +1,21 @@
+{
+  "kind": "reader_readback_response",
+  "request_id": "readback-wire-1",
+  "reader_readback_response": {
+    "scope": "sim_identity",
+    "operation_id": "readback-operation-1",
+    "process_generation": "android-test-process",
+    "reader_name": "Synthetic USIM reader",
+    "card_id": "89012345678901234567",
+    "sim_session_generation": "test-insertion-1",
+    "state": "applied",
+    "reader": {
+      "reader_name": "Synthetic USIM reader",
+      "card_present": true,
+      "session_generation": "test-insertion-1",
+      "card_id": "89012345678901234567",
+      "identity_state": "identified",
+      "sim": {"identity_state":"ready","imsi":"001010123456789","mcc":"001","mnc":"01","smsc":"+12345"}
+    }
+  }
+}

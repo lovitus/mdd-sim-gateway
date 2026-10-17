@@ -50,6 +50,17 @@ const line={schema_version:1,id:'line',card_id:'card',sim:{mcc:'234'},network:{e
 assert.equal(editedCatalogLine({...lineForm(line,3),proxy_country:''}).network.egress_country,'gb')
 assert.equal(editedCatalogLine({...lineForm(line,3),mcc:'999',proxy_country:''}).network.egress_country,'fr')
 const now=Date.parse('2026-10-13T00:00:00Z')
+const readerDevice={id:'reader',kind:'reader',agent_id:'reader-agent',process_generation:'process',reader:{reader_name:'reader'}}
+for(const [agent,expected] of [
+  [null,null],
+  [{agent_id:'reader-agent',process_generation:'old',capabilities:[]},null],
+  [{agent_id:'other',process_generation:'process',capabilities:[]},null],
+  [{agent_id:'reader-agent',process_generation:'process',capabilities:[]},false],
+  [{agent_id:'reader-agent',process_generation:'process',capabilities:['reader-readback-v1']},false],
+  [{agent_id:'reader-agent',process_generation:'process',capabilities:['reader-readback-v1','reader-sim-identity-v1']},true],
+]){
+  assert.equal(mapGoSnapshot({devices:[readerDevice],agents:agent?[agent]:[]}).devices[0].reader_sim_identity_supported,expected)
+}
 const fresh=snapshotObservation({at:new Date(now).toISOString(),devices_available:true,devices:[]},now)
 assert.equal(snapshotIsFresh(fresh,now+30000),true)
 assert.equal(snapshotIsFresh(fresh,now+76000),false)

@@ -206,6 +206,23 @@ public final class AgentService extends Service {
             public void message(JSONObject message){if(epoch!=readerEpoch||!sharing)return;if(message.optString("kind").equals("aka_request")){
                 final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;final long generation=owner.generation();
                 readerIO.execute(()->{JSONObject answer=device.authenticate(Json.object(message,"aka_request"));owner.respond(generation,message.optString("request_id"),answer);});
+            }else if(message.optString("kind").equals("reader_readback_request")){
+                final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;
+                final long generation=owner.generation(),deadline=SystemClock.elapsedRealtime()+15000;
+                final JSONObject request=Json.object(message,"reader_readback_request");
+                final String requestID=message.optString("request_id");
+                if(!requestID.matches("[A-Za-z0-9_.:-]{1,128}"))return;
+                java.util.function.BooleanSupplier current=()->epoch==readerEpoch&&hub==device&&agent==owner&&
+                    available&&sharing&&!destroyed&&owner.readerCurrent(generation)&&owner.readerSIMIdentity();
+                readerIO.execute(()->{
+                    JSONObject answer=device.readback(request,process,deadline,current);
+                    JSONObject fresh=answer.optString("state").equals("applied")?device.topology():null;
+                    main.post(()->{
+                        if(!current.getAsBoolean())return;
+                        if(fresh!=null){lastReaders=fresh;lastReaderAt=SystemClock.elapsedRealtime();owner.health(fresh);changed();}
+                        owner.respondReadback(generation,requestID,answer);
+                    });
+                });
             }}
         });agent.connect();refreshReaders();
     }

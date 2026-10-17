@@ -1,0 +1,130 @@
+name: Temporary Android SIM readback qualification
+on:
+  push:
+    branches: [codex/android-sim-readback]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;30.0.16248370'
+          log-accepted-android-sdk-licenses: false
+      - name: SMSP behavioral red then green
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          source=android-agent/app/src/main/java/com/lovitus/mddagent/SimProtocol.java
+          cp "$source" "$RUNNER_TEMP/SimProtocol.fixed.java"
+          trap 'cp "$RUNNER_TEMP/SimProtocol.fixed.java" "$source"' EXIT
+          git show 6b3fddcd0fb7c3a79709470a9b2ffb888d9d7b23:"$source" > "$source"
+          set +e
+          gradle -p android-agent --no-daemon testDebugUnitTest --tests '*SimIdentityTest' > proof/smsp-red.log 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          cp -R android-agent/app/build/test-results/testDebugUnitTest proof/smsp-red
+          grep -q 'SMSP_READBACK' proof/smsp-red/TEST-com.lovitus.mddagent.SimIdentityTest.xml
+          cp "$RUNNER_TEMP/SimProtocol.fixed.java" "$source"
+          sed -i '/if((record\[alpha\]\&2)!=0)/d' "$source"
+          set +e
+          gradle -p android-agent --no-daemon testDebugUnitTest --tests '*SimIdentityTest.missingOrMalformedSMSPDoesNotInventSMSCorInvalidateIdentity' > proof/smsp-presence-red.log 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          cp -R android-agent/app/build/test-results/testDebugUnitTest proof/smsp-presence-red
+          grep -q 'message="absent"' proof/smsp-presence-red/TEST-com.lovitus.mddagent.SimIdentityTest.xml
+          cp "$RUNNER_TEMP/SimProtocol.fixed.java" "$source"
+          gradle -p android-agent --no-daemon testDebugUnitTest --tests '*SimIdentityTest'
+          cp -R android-agent/app/build/test-results/testDebugUnitTest proof/smsp-green
+      - name: KVM access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_2
+          emulator-port: 5554
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash tools/android-sim-readback-proof.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android-sim-readback-proof
+          path: |
+            proof/
+            android-agent/app/build/reports/
+            android-agent/app/build/outputs/androidTest-results/
+  web-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+      - name: Existing Go contract accepts Android wire fixture
+        run: go -C go-runtime test -race -count=1 ./agentlink -run 'TestAndroidSIMReadbackWireContract|TestReaderSIMIdentityNegotiationDoesNotDispatchToLegacyAgent|TestReaderReadbackUsesNegotiatedAgentWSS'
+      - name: Mounted draft red then green and hosted embed
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          cd webui
+          npm ci
+          source=src/mdd/views/ReaderSetupActions.jsx
+          cp "$source" "$RUNNER_TEMP/ReaderSetupActions.fixed.jsx"
+          trap 'cp "$RUNNER_TEMP/ReaderSetupActions.fixed.jsx" "$source"' EXIT
+          git show 6b3fddcd0fb7c3a79709470a9b2ffb888d9d7b23:webui/"$source" > "$source"
+          set +e
+          MDD_BROWSER_EVIDENCE=../proof/browser-red node tests/readerSetupBrowser.mjs > ../proof/browser-red.log 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -q 'ANDROID_SETUP_GUIDANCE: old Agent must name the actual blocker' ../proof/browser-red.log
+          cp "$RUNNER_TEMP/ReaderSetupActions.fixed.jsx" "$source"
+          cp src/goV1Adapter.js "$RUNNER_TEMP/goV1Adapter.fixed.js"
+          git show 6b3fddcd0fb7c3a79709470a9b2ffb888d9d7b23:webui/src/goV1Adapter.js > src/goV1Adapter.js
+          set +e
+          node tests/newCardControl.mjs > ../proof/capability-red.log 2>&1
+          rc=$?
+          set -e
+          cp "$RUNNER_TEMP/goV1Adapter.fixed.js" src/goV1Adapter.js
+          test "$rc" -ne 0
+          grep -q 'AssertionError' ../proof/capability-red.log
+          node tests/newCardControl.mjs
+          MDD_BROWSER_EVIDENCE=../proof/browser-green node tests/readerSetupBrowser.mjs
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android-sim-web-proof
+          path: |
+            proof/
+            go-runtime/internal/webui/assets/
