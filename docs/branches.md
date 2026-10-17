@@ -1,5 +1,15 @@
 # Branch disposition and integration record
 
+Android SIM-only readback: `57b49d5` passed the original source review and hosted
+qualification `39012883696`; retained at `archive/2026-10-17/android-sim-qualified`.
+The old SMSP/handler/reconnect behaviors and removed guards fail behaviorally;
+restored unit/native TLS, Go wire contract and mounted draft journey pass.
+Native insertion delivery and physical card startup are not claimed by fixtures.
+Final cleanup imports the exact hosted UI and removes temporary proof entrypoints;
+normal full CI, signed APK and exact-device/browser acceptance remain pending.
+Earlier proof tags preserve failures and intermediate qualification, not merge queues.
+PR41 first-run setup remains separate and frozen until this blocker is resolved.
+
 Current delivery: PR39 `d267b527`, original source/final cleanup reviews and normal
 full CI `38731761585` passed, including real Xray namespace coverage. Normal merge
 `521067f` and deployed artifact `756558dc` share tree `5b3ad521`. Core/apply/egress

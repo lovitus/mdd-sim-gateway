@@ -18,6 +18,7 @@ let holdCandidate=false, releaseCandidate, candidateSeen
 let holdSave=false, releaseSave, saveSeen
 let holdWideApply=false, releaseApply, applySeen
 let releaseFirstSave, firstSaveSeen
+let readerAgents=[],readbackSIM={identity_state:'ready',...sim},readbackSupported=true,readerSIM=sim
 const firstSaveStarted=new Promise(resolve=>{firstSaveSeen=resolve})
 let lifecycleStarted=new Promise(resolve=>{lifecycleSeen=resolve})
 const requests=[], receipts=new Map(), errors=[]
@@ -37,9 +38,15 @@ try{
     if(path==='/v1/catalog/lines' && method==='GET')return route.fulfill({json:{revision,lines:[other,...(line?[line]:[])]}})
     if(path==='/v1/lines')return route.fulfill({json:{lines:line?[projection()]:[]}})
     if(path==='/v1/devices')return route.fulfill({json:{devices:[{id:'setup-reader',kind:'reader',agent_id:'agent',process_generation:'process',
-      reader:{reader_name:'Setup reader',card_id:card,card_present:true,session_generation:session,sim:{...sim}},
+      reader:{reader_name:'Setup reader',card_id:card,card_present:true,session_generation:session,sim:{...readerSIM}},
       endpoints:line?[{association:'exact',operation_candidate:true,card_ids:[card],line:{id:line.id}}]:[]}]}})
-    if(path==='/v1/agents')return route.fulfill({json:{agents:[]}})
+    if(path==='/v1/agents')return route.fulfill({json:{agents:readerAgents}})
+    if(path==='/v1/readers/readback'){
+      assert.equal(body.scope,'sim_identity');assert.equal(body.card_id,card);assert.equal(body.sim_session_generation,session)
+      assert.equal(request.headers()['x-mdd-agent-id'],'agent')
+      if(!readbackSupported)return route.fulfill({status:409,json:{code:'reader_sim_identity_unsupported',not_dispatched:true}})
+      return route.fulfill({json:{...body,state:'applied',reader:{reader_name:'Setup reader',card_id:card,card_present:true,session_generation:session,sim:readbackSIM}}})
+    }
     if(path==='/v1/egress/exits')return route.fulfill({json:{exits:[]}})
     if(path==='/v1/imei-pool')return route.fulfill({json:{revision:1,catalog_revision:revision,
       entries:[{id:'phone',name:'Test phone',imei:sim.imei}],bindings:[{card_id:card,entry_id:'phone',imei:sim.imei}],unpooled:[]}})
@@ -338,7 +345,42 @@ try{
     assert.equal(requests.filter(item=>item.path==='/v1/system/provider-config').length,beforeReadApply,'same-view recovery never repeats the confirmed apply')
     assert.equal(requests.filter(item=>item.path.endsWith('/runtime/start')).length,startsBeforeApply+1)
   }
+  // Existing Android draft after upgrade: no duplicate claim, guessed SMSC or
+  // automatic activation; the mounted editor owns Detect -> Save -> Enable.
+  line={...line,enabled:false,hardware_provision_state:'draft',sim:{...sim,smsc:''}}
+  readerSIM={...sim,smsc:''};readerAgents=[{agent_id:'agent',process_generation:'process',capabilities:[]}]
+  running=false;applied=false;desired=false;rejectScoped=false;loseWideApplyOnce=false;readbackSupported=false;++revision
+  const repairStart=requests.length
+  await page.reload();await idle()
+  assert.equal(await setup.getByText('Agent update required for SIM verification',{exact:true}).count(),1,'ANDROID_SETUP_GUIDANCE: old Agent must name the actual blocker')
+  await page.getByRole('button',{name:'Detect card',exact:true}).last().click();await idle()
+  await page.getByText(/Error:.*reader_sim_identity_unsupported/).waitFor()
+  assert.equal(await setup.getByRole('button',{name:'Enable VoWiFi',exact:true}).isEnabled(),false)
+  readerAgents[0].capabilities=['reader-readback-v1','reader-sim-identity-v1'];readbackSupported=true
+  await page.reload();await idle()
+  assert.equal(await setup.getByText('Agent update required for SIM verification',{exact:true}).count(),0)
+  const detect=async()=>{await page.getByRole('button',{name:'Detect card',exact:true}).last().click();await idle()}
+  for(const [fact,expected] of [
+    [{identity_state:'pin_required',error_code:'reader_sim_pin_required'},'This SIM requires PIN verification. Detection did not submit a PIN.'],
+    [{identity_state:'partial',imsi:sim.imsi,mcc:'234',error_code:'reader_sim_mnc_length_unavailable'},'SIM identity is incomplete; detection did not verify a PIN.'],
+    [{identity_state:'ready',...sim,smsc:''},'SIM identity read, but no SMS centre was returned. Select Manual and enter the carrier SMSC, then save and enable VoWiFi.'],
+  ]){
+    readbackSIM=fact;await detect();assert.ok((await page.locator('body').innerText()).includes(expected),'ANDROID_DETECT_CAUSE: '+expected)
+  }
+  await page.getByRole('radio',{name:'Manual',exact:true}).check()
+  await page.locator('[data-setup-field="smsc"]').fill('+449999999999')
+  readbackSIM={identity_state:'ready',...sim};await detect()
+  assert.equal(await page.locator('[data-setup-field="smsc"]').inputValue(),'+449999999999','manual SMSC remains user-owned')
+  await page.getByRole('radio',{name:'Auto (from SIM)',exact:true}).check()
+  assert.equal(await page.locator('[data-setup-field="smsc"]').inputValue(),sim.smsc)
+  assert.equal(requests.slice(repairStart).filter(item=>!item.path.endsWith('/readback')).length,0,'Detect never saves, claims, initializes or enables')
+  await setup.getByRole('button',{name:'Save configuration',exact:true}).click();await idle()
+  assert.equal(line.id,'new-line');assert.equal(line.enabled,false);assert.equal(line.sim.smsc,sim.smsc);assert.equal(line.sim.imei,sim.imei);assert.equal(line.network.egress_country,'gb')
+  await setup.getByRole('button',{name:'Enable VoWiFi',exact:true}).click();await confirm();await idle()
+  assert.equal(line.hardware_provision_state,'provisioned');assert.equal(line.enabled,true);assert.equal(running,true)
+  assert.equal(requests.slice(repairStart).filter(item=>item.path.endsWith('/claim')).length,0)
+  await page.screenshot({path:output+'/android-draft-enabled.png',fullPage:true})
   assert.deepEqual(errors,[])
-  console.log('PASS SETUP_ACTIVATION: one current-card action with explicit recovery, retained intent and separate saved-line management')
+  console.log('PASS SETUP_ACTIVATION and ANDROID_SETUP_GUIDANCE: existing draft Detect/Save/Enable, truthful missing facts and original user settings')
 }catch(error){if(page)await page.screenshot({path:`${output}/failure.png`,fullPage:true}).catch(()=>{});throw error}
 finally{await browser?.close();await vite.close()}
