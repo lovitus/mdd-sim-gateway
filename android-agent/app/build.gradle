@@ -28,6 +28,11 @@ android {
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     lint { abortOnError true; checkReleaseBuilds true }
     testOptions { unitTests.returnDefaultValues = true; animationsDisabled = true }
+    sourceSets {
+        test.java.srcDir 'src/sharedTest/java'
+        androidTest.java.srcDir 'src/sharedTest/java'
+        androidTest.assets.srcDir '../contract'
+    }
 }
 def verifyPreviewSigning = tasks.register('verifyPreviewSigning') {
     doLast {

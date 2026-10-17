@@ -32,7 +32,7 @@ public class LinkTest {
             });
             try {
                 link.connect();assertTrue(first.await(5,TimeUnit.SECONDS));link.networkChanged();assertTrue(second.await(5,TimeUnit.SECONDS));
-                for(int i=0;i<2;i++){RecordedRequest q=server.takeRequest(1,TimeUnit.SECONDS);assertNotNull(q);assertEquals("GET",q.getMethod());assertEquals("/v1/mobile/ws",q.getPath());assertEquals("mdd_session=same-session",q.getHeader("Cookie"));}
+                for(int i=0;i<2;i++){RecordedRequest q=server.takeRequest(1,TimeUnit.SECONDS);assertNotNull(q);assertEquals("GET",q.getMethod());assertEquals("/v1/mobile/ws",q.getPath());assertEquals("mdd_session=same-session",q.getHeader("Cookie"));assertNull(q.getHeader("X-MDD-Agent-Capabilities"));}
                 peer.get().close(4401,"revoked");assertTrue(revoked.await(5,TimeUnit.SECONDS));link.networkChanged();
                 assertNull("revocation must not trigger a new login or reconnect",server.takeRequest(800,TimeUnit.MILLISECONDS));
             } finally {link.close();loop.submit(()->{}).get(2,TimeUnit.SECONDS);api.close();}
