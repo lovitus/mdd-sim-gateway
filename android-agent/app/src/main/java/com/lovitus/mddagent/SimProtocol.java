@@ -82,12 +82,43 @@ final class SimProtocol {
         String id=iccid(c);JSONObject sim;
         try{c.select("usim");String imsi=bcd(ef(c,0x6f07,9),true);sim=Json.obj("identity_state","partial","imsi",imsi,"mcc",imsi.substring(0,3),"error_code","reader_sim_mnc_length_unavailable");
             try{byte[] ad=ef(c,0x6fad,4);int len=ad[3]&15;if((len==2||len==3)&&imsi.length()>=3+len){sim.put("mnc",imsi.substring(3,3+len));sim.put("identity_state","ready");sim.remove("error_code");}}catch(Exception ignored){}
+            try{sim.put("smsc",readSMSP(c));}catch(Exception unavailable){/* SMSC absence does not invalidate SIM identity. */}
         }catch(Exception unavailable){
             boolean pin=unavailable instanceof StatusError&&((StatusError)unavailable).sw1==0x69&&((StatusError)unavailable).sw2==0x82;
             String code=pin?"reader_sim_pin_required":unavailable instanceof StatusError?String.format(Locale.ROOT,"reader_sim_status_%02x%02x",((StatusError)unavailable).sw1,((StatusError)unavailable).sw2):"reader_sim_identity_unavailable";
             sim=Json.obj("identity_state",pin?"pin_required":"unavailable","error_code",code);
         }
         return Json.obj("card_id",id,"sim",sim);
+    }
+    // Port of internal/agentsim/reader_identity.go, with the EF_SMSP presence bit
+    // from TS 31.102 4.2.27. Only the first/default record is read; no SIM writes.
+    static String readSMSP(Card card)throws Exception{
+        byte[] fcp=success(exchange(card,new byte[]{0,(byte)0xa4,0,4,2,0x6f,0x42,0}));
+        int length=recordLength(fcp,0);
+        if(length<28||length>255)throw new IOException("Invalid EF_SMSP record length");
+        byte[] record=success(exchange(card,new byte[]{0,(byte)0xb2,1,4,(byte)length}));
+        if(record.length!=length)throw new IOException("Short EF_SMSP record");
+        int alpha=length-28;
+        if((record[alpha]&2)!=0)throw new IOException("EF_SMSP service centre absent");
+        int size=record[alpha+13]&255,ton=record[alpha+14]&255;
+        if(size<2||size>11)throw new IOException("Invalid EF_SMSP address length");
+        String digits=bcd(Arrays.copyOfRange(record,alpha+15,alpha+14+size),false);
+        return ((ton&0x70)==0x10?"+":"")+digits;
+    }
+    private static int recordLength(byte[] fcp,int depth)throws IOException{
+        if(depth>8||fcp.length>4096)throw new IOException("SIM FCP bounds exceeded");
+        for(int offset=0;offset<fcp.length;){
+            int tag=fcp[offset++]&255;
+            if(tag==0||tag==255)continue;
+            if((tag&31)==31||offset>=fcp.length)throw new IOException("Invalid SIM FCP tag");
+            int size=fcp[offset++]&255;
+            if((size&128)!=0){int octets=size&127;if(octets<1||octets>2||offset+octets>fcp.length)throw new IOException("Invalid SIM FCP length");size=0;for(int i=0;i<octets;i++)size=(size<<8)|(fcp[offset++]&255);}
+            if(size>fcp.length-offset)throw new IOException("Short SIM FCP");
+            byte[] value=Arrays.copyOfRange(fcp,offset,offset+size);offset+=size;
+            if(tag==0x82){if(size>=5)return ((value[size-3]&255)<<8)|(value[size-2]&255);if(size==4)return ((value[2]&255)<<8)|(value[3]&255);}
+            if((tag&32)!=0){int result=recordLength(value,depth+1);if(result!=0)return result;}
+        }
+        return 0;
     }
     static byte[] aka(Card c,String application,byte[] rand,byte[] autn)throws Exception{
         if(!Arrays.asList("usim","isim").contains(application)||rand.length!=16||autn.length!=16)throw new IOException("Invalid AKA challenge");

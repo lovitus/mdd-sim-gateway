@@ -10,15 +10,23 @@ final class Link implements AutoCloseable {
     private final Retry retry=new Retry();private volatile WebSocket socket;private volatile long epoch,opened,lastMessage;private volatile boolean stopped,terminal,acknowledged;private int retryState;
     private ScheduledFuture<?> pending,deadline;private long sequence;private String revision="";
     private volatile String diagnostic="";
+    private volatile boolean simReadback;
     Link(GatewayApi api,ScheduledExecutorService loop,String path,String agentID,String agentToken,String process,Events events){this.api=api;this.loop=loop;this.path=path;this.agentID=agentID;this.agentToken=agentToken;this.process=process;this.events=events;}
     void connect(){loop.execute(this::open);}
     private void open(){
         if(stopped||terminal||socket!=null)return;if(pending!=null)pending.cancel(false);pending=null;final long mine=++epoch;
         Request.Builder request=api.request(path);
-        if(!agentID.isEmpty())request.removeHeader("X-MDD-Session").removeHeader("Cookie").header("Authorization","Bearer "+agentToken).header("X-MDD-Agent-ID",agentID);
+        if(!agentID.isEmpty())request.removeHeader("X-MDD-Session").removeHeader("Cookie").header("Authorization","Bearer "+agentToken).header("X-MDD-Agent-ID",agentID)
+            .header("X-MDD-Agent-Capabilities","reader-readback-v1,reader-sim-identity-v1");
+        simReadback=false;
         opened=lastMessage=SystemClock.elapsedRealtime();acknowledged=false;sequence=0;revision="";if(retryState==0)events.state(R.string.link_connecting,false);else events.state(retryState,false);
         socket=api.http.newWebSocket(request.build(),new WebSocketListener(){
-            public void onOpen(WebSocket ws,Response response){if(stopped){ws.cancel();return;}post(()->{if(!current(mine,ws)){ws.cancel();return;}if(!agentID.isEmpty())ws.send(Json.obj("kind","hello","hello",Json.obj("schema_version",1,"agent_id",agentID,"process_generation",process)).toString());});}
+            public void onOpen(WebSocket ws,Response response){if(stopped){ws.cancel();return;}post(()->{if(!current(mine,ws)){ws.cancel();return;}if(!agentID.isEmpty()){
+                java.util.Set<String> features=new java.util.HashSet<>();
+                for(String feature:response.header("X-MDD-Agent-Features","").split(","))features.add(feature.trim());
+                simReadback=features.contains("reader-readback-v1")&&features.contains("reader-sim-identity-v1");
+                ws.send(Json.obj("kind","hello","hello",Json.obj("schema_version",1,"agent_id",agentID,"process_generation",process)).toString());
+            }});}
             public void onMessage(WebSocket ws,String text){post(()->{if(!current(mine,ws))return;try{
                 if(text.length()>2*1024*1024)throw new IllegalArgumentException();JSONObject o=new JSONObject(text);lastMessage=SystemClock.elapsedRealtime();
                 if(!agentID.isEmpty()&&!acknowledged){if(!o.optString("kind").equals("hello_ack"))throw new IllegalArgumentException();acknowledged=true;retryState=0;events.state(R.string.link_reader_online,true);}
@@ -51,15 +59,25 @@ final class Link implements AutoCloseable {
         retryState=R.string.link_network_changed;events.state(retryState,false);
         pending=loop.schedule(this::open,retry.next(),TimeUnit.MILLISECONDS);
     });}
-    void health(JSONObject topology){post(()->{if(stopped||!acknowledged||socket==null)return;
+    void health(JSONObject topology){health(topology,()->true);}
+    void health(JSONObject topology,java.util.function.BooleanSupplier current){health(()->topology,current);}
+    void health(java.util.function.Supplier<JSONObject> snapshot,java.util.function.BooleanSupplier current){post(()->{if(stopped||!acknowledged||socket==null||!current.getAsBoolean())return;
+        JSONObject topology=snapshot.get();
         String next=Json.sha(topology.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));JSONObject health=Json.obj("schema_version",1,"sequence",++sequence,"topology_revision",next);
         if(!next.equals(revision)){try{health.put("topology",topology);}catch(JSONException ignored){return;}}revision=next;
         if(socket.queueSize()>65536||!socket.send(Json.obj("kind","health","health",health).toString()))failed(epoch,R.string.link_backpressure,true);
     });}
     long generation(){return epoch;}
+    boolean readerCurrent(long expected){return !stopped&&epoch==expected&&acknowledged&&socket!=null;}
+    boolean readerSIMIdentity(){return simReadback;}
     String diagnostic(){return diagnostic;}
     void sessionRenewed(){post(()->{if(stopped)return;terminal=false;retryState=0;open();});}
     void respond(long expected,String requestID,JSONObject result){post(()->{if(epoch==expected&&acknowledged&&socket!=null)socket.send(Json.obj("kind","aka_response","request_id",requestID,"aka_response",result).toString());});}
+    void respondReadback(long expected,String requestID,java.util.function.Supplier<JSONObject> response){post(()->{
+        if(!readerCurrent(expected))return;
+        JSONObject result=response.get();
+        if(result!=null)socket.send(Json.obj("kind","reader_readback_response","request_id",requestID,"reader_readback_response",result).toString());
+    });}
     void checkFreshness(){post(()->{if(agentID.isEmpty()&&acknowledged&&SystemClock.elapsedRealtime()-lastMessage>65000)failed(epoch,R.string.link_heartbeat_missed,true);});}
     public void close(){stopped=true;WebSocket active=socket;if(active!=null)active.cancel();post(()->{epoch++;if(pending!=null)pending.cancel(false);if(deadline!=null)deadline.cancel(false);if(socket!=null)socket.cancel();socket=null;});}
 }

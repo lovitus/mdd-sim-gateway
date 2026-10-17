@@ -9,13 +9,19 @@ import java.util.concurrent.*;
 import java.nio.charset.StandardCharsets;
 /** One serialized I/O owner per Hub. Readiness is never inferred from USB presence alone. */
 final class ReaderHub implements AutoCloseable {
-    private final UsbManager usb;private SEService se;private final TreeMap<String,Entry> entries=new TreeMap<>();
+    private final UsbManager usb;private SEService se;private final ConcurrentNavigableMap<String,Entry> entries=new ConcurrentSkipListMap<>();
     volatile boolean closed;volatile UiText diagnostic=UiText.of(R.string.reader_permission_missing);
+    private volatile long topologyRevision;
     private Map<String,UiText> usbFailures=Collections.emptyMap();
     private final Map<String,UsbRecovery> usbRecovery=new HashMap<>();
     synchronized Map<String,UiText> usbFailures(){return new HashMap<>(usbFailures);}
     private final LinkedHashMap<String,Receipt> receipts=new LinkedHashMap<>();
-    private static final class Entry{String name,generation=Json.id(),id="";JSONObject sim;SimProtocol.Card card;long insertion,metadataNext;int metadataAttempts;Entry(String name,SimProtocol.Card card){this.name=name;this.card=card;}}
+    private static final class Entry{
+        volatile String name,generation=Json.id(),id="";volatile JSONObject sim;final SimProtocol.Card card;
+        final java.util.concurrent.atomic.AtomicLong insertionSource;
+        volatile boolean valid=true;volatile long insertion;long metadataNext;int metadataAttempts;
+        Entry(String name,SimProtocol.Card card){this.name=name;this.card=card;insertionSource=card instanceof UsbCard?((UsbCard)card).insertion:new java.util.concurrent.atomic.AtomicLong();}
+    }
     private static final class Receipt{String fingerprint;JSONObject response;Receipt(String f,JSONObject r){fingerprint=f;response=r;}}
     ReaderHub(Context context){usb=context.getSystemService(UsbManager.class);try{se=new SEService(context,Runnable::run,()->{});}catch(Exception ignored){}}
     synchronized void scan(boolean explicitMetadata,boolean recheck,java.util.function.BooleanSupplier canRecover){if(closed)return;
@@ -25,7 +31,7 @@ final class ReaderHub implements AutoCloseable {
             String name="USB-"+d.getVendorId()+"-"+d.getProductId()+"-"+d.getDeviceId()+"-slot0";seen.add(name);
             UsbRecovery recovery=usbRecovery.computeIfAbsent(name,ignored->new UsbRecovery());
             if(recheck)recovery.recheck();
-            try{Entry e=entries.get(name);if(e!=null){UsbCard c=(UsbCard)e.card;c.status();if(c.insertion.get()!=e.insertion){remove(name);e=null;}else repairMetadata(e,explicitMetadata);}
+            try{Entry e=entries.get(name);if(e!=null&&!e.valid){remove(name);e=null;}if(e!=null){UsbCard c=(UsbCard)e.card;c.status();if(c.insertion.get()!=e.insertion){remove(name);e=null;}else repairMetadata(e,explicitMetadata);}
                 if(e==null&&!canRecover.getAsBoolean()){failures.put(name,UiText.of(R.string.reader_usb_recovery_busy));continue;}
                 if(e==null&&entries.size()<8){UsbCard card=new UsbCard(usb,d);e=new Entry(name,card);entries.put(name,e);discover(e);e.insertion=card.insertion.get();}
                 if(e!=null)recovery.healthy(android.os.SystemClock.elapsedRealtime());
@@ -73,7 +79,7 @@ final class ReaderHub implements AutoCloseable {
         usbRecovery.keySet().retainAll(seen);
         if(se!=null&&se.isConnected())for(Reader reader:se.getReaders()){
             String name="OMAPI-"+reader.getName();seen.add(name);
-            try{Entry e=entries.get(name);if(!reader.isSecureElementPresent()){remove(name);continue;}
+            try{Entry e=entries.get(name);if(e!=null&&!e.valid){remove(name);e=null;}if(!reader.isSecureElementPresent()){remove(name);continue;}
                 if(e==null&&entries.size()<8){e=new Entry(name,new OmapiCard(reader));entries.put(name,e);discover(e);}else if(e!=null)repairMetadata(e,explicitMetadata);
             }catch(Exception failure){remove(name);omapiFailed=true;}
         }
@@ -84,7 +90,7 @@ final class ReaderHub implements AutoCloseable {
         if(omapiFailed){UiText failure=UiText.of(R.string.reader_omapi_blocked);diagnostic=diagnostic.empty()?failure:UiText.of(R.string.reader_scan_details,diagnostic,failure);}
         if(diagnostic.empty())diagnostic=UiText.of(R.string.reader_permission_missing);
     }
-    private void discover(Entry e)throws Exception{JSONObject identity=SimProtocol.identity(e.card);e.id=identity.getString("card_id");e.sim=identity.getJSONObject("sim");e.metadataNext=android.os.SystemClock.elapsedRealtime()+60000;}
+    private void discover(Entry e)throws Exception{JSONObject identity=SimProtocol.identity(e.card);e.id=identity.getString("card_id");e.sim=identity.getJSONObject("sim");e.metadataNext=android.os.SystemClock.elapsedRealtime()+60000;topologyRevision++;}
     private void repairMetadata(Entry e,boolean explicit)throws Exception{
         String state=e.sim==null?"unavailable":e.sim.optString("identity_state");
         if(state.equals("ready")||state.equals("pin_required")&&!explicit)return;
@@ -94,14 +100,129 @@ final class ReaderHub implements AutoCloseable {
         e.metadataAttempts++;e.metadataNext=now+(1L<<e.metadataAttempts)*30000;
         JSONObject identity=SimProtocol.identity(e.card);
         if(!e.id.equals(identity.getString("card_id")))throw new java.io.IOException("Card identity changed during metadata read");
-        e.sim=identity.getJSONObject("sim");
+        e.sim=identity.getJSONObject("sim");topologyRevision++;
     }
-    private void remove(String n){Entry e=entries.remove(n);if(e!=null)e.card.close();}
+    private void invalidate(Entry e){if(e.valid){e.valid=false;topologyRevision++;}}
+    private void remove(String n){Entry e=entries.remove(n);if(e!=null){invalidate(e);e.card.close();}}
     synchronized JSONObject topology(){JSONArray readers=new JSONArray();for(Entry e:entries.values()){
-        if(e.card instanceof UsbCard&&((UsbCard)e.card).insertion.get()!=e.insertion)continue;
+        if(!e.valid||e.insertionSource.get()!=e.insertion)continue;
         readers.put(Json.obj("reader_name",e.name,"card_present",true,"session_generation",e.generation,"card_id",e.id,"identity_state","identified","sim",e.sim));}
         return Json.obj("reader_condition","ready","readers",readers,"modem_condition","disabled");
     }
+    // Cache publication must not wait for card I/O, or resurrect an identity
+    // disproved on the I/O owner while a Link reconnects.
+    JSONObject retainCurrentIdentities(JSONObject previous){
+        JSONArray rows=Json.array(previous,"readers"),kept=new JSONArray();
+        for(int i=0;i<rows.length();i++){
+            JSONObject row=rows.optJSONObject(i);if(row==null)continue;
+            Entry e=entries.get(row.optString("reader_name"));
+            if(!closed&&e!=null&&e.valid&&e.insertionSource.get()==e.insertion&&
+                row.optString("card_id").equals(e.id)&&row.optString("session_generation").equals(e.generation))kept.put(row);
+        }
+        if(kept.length()==rows.length())return previous;
+        JSONObject next=new JSONObject();for(Iterator<String> keys=previous.keys();keys.hasNext();){String key=keys.next();try{next.put(key,previous.get(key));}catch(JSONException invalid){throw new IllegalStateException(invalid);}}
+        try{next.put("readers",kept);}catch(JSONException invalid){throw new IllegalStateException(invalid);}return next;
+    }
+    private static final class ReadbackFailure extends java.io.IOException {
+        final String code;
+        ReadbackFailure(String code){super(code);this.code=code;}
+    }
+    final class Readback {
+        final JSONObject result,facts;final long observedAt,deadline,revision;
+        private final Entry entry;private final java.util.function.BooleanSupplier owner;
+        Readback(JSONObject result,Entry entry,long deadline,java.util.function.BooleanSupplier owner){
+            this.result=result;this.entry=entry;this.deadline=deadline;this.owner=owner;
+            observedAt=android.os.SystemClock.elapsedRealtime();revision=topologyRevision;
+            facts=result.optString("state").equals("applied")?topology():null;
+        }
+        boolean identityLost(){return entry!=null&&(!entry.valid||entry.insertionSource.get()!=entry.insertion);}
+        boolean current(){return !closed&&owner.getAsBoolean()&&revision==topologyRevision&&!identityLost()&&android.os.SystemClock.elapsedRealtime()<deadline;}
+        JSONObject response(){
+            if(!result.optString("state").equals("applied")||current())return result;
+            JSONObject unknown=Json.obj("scope",result.optString("scope"),"operation_id",result.optString("operation_id"),
+                "process_generation",result.optString("process_generation"),"reader_name",result.optString("reader_name"),
+                "card_id",result.optString("card_id"),"sim_session_generation",result.optString("sim_session_generation"),
+                "state","unknown","error_code",identityLost()?"reader_readback_identity_stale":"reader_readback_interrupted");
+            return unknown;
+        }
+        // Withdraw only the disproved original identity, never a replacement or
+        // sibling reader. This is a negative fact, not a new observation time.
+        JSONObject withdraw(JSONObject previous){
+            if(!identityLost())return previous;
+            try{
+                JSONObject next=new JSONObject(previous.toString());JSONArray kept=new JSONArray(),readers=Json.array(previous,"readers");
+                for(int i=0;i<readers.length();i++){JSONObject reader=readers.getJSONObject(i);
+                    if(!reader.optString("reader_name").equals(entry.name)||!reader.optString("session_generation").equals(entry.generation)||!reader.optString("card_id").equals(entry.id))kept.put(reader);
+                }
+                next.put("readers",kept);return next;
+            }catch(JSONException invalid){return previous;}
+        }
+    }
+    synchronized Readback readback(JSONObject q,String process,long deadline,java.util.function.BooleanSupplier current){
+        Entry original=entries.get(q.optString("reader_name"));
+        JSONObject result=readbackResult(q,process,deadline,current);
+        return new Readback(result,original,deadline,current);
+    }
+    private JSONObject readbackResult(JSONObject q,String process,long deadline,java.util.function.BooleanSupplier current){
+        JSONObject result=Json.obj("scope",q.optString("scope"),"operation_id",q.optString("operation_id"),
+            "process_generation",q.optString("process_generation"),"reader_name",q.optString("reader_name"),
+            "card_id",q.optString("card_id"),"sim_session_generation",q.optString("sim_session_generation"),
+            "state","failed","error_code","invalid_reader_readback_request");
+        try{
+            Set<String> fields=new HashSet<>(Arrays.asList("scope","operation_id","process_generation","reader_name","card_id","sim_session_generation"));
+            for(Iterator<String> keys=q.keys();keys.hasNext();){String key=keys.next();if(!fields.remove(key)||!(q.opt(key) instanceof String))return result;}
+            fields.remove("scope"); // Omitted scope is the old full-read request, not SIM-only.
+            if(!fields.isEmpty()||!q.getString("operation_id").matches("[A-Za-z0-9_.:-]{1,128}")||
+                !q.getString("process_generation").matches("[A-Za-z0-9_.:-]{1,128}")||
+                !q.getString("sim_session_generation").matches("[A-Za-z0-9_.:-]{1,128}")||
+                !q.getString("card_id").matches("[0-9]{1,64}"))return result;
+            if(!q.optString("scope").equals("sim_identity"))return result.put("error_code","reader_readback_scope_unsupported");
+            if(!q.getString("process_generation").equals(process))return result.put("error_code","reader_readback_process_changed");
+            Entry entry=entries.get(q.getString("reader_name"));
+            if(closed||entry==null||!entry.valid||!entry.id.equals(q.getString("card_id"))||!entry.generation.equals(q.getString("sim_session_generation")))
+                return result.put("error_code","reader_readback_identity_stale");
+            // Guard every fixed APDU and the final publication, not only the socket reply.
+            // An in-flight native transfer may finish after cancellation; its facts cannot commit.
+            final ReadbackFailure[] transport={null};
+            RunnableCheck check=()->{
+                if(transport[0]!=null)throw transport[0];
+                if(!current.getAsBoolean()||Thread.currentThread().isInterrupted()||android.os.SystemClock.elapsedRealtime()>=deadline)
+                    throw new ReadbackFailure("reader_readback_interrupted");
+                if(entry.insertionSource.get()!=entry.insertion)invalidate(entry);
+                if(closed||!entry.valid||entries.get(entry.name)!=entry||!entry.generation.equals(q.optString("sim_session_generation")))
+                    throw new ReadbackFailure("reader_readback_identity_stale");
+            };
+            SimProtocol.Card guarded=new SimProtocol.Card(){
+                public byte[] transmit(byte[] command)throws Exception{
+                    check.run();byte[] response;
+                    try{response=entry.card.transmit(command);}catch(Exception failure){transport[0]=new ReadbackFailure("reader_readback_transport_failed");throw transport[0];}
+                    check.run();return response;
+                }
+                public void select(String application)throws Exception{
+                    check.run();
+                    if(entry.card instanceof OmapiCard)entry.card.select(application);
+                    else SimProtocol.selectApplication(this,application);
+                    check.run();
+                }
+                public void close(){}
+            };
+            check.run();
+            if(!SimProtocol.iccid(guarded).equals(entry.id)){invalidate(entry);throw new ReadbackFailure("reader_readback_identity_changed");}
+            JSONObject observed=SimProtocol.identity(guarded);
+            if(!observed.getString("card_id").equals(entry.id)||!SimProtocol.iccid(guarded).equals(entry.id))
+                {invalidate(entry);throw new ReadbackFailure("reader_readback_identity_changed");}
+            check.run();
+            JSONObject sim=observed.getJSONObject("sim");
+            entry.sim=sim;topologyRevision++;
+            result.put("reader",Json.obj("reader_name",entry.name,"card_present",true,"session_generation",entry.generation,
+                "card_id",entry.id,"identity_state","identified","sim",sim));
+            result.put("state","applied");result.remove("error_code");return result;
+        }catch(ReadbackFailure failure){return Json.obj("scope",q.optString("scope"),"operation_id",q.optString("operation_id"),
+            "process_generation",q.optString("process_generation"),"reader_name",q.optString("reader_name"),
+            "card_id",q.optString("card_id"),"sim_session_generation",q.optString("sim_session_generation"),"state","unknown","error_code",failure.code);
+        }catch(Exception failure){try{result.put("state","unknown").put("error_code","reader_readback_failed");}catch(JSONException ignored){}return result;}
+    }
+    private interface RunnableCheck {void run()throws ReadbackFailure;}
     synchronized JSONObject authenticate(JSONObject q){String op=q.optString("operation_id"),gen=q.optString("session_generation");JSONObject fail=Json.obj("operation_id",op,"session_generation",gen,"failure",Json.obj("kind","not_ready","code","reader_unavailable","retryable",false));
         if(closed)return fail;
         String fp=Json.sha(q.toString().getBytes(StandardCharsets.UTF_8));Receipt old=receipts.get(op);if(old!=null)return old.fingerprint.equals(fp)?old.response:Json.obj("operation_id",op,"session_generation",gen,"failure",Json.obj("kind","conflict","code","operation_identity_conflict","retryable",false));
@@ -109,7 +230,7 @@ final class ReaderHub implements AutoCloseable {
             if(!op.matches("[A-Za-z0-9_.:-]{1,160}")||(!q.optString("device_kind").isEmpty()&&!q.optString("device_kind").equals("reader")))return fail;
             byte[] rand=Base64.decode(q.getString("rand"),Base64.NO_WRAP),autn=Base64.decode(q.getString("autn"),Base64.NO_WRAP);
             String app=q.getString("application");if(rand.length!=16||autn.length!=16||!(app.equals("usim")||app.equals("isim")))return fail;
-            Entry match=null;for(Entry e:entries.values())if(e.generation.equals(gen)&&e.id.equals(q.optString("card_id"))){if(match!=null)return fail;match=e;}
+            Entry match=null;for(Entry e:entries.values())if(e.valid&&e.generation.equals(gen)&&e.id.equals(q.optString("card_id"))){if(match!=null)return fail;match=e;}
             if(match==null)return fail;Entry e=match;
             if(e.card instanceof UsbCard&&((UsbCard)e.card).insertion.get()!=e.insertion)return fail;
             // Fresh identity under the serialized owner, before authentication.
