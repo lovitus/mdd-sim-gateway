@@ -1,6 +1,6 @@
 # Branch disposition and integration record
 
-Current candidate: `codex/android-usb-access-recovery`, based on `e1207aa`, fixes
+PR43 delivery: `codex/android-usb-access-recovery`, based on `e1207aa`, fixes
 Android's missing automatic USB permission request using the existing reader
 recovery owner. Original plan review approved the bounded scope. Behavioral proof
 `a29d26b` / `39096747457` passed and is retained at
@@ -12,7 +12,12 @@ Temporary proof files are removed; original source review approved `1bf4bd7`.
 PR43 initial normal runs `39098244861`/`39098244880` failed: API35 checked Service
 destruction before its asynchronous IPC completed; an unchanged Core donor-apply
 test reported runtime unavailable. The fixture now waits for actual destruction
-without weakening its assertion. Full qualification remains pending; not deployed.
+without weakening its assertion. Final `3ceada0` passed original review, normal
+Android `39099064731`, Go `39099064725`, and signed Android `39099884933`.
+Normal merge `3108bea` has the same tree `c25caed5`; approved source is retained
+at `archive/2026-10-18/android-usb-access-delivery`. This branch is integrated,
+not another merge queue. Owner-authorized v178 update restored the actual missing
+USB permission flow and original card/IMS readiness; see DEPLOYMENT.md for scope.
 
 PR41 `0ababe4` / normal full CI `39015455331` and original final review passed;
 normal merge `160c52a` and deployed `aa89ce241f5f` share tree `c9cede66`.

@@ -303,6 +303,12 @@ proof is retained at `archive/2026-10-18/android-usb-access-qualified`.
 Review corrections passed `1bf4bd7` / `39097903093`: three additional behavioral
 reds, all eight restored flows green; tag
 `archive/2026-10-18/android-usb-access-review-qualified` retains the proof.
+Final `3ceada0` passed original review, normal Android `39099064731`, Go
+`39099064725` and signed Android `39099884933`; merged as same-tree `3108bea`.
+The authorized v178 phone update automatically requested its missing USB grant;
+after the OS confirmation, ordinary scanning restored the original card and IMS200.
+Actual Readers showed one identified reader and zero needing action. This is not
+physical replug/default-handler persistence, endurance or paid-operation acceptance.
 
 Both read and write transport failures during a read-only scan may qualify for
 recovery. Opening/resetting is deferred during the client's call or SMS operation;
