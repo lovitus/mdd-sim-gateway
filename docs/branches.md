@@ -1,11 +1,13 @@
 # Branch disposition and integration record
 
-PR40 `codex/linux-arm64-reader-agent` integrates current main `4d0764a` without
-rewriting the original reviewed history. Previous head `ca3e63b` is preserved at
-`archive/2026-10-18/linux-arm64-reader-before-main`. The original reviewer approved
-this packaging/documentation-only integration; the owner permits merge after
-exact-candidate final review and normal CI. Both remain pending for this new tree.
-No new deployment, device restart or paid/card operation is part of this batch.
+PR40 `a42cb98` passed original final review, normal Go `39102084430` and Android
+`39102084411`; owner-authorized normal merge `26e1997` shares tree `632ef673` with
+artifact source `0a4cfd93`. Qualified source is preserved at
+`archive/2026-10-18/linux-arm64-reader-delivery`; previous `ca3e63b` remains at
+`archive/2026-10-18/linux-arm64-reader-before-main`. Integration retained main
+`4d0764a` without rewriting history. This branch is integrated, not a merge queue.
+No redeployment, device restart or paid/card operation occurred; the ARM64 host
+retains the original installed artifact below. Exact artifact hashes are in PR40.
 
 Original PR40 delivery from main `6b3fddc`: reviewed
 candidate5552ebe and same-tree artifact83af89c3 passed CI38860462972 after one
