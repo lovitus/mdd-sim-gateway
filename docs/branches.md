@@ -1,12 +1,54 @@
 # Branch disposition and integration record
 
-PR40 `codex/linux-arm64-reader-agent` is an open, scoped ARM64 reader packaging
-delivery from main6b3fddc, not a runtime rewrite or a main deployment. Reviewed
+PR40 `codex/linux-arm64-reader-agent` integrates current main `4d0764a` without
+rewriting the original reviewed history. Previous head `ca3e63b` is preserved at
+`archive/2026-10-18/linux-arm64-reader-before-main`. The original reviewer approved
+this packaging/documentation-only integration; the owner permits merge after
+exact-candidate final review and normal CI. Both remain pending for this new tree.
+No new deployment, device restart or paid/card operation is part of this batch.
+
+Original PR40 delivery from main `6b3fddc`: reviewed
 candidate5552ebe and same-tree artifact83af89c3 passed CI38860462972 after one
 unchanged failed-job rerun; archive/2026-10-16/linux-arm64-reader-qualified retains
 that source. The one authorized new-host reader deployment and actual Chrome
-acceptance are recorded in DEPLOYMENT.md. Final closeout changes documentation
-only; no new artifact or whole-fleet rollout is implied. Do not restore old branches.
+acceptance are recorded in DEPLOYMENT.md. Those exact-source records remain valid,
+not qualification of the new integrated build. Do not restore old branches.
+
+PR43 delivery: `codex/android-usb-access-recovery`, based on `e1207aa`, fixes
+Android's missing automatic USB permission request using the existing reader
+recovery owner. Original plan review approved the bounded scope. Behavioral proof
+`a29d26b` / `39096747457` passed and is retained at
+`archive/2026-10-18/android-usb-access-qualified`. The original review's three
+lifecycle/UI/input corrections passed `1bf4bd7` / `39097903093` (three new reds,
+all eight restored flows green), retained at
+`archive/2026-10-18/android-usb-access-review-qualified`.
+Temporary proof files are removed; original source review approved `1bf4bd7`.
+PR43 initial normal runs `39098244861`/`39098244880` failed: API35 checked Service
+destruction before its asynchronous IPC completed; an unchanged Core donor-apply
+test reported runtime unavailable. The fixture now waits for actual destruction
+without weakening its assertion. Final `3ceada0` passed original review, normal
+Android `39099064731`, Go `39099064725`, and signed Android `39099884933`.
+Normal merge `3108bea` has the same tree `c25caed5`; approved source is retained
+at `archive/2026-10-18/android-usb-access-delivery`. This branch is integrated,
+not another merge queue. Owner-authorized v178 update restored the actual missing
+USB permission flow and original card/IMS readiness; see DEPLOYMENT.md for scope.
+
+PR41 `0ababe4` / normal full CI `39015455331` and original final review passed;
+normal merge `160c52a` and deployed `aa89ce241f5f` share tree `c9cede66`.
+`archive/2026-10-17/agent-setup-delivery` preserves the reviewed head; the source
+branch is integrated, not another merge queue. Real enrollment and restart reuse,
+cleanup and scoped limitations are recorded in [DEPLOYMENT.md](../DEPLOYMENT.md).
+Earlier `1382a64` / `38890810681`, `63476b7` / `38890087413`, and `2a78d41` /
+`39015231214` proof tags remain evidence only. PR40 integration is recorded above.
+
+PR42 `ba6fc803` passed original review, Go `39013478171` and signed Android
+`39013483690`, then merged normally as `dbf6baa`. Exact-phone v174 installation
+and actual Chrome Detect/Save/Enable reached IMS200 with the original line,
+IMEI/country and all unrelated catalog rows preserved. This is startup, not voice
+or endurance acceptance. Authorized Core Web-copy deployment and donor restoration
+completed; see the [receipt](https://github.com/lovitus/mdd-sim-gateway/pull/42#issuecomment-6231895384).
+Proof `57b49d5` / `39012883696` remains at
+`archive/2026-10-17/android-sim-qualified`; earlier proof tags are evidence only.
 
 Current delivery: PR39 `d267b527`, original source/final cleanup reviews and normal
 full CI `38731761585` passed, including real Xray namespace coverage. Normal merge

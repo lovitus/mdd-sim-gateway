@@ -15,7 +15,7 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 PR40 候选 `5552ebe` 及原评审通过；正常 CI `38860462972` 在一次同源码失败任务重跑后成功。
 首次失败是既有读卡并发测试的槽位等待超时，保留原证据；调度竞争只是待证解释，未修改门禁。
 已验证工件源 `83af89c3` 与候选 tree 同为 `147ebb73`，保留于
-`archive/2026-10-16/linux-arm64-reader-qualified`。PR 尚未合并，不改写 main 的部署版本。
+`archive/2026-10-16/linux-arm64-reader-qualified`。本条记录当时的独立交付，未代表当时已合并 main。
 仅新授权 Debian 13 ARM64 主机安装 PC/SC 依赖及现有 headless Agent；独立 scoped 凭据、
 固定证书 pin、0700/0600 配置和单一 systemd owner，modem/raw USB 关闭。
 06:50-06:51 UTC 本机与 Core 新鲜读回确认唯一当前读卡位置、卡身份、EID 和三个 profile；
@@ -24,6 +24,40 @@ PR40 候选 `5552ebe` 及原评审通过；正常 CI `38860462972` 在一次同�
 Tar SHA-256 `57247e826390fa24343e468f2a449ae30b68e109cab3f1d3b51fd358e5d398c0`；
 实际 Agent 映像 `a8b9edbdc5e36a2d7e320ba5169535560d72af2ee4f678defe06892a6fd0a414`。
 包和实机逐项哈希相符，unit enabled/active，重启次数为 0；原始主机/凭据证据仅存私有记录。
+10 月 18 日接续 PR40 与当前 main 的集成；新组合须另经评审及 CI，不替换以上旧工件证据。
+本次仅合并打包支持，不重新部署、不重启设备，也不执行付费或卡片操作。
+
+## 2026-10-18 PR43 Android USB 权限恢复
+
+`3ceada0` 原评审、Android `39099064731`、Go `39099064725` 和签名构建
+`39099884933` 通过；正常合并 `3108bea` 同树 `c25caed5`，交付 tag 见分支台账。
+仅更新用户指定手机到稳定签名 v178，旧 APK 和初次 CI 失败证据保留。
+APK SHA-256：`2d41ce1d8f4fde7f4e78f5f1920742fdaa5eaffab2ac4edf9e0002f616603730`。
+更新前实机读卡器仍枚举、缺少 USB 权限；新版启动后自动弹出系统授权，
+没有点击 Readers 手动连接按钮。确认原读卡器授权并选择系统默认打开后，
+普通扫描恢复卡片，实际 Readers 显示识别 1、需处理 0；05:30:28 UTC 固定证书
+读回确认原 Agent 身份、新进程、卡路由及 IMS200、语音/短信能力就绪。
+原可用/共享意图保留；没有更新 Core、修改线路或执行付费、PIN、profile 操作。
+系统确认由本次验收代为完成，不代表绕过权限；未来拔插免提示、USB/OEM 耐久和
+新通话/短信业务未验。本批仅保留同进程 attachment 尝试预算，未增加跨进程持久化，
+不作跨进程保证。原评审已接受本次恢复验收边界；临时镜像已退出，未停止手机共享。
+
+## 2026-10-17 PR41 首次接入与 PR42 新卡修复
+
+PR41 `0ababe4` / 完整 CI `39015455331` 及原评审通过，正常合并 `160c52a`；
+部署工件 `aa89ce241f5f` 同树，归档 `archive/2026-10-17/agent-setup-delivery`。
+真实 Chrome 添加 Agent、macOS 接入包导入及配置落盘、退出后同身份重连通过。
+测试身份已撤销并确认旧 token 返回 401；原 9 份有效凭据、其他进程及业务配置不变。
+原 donor 已恢复，维护与临时启动保护移除、守卫与更新监听器正常。
+初次恢复路由 apply 的 409 留存，随后原恢复路径完成；没有重复安装或放宽门禁。
+Mac 使用隔离路径的开发签名工件，未覆盖生产签名 App；无硬件、付费或耐久验收。
+哈希与完整边界见 [PR41 回执](https://github.com/lovitus/mdd-sim-gateway/pull/41#issuecomment-6234721009)。
+
+PR42 `ba6fc803` / Go `39013478171` / Android `39013483690` 已部署：目标手机
+v174 的真实 Detect/Save/Enable 达到 IMS200，Core 文案及借用恢复也已完成。
+先前失败与回滚见 [PR42 回执](https://github.com/lovitus/mdd-sim-gateway/pull/42#issuecomment-6231895384)。
+后续在 PR41 部署前，手机 USB 重新连接后缺少 MDD 授权，Core 已无 reader；
+这是后续 PR43 修复前的历史状态；恢复过程见上节，不再等待用户手动连接。
 
 ## 2026-10-16 PR39 出口恢复与借用额度
 

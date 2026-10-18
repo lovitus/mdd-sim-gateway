@@ -4,6 +4,20 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
+October 17 new-card repair candidate: Android now negotiates the existing
+`sim_identity` readback and reads the default EF_SMSP record, ported from
+`go-runtime/internal/agentsim/reader_identity.go` and TS 31.102 section 4.2.27.
+The existing serialized reader owner checks connection, insertion and ICCID
+before publishing fresh facts. Full eSIM readback, PIN writes and arbitrary APDUs
+are not added. Missing SMSC stays missing; saved manual values remain user-owned.
+The same observation retains its time/deadline and original entry through queued
+cache/wire publication. Confirmed replacement withdraws only that old identity;
+ordinary SMSC absence or transport failure does not reset the reader.
+Failure checklist: old Agent silently times out; stale queued work touches a new
+card; cancelled facts replace current topology; invalid SMSP invents a number;
+Detect creates another draft or starts the line. Hosted and field acceptance are
+tracked in `USER_FLOW_CONSISTENCY`; this paragraph does not claim deployment.
+
 October 9 presentation correction (review candidate, signed v116 installed): the shared
 Calls/Messages line row shows a bold availability summary beside the SIM name.
 Entire route labels are colored: green ready, gray off/offline, red unavailable,
@@ -254,7 +268,7 @@ and repairing it at meaningful lifecycle events until the user stops it. Existin
 Pause, sign-out and sharing-off choices remain authoritative; this does not turn
 sharing back on or silently grant Android USB permission.
 
-Activity resume, screen-on/unlock, leaving device idle, USB attach/detach/permission,
+Activity resume, screen-on/unlock, leaving device idle, USB attach/detach,
 reader-link reconnection and local call completion request a serialized fresh
 scan. Events coalesce into the existing reader-I/O owner and health schedule;
 there is no additional polling loop or permanent wake lock. An event reopens an
@@ -262,6 +276,39 @@ exhausted recovery episode only after the existing 30-second cooldown. Each
 episode still allows at most two resets; events during a pending retry are
 consumed by that retry. An unsupported device shape or missing native reset
 implementation remains a visible manual-recovery case.
+
+October 18 permission recovery closes a separate reproduced gap: scans previously
+skipped an attached reader without a current USB grant, while the manual access
+button could restore it. The existing service now owns both paths. Availability
+and sharing must be enabled, with no call/SMS or pending intent change, before an
+automatic request. Each attachment gets one automatic attempt; requests serialize,
+denial/cancellation does not loop, including across same-process Service recreation.
+Only attachment keys survive the owner, never its Context or PendingIntent.
+The exact pending reader's button stays reachable while paused; clicking checks
+the two-minute deadline rather than needing a background timer to enable the UI.
+Other attachments remain blocked until the pending request finishes. Replies
+are fenced by a unique PendingIntent identity and fresh Android permission facts.
+An accepted reply requests an ordinary scan, not another port-reset episode.
+
+The class-11 attachment declaration lets Android offer its normal default-handler
+choice, including CCID interfaces on composite devices. It neither bypasses the OS
+permission dialog nor relaxes the existing refusal to reset composite devices.
+Cold/warm attachment entry preserves saved Pause/share intent. Home/Readers show
+pending or unconfirmed access; no extra timer, wake lock, Core API or paid retry is
+introduced. Native Service/Activity/PendingIntent regression coverage uses synthetic
+USB hardware; it is not physical disconnect, OEM durability or card acceptance.
+Behavioral proof `a29d26b` / `39096747457` verified all five tests fail on the
+withdrawn automatic-dispatch behavior and pass with the fix restored. The exact
+proof is retained at `archive/2026-10-18/android-usb-access-qualified`.
+Review corrections passed `1bf4bd7` / `39097903093`: three additional behavioral
+reds, all eight restored flows green; tag
+`archive/2026-10-18/android-usb-access-review-qualified` retains the proof.
+Final `3ceada0` passed original review, normal Android `39099064731`, Go
+`39099064725` and signed Android `39099884933`; merged as same-tree `3108bea`.
+The authorized v178 phone update automatically requested its missing USB grant;
+after the OS confirmation, ordinary scanning restored the original card and IMS200.
+Actual Readers showed one identified reader and zero needing action. This is not
+physical replug/default-handler persistence, endurance or paid-operation acceptance.
 
 Both read and write transport failures during a read-only scan may qualify for
 recovery. Opening/resetting is deferred during the client's call or SMS operation;

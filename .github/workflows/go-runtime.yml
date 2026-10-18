@@ -198,6 +198,19 @@ jobs:
         working-directory: webui
         run: npm run test:update-entry-browser
 
+      - name: Real browser Agent enrollment
+        working-directory: webui
+        run: node tests/agentSetupBrowser.mjs
+
+      - name: Retain Agent enrollment browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-setup-browser-${{ github.sha }}
+          path: webui/browser-evidence/agent-setup
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Retain update entry browser evidence
         if: always()
         uses: actions/upload-artifact@v7

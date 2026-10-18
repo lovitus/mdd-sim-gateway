@@ -28,6 +28,8 @@ public final class AgentService extends Service {
     private static final class ReaderScan {final ReaderHub hub;final Link link;final long epoch;ReaderScan(ReaderHub hub,Link link,long epoch){this.hub=hub;this.link=link;this.epoch=epoch;}}
     private final java.util.concurrent.atomic.AtomicReference<ReaderScan> scanOwner=new java.util.concurrent.atomic.AtomicReference<>();
     private final AtomicBoolean readerRecoveryEvent=new AtomicBoolean();
+    private final AtomicBoolean usbAccessCheckPending=new AtomicBoolean();
+    private ReaderUsbAccess usbAccess;
     private volatile long readerEpoch;
     private final String process=Json.id();
     private ConnectivityManager connectivity;private ConnectivityManager.NetworkCallback networkCallback;
@@ -52,12 +54,25 @@ public final class AgentService extends Service {
     private volatile long sharingIntentEpoch;
     private volatile boolean intentSaving;
     private volatile boolean configurationLoaded;
-    private final BroadcastReceiver usbReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){readerEnvironmentChanged();changed();}};
+    private final BroadcastReceiver usbReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){
+        if((getPackageName()+".USB_PERMISSION").equals(i.getAction())){
+            if(usbAccess!=null&&usbAccess.result(i))refreshReaders();
+            // A denial or duplicate response must not rearm the USB reset budget.
+            changed();return;
+        }
+        if(!UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(i.getAction())&&!UsbManager.ACTION_USB_DEVICE_DETACHED.equals(i.getAction()))return;
+        final android.os.Parcelable extra;
+        try{extra=i.getParcelableExtra(UsbManager.EXTRA_DEVICE);}catch(RuntimeException malformed){return;}
+        if(!(extra instanceof UsbDevice))return;
+        UsbDevice device=(UsbDevice)extra;
+        if(usbAccess!=null&&device!=null&&UsbManager.ACTION_USB_DEVICE_DETACHED.equals(i.getAction()))usbAccess.detached(ReaderUsbAccess.key(device));
+        readerEnvironmentChanged();changed();
+    }};
     private final BroadcastReceiver readerWakeReceiver=new BroadcastReceiver(){public void onReceive(Context c,Intent i){
         if(!PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED.equals(i.getAction())||!getSystemService(PowerManager.class).isDeviceIdleMode())readerEnvironmentChanged();
     }};
     public IBinder onBind(Intent intent){return new LocalBinder();}
-    @Override public void onCreate(){super.onCreate();store=new ConfigStore(this);config=new JSONObject();
+    @Override public void onCreate(){super.onCreate();store=new ConfigStore(this);config=new JSONObject();usbAccess=ReaderUsbAccess.android(this);
         ConfigStore.intent(()->{try{JSONObject saved=store.load();main.post(()->{if(destroyed||configurationEpoch!=0)return;config=saved;sharing=saved.optBoolean("share");readerStatus=UiText.of(sharing?R.string.sharing_paused:R.string.sharing_off);changed();});}catch(Exception failure){main.post(()->{if(destroyed||configurationEpoch!=0)return;notice=UiText.of(R.string.settings_unavailable);changed();});}});
         NotificationManager n=getSystemService(NotificationManager.class);
         n.createNotificationChannel(new NotificationChannel("availability",getString(R.string.notification_availability),NotificationManager.IMPORTANCE_LOW));
@@ -65,8 +80,11 @@ public final class AgentService extends Service {
         connectivity=getSystemService(ConnectivityManager.class);
         networkCallback=new ConnectivityManager.NetworkCallback(){@Override public void onAvailable(Network n){networkChanged();}@Override public void onLost(Network n){networkChanged();}};
         connectivity.registerDefaultNetworkCallback(networkCallback);
-        IntentFilter f=new IntentFilter(getPackageName()+".USB_PERMISSION");f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
-        if(Build.VERSION.SDK_INT>=33)registerReceiver(usbReceiver,f,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(usbReceiver,f);
+        IntentFilter permission=new IntentFilter(getPackageName()+".USB_PERMISSION");permission.addDataScheme("mdd-usb-permission");
+        IntentFilter attachment=new IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED);attachment.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        for(IntentFilter filter:new IntentFilter[]{permission,attachment}){
+            if(Build.VERSION.SDK_INT>=33)registerReceiver(usbReceiver,filter,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(usbReceiver,filter);
+        }
         IntentFilter wake=new IntentFilter(Intent.ACTION_SCREEN_ON);wake.addAction(Intent.ACTION_USER_PRESENT);wake.addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED);
         if(Build.VERSION.SDK_INT>=33)registerReceiver(readerWakeReceiver,wake,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(readerWakeReceiver,wake);
     }
@@ -97,7 +115,7 @@ public final class AgentService extends Service {
         healthTask=loop.scheduleWithFixedDelay(()->{
             if(!available||destroyed)return;
             if(observer!=null)observer.checkFreshness();
-            if(sharing){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);refreshReaders();}
+            if(sharing){publishReaderHealth();refreshReaders();}
         },1,10,TimeUnit.SECONDS);
     }
     void prepareLogin(){
@@ -202,19 +220,66 @@ public final class AgentService extends Service {
         final long epoch=++readerEpoch;scanOwner.set(null);readerLinkOnline=false;
         readerConnection=UiText.of(R.string.link_connecting);
         agent=new Link(api,loop,"/v1/agent/ws",config.optString("agent_id"),config.optString("agent_token"),process,new Link.Events(){
-            public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerLinkOnline=connected;readerConnection=UiText.of(label);readerStatus=readerConnection;changed();if(connected){Link link=agent;if(link!=null)link.health(android.os.SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():lastReaders);readerEnvironmentChanged();}}
+            public void state(int label,boolean connected){if(epoch!=readerEpoch||!sharing)return;readerLinkOnline=connected;readerConnection=UiText.of(label);readerStatus=readerConnection;changed();if(connected){publishReaderHealth();readerEnvironmentChanged();}}
             public void message(JSONObject message){if(epoch!=readerEpoch||!sharing)return;if(message.optString("kind").equals("aka_request")){
                 final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;final long generation=owner.generation();
                 readerIO.execute(()->{JSONObject answer=device.authenticate(Json.object(message,"aka_request"));owner.respond(generation,message.optString("request_id"),answer);});
+            }else if(message.optString("kind").equals("reader_readback_request")){
+                final Link owner=agent;final ReaderHub device=hub;if(owner==null||device==null)return;
+                final long generation=owner.generation(),deadline=SystemClock.elapsedRealtime()+15000;
+                final JSONObject request=Json.object(message,"reader_readback_request");
+                final String requestID=message.optString("request_id");
+                if(!requestID.matches("[A-Za-z0-9_.:-]{1,128}"))return;
+                java.util.function.BooleanSupplier localOwner=()->epoch==readerEpoch&&hub==device&&agent==owner&&available&&sharing&&!destroyed;
+                java.util.function.BooleanSupplier current=()->localOwner.getAsBoolean()&&owner.readerCurrent(generation);
+                readerIO.execute(()->{
+                    if(!owner.readerSIMIdentity()){
+                        owner.respondReadback(generation,requestID,()->current.getAsBoolean()?Json.obj(
+                            "scope",request.optString("scope"),"operation_id",request.optString("operation_id"),
+                            "process_generation",request.optString("process_generation"),"reader_name",request.optString("reader_name"),
+                            "card_id",request.optString("card_id"),"sim_session_generation",request.optString("sim_session_generation"),
+                            "state","failed","error_code","reader_readback_scope_unsupported"):null);
+                        return;
+                    }
+                    ReaderHub.Readback observation=device.readback(request,process,deadline,current);
+                    Runnable withdraw=()->{
+                        if(!localOwner.getAsBoolean())return;
+                        JSONObject remaining=observation.withdraw(lastReaders);
+                        if(remaining!=lastReaders){lastReaders=remaining;publishReaderHealth();changed();}
+                    };
+                    main.post(()->{
+                        withdraw.run();
+                        if(!current.getAsBoolean())return;
+                        if(observation.facts!=null&&observation.current()){
+                            lastReaders=observation.facts;lastReaderAt=observation.observedAt;owner.health(observation.facts,observation::current);changed();
+                        }
+                        owner.respondReadback(generation,requestID,()->{
+                            if(!current.getAsBoolean())return null;
+                            if(observation.identityLost())main.post(withdraw);
+                            return observation.response();
+                        });
+                    });
+                });
             }}
         });agent.connect();refreshReaders();
     }
     void refreshReaders(){refreshReaders(false);}
     void readerEnvironmentChanged(){if(destroyed||!available||!sharing)return;readerRecoveryEvent.set(true);refreshReaders();}
     void refreshReaderMetadata(){readerRecoveryEvent.set(true);refreshReaders(true);}
-    private boolean readerRecoveryAllowed(){return available&&sharing&&!destroyed&&call==null&&!smsPending.get();}
+    private boolean readerRecoveryAllowed(){return available&&sharing&&!destroyed&&!intentSaving&&call==null&&!smsPending.get();}
+    void requestReaderAccess(String attachment){
+        if(destroyed||usbAccess==null||attachment==null||attachment.isEmpty())return;
+        if(call!=null||smsPending.get()){notice=UiText.of(R.string.account_busy);changed();return;}
+        usbAccess.reconcile(true,attachment);changed();
+    }
+    int readerAccessStatus(UsbDevice device){return usbAccess==null?R.string.reader_usb_wait_permission:usbAccess.status(ReaderUsbAccess.key(device));}
+    boolean readerAccessCanRequest(String attachment){return !destroyed&&call==null&&!smsPending.get()&&usbAccess!=null&&usbAccess.canRequest(attachment);}
     private void refreshReaders(boolean explicitMetadata){
         if(destroyed||!available||!sharing)return;
+        if(usbAccessCheckPending.compareAndSet(false,true))main.post(()->{
+            try{if(usbAccess!=null){usbAccess.reconcile(readerRecoveryAllowed(),null);changed();}}
+            finally{usbAccessCheckPending.set(false);}
+        });
         ReaderHub owner=hub;Link link=agent;long epoch=readerEpoch;
         if(owner==null)return;
         ReaderScan ticket=new ReaderScan(owner,link,epoch);
@@ -228,7 +293,7 @@ public final class AgentService extends Service {
                     if(scanOwner.get()!=ticket)return;
                     try{
                         if(ticket.epoch==readerEpoch&&ticket.hub==hub&&ticket.link==agent&&available&&sharing&&!owner.closed){
-                            if(link!=null)link.health(fresh);lastReaders=fresh;readerUSBFailures=failures;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;changed();
+                            lastReaders=owner.retainCurrentIdentities(fresh);readerUSBFailures=failures;lastReaderAt=android.os.SystemClock.elapsedRealtime();readerStatus=owner.diagnostic;publishReaderHealth();changed();
                         }
                     }finally{scanOwner.compareAndSet(ticket,null);}
                 }))scanOwner.compareAndSet(ticket,null);
@@ -245,13 +310,19 @@ public final class AgentService extends Service {
             }
         });}catch(RejectedExecutionException rejected){scanOwner.compareAndSet(ticket,null);}
     }
-    JSONObject readers(){ReaderHub h=hub;return h==null?Json.obj("readers",new JSONArray()):lastReaders;}
+    private void publishReaderHealth(){
+        ReaderHub device=hub;Link link=agent;long epoch=readerEpoch;if(device==null||link==null)return;
+        link.health(()->SystemClock.elapsedRealtime()-lastReaderAt>20000?recoveringReaders():device.retainCurrentIdentities(lastReaders),
+            ()->epoch==readerEpoch&&hub==device&&agent==link&&available&&sharing&&!destroyed);
+    }
+    JSONObject readers(){ReaderHub h=hub;return h==null?Json.obj("readers",new JSONArray()):h.retainCurrentIdentities(lastReaders);}
     volatile long lastReaderAt;
     private static JSONObject recoveringReaders(){return Json.obj("reader_condition","recovering","reader_detail","Fresh reader observation required","readers",new JSONArray(),"modem_condition","disabled");}
     volatile JSONObject lastReaders=recoveringReaders();
     volatile Map<String,UiText> readerUSBFailures=Collections.emptyMap();
     void shareReaders(boolean enabled){if(call!=null){notice=UiText.of(R.string.sharing_call_busy);changed();return;}
         if(!enabled){
+            if(usbAccess!=null)usbAccess.cancel();
             readerUSBFailures=Collections.emptyMap();readerRecoveryEvent.set(false);
             final long expected=++sharingIntentEpoch;readerEpoch++;scanOwner.set(null);sharing=false;readerLinkOnline=false;lastReaders=recoveringReaders();lastReaderAt=0;
             if(agent!=null)agent.close();agent=null;ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
@@ -330,7 +401,7 @@ public final class AgentService extends Service {
     }
     void changed(){captureActivity();main.post(()->{if(destroyed)return;for(Runnable l:listeners)l.run();if(foreground&&(Build.VERSION.SDK_INT<33||checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)==android.content.pm.PackageManager.PERMISSION_GRANTED))getSystemService(NotificationManager.class).notify(1,notification());});}
     private PendingIntent openIntent(int id){return PendingIntent.getActivity(this,id,new Intent(this,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);}
-    private Notification notification(){return new Notification.Builder(this,"availability").setSmallIcon(com.lovitus.mddagent.R.drawable.ic_agent).setContentTitle(getString(R.string.app_name)).setContentText(call!=null?call.state.render(this):connection.render(this)+(sharing?" · "+getString(R.string.readers_shared_suffix):"")).setContentIntent(openIntent(1)).setOngoing(true).setCategory(Notification.CATEGORY_SERVICE).setVisibility(Notification.VISIBILITY_PRIVATE).addAction(new Notification.Action.Builder(null,getString(R.string.pause),PendingIntent.getService(this,1,new Intent(this,AgentService.class).setAction(PAUSE),PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE)).build()).build();}
+    private Notification notification(){return new Notification.Builder(this,"availability").setSmallIcon(com.lovitus.mddagent.R.drawable.ic_agent).setContentTitle(getString(R.string.app_name)).setContentText(call!=null?call.state.render(this):connection.render(this)+(sharing?" · "+getString(usbAccess!=null&&usbAccess.waiting()?R.string.reader_usb_wait_permission:R.string.readers_shared_suffix):"")).setContentIntent(openIntent(1)).setOngoing(true).setCategory(Notification.CATEGORY_SERVICE).setVisibility(Notification.VISIBILITY_PRIVATE).addAction(new Notification.Action.Builder(null,getString(R.string.pause),PendingIntent.getService(this,1,new Intent(this,AgentService.class).setAction(PAUSE),PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE)).build()).build();}
     private void promote(boolean microphone){int type=0;if(Build.VERSION.SDK_INT>=34)type=ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING|(sharing?ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE:0);if(microphone&&Build.VERSION.SDK_INT>=30)type|=ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
         if(Build.VERSION.SDK_INT>=29)startForeground(1,notification(),type);else startForeground(1,notification());foreground=true;}
     void begin(CallPlan plan)throws Exception{if(!online()||api==null)throw new IllegalStateException(getString(R.string.connect_first));if(call!=null)throw new IllegalStateException(getString(R.string.account_busy));
@@ -510,10 +581,11 @@ public final class AgentService extends Service {
         getSystemService(NotificationManager.class).notify(id,3,n);
     }
     private void networkChanged(){if(!available)return;Link o=observer,a=agent;if(o!=null)o.networkChanged();if(a!=null)a.networkChanged();RemoteCall c=call;if(c!=null&&c.audio!=null)c.audio.networkChanged();}
-    private void closeLinks(){if(loginTimer!=null)loginTimer.cancel(false);if(observer!=null)observer.close();if(agent!=null)agent.close();observer=agent=null;online=false;readerLinkOnline=false;}
+    private void closeLinks(){if(usbAccess!=null)usbAccess.cancel();if(loginTimer!=null)loginTimer.cancel(false);if(observer!=null)observer.close();if(agent!=null)agent.close();observer=agent=null;online=false;readerLinkOnline=false;}
     private void stopConnections(){
         invalidateCall();
         available=false;readerRecoveryEvent.set(false);configurationEpoch++;configurationLoaded=true;
+        if(usbAccess!=null)usbAccess.cancel();
         if(healthTask!=null)healthTask.cancel(false);
         readerEpoch++;scanOwner.set(null);lastReaders=recoveringReaders();lastReaderAt=0;closeLinks();
         ReaderHub old=hub;hub=null;if(old!=null)readerIO.execute(old::close);
@@ -534,6 +606,7 @@ public final class AgentService extends Service {
     }
     @Override public void onDestroy(){
         destroyed=true;readerRecoveryEvent.set(false);invalidateCall();closeLinks();
+        if(usbAccess!=null)usbAccess.cancel();
         if(call!=null)releaseWake(call);if(api!=null)api.close();
         try{connectivity.unregisterNetworkCallback(networkCallback);}catch(Exception ignored){}
         try{unregisterReceiver(usbReceiver);}catch(Exception ignored){}
