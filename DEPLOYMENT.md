@@ -10,6 +10,27 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-18 v2.0.0 正式发布（非生产升级）
+
+PR44 `e9de823` 通过原终审及正常 Go `39108641098`、Android `39108640988`；
+正常合并源码 `9a139f81647a83224f04b8c30f06279176061bfb` 与批准源码完整 tree
+均为 `32bcc859197f28c650f80f0766ea53e6104ca4f3`。两个不可变发布 tag 指向同一合并。
+
+| 公开发行 | 发布 workflow | 实际结果 |
+| --- | --- | --- |
+| [Android preview 2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0) | [39109678131](https://github.com/lovitus/mdd-sim-gateway/actions/runs/39109678131) | 成功；versionCode 182，原稳定签名与 application ID，非 debug；prerelease，不占 Latest |
+| [Go v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0) | [39110411762](https://github.com/lovitus/mdd-sim-gateway/actions/runs/39110411762) | 成功；四个平台包、Linux 版本别名、索引和校验清单；Latest 读回为 v2.0.0 |
+
+两份 Release 各 7 项公开资产均已下载，完整 `SHA256SUMS`、`RELEASE.json` 的源码/tree
+及包内 metadata 已核对；Linux 版本包和 revision 包逐字节相同。Mac 沿用原 Developer ID，
+未公证；Windows 未做 Authenticode 签名；ARM64 仅 reader、glibc >=2.39。
+签名与校验文件随各自 Release 提供，安装入口见 [README](README.md#-快速开始)。
+两次 tag CI 均在第二个有界等待内完成，没有重跑 workflow。
+
+这只是公开发行和下载入口收尾，没有升级/重启 Core、Agent 或手机，没有付费或卡片操作。
+实际手机仍为下文 PR43 v178，Core 和各 Agent 仍按各自已接受回执；发布 v182 不代表已安装。
+历史硬件、录音、耐久及系统更新连续性未验项保留，不因发布成功视为通过。
+
 ## 2026-10-16 ARM64 reader Agent
 
 PR40 候选 `5552ebe` 及原评审通过；正常 CI `38860462972` 在一次同源码失败任务重跑后成功。

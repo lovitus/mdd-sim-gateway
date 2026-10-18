@@ -1,22 +1,25 @@
 # Branch disposition and integration record
 
-October18 formal-release batch starts from clean main25bac62 on
-`codex/formal-release-downloads`. Original reviewer approved reuse of the two
-existing workflows, exact-source Android preview before Go stable publication,
-Linux version alias, draft/download verification and scoped status reconciliation.
-Runtime/installer behavior, production devices and deferred tests are unchanged.
+October18 PR44 `codex/formal-release-downloads` is integrated, not a merge queue.
+Original final review approved `e9de823`; normal Go `39108641098` and Android
+`39108640988` passed. Normal merge `9a139f81647a83224f04b8c30f06279176061bfb`
+shares the approved complete tree `32bcc859197f28c650f80f0766ea53e6104ca4f3`.
+Immutable `android-preview-v2.0.0` and `v2.0.0` point to that merge. Signed Android
+`39109678131` and Go `39110411762` published their releases; all public assets
+were downloaded and verified, and Go is Latest. Do not move the tags or replace
+published assets. Runtime/installer behavior, production devices and deferred
+tests are unchanged; publication is not fleet deployment. See DEPLOYMENT.md.
+
 Hosted proof `42e4f7b` / `39107209751` passed six behavioral reds and the restored
 Go/Android publication matrix; `archive/2026-10-18/formal-release-qualified`
 retains it. Temporary proof workflow removed before the single delivery commit.
-Exact normal CI/final review and publication remain pending; no new release
-or fleet deployment is claimed by this record.
 Original final review rejected `0ec4d65` despite green normal Go `39107348206`
 and Android `39107347994`: the fixture omitted real draft lookup and empty
 starter semantics, and preview handoff omitted SHA256SUMS. These are corrected
 at `6a89191` / proof `39108506631`, archived as
 `archive/2026-10-18/formal-release-review-qualified`; old source remains at
 `formal-release-before-review`. The temporary proof branch/workflow is not a
-merge queue. Final normal CI and re-review apply to the cleaned delivery head.
+merge queue. Final normal CI and re-review above apply to the cleaned delivery head.
 
 PR40 `a42cb98` passed original final review, normal Go `39102084430` and Android
 `39102084411`; owner-authorized normal merge `26e1997` shares tree `632ef673` with

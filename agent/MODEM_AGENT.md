@@ -60,7 +60,7 @@ Fyne 接入包导入、保存、连接、退出后同身份重连通过；临时
 ## 获取 release
 
 从根 [README 下载表](../README.md#-快速开始) 选择固定版本；核对同一 Release 的外层 SHA-256，
-再解包并保留整个目录、许可证和内层清单。发布候选未公开时不能用旧 Python Latest 替代。
+再解包并保留整个目录、许可证和内层清单。Go `v2.0.0` 已公开；不要用旧 Python 1.x 包替代。
 Windows 与 macOS 包内分别附带现有安装入口（源文件路径如下）：
 
 - `go-runtime/release/install-windows-agent.ps1`

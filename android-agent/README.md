@@ -4,16 +4,16 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
-The `2.0.0-preview` release candidate uses the existing stable preview signing
-identity and application ID. Its fixed download is
-[android-preview-v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0);
-until publication succeeds, that link may not exist. Download the APK and its own
-SHA256SUMS/signature.txt, verify them, then install as an update without uninstalling
-a compatible earlier preview. Do not substitute an old VPCD APK or an unknown signer.
-Connect to the matching Go Core, not the old Python 1.x Latest. The matching
-[Go v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0) is published
-separately after its gates; the preview may appear first. Publishing does not
-upgrade any phone or Core. The last actual phone receipt remains v178 in DEPLOYMENT.md.
+The `2.0.0-preview` release (versionCode **182**) was published on October 18 with
+the existing stable preview signing identity and application ID. Its fixed download is
+[android-preview-v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0).
+All seven public assets and their checksums were downloaded and verified. Download
+the APK and its own SHA256SUMS/signature.txt, verify them, then install as an update
+without uninstalling a compatible earlier preview. Do not substitute an old VPCD APK
+or an unknown signer. Connect to the matching Go Core, not the old Python 1.x release.
+The same-source [Go v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0)
+is the stable Latest; Android remains a prerelease. Publishing did not upgrade any
+phone or Core. The last actual phone receipt remains v178 in DEPLOYMENT.md.
 
 October 17 new-card repair (PR42 merged and scoped startup accepted): Android now negotiates the existing
 `sim_identity` readback and reads the default EF_SMSP record, ported from

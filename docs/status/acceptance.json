@@ -4,7 +4,7 @@
   "baselineTree": "f0f6b038519bdce6520ea805c4c77c5aecd0535a",
   "reviewDate": "2026-09-20",
   "issue": "https://github.com/lovitus/mdd-sim-gateway/issues/3",
-  "scope": "October18 formal-release candidate: the owner authorizes one download/deployment-entry and stale-status batch, with original-review approval and hosted CI before publication. v2.0.0 and the matching independent Android preview are not yet published by this record. No production upgrade, restart, paid/card operation or expanded deferred test is authorized. PR40 integration and PR41-43 scoped acceptance remain completed; actual phone v178/Core/Agent artifacts are recorded separately in DEPLOYMENT.md. Old pending-final-review and undeployed assertions are reconciled below; missing field evidence is not erased or converted into a release gate.",
+  "scope": "October18 formal-release batch is complete: PR44 passed original review and hosted CI, merged normally, then published same-source Go v2.0.0 and independent Android preview v182. All public downloads/checksums were verified; Go is Latest. Download/setup guides and stale status labels are reconciled. Publication did not upgrade or restart production or the phone, perform paid/card operations or expand deferred tests. PR40 integration and PR41-43 scoped acceptance remain completed; actual phone v178/Core/Agent artifacts remain separately recorded in DEPLOYMENT.md. Missing field evidence is preserved, not erased or converted into a release gate.",
   "archives": [
     {
       "original": "TODO.md",
@@ -1422,11 +1422,17 @@
   "workstreams": [
     {
       "id": "FORMAL_RELEASE",
-      "state": "partial",
+      "state": "completed",
       "releaseRelevance": "current",
-      "summary": "Prepare the first Go formal release and matching independent Android preview through the existing workflows. Include all four qualified platform packages, byte-identical Linux version alias, desktop installation/setup guides, exact-source draft/download verification and explicit stable/preview latest policy. Do not change runtime, installer ownership or device configuration.",
-      "acceptance": "Initial hosted39107209751/42e4f7b supplied six behavioral reds and green CLI matrix; normal Go39107348206 and Android39107347994 passed at0ec4d65. Original final review correctly rejected its draft lookup, empty-starter recovery and incomplete preview checksum handoff. Corrected6a89191/39108506631 executes the unchanged old publisher against faithful draft404 semantics (red), three narrow starter/manifest counterexamples (red), then restored Go/Android publication,15 rejection cases, lost create/publish response, starter/partial-upload resume and read-only repetition (green). Both qualified proof tags and formal-release-before-review preserve evidence; temporary workflows removed. Normal final CI, source re-review and actual public downloads remain pending. Existing hardware/paid/endurance acceptance is preserved, not repeated. Publishing is not fleet deployment or automatic Python1.x migration.",
-      "evidence": ["README.md", ".github/workflows/go-runtime.yml", ".github/workflows/android-agent.yml", "tools/publish-release.mjs", "go-runtime/release/README.md"]
+      "summary": "Published Go v2.0.0 and same-source independent Android preview through the existing workflows. Four platform packages, byte-identical Linux version alias, desktop/manual/first-run deployment guides, exact-source draft/download verification and stable/preview Latest policy are delivered. Runtime, installer ownership and device configuration are unchanged.",
+      "acceptance": "Initial42e4f7b/39107209751 and corrected6a89191/39108506631 behavioral red/green evidence are archived; the original0ec4d65 green CI but rejected review remains recorded in docs/branches.md. Final e9de823 passed original source review, Go39108641098 and Android39108640988; normal merge9a139f81647a83224f04b8c30f06279176061bfb shares tree32bcc859197f28c650f80f0766ea53e6104ca4f3. Both release tags point there. Signed Android39109678131 published preview v182, then Go39110411762 published v2.0.0; all seven public assets per release were downloaded, complete checksums/source/tree/package metadata matched, and Linux aliases are byte-identical. Android preserves its stable signer/application ID and is non-debug/prerelease; Go readback is Latest. Normal Android API28/35 each passed41 methods without failures/errors/skips; dedicated hosted root/Xray/liveness passes cover corresponding default skips, not real-systemd or ARM64 interactive CLI/PTY acceptance. No fleet/phone upgrade, paid/card operation, automatic Python1.x migration or expanded deferred acceptance occurred. Actual installed artifacts remain in DEPLOYMENT.md.",
+      "evidence": ["README.md", "DEPLOYMENT.md", "docs/branches.md", ".github/workflows/go-runtime.yml", ".github/workflows/android-agent.yml", "tools/publish-release.mjs", "go-runtime/release/README.md"],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Owner-authorized original review, exact-source hosted qualification, normal merge, both actual public releases and complete download/checksum/Latest readback are complete. This closes publication and entry-point documentation, not unperformed deployment, hardware or endurance acceptance.",
+        "decisionRefs": [],
+        "evidence": ["README.md", "DEPLOYMENT.md", "docs/branches.md"]
+      }
     },
     {
       "id": "LINUX_ARM64_READER",
