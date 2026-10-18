@@ -4,7 +4,18 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
-October 17 new-card repair candidate: Android now negotiates the existing
+The `2.0.0-preview` release candidate uses the existing stable preview signing
+identity and application ID. Its fixed download is
+[android-preview-v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0);
+until publication succeeds, that link may not exist. Download the APK and its own
+SHA256SUMS/signature.txt, verify them, then install as an update without uninstalling
+a compatible earlier preview. Do not substitute an old VPCD APK or an unknown signer.
+Connect to the matching Go Core, not the old Python 1.x Latest. The matching
+[Go v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0) is published
+separately after its gates; the preview may appear first. Publishing does not
+upgrade any phone or Core. The last actual phone receipt remains v178 in DEPLOYMENT.md.
+
+October 17 new-card repair (PR42 merged and scoped startup accepted): Android now negotiates the existing
 `sim_identity` readback and reads the default EF_SMSP record, ported from
 `go-runtime/internal/agentsim/reader_identity.go` and TS 31.102 section 4.2.27.
 The existing serialized reader owner checks connection, insertion and ICCID
@@ -16,9 +27,9 @@ ordinary SMSC absence or transport failure does not reset the reader.
 Failure checklist: old Agent silently times out; stale queued work touches a new
 card; cancelled facts replace current topology; invalid SMSP invents a number;
 Detect creates another draft or starts the line. Hosted and field acceptance are
-tracked in `USER_FLOW_CONSISTENCY`; this paragraph does not claim deployment.
+tracked in `USER_FLOW_CONSISTENCY`; deployment scope is recorded in DEPLOYMENT.md.
 
-October 9 presentation correction (review candidate, signed v116 installed): the shared
+October 9 presentation correction (PR25 merged, signed v116 inspected): the shared
 Calls/Messages line row shows a bold availability summary beside the SIM name.
 Entire route labels are colored: green ready, gray off/offline, red unavailable,
 amber connecting/unknown/busy. Calls and Messages reuse their existing separate
@@ -598,6 +609,13 @@ gradle -p android-agent testDebugUnitTest lintDebug assembleDebug
 gradle -p android-agent connectedDebugAndroidTest
 ```
 
-The workflow also runs Core tests and builds an installable, **non-debuggable test-signed** preview APK, verifies its signature/manifest and retains checksums and test reports. Unit tests exercise TLS pin mismatch/redirect refusal, same-origin paths, QR validation, call/SMS identities, CCID framing/bounds, fixed APDUs and jitter. Instrumentation exercises native setup, Keystore and real Android audio callbacks/canary/reconnect on a local TLS fixture, not a carrier.
+Only GitHub-hosted workflows run the commands above for delivery. The workflow
+also runs Core tests and builds an installable, **non-debuggable stable-preview-signed**
+APK, verifies its signature/manifest and retains checksums and test reports. Unit tests exercise TLS pin mismatch/redirect refusal, same-origin paths, QR validation, call/SMS identities, CCID framing/bounds, fixed APDUs and jitter. Instrumentation exercises native setup, Keystore and real Android audio callbacks/canary/reconnect on a local TLS fixture, not a carrier.
 
 Authorized workflow dispatches use the existing stable preview signing identity; pull-request builds do not receive its secrets. Never uninstall a differently signed installed app to bypass verification. Do not install with real administrator credentials on untrusted devices. Field compatibility, notification delivery and battery acceptance remain separate from the build.
+
+Only `android-preview-v<version>` tags publish a prerelease, after the existing
+API28/35, Core and signed-APK checks. `versionCode` remains this same workflow's
+run number; the publisher rejects values not newer than delivered v178 or any
+previous public preview. Dispatch on main builds a signed candidate without publishing.

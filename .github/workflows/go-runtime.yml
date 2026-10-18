@@ -16,6 +16,7 @@ on:
       - 'install.sh'
       - 'offline-install.sh'
       - 'README.md'
+      - 'VERSION'
       - 'DEPLOYMENT.md'
       - 'GO_REWRITE.md'
       - 'DEVELOPMENT.md'
@@ -41,6 +42,7 @@ on:
       - 'install.sh'
       - 'offline-install.sh'
       - 'README.md'
+      - 'VERSION'
       - 'DEPLOYMENT.md'
       - 'GO_REWRITE.md'
       - 'DEVELOPMENT.md'
@@ -62,7 +64,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 permissions:
   contents: read
@@ -126,6 +128,7 @@ jobs:
           node tools/repository-check.mjs
           node tools/repository-check.test.mjs
           node tools/installer-waits.test.mjs
+          node tools/publish-release.test.mjs
 
       - name: Rebuild and verify embedded React WebUI
         working-directory: webui
@@ -1478,7 +1481,7 @@ jobs:
           output="$RUNNER_TEMP/MDD-Agent-Windows-amd64"
           go-runtime/release/build-windows-agent.sh \
             --output "$output" \
-            --version 0.1.0 \
+            --version "$(cat VERSION)" \
             --build "$BUILD_NUMBER" \
             --arch amd64 \
             --cc x86_64-w64-mingw32-gcc
@@ -1633,7 +1636,7 @@ jobs:
           fi
           go-runtime/release/build-macos-agent.sh \
             --output "$output" \
-            --version 0.1.0 \
+            --version "$(cat VERSION)" \
             --build "$BUILD_NUMBER" "$@"
           test -x "$output/mdd-agent"
           test -x "$output/mdd-cellular-io"
@@ -1701,14 +1704,17 @@ jobs:
           retention-days: 1
 
   publish-tagged-release:
-    name: Publish verified tagged release
-    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    name: Verify download set and publish exact release tags
     needs:
       - validate-fresh-linux-artifact
       - release-windows-amd64
       - release-macos-arm64
+      - release-linux-arm64-agent
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    concurrency:
+      group: mdd-public-release
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: write
@@ -1719,39 +1725,46 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Download all verified release packages
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Download verified Linux server package
         uses: actions/download-artifact@v8
         with:
-          pattern: '*'
-          path: ${{ runner.temp }}/release-assets
-          merge-multiple: true
+          name: mdd-release-linux-amd64-${{ github.sha }}
+          path: ${{ runner.temp }}/release-assets/linux
 
-      - name: Verify the tag and assemble checksums
+      - uses: actions/download-artifact@v8
+        with:
+          name: mdd-agent-linux-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/release-assets/arm64
+      - uses: actions/download-artifact@v8
+        with:
+          name: mdd-agent-windows-amd64-${{ github.sha }}
+          path: ${{ runner.temp }}/release-assets/windows
+      - uses: actions/download-artifact@v8
+        with:
+          name: mdd-agent-macos-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/release-assets/macos
+
+      - name: Verify packages, version alias and publication handoff
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_ROOT: ${{ runner.temp }}/release-assets
         run: |
           set -euo pipefail
-          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "$GITHUB_SHA"
-          mapfile -t linux < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'mdd-*-linux-amd64.tar' -print)
-          mapfile -t windows < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'MDD-Agent-Windows-amd64.tar.gz' -print)
-          mapfile -t macos < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'MDD-Agent-macOS-arm64.tar.gz' -print)
-          test "${#linux[@]}" -eq 1
-          test "${#windows[@]}" -eq 1
-          test "${#macos[@]}" -eq 1
-          sha256sum "${linux[0]}" "${windows[0]}" "${macos[0]}" |
-            sed "s#  $RELEASE_ROOT/#  #" > "$RELEASE_ROOT/SHA256SUMS"
-          printf 'linux_asset=%s\n' "${linux[0]}" >> "$GITHUB_ENV"
-          printf 'windows_asset=%s\n' "${windows[0]}" >> "$GITHUB_ENV"
-          printf 'macos_asset=%s\n' "${macos[0]}" >> "$GITHUB_ENV"
-          printf 'checksums=%s\n' "$RELEASE_ROOT/SHA256SUMS" >> "$GITHUB_ENV"
-
-      - name: Publish versioned release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
-            "$linux_asset" "$windows_asset" "$macos_asset" "$checksums" \
-            --verify-tag \
-            --title "MDD $GITHUB_REF_NAME" \
-            --notes "Verified Go-only server and unified Agent packages built from $GITHUB_SHA. See SHA256SUMS before installation."
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/v* ]]; then
+            node tools/publish-release.mjs go
+          else
+            node tools/publish-release.mjs go --prepare-only
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: release-index-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/release-assets/publish-go/RELEASE.json
+            ${{ runner.temp }}/release-assets/publish-go/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

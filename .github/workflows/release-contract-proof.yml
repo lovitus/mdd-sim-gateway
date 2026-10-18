@@ -1,0 +1,42 @@
+name: Temporary release contract proof
+on:
+  push:
+    branches: [codex/formal-release-downloads]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: One-time behavioral red counterexamples and restored green
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const source = fs.readFileSync('tools/publish-release.mjs', 'utf8');
+          const cases = [
+            ["  add(linux, `mdd-${version}-linux-amd64.tar`);", 'mdd-2.0.0-linux-amd64.tar'],
+            ["  assert.equal(manifest.source_revision, sha);", 'wrong source must fail'],
+            ["      assert.equal(build.team_identifier, '8WPJLUNLY8');", 'wrong Mac signing identity must fail'],
+            ["  assert(!pkg.includes('application-debuggable'), 'debug APK cannot be published');", 'debug package must fail'],
+            ["  assert(versionCode > 178, 'APK would not upgrade the known delivered preview');", 'old versionCode must fail'],
+            ["    assert(compareVersion(tag, latest.tag_name) > 0, 'older release cannot reclaim latest');", 'newer stable exists must fail'],
+          ];
+          for (const [removed, failure] of cases) {
+            const mutant = path.join(process.env.RUNNER_TEMP, 'publisher-counterexample.mjs');
+            fs.writeFileSync(mutant, source.replace(removed, ''));
+            const run = spawnSync(process.execPath, ['tools/publish-release.test.mjs'], { encoding: 'utf8', timeout: 120000, env: { ...process.env, RELEASE_TEST_PUBLISHER: mutant } });
+            assert(run.status !== 0 && run.stderr.includes(failure), `Missing behavioral red: ${failure}\n${run.stdout}\n${run.stderr}`);
+            console.log(`RED reproduced: ${failure}`);
+          }
+          NODE
+          node tools/publish-release.test.mjs
