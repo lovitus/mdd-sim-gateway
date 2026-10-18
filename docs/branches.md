@@ -1,5 +1,19 @@
 # Branch disposition and integration record
 
+PR40 `codex/linux-arm64-reader-agent` integrates current main `4d0764a` without
+rewriting the original reviewed history. Previous head `ca3e63b` is preserved at
+`archive/2026-10-18/linux-arm64-reader-before-main`. The original reviewer approved
+this packaging/documentation-only integration; the owner permits merge after
+exact-candidate final review and normal CI. Both remain pending for this new tree.
+No new deployment, device restart or paid/card operation is part of this batch.
+
+Original PR40 delivery from main `6b3fddc`: reviewed
+candidate5552ebe and same-tree artifact83af89c3 passed CI38860462972 after one
+unchanged failed-job rerun; archive/2026-10-16/linux-arm64-reader-qualified retains
+that source. The one authorized new-host reader deployment and actual Chrome
+acceptance are recorded in DEPLOYMENT.md. Those exact-source records remain valid,
+not qualification of the new integrated build. Do not restore old branches.
+
 PR43 delivery: `codex/android-usb-access-recovery`, based on `e1207aa`, fixes
 Android's missing automatic USB permission request using the existing reader
 recovery owner. Original plan review approved the bounded scope. Behavioral proof
@@ -25,7 +39,7 @@ normal merge `160c52a` and deployed `aa89ce241f5f` share tree `c9cede66`.
 branch is integrated, not another merge queue. Real enrollment and restart reuse,
 cleanup and scoped limitations are recorded in [DEPLOYMENT.md](../DEPLOYMENT.md).
 Earlier `1382a64` / `38890810681`, `63476b7` / `38890087413`, and `2a78d41` /
-`39015231214` proof tags remain evidence only. PR40 remains separate and unmerged.
+`39015231214` proof tags remain evidence only. PR40 integration is recorded above.
 
 PR42 `ba6fc803` passed original review, Go `39013478171` and signed Android
 `39013483690`, then merged normally as `dbf6baa`. Exact-phone v174 installation
