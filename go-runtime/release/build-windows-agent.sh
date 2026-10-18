@@ -269,7 +269,11 @@ printf '%s\n' \
 	"  MDD Agent.exe  tray GUI and Windows service management" \
 	"  mdd-call-audio-helper.exe  exact-modem UAC audio boundary" \
 	"" \
-	"Initialize the shared configuration from a terminal, then install/start the service from an elevated terminal or the GUI." \
+	"First install: place this complete directory at a persistent path, then use config setup -config ABSOLUTE_PATH." \
+	"Setup accepts the Core URL and administrator login, or the Web Security/Add Agent enrollment package." \
+	"From an elevated terminal use service-install -config ABSOLUTE_PATH, then service-start with that same path." \
+	"Existing service upgrade: use the included install-windows-agent.ps1 Preflight/Install with the existing config." \
+	"Keep config/state and user switches. See MODEM_AGENT.md; do not start a second hardware owner." \
 	"The GUI always registers the sibling mdd-agent.exe, never itself, as the service executable." \
 	"" \
 	"The default is PC/SC-only. On Windows, modem_enabled=true adds read-only MBN facts and" \
@@ -298,6 +302,7 @@ printf '%s\n' \
 	"architecture=$architecture" \
 	"source_revision=$source_revision" \
 	"source_tree=$source_state" \
+	"source_tree_hash=$(git -C "$repository_root" rev-parse HEAD^{tree})" \
 	"fyne_runtime=v2.8.1" \
 	"fyne_tools=$fyne_tools_version" \
 	"go_serial=v1.8.0" \
@@ -305,6 +310,9 @@ printf '%s\n' \
 	"malgo=v0.11.26" \
 	"signing=unsigned-development" \
 	>"$payload/BUILD.txt"
+
+cp "$script_dir/install-windows-agent.ps1" "$payload/"
+cp "$repository_root/agent/MODEM_AGENT.md" "$payload/"
 
 (
 	cd "$payload"

@@ -59,8 +59,9 @@ Fyne 接入包导入、保存、连接、退出后同身份重连通过；临时
 
 ## 获取 release
 
-只使用 GitHub workflow 生成的对应平台 Agent artifact，并核对随包 manifest/SHA-256。Windows 与 macOS
-安装入口分别是：
+从根 [README 下载表](../README.md#-快速开始) 选择固定版本；核对同一 Release 的外层 SHA-256，
+再解包并保留整个目录、许可证和内层清单。发布候选未公开时不能用旧 Python Latest 替代。
+Windows 与 macOS 包内分别附带现有安装入口（源文件路径如下）：
 
 - `go-runtime/release/install-windows-agent.ps1`
 - `go-runtime/release/install-macos-agent.sh`
@@ -72,6 +73,30 @@ PyInstaller spec、旧 package builder、计划任务、`run-*.bat/command` 或�
 
 正式运行时是 `MDDAgent` SCM 服务。服务独占硬件；CLI/GUI 只是本机控制客户端，不能再启动第二个
 设备运行时。配置通常位于 `%ProgramData%\MDD\GoAgent\config.json`，以实际安装 receipt 为准。
+
+**首次安装：** 将完整解包目录放到不会被下载清理删除的固定路径，在管理员 PowerShell 中进入该目录：
+
+```powershell
+$config = Join-Path $env:ProgramData 'MDD\GoAgent\config.json'
+.\mdd-agent.exe config setup -config $config
+.\mdd-agent.exe service-install -config $config
+.\mdd-agent.exe service-start -config $config
+.\mdd-agent.exe status -config $config
+```
+
+向导验证 URL、凭据与 TLS 后保存；也可导入网页“安全 → 添加 Agent”显示的配置包。
+确认配置步骤成功后才安装服务。已有服务不要重复 `service-install` 或重新生成身份；
+此安装不自动开启 modem、4G、借用或 raw USB。Windows 程序尚未做 Authenticode 签名，
+随包的固定 usbipd MSI 签名不能被当成 MDD exe 的签名。
+
+**已有服务升级：** 保留原配置和 state，确认没有活动业务后，使用新包附带脚本，显式传原配置路径：
+
+```powershell
+.\install-windows-agent.ps1 -Action Preflight -CandidateDirectory $PWD.Path -ConfigPath $config
+.\install-windows-agent.ps1 -Action Install -CandidateDirectory $PWD.Path -ConfigPath $config
+```
+
+该脚本管理已有服务的版本切换和回退，不是首次创建服务的入口。
 
 管理员 PowerShell 中先运行安装器 preflight，再安装候选。Windows 没有伪造的 `current` 链接；日常状态
 从 SCM 的权威 ImagePath 解析当前版本：
@@ -110,6 +135,21 @@ CLI 与 `MDD Agent.app` 使用同一个 AgentHost 和同一份配置，不能同
 LaunchAgent、版本目录和 rollback。配置与 state 路径由安装 receipt/LaunchAgent 的 `-config` 参数确定；
 不要假设旧 `MDD Go Shadow` 或历史 App 目录一定是当前路径。
 
+新安装可先打开包内 App 完成向导并退出，或只运行 CLI 配置向导。需要登录后由 launchd 管理时，
+在已登录桌面的同一用户终端执行（不要用 sudo 改成另一位 owner）：
+
+```sh
+config="$HOME/Library/Application Support/MDD Agent/config.json"
+deployment="$HOME/Library/Application Support/MDD Agent/deployment"
+./mdd-agent config setup -config "$config"
+./install-macos-agent.sh preflight --candidate "$PWD" --config "$config" --state "$deployment" --mode gui
+./install-macos-agent.sh install --candidate "$PWD" --config "$config" --state "$deployment" --mode gui
+```
+
+已有安装沿用实际 config/state/mode，不重做向导、不改原身份；`--mode cli` 仍需安装器规定的
+用户 launchd 会话。纯 headless 手动运行可使用 `./mdd-agent run -config "$config"`，不同时开 App。
+包要求 macOS 15+、Apple Silicon，保留 Developer ID；未公证不等于未签名。
+
 只读核对当前 LaunchAgent：
 
 ```bash
@@ -131,17 +171,12 @@ printf '%s\n' "$MDD_AGENT_TOKEN" |
 
 ### 现有 systemd 安装方式
 
-release 包含同一 `mdd-agent` 与 `mdd-agent.service`，但服务端安装不会自动启用 endpoint Agent。先创建
-owner-only 配置、写入精确 Agent ID/server/token/TLS pin，再显式启动：
+release 包含同一 `mdd-agent` 与 `mdd-agent.service`，但服务端安装不会自动启用 endpoint Agent。
+新配置用向导完成后再显式启动；已有配置保持原路径/身份：
 
 ```bash
 sudo install -d -m 0700 /var/lib/mdd-agent
-sudo mdd-agent config init -config /var/lib/mdd-agent/config.json
-sudo mdd-agent config set agent_id linux-agent-1 -config /var/lib/mdd-agent/config.json
-sudo mdd-agent config set server gateway.example.com:8443 -config /var/lib/mdd-agent/config.json
-printf '%s\n' "$MDD_AGENT_TOKEN" |
-  sudo mdd-agent config set token --stdin -config /var/lib/mdd-agent/config.json
-sudo mdd-agent config set tls_sha256 "$MDD_TLS_CERT_SHA256" -config /var/lib/mdd-agent/config.json
+sudo mdd-agent config setup -config /var/lib/mdd-agent/config.json
 sudo systemctl enable --now mdd-agent.service
 ```
 
@@ -157,7 +192,7 @@ bearer 或未完成宿主隔离的设备必须 typed fail closed；不得因为�
 **先确认范围和依赖：**
 
 - 使用对应架构和 libc 的 GitHub workflow 工件。Linux 完整服务端包仍为 amd64；新增原生
-  `ubuntu-24.04-arm` job 提供独立 `MDD-Agent-Linux-arm64.tar.gz` 候选，仅验证 headless reader
+  `ubuntu-24.04-arm` job 提供独立 `MDD-Agent-Linux-arm64.tar.gz`，发布到正式版本的 reader-only 资产，仅覆盖 headless reader
   路径，需要 glibc 2.39 或更新版本。以精确 workflow 的成功结果为准，不把新增 job 当成已验收。
   ARMv7、OpenWrt/musl 不在此范围；不在目标板上现场构建或下载不明来源替代品。
 - Reader 需要系统提供匹配的 PC/SC 库、`pcscd` 和读卡器驱动（例如 libccid），并允许运行用户访问
@@ -180,8 +215,8 @@ Linux tar 和同一发布的 `SHA256SUMS`，先用 `sha256sum` 比对所选 tar 
 源码归档，按 `manifest.json` 的 `agent` role 找到 `mdd-agent`，核对其 SHA-256。使用 `file`/`readelf`
 检查 ELF 架构、动态加载器和依赖；不要把缺库、glibc 版本不兼容当成配置故障。
 
-ARM64 Agent-only 候选从成功 workflow 的 `mdd-agent-linux-arm64-<sha>` artifact 下载，
-不是完整 server release，也暂不自动发布到 tagged release。先核对同包 tar 的 `.sha256`，解包后
+ARM64 Agent-only 包从同一正式版本下载，不是完整 server release，也不能交给 Core updater。
+先核对 Release 的 `SHA256SUMS`（workflow 候选则用同包 tar 的 `.sha256`），解包后
 进入 `MDD-Agent-Linux-arm64` 执行 `sha256sum --check SHA256SUMS`。该包使用自己的校验清单，
 不冒用完整 release 的 `manifest.json`；`BUILD.txt`、`ELF.txt`、`DYNAMIC-LIBRARIES.txt` 和
 `mdd-source.tar.gz` 分别保存源码/构建、架构/加载器、动态依赖和完整对应仓库源码。整个目录
@@ -212,7 +247,18 @@ ARM64 Agent-only 候选从成功 workflow 的 `mdd-agent-linux-arm64-<sha>` arti
 unit 对 cellular guard 只有顺序引用，reader-only 不要求部署 modem guard。没有 systemd 的设备
 继续使用下述同账户手动/cron 流程，不能据此启用未验收的 modem。
 
-**2. 初始化并手动配置。**
+**2. 首次交互配置，或使用已有配置。**
+
+默认推荐只运行配置向导，不在保存后自动启动硬件运行时：
+
+```sh
+umask 077
+/opt/mdd-agent/current/mdd-agent config setup -config /opt/mdd-agent/config.json
+```
+
+输入 Core URL 后用管理员登录完成接入，或导入网页“安全 → 添加 Agent”的配置包。
+正常 CA 走标准验证，自签证书按已核对的叶证书 pin 保存。已有配置直接进入下一步运行，
+不重复初始化；无可写默认路径时向导会询问自定义路径。高级手动配置仍兼容如下旧入口。
 
 以下仅适用于全新目录；已有配置不得再次初始化、换 ID 或丢弃 `state/`。示例 ID/地址由用户替换。
 先创建稳定 ID，在 Core 系统设置中为该 ID 签发独立 scoped token。配置命令直接写入 `0600` 文件，

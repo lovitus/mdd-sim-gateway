@@ -1,4 +1,4 @@
-# Go Agent desktop candidates
+# Go Release Packages
 
 ## Linux ARM64 reader candidate
 
@@ -12,8 +12,8 @@ The `mdd-agent-linux-arm64-<sha>` Actions artifact contains an Agent-only tar an
 its SHA-256. The payload retains per-file hashes, exact source/tree/build identity,
 ELF/loader/dependency reports, licenses, complete repository source and the existing
 optional unit. It requires glibc 2.39 or newer and compatible PC/SC runtime/driver
-packages. This candidate is not automatically added to tagged releases or consumed
-by the server updater. Follow the existing
+packages. Versioned Go releases include this separate reader-only asset; it is
+never consumed by the server updater. Follow the existing
 [manual deployment instructions](../../agent/MODEM_AGENT.md#嵌入式设备手动部署),
 preserving reader-only defaults and using one supervisor. Architecture qualification
 and physical attachment acceptance remain separate ledger entries.
@@ -330,8 +330,35 @@ directories, and reloads systemd. It preserves `/etc/mdd`, every `/var/lib/mdd*`
 
 The GitHub workflow publishes standard downloadable archives for the Linux release and desktop Agent
 packages, and keeps them short-lived for its internal cross-job gates. A pushed `v*` tag
-is published only after the Linux fresh-host lifecycle and both desktop Agent builds pass; the GitHub
-Release contains the Linux server tar, Windows Agent, macOS Agent and one `SHA256SUMS` file.
+is published only after the Linux fresh-host lifecycle, both desktop builds and
+native ARM64 reader job pass. The release job downloads exactly those four artifacts.
+`tools/publish-release.mjs` verifies their source/tree/platform metadata and includes
+both the original Linux revision archive and a byte-identical `mdd-<version>-linux-amd64.tar`
+alias required by the unchanged updater. `RELEASE.json` and `SHA256SUMS` identify every
+asset. Windows/macOS archives include their existing installer and Agent guide.
+
+Publish the reviewed main commit first as `android-preview-v<version>`, then as
+`v<version>`. Both tags resolve to the same commit/tree. Android keeps its existing
+workflow run-number versionCode, application ID and stable preview signing key;
+only explicit preview tags publish, never a main dispatch. API28/35 and existing
+Core gates remain required. Go verifies the exact public preview and downloads
+its recorded assets before publication; it never polls another workflow.
+
+Both publishers are serialized, create/resume drafts without clobbering assets,
+download and verify all draft bytes before publishing, and read back the result.
+Android is explicitly prerelease/non-latest; only a newer Go version may become
+latest. A mismatching existing asset stops recovery. Keep a partial draft and its
+tag/evidence; rerun only the publisher with the original build artifacts. If a new
+build changes bytes or the published content needs changes, use a new version/tag.
+Never move a tag, delete/recreate a public release or use `--clobber`.
+If Android succeeds and Go fails, keep that preview and the previous Go latest;
+do not claim the matching Go release exists. This is not a cross-release transaction.
+
+Root VERSION and desktop/Android display versions are release labels. Go runtime
+identity still reports its actual module/VCS revision; this batch does not rewrite
+buildidentity or pretend a SHA-only deployed build has semver update comparison.
+Publishing is not a production upgrade or a Python/Docker migration. Existing
+hardware, updater-continuity and endurance deferrals remain separate.
 
 Provider configuration rendering reads a typed catalog snapshot from the running Core's authenticated
 literal-loopback API. It never opens the live catalog bbolt file beside Core. A newly initialized empty
