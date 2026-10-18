@@ -4,10 +4,11 @@ October18 PR44 `codex/formal-release-downloads` is integrated, not a merge queue
 Original final review approved `e9de823`; normal Go `39108641098` and Android
 `39108640988` passed. Normal merge `9a139f81647a83224f04b8c30f06279176061bfb`
 shares the approved complete tree `32bcc859197f28c650f80f0766ea53e6104ca4f3`.
-Immutable `android-preview-v2.0.0` and `v2.0.0` point to that merge. Signed Android
+Fixed `android-preview-v2.0.0` and `v2.0.0` point to that merge. Signed Android
 `39109678131` and Go `39110411762` published their releases; all public assets
-were downloaded and verified, and Go is Latest. Do not move the tags or replace
-published assets. Runtime/installer behavior, production devices and deferred
+were downloaded and verified, and Go is Latest. Project policy forbids moving
+these tags or replacing published assets; GitHub reports `immutable=false`, so
+this is not a platform-lock claim. Runtime/installer behavior, production devices and deferred
 tests are unchanged; publication is not fleet deployment. See DEPLOYMENT.md.
 
 Hosted proof `42e4f7b` / `39107209751` passed six behavioral reds and the restored
