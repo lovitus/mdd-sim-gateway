@@ -1,5 +1,14 @@
 # Branch disposition and integration record
 
+Current candidate: `codex/android-usb-access-recovery`, based on `e1207aa`, fixes
+Android's missing automatic USB permission request using the existing reader
+recovery owner. Original plan review approved the bounded scope. Behavioral proof
+`a29d26b` / `39096747457` passed and is retained at
+`archive/2026-10-18/android-usb-access-qualified`. The original source review added
+three scoped lifecycle/UI/input corrections; their behavioral proof is pending.
+Final delivery excludes temporary proof files. Normal API28/35 qualification and
+final review are pending; not deployed.
+
 PR41 `0ababe4` / normal full CI `39015455331` and original final review passed;
 normal merge `160c52a` and deployed `aa89ce241f5f` share tree `c9cede66`.
 `archive/2026-10-17/agent-setup-delivery` preserves the reviewed head; the source
