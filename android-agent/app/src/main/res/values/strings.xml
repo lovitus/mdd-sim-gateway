@@ -169,6 +169,9 @@ Stay available uses a visible foreground notification and network-change callbac
 <string name="reader_attention_accessibility">Readers, %1$d device(s) need attention</string>
 <string name="reader_usb_detected">USB CCID reader %1$d:%2$d</string>
 <string name="reader_usb_wait_permission">USB access is required for this reader.</string>
+<string name="reader_usb_permission_requesting">Waiting for Android USB access confirmation.</string>
+<string name="reader_usb_permission_retry">USB access was not confirmed. Automatic requests are paused; manual retry is available.</string>
+<string name="reader_usb_permission_failed">Android USB access is unavailable. Retry USB access from Readers.</string>
 <string name="reader_usb_paused">Availability is paused; resume to connect this reader.</string>
 <string name="reader_usb_not_shared">Start reader sharing to register this device with Core.</string>
 <string name="reader_usb_wait_link">Sharing is on; waiting for the Agent connection.</string>

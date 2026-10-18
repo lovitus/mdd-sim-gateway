@@ -169,6 +169,9 @@
 <string name="reader_attention_accessibility">读卡器，有 %1$d 个设备需要处理</string>
 <string name="reader_usb_detected">USB CCID 读卡器 %1$d:%2$d</string>
 <string name="reader_usb_wait_permission">需要先授予此读卡器的 USB 访问权限。</string>
+<string name="reader_usb_permission_requesting">正在等待 Android 确认 USB 访问权限。</string>
+<string name="reader_usb_permission_retry">USB 授权未确认，已停止自动申请，可手动重试。</string>
+<string name="reader_usb_permission_failed">Android USB 访问暂不可用，可在读卡器页面重试授权。</string>
 <string name="reader_usb_paused">在线服务已暂停；恢复后才能连接此读卡器。</string>
 <string name="reader_usb_not_shared">请启动读卡器共享，将此设备登记到 Core。</string>
 <string name="reader_usb_wait_link">共享已开启，正在等待 Agent 连接。</string>

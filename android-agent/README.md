@@ -268,7 +268,7 @@ and repairing it at meaningful lifecycle events until the user stops it. Existin
 Pause, sign-out and sharing-off choices remain authoritative; this does not turn
 sharing back on or silently grant Android USB permission.
 
-Activity resume, screen-on/unlock, leaving device idle, USB attach/detach/permission,
+Activity resume, screen-on/unlock, leaving device idle, USB attach/detach,
 reader-link reconnection and local call completion request a serialized fresh
 scan. Events coalesce into the existing reader-I/O owner and health schedule;
 there is no additional polling loop or permanent wake lock. An event reopens an
@@ -276,6 +276,23 @@ exhausted recovery episode only after the existing 30-second cooldown. Each
 episode still allows at most two resets; events during a pending retry are
 consumed by that retry. An unsupported device shape or missing native reset
 implementation remains a visible manual-recovery case.
+
+October 18 permission recovery closes a separate reproduced gap: scans previously
+skipped an attached reader without a current USB grant, while the manual access
+button could restore it. The existing service now owns both paths. Availability
+and sharing must be enabled, with no call/SMS or pending intent change, before an
+automatic request. Each attachment gets one automatic attempt; requests serialize,
+denial/cancellation does not loop, and explicit retry remains in Readers. Replies
+are fenced by a unique PendingIntent identity and fresh Android permission facts.
+An accepted reply requests an ordinary scan, not another port-reset episode.
+
+The class-11 attachment declaration lets Android offer its normal default-handler
+choice, including CCID interfaces on composite devices. It neither bypasses the OS
+permission dialog nor relaxes the existing refusal to reset composite devices.
+Cold/warm attachment entry preserves saved Pause/share intent. Home/Readers show
+pending or unconfirmed access; no extra timer, wake lock, Core API or paid retry is
+introduced. Native Service/Activity/PendingIntent regression coverage uses synthetic
+USB hardware; it is not physical disconnect, OEM durability or card acceptance.
 
 Both read and write transport failures during a read-only scan may qualify for
 recovery. Opening/resetting is deferred during the client's call or SMS operation;

@@ -51,7 +51,7 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state){super.onCreate(state);Object retained=getLastNonConfigurationInstance();if(retained instanceof LoginProfile&&((LoginProfile)retained).storageEpoch==ConfigStore.currentEpoch())loginProfile=(LoginProfile)retained;if(state!=null){selectionFromState=state.containsKey("route")||state.containsKey("line")||state.containsKey("card");tab=state.getInt("tab");focusIncoming=state.getString("incoming","");draftNumber=state.getString("number","");draftMessage=state.getString("message","");selectedLine=state.getString("line","");selectedCard=state.getString("card","");selectedRoute=state.getInt("route");composingMessage=state.getBoolean("compose_message");}else readNotification(getIntent());if(Build.VERSION.SDK_INT>=30)getWindow().setDecorFitsSystemWindows(false);getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);build();}
     @Override public Object onRetainNonConfigurationInstance(){captureLoginDraft();return !resettingStorage&&loginProfile!=null&&loginProfile.storageEpoch==ConfigStore.currentEpoch()?loginProfile:null;}
     private void readNotification(Intent intent){if(intent==null)return;String event=intent.getStringExtra("incoming_event");if(event!=null){focusIncoming=event;tab=1;}if(intent.getBooleanExtra("open_messages",false)){tab=2;composingMessage=false;}intent.removeExtra("incoming_event");intent.removeExtra("open_messages");}
-    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);readNotification(intent);render();}
+    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);readNotification(intent);render();if(UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())&&service!=null)service.readerEnvironmentChanged();}
     @Override protected void onStart(){super.onStart();bound=bindService(new Intent(this,AgentService.class),binding,BIND_AUTO_CREATE);reloadStorage();}
     @Override protected void onResume(){super.onResume();resumed=true;if(service!=null)service.readerEnvironmentChanged();}
     @Override protected void onPause(){resumed=false;super.onPause();}
@@ -727,10 +727,10 @@ public final class MainActivity extends Activity {
         readerSummary.setText(getString(R.string.reader_status_summary,readerStateText,devices.size(),pending));readerSummary.setTextColor(usbFault?UiLabels.ERROR:!service.readerUSBFailures.isEmpty()?UiLabels.WARNING:service.sharing()&&!service.readerLinkOnline?UiLabels.statusColor(service.readerConnection):pending>0?UiLabels.WARNING:UiLabels.statusColor(service.readerStatus));
         sharingButton.setText(service.sharing()?getString(R.string.stop_sharing):getString(R.string.share));sharingButton.setEnabled(!service.intentSaving()&&(service.available()||service.sharing()));
         StringBuilder key=new StringBuilder();
-        for(UsbDevice device:devices)key.append(device.getDeviceId()).append(':').append(device.getVendorId()).append(':').append(device.getProductId()).append(':').append(usb.hasPermission(device)).append(';');
+        for(UsbDevice device:devices)key.append(device.getDeviceId()).append(':').append(device.getVendorId()).append(':').append(device.getProductId()).append(':').append(usb.hasPermission(device)).append(':').append(service.readerAccessStatus(device)).append(':').append(service.readerAccessCanRequest(device)).append(';');
         if(usbPermissions!=null&&!key.toString().equals(usbPermissionState)){
             usbPermissionState=key.toString();usbPermissions.removeAllViews();
-            for(UsbDevice device:devices){boolean ccid=false;for(int i=0;i<device.getInterfaceCount();i++)ccid|=device.getInterface(i).getInterfaceClass()==11;if(!ccid||usb.hasPermission(device))continue;button(usbPermissions,getString(R.string.usb_permission)+" · "+device.getVendorId()+":"+device.getProductId(),()->{Intent intent=new Intent(getPackageName()+".USB_PERMISSION").setPackage(getPackageName());int flags=PendingIntent.FLAG_UPDATE_CURRENT|(Build.VERSION.SDK_INT>=31?PendingIntent.FLAG_MUTABLE:0);usb.requestPermission(device,PendingIntent.getBroadcast(this,device.getDeviceId(),intent,flags));});}
+            for(UsbDevice device:devices){boolean ccid=false;for(int i=0;i<device.getInterfaceCount();i++)ccid|=device.getInterface(i).getInterfaceClass()==11;if(!ccid||usb.hasPermission(device))continue;button(usbPermissions,getString(R.string.usb_permission)+" · "+device.getVendorId()+":"+device.getProductId(),()->{if(service!=null)service.requestReaderAccess(device);}).setEnabled(service.readerAccessCanRequest(device));}
         }
         JSONArray readers=Json.array(service.readers(),"readers");String itemState=key+"|"+service.sharing()+"|"+service.available()+"|"+service.readerLinkOnline+"|"+readers;
         Map<String,UiText> failures=service.readerUSBFailures;
@@ -738,7 +738,7 @@ public final class MainActivity extends Activity {
         if(itemState.equals(readerItemsState))return;readerItemsState=itemState;readerItems.removeAllViews();Set<String> scanned=new HashSet<>();
         for(int i=0;i<readers.length();i++){JSONObject row=readers.optJSONObject(i);if(row!=null)scanned.add(row.optString("reader_name"));}
         for(UsbDevice device:devices){String name=usbReaderName(device);if(scanned.contains(name))continue;
-            int stateText=!usb.hasPermission(device)?R.string.reader_usb_wait_permission:
+            int stateText=!usb.hasPermission(device)?service.readerAccessStatus(device):
                 !service.available()?R.string.reader_usb_paused:
                 !service.sharing()?R.string.reader_usb_not_shared:
                 !service.readerLinkOnline?R.string.reader_usb_wait_link:R.string.reader_usb_wait_scan;
@@ -769,7 +769,7 @@ public final class MainActivity extends Activity {
             String name=usbReaderName(device);JSONObject matched=null;
             for(int i=0;i<readers.length();i++){JSONObject row=readers.optJSONObject(i);if(row!=null&&name.equals(row.optString("reader_name"))){matched=row;break;}}
             UiText failure=failures.get(name);String state;
-            if(!usb.hasPermission(device)){state=getString(R.string.reader_usb_wait_permission);pending=true;}
+            if(!usb.hasPermission(device)){state=getString(service.readerAccessStatus(device));pending=true;}
             else if(!service.available()){state=getString(R.string.reader_usb_paused);pending=true;}
             else if(!service.sharing()){state=getString(R.string.reader_usb_not_shared);pending=true;}
             else if(failure!=null){state=failure.render(this);if(failure.resource==R.string.reader_usb_recovering)pending=true;else fault=true;}
