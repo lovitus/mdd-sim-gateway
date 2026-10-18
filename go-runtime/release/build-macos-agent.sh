@@ -350,15 +350,14 @@ if [ -n "$identity" ]; then
 fi
 
 printf '%s\n' \
-	"MDD Go Agent development candidate" \
+	"MDD Go Agent $version" \
 	"" \
-	"1. Initialize the shared owner-only configuration:" \
-	"   ./mdd-agent config init" \
-	"   ./mdd-agent config set server gateway.example:8443" \
-	"   ./mdd-agent config set tls_sha256 CERTIFICATE_SHA256" \
-	"   printf '%s\\n' \"\$MDD_AGENT_TOKEN\" | ./mdd-agent config set token --stdin" \
+	"1. Configure once with ./mdd-agent config setup -config ABSOLUTE_PATH or launch MDD Agent.app." \
+	"   Use the Core URL and administrator login, or the Web Security/Add Agent enrollment package." \
 	"" \
 	"2. Start either the headless host or MDD Agent.app. They use the same configuration and cannot own PC/SC simultaneously." \
+	"   For managed login startup/upgrade use the included install-macos-agent.sh and MODEM_AGENT.md." \
+	"   Preserve existing configuration/state and signing identity; this package is not notarized." \
 	"" \
 	"The default remains PC/SC-only. Set modem_enabled=true explicitly to claim supported raw-USB modems with private PPP; the Mac does not receive a cellular interface or route." \
 	>"$payload/README.txt"
@@ -369,6 +368,7 @@ printf '%s\n' \
 	"architecture=$(uname -m)" \
 	"source_revision=$source_revision" \
 	"source_tree=$source_state" \
+	"source_tree_hash=$(git -C "$repository_root" rev-parse HEAD^{tree})" \
 	"fyne_runtime=v2.8.1" \
 	"fyne_tools=$fyne_tools_version" \
 	"libusb=1.0.30" \
@@ -378,6 +378,9 @@ printf '%s\n' \
 	"team_identifier=${team_id:-not-set}" \
 	"notarization=not-performed" \
 	>"$payload/BUILD.txt"
+
+cp "$script_dir/install-macos-agent.sh" "$payload/"
+cp "$repository_root/agent/MODEM_AGENT.md" "$payload/"
 
 (
 	cd "$payload"

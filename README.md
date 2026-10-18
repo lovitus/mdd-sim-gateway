@@ -22,7 +22,7 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 2. **统一 HTTPS/WSS 入口**：
    - 页面、管理 API、Agent 和浏览器 PCM 都复用一个公开 TCP 入口，不要求用户确认服务器网卡 IP，也不暴露 RTP 端口。
 3. **跨平台统一 Agent**：
-   - 当前 CI 发布矩阵为 **Linux amd64、Windows amd64、macOS arm64**；包内包含 manifest 声明的原生 helper／依赖，不能宣称所有硬件免驱或所有架构已验收。
+   - 发布矩阵为 **Linux amd64 服务端/Agent、Linux ARM64 reader-only Agent、Windows amd64 Agent、macOS arm64 Agent**；不能宣称所有硬件免驱或所有架构已验收。
    - macOS 默认 **PC/SC-only**，Modem、音频和私有数据能力保留安全门禁；不为满足清单擅自开启。Windows、macOS、Linux 均为远程 Agent 的当前目标。
    - 三大平台开启 4G 时必须强制独占隔离；隔离失败不放行、不回落宿主网络、不覆盖用户开关。
    - 本轮不做 macOS 公证，不使用 `.p8`；现有签名检查保留，Universal 包装另行记录。
@@ -42,42 +42,53 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 
 ### 1. 服务端部署（默认 Go artifact）
 
-**当前下载限制（2026-10-08）：** 最新正式 Release `v1.3.14` 是重构前产物，不含下述 Go Linux tar
-及 `SHA256SUMS`，不能用于本节安装。当前新版尚无面向新用户的正式发布包，请勿用旧 Card Agent
-或 APK 替代。维护者可从已完成验证的 [Go Runtime workflow](https://github.com/lovitus/mdd-sim-gateway/actions/workflows/go-runtime.yml)
-取得精确提交的 `mdd-release-linux-amd64-<commit>` 工件用于受控验收；这些有保留期限的 CI 工件不是正式 Release，
-不可据此宣称新用户发布已完成。已有部署继续按其已验证产物维护。
+**v2.0.0 发布候选：** 以下为固定版本入口，正式发布成功前链接可能尚不存在。旧 Latest `v1.3.14`
+属于 Python/Docker 时代，不能代替这些包；Actions 临时工件也不是正式下载入口。
 
-下面的安装步骤适用于已取得并核对过的新版 Go release bundle。正式包发布后，从对应版本的
-[Releases 页面](https://github.com/lovitus/mdd-sim-gateway/releases) 下载 Linux tar，并先按同一
-Release 的 `SHA256SUMS` 核对文件。普通 main push 的 workflow artifact 只用于 CI 内部验收；只有精确
-`v*` tag 在全部平台门禁通过后才发布可长期下载的 Release。Linux tar 外层只包含安装脚本和一个经过严格 manifest
+| 用途 | 固定下载入口 | 前提与部署说明 |
+| --- | --- | --- |
+| Linux amd64 服务端与 Agent | [mdd-2.0.0-linux-amd64.tar](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/mdd-2.0.0-linux-amd64.tar) | 服务端需 systemd，按下节安装；Agent 可按手动流程运行 |
+| Linux ARM64 读卡器 Agent | [MDD-Agent-Linux-arm64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/MDD-Agent-Linux-arm64.tar.gz) | glibc >=2.39、PC/SC、pcscd/libccid；仅 reader，不含 Core/Provider/modem guard；可不使用 systemd |
+| Windows amd64 Agent | [MDD-Agent-Windows-amd64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/MDD-Agent-Windows-amd64.tar.gz) | [首次服务安装与已有服务升级](agent/MODEM_AGENT.md#windows)；程序未做 Authenticode 签名 |
+| macOS arm64 Agent | [MDD-Agent-macOS-arm64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/MDD-Agent-macOS-arm64.tar.gz) | macOS 15+；原 Developer ID 签名，未公证；[配置和安装](agent/MODEM_AGENT.md#macos) |
+| Android 9+ 原生客户端（预览） | [独立 Android preview](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0) | 原 application ID/稳定 preview 签名，独立 versionCode；读卡器可选，不支持本机 modem |
+
+从 [v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0) 同时下载 `SHA256SUMS`，核对所选文件后再解包。
+Linux 用 `sha256sum 文件名`，macOS 用 `shasum -a 256 文件名`，Windows 用
+`Get-FileHash -Algorithm SHA256 文件名`，与清单对应行完整比较；Android 使用其独立 preview 的清单。
+`RELEASE.json` 记录源码、tree 和资产哈希；Linux 版本号包与源码 revision 包逐字节相同。
+只有精确版本 tag 通过原有门禁、草稿上传及下载读回校验后才公开。Linux tar 外层只包含安装脚本和一个经过严格 manifest
 描述的 `mdd-<revision>` release 目录；不要从源码目录现场构建或回退到 Docker。
 目标宿主需要 Linux systemd、`realpath`、`curl`、`openssl`、coreutils `timeout`，以及标准的
 `useradd`、`groupadd`、`nologin` 账户工具；不需要 Git checkout、Python 或 Docker。
 
 ```bash
-tar -xf mdd-<revision>-linux-amd64.tar
-cd <解包目录>
+mkdir mdd-install
+tar -xf mdd-2.0.0-linux-amd64.tar -C mdd-install
+cd mdd-install
+# 将 <revision> 替换为本目录中实际的 mdd-* 子目录后缀：
 sudo ./install-release.sh install "$PWD/mdd-<revision>"
 sudo ./install-release.sh start
 sudo ./install-release.sh status
-sudo ./install-release.sh stop
-# 保留 /etc/mdd、/var/lib/mdd* 和 mdd 用户，只移除 Go 软件与 unit：
-sudo ./install-release.sh uninstall
 ```
 
 TTY 会隐藏首次管理员密码输入；非交互部署应从权限受控的 secret/file 通过 stdin 提供，禁止把
 密码放进 argv 或环境变量。首次 `install` 创建管理员凭据、过渡期 Agent token 和仅含 localhost、当前
 hostname 及回环地址 SAN 的自签 TLS 身份，但不会启动服务；重复安装保留现有配置及进程 PID。
-登录系统设置后应为每个稳定 Agent ID 分别签发独立 token，逐台更新并确认重连，最后关闭共享
-fallback；签发响应只显示新 token 一次，状态列表不回显秘密。
+新 Agent 可用首次配置向导，或网页“安全 → 添加 Agent”的一次性显示配置包；管理员口令不会保存在 Agent。
+已有凭据不因安装新版自动轮换，不复制其他主机的 Agent 身份。
 本机可打开 `https://localhost:8443/`；远程浏览器应使用证书 SAN 中的 hostname（并保证解析可达），
 同时在受控的系统/浏览器信任存储中信任这张精确自签证书，或使用带匹配受信任证书的 HTTPS/WSS
 反向代理。Agent 固定服务端叶证书 DER 的 SHA-256，不是 SPKI 哈希。系统不会要求用户确认或固定某个网卡 IP。证书固定和离线
 artifact 安装见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 仓库根 `install.sh` 只转发到同一个 Go 安装器；在线与离线安装没有第二套运行时。
+
+**已有 Go 部署升级：** 先保留旧包及权限受控的配置/状态备份，确认通话、数据和维护 owner 空闲，
+使用现有安装器的 preflight/install/显式 restart 与回退流程。`install` 不等于已切换运行进程。
+当前 SHA 标识构建可能显示“版本不可比较”，不应把它误判为已是最新版；保持原更新门禁，走明确版本的受控安装。
+**旧 Python/Docker 1.x：** 本发行不提供原地自动数据迁移保证，不要把本节命令直接覆盖旧部署。
+先保留原数据并完成针对性迁移；本批不恢复旧运行时或自动启用旧线路。
 
 详细安装与配置说明参见：[完整部署与维护手册 (DEPLOYMENT.md)](DEPLOYMENT.md)。
 开发、构建、制品溯源和临时证据规则见：[DEVELOPMENT.md](DEVELOPMENT.md)。
@@ -88,14 +99,16 @@ artifact 安装见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 Windows、macOS 和 Linux 只使用 release 中的统一 `mdd-agent`（macOS 也提供 `MDD Agent.app`）。
 同一进程管理该主机允许启用的 PC/SC/eUICC、Modem、短信、通话、音频和受隔离数据能力；不存在
-另一个轻量 Card Agent、Android VPCD App、共享 token 客户端或明文 35963 兼容入口。先在系统设置按
-稳定 Agent ID 签发独立 token，再通过 stdin 写入 owner-only 配置。平台安装、服务管理、证书 pin 和
+另一个轻量 Card Agent、Android VPCD App、共享 token 客户端或明文 35963 兼容入口。
+首次在终端运行 `mdd-agent`（或打开桌面 App），缺配置时按向导输入 Core URL，再选择网页登录或导入
+网页“安全 → 添加 Agent”的配置包。已有配置按原 `-config` 路径启动，不重复初始化；向导也支持
+`mdd-agent config setup -config /absolute/path/config.json`。平台安装、服务管理、证书 pin 和
 当前实机支持边界见 [DEPLOYMENT.md](DEPLOYMENT.md#三客户端部署与支持边界) 与
 [统一 Agent 手册](agent/MODEM_AGENT.md)。
 
 嵌入式 Linux 用户可选择[手动下载、放置、配置及 crontab 保活流程](agent/MODEM_AGENT.md#嵌入式设备手动部署)，
 不必为 reader Agent 安装 systemd。现有安装器及 modem 隔离逻辑不变；架构/运行库需匹配，
-目前没有已验证的 Linux ARM64 发布工件，也不宣称无 systemd modem 已适配。
+ARM64 的原生构建和一台读卡器主机已有独立回执，但不宣称无 systemd modem 已适配。
 
 Android 使用独立的[原生预览客户端](android-agent/README.md)，复用 Core 线路和现有通话仲裁；
 读卡器共享是可选用途，不是使用远程通话/短信的前提。预览交付不等于所有手机和运营商均已验收。

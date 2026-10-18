@@ -2,6 +2,7 @@ name: Android native agent preview
 on:
   push:
     branches: [codex/android-v2]
+    tags: ['android-preview-v*']
   pull_request:
     branches: [main, codex/android-v2]
   workflow_dispatch:
@@ -9,7 +10,7 @@ permissions:
   contents: read
 concurrency:
   group: android-preview-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -35,9 +36,10 @@ jobs:
         run: gradle -p android-agent --no-daemon testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
       - name: Sign non-debuggable test APK and verify it
         if: >-
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-preview-v')) ||
           (github.event_name == 'push' && github.ref == 'refs/heads/codex/android-v2') ||
           (github.event_name == 'workflow_dispatch' &&
-          (github.ref == 'refs/heads/codex/android-v2' ||
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/android-v2' ||
           github.ref == 'refs/heads/codex/android-client-focused' ||
           github.ref == 'refs/heads/codex/android-production-adaptation' ||
           github.ref == 'refs/heads/codex/android-status-messages-ux' ||
@@ -65,7 +67,10 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs android-evidence/mdd-agent-preview.apk > android-evidence/signature.txt
           grep -Fq 'Signer #1 certificate SHA-256 digest: 8b5e818fccfa6f6738cd53658b2df9ab57a014f9a5269decc4104d91894dd5e2' android-evidence/signature.txt
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging android-evidence/mdd-agent-preview.apk > android-evidence/package.txt
-          ! grep -q application-debuggable android-evidence/package.txt
+          if grep -q application-debuggable android-evidence/package.txt; then
+            echo '::error::Refusing a debuggable release APK'; exit 1
+          fi
+          grep -Fq "package: name='com.lovitus.mddagent.preview' versionCode='$MDD_ANDROID_VERSION_CODE' versionName='$(cat VERSION)-preview'" android-evidence/package.txt
           (cd android-evidence && sha256sum mdd-agent-preview.apk > SHA256SUMS)
           git rev-parse HEAD HEAD^{tree} > android-evidence/source.txt
           cp android-agent/README.md android-evidence/README.md
@@ -122,6 +127,7 @@ jobs:
           script: |
             gradle -p android-agent --no-daemon connectedDebugAndroidTest
             mkdir -p android-screens
+            if [[ "$GITHUB_REF" == refs/tags/android-preview-v* ]]; then test -s release-bundle/android-evidence/mdd-agent-preview.apk; fi
             if [ -f release-bundle/android-evidence/mdd-agent-preview.apk ]; then adb -P 5037 -s emulator-5554 install -r release-bundle/android-evidence/mdd-agent-preview.apk; adb -P 5037 -s emulator-5554 shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity; adb -P 5037 -s emulator-5554 exec-out screencap -p > android-screens/setup.png; fi
       - uses: actions/upload-artifact@v7
         if: always()
@@ -173,33 +179,32 @@ jobs:
           path: android-core.jsonl
           retention-days: 14
   preview:
-    if: github.ref == 'refs/heads/codex/android-v2'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-preview-v')
     needs: [build, device, core]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: mdd-public-release
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
       - uses: actions/download-artifact@v7
         with:
           name: android-preview-build
-          path: bundle
-      - name: Publish only the tested head as a prerelease
+          path: ${{ runner.temp }}/release-assets/android
+      - name: Publish the tested tag with the stable preview identity
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          RELEASE_ROOT: ${{ runner.temp }}/release-assets
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh api 'repos/${{ github.repository }}/git/ref/heads/codex/android-v2' --jq .object.sha)" = "$GITHUB_SHA"
-          cd bundle/android-evidence
-          sha256sum --check SHA256SUMS
-          cat > release-notes.md <<'NOTES'
-          Native Android Agent preview — draft PR implementation, not a production rollout.
-
-          Android 9+; native setup, server calls/SMS, USB APDU-level CCID slot-0 / access-controlled OMAPI reader sharing, bounded network recovery and foreground availability.
-          Requires the matching Core /v1/mobile/ws implementation in the draft PR. No production server is automatically updated.
-          APK is non-debuggable but signed with a disposable test key, NOT the owner's stable production certificate. Future preview updates may require uninstalling the previous preview.
-          API 28/35 emulators, unit tests and Core protocol tests gate this prerelease. Synthetic audio is not a real SIM/carrier or screen-off/OEM/battery acceptance.
-          No paid calls/SMS or physical SIM operations were performed. See README and signature/checksum evidence.
-          NOTES
-          gh release create "android-preview-${GITHUB_SHA:0:12}" mdd-agent-preview.apk SHA256SUMS signature.txt package.txt source.txt README.md --target "$GITHUB_SHA" --prerelease --title "Android Agent 0.1 preview ${GITHUB_SHA:0:7}" --notes-file release-notes.md
+          node tools/publish-release.mjs android

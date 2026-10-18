@@ -1,0 +1,44 @@
+name: Temporary release contract proof
+on:
+  push:
+    branches: [codex/formal-release-proof-review]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Exact pre-review failure, narrow counterexamples and restored green
+        run: |
+          git show 0ec4d65789e57ff3b37579ce93c55f59f321b702:tools/publish-release.mjs > "$RUNNER_TEMP/publisher-before-review.mjs"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const source = fs.readFileSync('tools/publish-release.mjs', 'utf8');
+          const run = file => spawnSync(process.execPath, ['tools/publish-release.test.mjs'], { encoding: 'utf8', timeout: 180000, env: { ...process.env, RELEASE_TEST_PUBLISHER: file } });
+          const old = run(path.join(process.env.RUNNER_TEMP, 'publisher-before-review.mjs'));
+          assert(old.status !== 0 && old.stderr.includes("Cannot read properties of null (reading 'prerelease')"), `Missing original draft failure\n${old.stderr}`);
+          console.log('RED: exact 0ec4d65 publisher cannot discover its draft');
+          const cases = [
+            [source.replace(/  if \(release\.draft && asset\.state === 'starter'[\s\S]*?^  }/m, ''), 'empty starter must recover'],
+            [source.split('\n').filter(line => !line.includes('preview asset set incomplete') && !line.includes('preview checksum manifest mismatch')).join('\n'), 'missing preview checksum manifest must fail'],
+            [source.split('\n').filter(line => !line.includes('preview checksum manifest mismatch')).join('\n'), 'wrong preview checksum contents must fail'],
+          ];
+          for (const [code, failure] of cases) {
+            const file = path.join(process.env.RUNNER_TEMP, 'publisher-counterexample.mjs'); fs.writeFileSync(file, code);
+            const red = run(file);
+            assert(red.status !== 0 && red.stderr.includes(failure), `Missing behavioral red: ${failure}\n${red.stderr}`);
+            console.log(`RED: ${failure}`);
+          }
+          NODE
+          node tools/publish-release.test.mjs
