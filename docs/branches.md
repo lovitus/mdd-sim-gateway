@@ -1,5 +1,23 @@
 # Branch disposition and integration record
 
+October18 formal-release batch starts from clean main25bac62 on
+`codex/formal-release-downloads`. Original reviewer approved reuse of the two
+existing workflows, exact-source Android preview before Go stable publication,
+Linux version alias, draft/download verification and scoped status reconciliation.
+Runtime/installer behavior, production devices and deferred tests are unchanged.
+Hosted proof `42e4f7b` / `39107209751` passed six behavioral reds and the restored
+Go/Android publication matrix; `archive/2026-10-18/formal-release-qualified`
+retains it. Temporary proof workflow removed before the single delivery commit.
+Exact normal CI/final review and publication remain pending; no new release
+or fleet deployment is claimed by this record.
+Original final review rejected `0ec4d65` despite green normal Go `39107348206`
+and Android `39107347994`: the fixture omitted real draft lookup and empty
+starter semantics, and preview handoff omitted SHA256SUMS. These are corrected
+at `6a89191` / proof `39108506631`, archived as
+`archive/2026-10-18/formal-release-review-qualified`; old source remains at
+`formal-release-before-review`. The temporary proof branch/workflow is not a
+merge queue. Final normal CI and re-review apply to the cleaned delivery head.
+
 PR40 `a42cb98` passed original final review, normal Go `39102084430` and Android
 `39102084411`; owner-authorized normal merge `26e1997` shares tree `632ef673` with
 artifact source `0a4cfd93`. Qualified source is preserved at
