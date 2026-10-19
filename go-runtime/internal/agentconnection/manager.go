@@ -152,6 +152,15 @@ func (manager *Manager) Persistent(target agentdata.Target) bool {
 	return current != nil && current.target == target && current.connected && current.persistent
 }
 
+// PersistentMatches observes the original owner without setting persistent or
+// disturbing a borrower. Compare requested credentials, not the display name.
+func (manager *Manager) PersistentMatches(target agentdata.Target, profile agentdata.Profile) bool {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	current := manager.items[target.EquipmentID]
+	return current != nil && current.target == target && current.connected && current.persistent && current.requested == profile
+}
+
 func (manager *Manager) OwnedTargets() []agentdata.Target {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

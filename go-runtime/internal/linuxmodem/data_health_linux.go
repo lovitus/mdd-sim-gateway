@@ -32,6 +32,12 @@ func (prober *Prober) ConnectionNeedsRecovery(ctx context.Context, target agentp
 		return false, err
 	}
 	_, err := commands.Command(ctx, claim.commandSnapshot.ObjectPath, "AT", 3*time.Second)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return false, contextErr
+	}
+	if identityErr := port.check(ctx); identityErr != nil {
+		return false, identityErr
+	}
 	if err == nil {
 		return false, nil
 	}
