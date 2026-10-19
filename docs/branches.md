@@ -1,5 +1,13 @@
 # Branch disposition and integration record
 
+October19 `codex/linux-policy-recovery` is the single complete candidate from
+main6015f45, not yet merged/deployed. Proof601d32e/39212493452 is retained at
+`archive/2026-10-19/linux-policy-qualified`; production/permanent tests remain
+identical after removing the temporary proof entry. Earlier failures and review
+baseline remain at `archive/2026-10-19/linux-policy-initial-proof`
+(ed84fab/39210883341) and `archive/2026-10-19/linux-policy-proof-initial-green`
+(8727add/39211207680). These are evidence only, not alternative merge candidates.
+
 October18 PR44 `codex/formal-release-downloads` is integrated, not a merge queue.
 Original final review approved `e9de823`; normal Go `39108641098` and Android
 `39108640988` passed. Normal merge `9a139f81647a83224f04b8c30f06279176061bfb`

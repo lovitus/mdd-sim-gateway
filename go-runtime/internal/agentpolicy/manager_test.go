@@ -120,6 +120,13 @@ func (connection *testConnection) Persistent(target agentdata.Target) bool {
 	return len(connection.owned) == 1 && connection.owned[0] == target && len(connection.calls) > 0 && connection.calls[len(connection.calls)-1]
 }
 
+func (connection *testConnection) PersistentMatches(target agentdata.Target, profile agentdata.Profile) bool {
+	connection.mu.Lock()
+	defer connection.mu.Unlock()
+	return len(connection.owned) == 1 && connection.owned[0] == target && connection.profile == profile &&
+		len(connection.calls) > 0 && connection.calls[len(connection.calls)-1]
+}
+
 func (passthroughCoordinator) DoAuxiliary(ctx context.Context, _ string, callback func(context.Context) error) error {
 	return callback(ctx)
 }

@@ -7,12 +7,60 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpolicy"
 )
+
+type healthCommandManager struct {
+	commandTestManager
+	duringCommand func()
+	failure       error
+}
+
+func (manager *healthCommandManager) Command(_ context.Context, _ dbus.ObjectPath, command string, _ time.Duration) ([]byte, error) {
+	if command != "AT" {
+		return nil, errors.New("unexpected recovery command")
+	}
+	if manager.duringCommand != nil {
+		manager.duringCommand()
+	}
+	return nil, manager.failure
+}
+
+func TestControlHealthObservationRejectsReplacedOrCancelledClaim(t *testing.T) {
+	for _, name := range []string{"forced-close", "replacement-during-command", "cancel-during-command", "ordinary-timeout"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			snapshot := modemSnapshot{ObjectPath: "/org/freedesktop/ModemManager1/Modem/1", UID: "usb",
+				EquipmentID: "equipment", ICCID: "card", SIMState: agentmodem.SIMReady}
+			target := agentdata.Target{EquipmentID: "equipment", CardID: "card", AttachmentID: "attachment", SIMSessionGeneration: "session"}
+			manager := &healthCommandManager{commandTestManager: commandTestManager{testModemManager: testModemManager{inventory: []modemSnapshot{snapshot}}},
+				failure: dbus.Error{Name: "org.freedesktop.ModemManager1.Error.Core.Connected", Body: []interface{}{"ttyUSB2 has been forced close"}}}
+			var want error
+			switch name {
+			case "replacement-during-command":
+				manager.duringCommand = func() { manager.inventory[0].ICCID = "replacement" }
+				want = agentmodem.ErrOperationTargetReplaced
+			case "cancel-during-command":
+				manager.duringCommand, want = cancel, context.Canceled
+			case "ordinary-timeout":
+				manager.failure, want = context.DeadlineExceeded, context.DeadlineExceeded
+			}
+			prober := &Prober{manager: manager, data: map[string]*dataClaim{"equipment": {target: target, commandSnapshot: snapshot}}}
+			recover, err := prober.ConnectionNeedsRecovery(ctx, agentpolicy.Target{EquipmentID: target.EquipmentID,
+				AttachmentID: target.AttachmentID, CardID: target.CardID, SIMSessionGeneration: target.SIMSessionGeneration})
+			if recover != (want == nil) || !errors.Is(err, want) {
+				t.Fatalf("recovery=%t err=%v want=%v", recover, err, want)
+			}
+		})
+	}
+}
 
 func TestForcedCloseRecoveryRequiresExactModemManagerError(t *testing.T) {
 	closed := dbus.Error{Name: "org.freedesktop.ModemManager1.Error.Core.Connected", Body: []interface{}{"Could not open serial device ttyUSB2: it has been forced close"}}
