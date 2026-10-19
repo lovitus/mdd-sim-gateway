@@ -10,6 +10,27 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-19 PR45 Linux 策略恢复
+
+PR45 批准源码 `9bf6571`、完整 CI `39212919170` 和原终审通过，正常合并 `90fde687`。
+按用户专项授权，仅故障 Linux Agent 升级到工件源码 `bab742e5269a`；三者完整 tree
+均为 `1df9481c16bd09b288613edd4949bf4058aa91b7`，22 项 manifest 已逐项核对。
+实际 Agent SHA-256：`a467f974f919433d22a6c535e3afe1de08b71c116bcb489b6d05ecf942545acf`。
+原借用 owner 停止、清理确认后，经原受保护重启入口切换；旧工件及失败证据保留。
+08:35 UTC：AT/通话信令/SMS 就绪，策略 `ready/policy_ready`，原借用租约与出口恢复。
+出口子进程连接新租约端口，配置摘要与 executor 回执一致，`runtime_confirmed=true`；
+Chrome 诊断及 FR/GB/HK 出口页面确认当前展示，没有执行网络测试或保存配置。
+原有 catalog/applied `37/36` 未应用差异保留，没有为恢复出口顺带应用其他配置。
+配置/pin/guard 文件哈希、策略 revision6/用户开关、完整 catalog/通知配置及 Core PID 未变；
+仅目标 Agent 与获准暂停的 egress PID 改变，其他 Agent 代际和 Provider PID 保留，零遗留维护。
+ARM64 已在前一批升级 v2.0.0；本批不重启，原进程的读卡/卡路由/IMS/短信能力新鲜就绪。
+**因果边界：**08:31 UTC 停借用后旧版 AT 已恢复，早于换包；本次证明受控恢复及新版
+持续连接与借用共存收敛，不是生产强制断口自动恢复的完整复现。该路径的确定性证据见
+`archive/2026-10-19/linux-policy-qualified` / `39212493452`；最初 MM 断口原因仍未知。
+首次 SSH staging 超时发生在远端执行前，重连成功后才暂存；原失败未覆盖。
+无 Core/ARM/手机升级、付费/PIN/profile 操作或延期测试扩展；隔离读回不代表全时段无泄漏。
+本节取代下节当时的 Linux 未解决状态；公开 v2.0.0 tag/资产没有修改。
+
 ## 2026-10-19 v2.0.0 生产与 Agent 升级
 
 按用户后续授权，使用下节已发布的同源 `9a139f81647a83224f04b8c30f06279176061bfb` /
@@ -28,6 +49,7 @@ Core/apply/egress、10 个运行中 Provider 及六台桌面/Linux Agent 已升�
 最终安装 journal 为 applied，零遗留维护租约，本批临时启动覆盖已移除，更新监听器恢复。
 Linux donor 与 AT/通话信令/SMS 能力 ready，但策略仍为
 `recovering/cellular_connection_reconcile_failed`，原因未定，保留在既有延期项。
+这是当时的状态；后续 PR45 受控修复与验收范围见上节，不再代表当前故障。
 升级前 `cleanup_failed`/AT unavailable 与此后状态分别记录，不断言同根因或故障已修好。
 guard active、main 表无蜂窝默认路由仅是本次读回，不是所有路由/流量或持续无泄漏证明；
 原 donor 仍有正常数据会话，零遗留维护不等于全局无数据会话。用户开关、线路和通知配置未变。

@@ -1,7 +1,10 @@
 # Branch disposition and integration record
 
-October19 `codex/linux-policy-recovery` is the single complete candidate from
-main6015f45, not yet merged/deployed. Proof601d32e/39212493452 is retained at
+October19 PR45 `codex/linux-policy-recovery` is integrated, not a merge queue.
+Approved head9bf6571 and normal merge90fde687 share tree1df9481c with deployed
+artifactbab742e. Original final review and full CI39212919170 passed; only the
+authorized Linux Agent was upgraded, with original donor/exit restored. Exact
+field boundaries are in DEPLOYMENT.md. Proof601d32e/39212493452 is retained at
 `archive/2026-10-19/linux-policy-qualified`; production/permanent tests remain
 identical after removing the temporary proof entry. Earlier failures and review
 baseline remain at `archive/2026-10-19/linux-policy-initial-proof`
