@@ -47,6 +47,10 @@ Android 是独立 preview。公开包及校验清单已下载核对，准确源�
 [发布回执](DEPLOYMENT.md#2026-10-18-v200-正式发布非生产升级)。发布没有自动升级现有设备。
 旧 `v1.3.14` 属于 Python/Docker 时代；Actions 临时工件也不是正式下载入口。
 
+10 月 19 日已按后续授权升级生产服务端和六台桌面/Linux Agent；指定 Android 手机已安装 v182，
+本轮应用内验证按用户决定跳过。网页限定主流程已检查，Linux 策略剩余异常及未验边界见
+[部署回执](DEPLOYMENT.md#2026-10-19-v200-生产与-agent-升级)，不代表全端业务或耐久全部通过。
+
 | 用途 | 固定下载入口 | 前提与部署说明 |
 | --- | --- | --- |
 | Linux amd64 服务端与 Agent | [mdd-2.0.0-linux-amd64.tar](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/mdd-2.0.0-linux-amd64.tar) | 服务端需 systemd，按下节安装；Agent 可按手动流程运行 |
