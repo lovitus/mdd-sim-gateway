@@ -518,3 +518,23 @@ isolation acceptance is implied.
 | Linux green | `41d85c50fd3a563d426cabfde4c1583d3ccabfe69c2a212d83394bf2200c0047` |
 | Windows red | `ca114689211b53a1a804afc7e1ec11712a9fc87e28ebbb47bfdd7f0719fcce5e` |
 | Windows green | `9e2e6f7a4d85064faf58a2aa4d3d83081349d11f3e8d2ba0e2010457d69ab9dc` |
+
+## October 19 shared-connection recovery candidate
+
+Healthy persistent 4G plus borrowing must converge by exact read-only observation,
+not a rejected mutation. Target/generation, complete requested profile, radio,
+guard, AT and policy revision must agree. Genuine busy/unknown results stay typed.
+Confirmed MM forced-close blocks Prepare/Open/Renew; original expiry drops the
+borrower, then original guarded cleanup retires the persistent owner. Unknown
+cleanup and active calls retain ownership. No switch, isolation or Core changes.
+Failure checklist: false busy error; renewed or immediately reborrowed bad claim;
+stale revision/profile ready; unknown stop losing ownership; old-SIM AT error
+misattribution. Hosted39212493452 at601d32e proves the original compiled failures
+and the reviewed revision-fence failure, then168 Linux/90 Windows package
+test/subtest race passes, zero skips/errors. Normal full CI/final review are pending.
+Agent recovery, donor lease recovery and existing coordinated exit apply are
+separate acceptance steps. No fixed recovery-time or original MM-cause claim.
+Proof source is archived in `archive/2026-10-19/linux-policy-qualified`; the
+temporary entry is removed from delivery. Initial39210883341 dependency/old
+Windows test-handle failures and intermediate39211207680 remain traceable in
+the earlier archive tags. Production remains on the public v2.0.0 artifact.
