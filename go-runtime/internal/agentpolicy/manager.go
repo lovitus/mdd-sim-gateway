@@ -48,6 +48,7 @@ type ConnectionRuntime interface {
 	OwnedTargets() []agentdata.Target
 	ReleaseStale(context.Context, agentdata.Target) error
 	Persistent(agentdata.Target) bool
+	PersistentMatches(agentdata.Target, agentdata.Profile) bool
 }
 
 type connectionHealthRuntime interface {
@@ -66,10 +67,11 @@ type Config struct {
 }
 
 type reconcileStatus struct {
-	State   string
-	Code    string
-	RetryAt time.Time
-	Attempt int
+	Revision uint64
+	State    string
+	Code     string
+	RetryAt  time.Time
+	Attempt  int
 }
 
 type leaseStatus struct {
@@ -173,6 +175,9 @@ func (manager *Manager) View(equipmentID, cardID string) agentlink.ModemPolicyFa
 	manager.mu.RUnlock()
 	if view.State == "" {
 		view.State, view.Code, view.RetryAt = status.State, status.Code, status.RetryAt
+		if status.State == "ready" && status.Revision != 0 && status.Revision != policy.Revision {
+			view.State, view.Code, view.RetryAt = "recovering", "policy_revision_changed", time.Time{}
+		}
 		if view.State == "" {
 			view.State, view.Code = "ready", "policy_ready"
 		}
@@ -442,19 +447,27 @@ func (manager *Manager) setPersistentConnection(ctx context.Context, target Targ
 			return ErrRoamingDisabled
 		}
 	}
+	profile, err := manager.connectionProfile(policy)
+	if err != nil {
+		return err
+	}
+	return connection.SetPersistent(ctx, dataTargetFor(target), profile, enabled)
+}
+
+func (manager *Manager) connectionProfile(policy Policy) (agentdata.Profile, error) {
 	profile := agentdata.Profile{AllowRoaming: policy.Desired.RoamingEnabled}
 	if name := strings.TrimSpace(policy.Desired.SelectedProfile); name != "" {
 		stored, found, err := manager.config.Store.Profile(policy.EquipmentID, policy.CardID, name)
 		if err != nil {
-			return err
+			return profile, err
 		}
 		if !found {
-			return ErrProfileNotFound
+			return profile, ErrProfileNotFound
 		}
 		profile.Name, profile.APN, profile.Auth = stored.Name, stored.APN, stored.Auth
 		profile.Username, profile.Password = stored.Username, stored.Password
 	}
-	return connection.SetPersistent(ctx, dataTargetFor(target), profile, enabled)
+	return profile, nil
 }
 
 // ResolveDataProfile is called while the data manager already owns its
@@ -530,16 +543,44 @@ func (manager *Manager) validateDataTarget(ctx context.Context, target agentdata
 		return nil, false, err
 	}
 	matches, roaming := 0, false
+	var matched agentmodem.Fact
 	for _, fact := range facts {
 		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID &&
 			fact.SIM.ICCID == target.CardID && fact.SIM.State == agentmodem.SIMReady &&
 			(target.SIMSessionGeneration == "" || fact.SIM.SessionGeneration == target.SIMSessionGeneration) {
 			matches++
+			matched = fact
 			roaming = fact.Network.Registration == agentmodem.RegistrationRoaming
 		}
 	}
 	if matches != 1 {
 		return facts, false, agentmodem.ErrOperationTargetReplaced
+	}
+	// Prepare, Open and Renew share this read-only admission check. In particular,
+	// expiry must not let a new borrower reacquire the same forced-closed claim
+	// before the existing policy owner gets to ReleaseStale. Never re-enter the
+	// data/call coordinator here: the caller already holds those lifecycle locks.
+	if health, ok := manager.config.Runtime.(connectionHealthRuntime); ok {
+		manager.mu.RLock()
+		connection := manager.config.Connection
+		manager.mu.RUnlock()
+		if connection != nil && matched.Network.Data != agentmodem.DataConnected {
+			for _, owned := range connection.OwnedTargets() {
+				if owned == target {
+					return facts, roaming, ErrBearerUnconfirmed
+				}
+			}
+		}
+		if matched.Network.Data == agentmodem.DataConnected && matched.AT.State == agentmodem.ATControlUnavailable {
+			recover, err := health.ConnectionNeedsRecovery(ctx, Target{AttachmentID: target.AttachmentID,
+				EquipmentID: target.EquipmentID, CardID: target.CardID, SIMSessionGeneration: matched.SIM.SessionGeneration})
+			if err != nil {
+				return facts, roaming, err
+			}
+			if recover {
+				return facts, roaming, ErrControlRecoveryRequired
+			}
+		}
 	}
 	return facts, roaming, nil
 }
@@ -660,7 +701,18 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "radio_state_unavailable")
 			continue
 		}
+		converged, observationErr := manager.connectionConverged(ctx, target, policy, status, facts)
+		if converged || errors.Is(observationErr, ErrRevision) {
+			continue
+		}
+		if observationErr != nil {
+			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, policyErrorCode(observationErr))
+			continue
+		}
 		err = coordinator.DoAuxiliary(ctx, fact.EquipmentID, func(operationContext context.Context) error {
+			if err := manager.requirePolicyRevision(policy); err != nil {
+				return err
+			}
 			if policy.Desired.FlightMode {
 				if err := manager.setPersistentConnection(operationContext, target, policy, false); err != nil {
 					return err
@@ -678,8 +730,11 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 			return nil
 		})
 		if err != nil {
+			if errors.Is(err, ErrRevision) {
+				continue
+			}
 			code := policyErrorCode(err)
-			if policy.Desired.ConnectionEnabled {
+			if policy.Desired.ConnectionEnabled && code == "radio_reconcile_failed" {
 				code = "cellular_connection_reconcile_failed"
 			}
 			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, code)
@@ -693,6 +748,74 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 		}
 		manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
 	}
+}
+
+// A healthy shared bearer needs no auxiliary mutation. Fresh facts, the exact
+// persistent owner and the complete desired profile must agree. A revision
+// fence keeps this observation from acknowledging a concurrently saved policy.
+func (manager *Manager) connectionConverged(ctx context.Context, target Target, policy Policy, observed reconcileStatus, facts []agentmodem.Fact) (bool, error) {
+	if !policy.Desired.ConnectionEnabled || policy.Desired.FlightMode {
+		return false, nil
+	}
+	manager.mu.RLock()
+	connection := manager.config.Connection
+	manager.mu.RUnlock()
+	if connection == nil {
+		return false, nil
+	}
+	profile, err := manager.connectionProfile(policy)
+	if err != nil || !connection.PersistentMatches(dataTargetFor(target), profile) {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	// Reuse this cycle's coordinated observation. Runtime.Probe on Linux can
+	// acquire devices or retry cleanup; it is not a pure read outside the gate.
+	matches := 0
+	for _, fact := range facts {
+		if fact.EquipmentID != target.EquipmentID {
+			continue
+		}
+		matches++
+		if fact.AttachmentID != target.AttachmentID || fact.SIM.ICCID != target.CardID ||
+			fact.SIM.SessionGeneration != target.SIMSessionGeneration || fact.SIM.State != agentmodem.SIMReady ||
+			fact.Network.SoftwareRadio != agentmodem.RadioOn || fact.Network.Data != agentmodem.DataConnected ||
+			fact.Network.Guard.State != agentmodem.DataGuardProtected || fact.AT.State != agentmodem.ATControlReady {
+			return false, nil
+		}
+	}
+	if matches != 1 || !connection.PersistentMatches(dataTargetFor(target), profile) {
+		return false, nil
+	}
+	if err := manager.requirePolicyRevision(policy); err != nil {
+		return false, err
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	key := pair(target.EquipmentID, target.CardID)
+	if manager.status[key] != observed || manager.leases[target.EquipmentID].State == "cleanup" {
+		return false, nil
+	}
+	if profile.Name != "" {
+		applied, found := manager.appliedProfiles[key]
+		if !found || applied != (Profile{Name: profile.Name, APN: profile.APN, Auth: profile.Auth, Username: profile.Username, Password: profile.Password}) {
+			return false, nil
+		}
+	}
+	manager.status[key] = reconcileStatus{Revision: policy.Revision, State: "ready", Code: "policy_ready"}
+	return true, nil
+}
+
+func (manager *Manager) requirePolicyRevision(policy Policy) error {
+	current, found, err := manager.config.Store.Get(policy.EquipmentID, policy.CardID)
+	if err != nil {
+		return err
+	}
+	if !found || current.Revision != policy.Revision {
+		return ErrRevision
+	}
+	return nil
 }
 
 func (manager *Manager) reconcileDefaultData(ctx context.Context, fact agentmodem.Fact) {
@@ -784,7 +907,7 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 				manager.mu.Lock()
 				key := pair(owned.EquipmentID, owned.CardID)
 				status := manager.status[key]
-				status.State, status.Code = "recovering", "cellular_bearer_unconfirmed"
+				status.Revision, status.State, status.Code = 0, "recovering", "cellular_bearer_unconfirmed"
 				manager.status[key] = status
 				manager.mu.Unlock()
 				continue
@@ -816,7 +939,11 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 			return connection.ReleaseStale(operationContext, owned)
 		})
 		if err != nil {
-			manager.setFailure(owned.EquipmentID, owned.CardID, "cellular_connection_cleanup_failed")
+			code := policyErrorCode(err)
+			if code == "radio_reconcile_failed" {
+				code = "cellular_connection_cleanup_failed"
+			}
+			manager.setFailure(owned.EquipmentID, owned.CardID, code)
 			blocked[owned.EquipmentID] = err
 		} else {
 			manager.setReady(owned.EquipmentID, owned.CardID)
@@ -847,6 +974,7 @@ func (manager *Manager) setFailure(equipmentID, cardID, code string) {
 	key := pair(equipmentID, cardID)
 	manager.mu.Lock()
 	current := manager.status[key]
+	current.Revision = 0
 	current.Attempt++
 	decision, _ := manager.config.Recovery.Decide(recovery.Failure{Attempt: current.Attempt, Recoverable: true})
 	current.State, current.Code, current.RetryAt = "recovering", code, manager.config.Now().Add(decision.After)
@@ -854,7 +982,12 @@ func (manager *Manager) setFailure(equipmentID, cardID, code string) {
 	manager.mu.Unlock()
 }
 func policyErrorCode(err error) string {
+	var admission dataAdmissionError
 	switch {
+	case errors.As(err, &admission):
+		return admission.code
+	case errors.Is(err, agentmodem.ErrOperationTargetReplaced):
+		return "modem_target_replaced"
 	case errors.Is(err, agentdata.ErrSessionActive):
 		return "data_lease_active"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -890,6 +1023,8 @@ func (err dataAdmissionError) Error() string         { return err.detail }
 func (err dataAdmissionError) ModemDataCode() string { return err.code }
 
 var (
+	ErrBearerUnconfirmed       error = dataAdmissionError{"cellular_bearer_unconfirmed", "owned cellular bearer is not confirmed connected"}
+	ErrControlRecoveryRequired error = dataAdmissionError{"cellular_control_recovery_required", "cellular control owner requires recovery before data admission"}
 	ErrCellularDisabled        error = dataAdmissionError{"cellular_data_disabled", "cellular data borrowing is disabled by device policy"}
 	ErrProbeConnectionDisabled error = dataAdmissionError{"cellular_connection_disabled", "4G data connection is disabled by device policy"}
 	ErrFlightMode              error = dataAdmissionError{"flight_mode_enabled", "flight mode blocks cellular data borrowing"}

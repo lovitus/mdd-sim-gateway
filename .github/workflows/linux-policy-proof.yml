@@ -1,0 +1,44 @@
+name: Temporary shared connection counterexamples
+on:
+  push:
+    branches: [codex/linux-policy-recovery]
+    paths:
+      - 'go-runtime/**'
+      - '.github/workflows/linux-policy-proof.yml'
+      - 'tools/linux-policy-proof.mjs'
+permissions:
+  contents: read
+jobs:
+  proof:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install Linux PC/SC build dependency
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpcsclite-dev pkg-config
+      - name: Compiled baseline failures and restored race tests
+        run: node tools/linux-policy-proof.mjs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: shared-connection-proof-${{ matrix.os }}
+          path: proof-evidence/
+          if-no-files-found: error
+          retention-days: 30
