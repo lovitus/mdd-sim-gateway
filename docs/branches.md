@@ -1,5 +1,18 @@
 # Branch disposition and integration record
 
+PR47 remains an unqualified desktop candidate. `827be01` / `39772068347` is retained
+at `archive/2026-10-22/agent-usability-review-proof`: Mac behavioral reds and32 fixed
+passes, but Windows proof timed out before test events. Original review requires
+creation-time ACL and multiple-config selection corrections. This tag is evidence,
+not merge/release approval; preserve the earlier initial candidate below.
+`d0636c8` / `39776249707`, retained as `agent-usability-acl-metadata` under the
+same archive prefix, passed source review but failed an overly exact ACL-history
+comparison: CREATE_NEW cleared only SE_DACL_AUTO_INHERITED. Creation-time denial
+passed. Normalize that historical bit only; owner/group/ACEs/protection remain exact.
+`0d1a024` / `39778963835` is at `agent-usability-windows-partial`: reviewed ACL
+normalization,32 fixed Mac passes, two Windows SCM/ACL compiled reds. The selection
+withdrawal did not match Windows CRLF; not a product failure or completed proof.
+
 October22 PR46 `codex/status-copy-acceptance-closeout` is integrated, not a merge queue.
 Approved `d0ed08d`, merge `5a6c7e2` and deployed Core artifact `d3ebc0221b6c`
 share tree `c6afc0cd2bd3b53cce0d473546ce997c1fb88a25`. Original final review,
@@ -321,6 +334,12 @@ not releases or approved merge candidates. Each tag resolves to the exact SHA be
 Private unsubmitted worktree evidence was backed up separately, not in public tags.
 
 ## Rules for subsequent work
+
+October22 desktop Agent candidate `archive/2026-10-22/agent-usability-initial`
+preserves05131ac/39768133187: successful initial behavioral counterexamples, but
+failed fixed qualification (Fyne confirmation-button fixture). PR47 stays the
+single delivery candidate; original review's five corrections supersede that
+source. The archive is not release approval or a branch to restore.
 
 October13 new-card evidence only: `archive/2026-10-13/new-card-qualified`
 retains6e63731/CI38342258088 (compiled behavioral counterexamples followed by
