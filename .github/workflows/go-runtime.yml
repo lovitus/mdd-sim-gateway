@@ -1462,12 +1462,54 @@ jobs:
 
       - name: Install Windows cross compiler
         run: |
+          set -euo pipefail
+          printf 'dependency_source begin %s\n' "$(date -u +%FT%TZ)"
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$(dpkg --print-architecture)" = amd64
+          ubuntu_source=/etc/apt/sources.list.d/ubuntu.sources
+          mirror_list=/etc/apt/apt-mirrors.txt
+          test "$(grep '^URIs:' "$ubuntu_source" | sort -u)" = "URIs: mirror+file:$mirror_list"
+          grep -Eq "^Suites:.*${VERSION_CODENAME}-security([[:space:]]|$)" "$ubuntu_source"
+          test "$(grep '^Signed-By:' "$ubuntu_source" | sort -u)" = \
+            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg'
+          cmp "$mirror_list" <(printf '%s\tpriority:%s\n' \
+            http://azure.archive.ubuntu.com/ubuntu/ 1 \
+            https://archive.ubuntu.com/ubuntu/ 2 \
+            https://security.ubuntu.com/ubuntu/ 3)
+          printf 'dependency_source os=%s arch=amd64\n' "$VERSION_CODENAME"
+          grep -E '^(Types|URIs|Suites|Components|Signed-By):' "$ubuntu_source"
+          source_sha=$(sha256sum "$ubuntu_source")
+          # Keep the runner's existing signed Ubuntu fallbacks; do not rewrite sources.
+          sudo -n sed -i '\|^http://azure\.archive\.ubuntu\.com/ubuntu/\tpriority:1$|d' "$mirror_list"
+          cmp "$mirror_list" <(printf '%s\tpriority:%s\n' \
+            https://archive.ubuntu.com/ubuntu/ 2 \
+            https://security.ubuntu.com/ubuntu/ 3)
+          test "$source_sha" = "$(sha256sum "$ubuntu_source")"
           azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
           if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
-            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+            sudo -n mv "$azure_cli_source" "$azure_cli_source.disabled"
           fi
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+          printf 'dependency_source complete %s\n' "$(date -u +%FT%TZ)"
+          run_apt_stage() {
+            local stage=$1 limit=$2 started=$SECONDS rc=0
+            shift 2
+            printf 'dependency_%s begin %s limit=%s\n' "$stage" "$(date -u +%FT%TZ)" "$limit"
+            if sudo -n timeout --signal=TERM --kill-after=15s "$limit" apt-get "$@"; then
+              rc=0
+            else
+              rc=$?
+            fi
+            printf 'dependency_%s end %s elapsed=%ss exit=%s\n' \
+              "$stage" "$(date -u +%FT%TZ)" "$((SECONDS - started))" "$rc"
+            if (( rc != 0 )); then
+              exit "$rc"
+            fi
+          }
+          run_apt_stage update 180s --error-on=any update
+          run_apt_stage install 300s install -y gcc-mingw-w64-x86-64
+          dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' \
+            'gcc-mingw-w64*' 'mingw-w64*' 'binutils-mingw-w64*'
 
       - name: Build service, CLI and tray GUI package
         env:

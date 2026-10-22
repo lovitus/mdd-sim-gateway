@@ -135,6 +135,7 @@ jobs:
           name: android-emulator-${{ matrix.api }}
           path: |
             android-screens/
+            android-agent/app/build/outputs/connected_android_test_additional_output/
             android-agent/app/build/reports/androidTests/
             android-agent/app/build/outputs/androidTest-results/
           retention-days: 14
