@@ -1462,12 +1462,30 @@ jobs:
 
       - name: Install Windows cross compiler
         run: |
+          set -euo pipefail
+          printf 'dependency_source begin %s\n' "$(date -u +%FT%TZ)"
           azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
           if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
-            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+            sudo -n mv "$azure_cli_source" "$azure_cli_source.disabled"
           fi
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+          printf 'dependency_source complete %s\n' "$(date -u +%FT%TZ)"
+          run_apt_stage() {
+            local stage=$1 limit=$2 started=$SECONDS rc=0
+            shift 2
+            printf 'dependency_%s begin %s limit=%s\n' "$stage" "$(date -u +%FT%TZ)" "$limit"
+            if sudo -n timeout --signal=TERM --kill-after=15s "$limit" apt-get "$@"; then
+              rc=0
+            else
+              rc=$?
+            fi
+            printf 'dependency_%s end %s elapsed=%ss exit=%s\n' \
+              "$stage" "$(date -u +%FT%TZ)" "$((SECONDS - started))" "$rc"
+            if (( rc != 0 )); then
+              exit "$rc"
+            fi
+          }
+          run_apt_stage update 180s --error-on=any update
+          run_apt_stage install 300s install -y gcc-mingw-w64-x86-64
 
       - name: Build service, CLI and tray GUI package
         env:
