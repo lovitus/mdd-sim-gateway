@@ -1,7 +1,11 @@
 # Branch disposition and integration record
 
-October22 `codex/status-copy-acceptance-closeout` changes presentation/status records
-only; not merged or deployed. Qualified proof `ffc8a88` / `39746284080` is at
+October22 PR46 `codex/status-copy-acceptance-closeout` is integrated, not a merge queue.
+Approved `d0ed08d`, merge `5a6c7e2` and deployed Core artifact `d3ebc0221b6c`
+share tree `c6afc0cd2bd3b53cce0d473546ce997c1fb88a25`. Original final review,
+normal Go `39747311051` and Android `39747310982` passed. Only the Core process
+was upgraded; scoped browser acceptance and temporary donor restoration are in
+DEPLOYMENT.md. Qualified proof `ffc8a88` / `39746284080` is at
 `archive/2026-10-22/status-closeout-qualified`; temporary workflow/script removed.
 Earlier harness results are NOT CLI acceptance: `a55bf06` / `39744165413` (missing
 read fixture), `dd9486e` / `39744873054` (syntax error masked by pipeline), and

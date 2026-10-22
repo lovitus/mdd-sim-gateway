@@ -10,12 +10,44 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
-## 2026-10-22 限定文案与状态收尾（尚未生产部署）
+## 2026-10-22 PR46 合并、Core 部署与限定页面验收
+
+批准头 `d0ed08d`、正常合并 `5a6c7e2`、实际工件 `d3ebc0221b6c` 的完整 tree
+均为 `c6afc0cd2bd3b53cce0d473546ce997c1fb88a25`；原终审、Go `39747311051`
+和 Android `39747310982` 通过。复用该 Go 工件，22 项 manifest 及整包摘要核对完成，
+没有重建或替换公开 release。整包 SHA-256：
+`b4688766a70a72a99445ffbbfd0e4746e3c9d2448ce2f40eeb118f257c484999`。
+运行 Core SHA-256：`a43db29692cd8e52277f89df32e3e2fbe1db53f4c5d8aff08de572bf9404b501`。
+
+用户专项授权原 owner 短暂停借用并恢复。准确租约在原清理链在线时停止、Core/Agent
+清理确认后，维护内离线备份并记录哈希，再由标准安装器发布 shared release。
+已核对的 Core/apply/egress owner/Agent/十个 Provider 中仅 Core PID 改变；其余
+已核对进程的运行映像和 PID 未变，不据此断言出口子进程未重建，也不把
+shared 发布当作这些进程已升级。同宿主 Agent 的 PR45 独立启动目标及 guard 参数保留。
+配置/pin 文件、catalog/IMEI 池/通知/egress 配置和策略 revision6 保持；临时 pin、维护
+清零，updater watcher 恢复。原 owner 恢复借用，按同一 generation 协调新端口，
+部署前已有的 HK `runtime route changed` 收敛为 `runtime_confirmed=true/pending=false`。
+原 `catalog37/applied36` 差异未应用。两条 GB 线路恢复窗口曾报 `userspace_stack_failed`；
+保留失败快照，09:23 UTC 自动恢复通话/SMS 就绪，无人工重试，不声称零中断或实际通话通过。
+六个原连接身份同代际返回（包含一个 Android）；Mac CLI 短时缺席后自返，不证明连续在线。
+更正此前 08:44 回执的“六台桌面/Linux”：实际是五台桌面/Linux 加一个 Android 身份，
+并非完整六台桌面机群都在线；另一 Windows 身份在切换前快照也未出现，未新增操作。
+
+用户处理浏览器信任后，Chrome 硬刷新、重新登录并实际回看概览、设备/VoWiFi 历史、
+通话选择/+号输入、短信历史及原 SIM 不可证时的拒绝回复、IMEI 绑定、eSIM 缓存门禁、
+通知已保存配置/既有 delivered 日志、诊断及添加 Agent 表单；未签发新身份或保存配置。
+09:27 UTC 固定 pin 复核实际服务的 `app.js` 为 627020 字节，SHA-256
+`7b5ee310345381ddd77b51e55e3615351f0069c4afd8d1c3a95f7fe790c956a8`，与资格资源一致。
+当时无 `swu_authentication_failed` 现场样本，未制造失败；精确新文案的中英回归仍归属
+下方 hosted proof，不冒充现场负例。无付费、主动网络测试、PIN/profile、手机操作或延期扩展。
+原评审完整回执接受本次限定收尾；其结论依据执行回执，不冒称独立访问了私有现场证据。
+
+### 本批资格及既有诊断记录
 
 本批只修改 WebUI 认证失败提示和当前台账，不改认证、重试、路由、用户开关或隔离。
 候选提示只表示 ePDG 返回认证失败，不能据此认定 SIM、国家、IP 或具体运营商策略；
 历史结构化详情不再覆盖成过度归因，原始码仍可查看。原评审已批准限定方案；
-候选构建、浏览器验证与生产版本分开记录，不为嵌入式网页文案重启 Core。
+候选构建、浏览器验证与生产版本分开记录；随后经用户专项短停授权完成上方部署。
 限定 proof `ffc8a88` / `39746284080` 已通过，保留于
 `archive/2026-10-22/status-closeout-qualified`；中英实际组件回归和生成的 embed 已核对。
 旧版反例在主状态缺少文案处失败，不声称每个历史断言都分别取得旧版反例。
@@ -37,7 +69,7 @@ SHA-256 `dc5fd8cd76321ea3c04be8d4b17d402d9add7365a6f6d4edcd8d7afc8184ab69`，
 落盘、正常退出、无配置参数再次发现并复用身份、最后撤销测试凭据。成功回执非空且逐项核对。
 未接入生产、硬件或现有配置；不把该 Linux 旅程推广为三平台安装、USB 或业务验收。
 初始夹具缺接口、CLI 解析错误被管道掩盖、PTY 匹配超时均已保留，不算通过；
-对应 run/tag 见 docs/branches.md。临时入口已移除，最终正常 CI 与终审另行记录。
+对应 run/tag 见 docs/branches.md。临时入口已移除，最终正常 CI 与终审见本节开头。
 
 ## 2026-10-19 PR45 Linux 策略恢复
 
