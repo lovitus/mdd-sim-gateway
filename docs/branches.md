@@ -1,11 +1,19 @@
 # Branch disposition and integration record
 
+PR47 is integrated: approved `25c78a0`, normal Go `39802816073` and original final
+review passed; merge `1bfcf9a` has the same tree `f00db424`. Main run `39814557921`
+was cancelled in Linux packaging with downstream install/aggregate steps skipped;
+its four required desktop jobs explicitly succeeded. The reviewer accepted only
+the verified desktop artifacts. Three desktops are upgraded; one Windows target
+and two GB runtime failures remain open. No formal release/tag was changed.
+Exact scoped receipts are linked in DEPLOYMENT.md; do not re-run qualified proofs.
+
 PR47 qualified source `7dfe66c` passed full Go `39798759586` and original source
 review; archive `archive/2026-10-22/agent-usability-qualified` preserves the temporary
 proof. Same-tree artifact `234231bc` proves the real old status path fails after
 query rights succeed and START/STOP are denied; fixed Windows race has38 passes,
-zero failures/skips. Temporary proof is removed for final normal qualification.
-No production deployment or complete M15 acceptance is implied.
+zero failures/skips. Temporary proof was removed before final normal qualification.
+That proof does not itself establish production deployment or complete M15 acceptance.
 `827be01` / `39772068347` is retained
 at `archive/2026-10-22/agent-usability-review-proof`: Mac behavioral reds and32 fixed
 passes, but Windows proof timed out before test events. Original review requires

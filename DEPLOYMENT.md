@@ -10,6 +10,29 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 
 本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
+## 2026-10-23 PR47 桌面限定交付
+
+批准头 `25c78a0`、完整 Go `39802816073` 和原终审通过；正常合并 `1bfcf9a`
+保持完整 tree `f00db424c2fdfad71e835ed2fc9d3f289e9ef099`。主分支构建
+`39814557921` 整轮 cancelled，Linux 打包取消及下游跳过不能记为全绿。
+原评审接受其中明确成功的 Windows/Mac 及前置任务；完整 manifest、源码与原 Team
+七个 Mac 组件签名核对后，仅用于桌面升级，不改正式 release/tag/updater。
+[资格与原生检查回执](https://github.com/lovitus/mdd-sim-gateway/pull/47#issuecomment-6345847654)
+保留成功保存后明确未加载、退出重开才接入的 Mac 旅程及 Windows 隔离桌面检查；
+Windows 现场启用灰度滤镜，不能据此声称原生色彩已验收。
+
+两台 Mac 和一台 Windows 已升级，实际进程哈希/代际、原配置/pin、CLI/GUI 模式、
+Windows 服务账户/ACL 和适用隔离策略保持，目标维护已释放。另一 Windows 在升级前
+已连接超时，仍保留原版本，未强制重启或改网络。Core/Provider/原 Linux 借用未重启，
+借用为同一会话自然续期；未进行付费或延期测试。
+
+两条 GB 卡路由已恢复，但一次 600 秒观察结束时仍为 `swu_open_failed`、IKE 无响应；
+后续既有重试时间在窗口之外，不判定恢复器未重试。ARM 卡路由先于新 Mac 程序运行
+失去准入；另一条与 Mac 维护窗口重合，保留实际中断而非零影响。共同出口是排查关联，
+不是已证实根因；准确 Stop operation ID 缺失。未续开观察、换出口或回滚试探。
+[原评审接受的部分部署回执](https://github.com/lovitus/mdd-sim-gateway/pull/47#issuecomment-6347080177)
+保留三台完成、一台待升级、两条业务未恢复的边界；不能写成全机群或通信全恢复。
+
 ## 2026-10-22 PR46 合并、Core 部署与限定页面验收
 
 批准头 `d0ed08d`、正常合并 `5a6c7e2`、实际工件 `d3ebc0221b6c` 的完整 tree
