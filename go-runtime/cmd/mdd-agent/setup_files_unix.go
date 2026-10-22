@@ -20,3 +20,8 @@ func protectSetupPath(path string) error {
 }
 
 func lockSetupFile(file *os.File) error { return unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB) }
+
+func createSetupTemp(directory, original string) (*os.File, error) {
+	// CreateTemp uses 0600 at creation, before another process can open it.
+	return os.CreateTemp(directory, ".mdd-setup-*")
+}

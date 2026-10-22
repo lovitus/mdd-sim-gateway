@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### AGENT_USABILITY
+
+**State: partial; release relevance: current.** October22 full completion goal remains active. Original reviewer approved the bounded desktop plan at main09eb679. Candidate reuses Fyne overview/configuration/diagnostics, semantic theme colors, typed device and Core states, existing-config verification/save with original-file fencing, and platform-owned confirmed controls. Disk changes are not claimed loaded; no Core, Agent wire, hardware policy, service architecture or Android change. Desktop candidate and remaining Android usability are not accepted or deployed.
+
+Acceptance scope / remaining action: PR47 retains prior39768133187 counterexamples and the corrected Fyne No-button locator. At827be01, run39772068347 passed the Mac cancellation/owner/pending/mode counterexamples and32 fixed tests; Windows proof timed out before any test event, not a diagnosed product failure. archive/2026-10-22/agent-usability-review-proof preserves that source. Original review closed those four contracts but requires creation-time private Windows ACL and independent selection of an existing config beside pending enrollment. Same-batch corrections and direct regressions remain unqualified; compile and execution now have separate bounded evidence. Prior successful reds are not rerun. Final review, native interaction and deployment remain pending. The wider Windows privilege/Linux bearer/Universal/remaining acceptance goal remains open in DEVELOPMENT.md.
+
 ### EGRESS_DONOR_RECOVERY
 
 **State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.

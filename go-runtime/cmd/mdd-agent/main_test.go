@@ -126,7 +126,7 @@ func TestAgentHostReadyMeansItOwnsTheSingletonListener(t *testing.T) {
 	ready := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- runHostWithReady(ctx, settings, processWorker{}, func() { close(ready) })
+		done <- runHostWithReady(ctx, settings, processWorker{}, func(context.Context, *agentcontrol.Controller) { close(ready) })
 	}()
 	select {
 	case <-ready:
@@ -137,7 +137,7 @@ func TestAgentHostReadyMeansItOwnsTheSingletonListener(t *testing.T) {
 	}
 
 	duplicateReady := false
-	err := runHostWithReady(context.Background(), settings, processWorker{}, func() { duplicateReady = true })
+	err := runHostWithReady(context.Background(), settings, processWorker{}, func(context.Context, *agentcontrol.Controller) { duplicateReady = true })
 	if err == nil {
 		t.Fatal("duplicate host acquired singleton listener")
 	}
