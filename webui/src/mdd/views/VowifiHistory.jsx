@@ -20,7 +20,6 @@ const REASON_LABEL = {
   tunnel_ike_rekey_timeout: 'Server ePDG did not answer IKE_SA rekey',
   tunnel_rekey_send_error: 'Client failed to send IPsec rekey',
   tunnel_sim_auth: 'Client SIM authentication failed',
-  swu_authentication_failed: 'Server ePDG rejected client network/identity',
   swu_proxy_dns_unavailable: 'Proxy DNS connection unavailable',
   tunnel_not_authorized: 'Server ePDG rejected client network/identity',
   tunnel_proposal: 'Server ePDG rejected client IKE proposal',
@@ -65,6 +64,11 @@ function evidenceLabel(detail, t) {
   } catch (_) { return '' }
 }
 function outageCause(segment, t) {
+  // This typed IKE/EAP rejection does not identify a carrier policy. Older
+  // structured details must not override it with speculative network/SIM causes.
+  if (segment.reason === 'swu_authentication_failed') {
+    return { summary: t(segment.reason), legacyDetail: '' }
+  }
   const evidence = evidenceLabel(segment.detail, t)
   if (evidence) return { summary: evidence, legacyDetail: '' }
   // Structured evidence is internal data. If a future code is not yet mapped, retain the
@@ -242,6 +246,7 @@ export default function VowifiHistory({ instanceId, compact = false }) {
             <td>{segment.end >= data.end ? t('Ongoing') : stampLabel(segment.end, language)}</td>
             <td>{duration(segment.end - segment.start, t)}</td>
             <td>{cause.summary}
+              {segment.reason === 'swu_authentication_failed' && <small className="u-outage-detail"><code>{segment.reason}</code></small>}
               {cause.legacyDetail && <small className="u-outage-detail">{cause.legacyDetail}</small>}</td>
           </tr>
         })}

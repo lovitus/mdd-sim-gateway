@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { DevicesPage } from '../src/mdd/views/UnifiedPages.jsx'
 import { UnifiedOverview } from '../src/mdd/views/UnifiedPages.jsx'
 import { EgressPage } from '../src/mdd/views/UnifiedPages.jsx'
+import VowifiHistory from '../src/mdd/views/VowifiHistory.jsx'
 import DialogHost from '../src/DialogHost.jsx'
 import { lineForm } from '../src/mdd/lineAdapter.js'
 import { mapGoSnapshot } from '../src/goV1Adapter.js'
@@ -97,7 +98,19 @@ function SetupFixture() {
   </>
 }
 
-localStorage.setItem('mdd-language','en')
+const parameters = new URLSearchParams(location.search)
+localStorage.setItem('mdd-language', parameters.get('language') || 'en')
+function StatusCopyFixture() {
+  const code = parameters.get('code') || 'swu_authentication_failed'
+  const device = {...flowReader, instance_id:'auth-fixture', status:{state:'ERROR',label:code},
+    capabilities:{vowifi:{desired:true,actual:'error',reason:code,available:true}},
+    facts:{summary:{state:'blocked',code},facts:{tunnel:{state:'blocked',code,fresh:true,layer:'tunnel'}}}}
+  const [tab,setTab] = useState('status')
+  return <><DevicesPage devices={[device]} discovering={false} instances={[]} cards={[]}
+    selectedDeviceId={device.id} setSelectedDeviceId={()=>{}} selected={null} setSelected={()=>{}}
+    refresh={()=>{}} refreshDevices={()=>{}} showToast={()=>{}} deviceTab={tab} setDeviceTab={setTab}/>
+    <VowifiHistory instanceId="auth-fixture"/></>
+}
 function EgressFixture() {
   const [toast,setToast]=useState('')
   const [visible,setVisible]=useState(true)
@@ -107,4 +120,4 @@ function EgressFixture() {
 }
 // The control-flow fixture uses the same root as main.jsx. Keep the existing
 // Hardware readback stress fixture's separate StrictMode coverage unchanged.
-createRoot(document.getElementById('root')).render(<I18nProvider>{new URLSearchParams(location.search).has('egress') ? <EgressFixture/> : new URLSearchParams(location.search).has('setup') ? <SetupFixture/> : new URLSearchParams(location.search).has('flow') ? <FlowFixture/> : <React.StrictMode><Fixture/></React.StrictMode>}</I18nProvider>)
+createRoot(document.getElementById('root')).render(<I18nProvider>{parameters.has('status-copy') ? <StatusCopyFixture/> : parameters.has('egress') ? <EgressFixture/> : parameters.has('setup') ? <SetupFixture/> : parameters.has('flow') ? <FlowFixture/> : <React.StrictMode><Fixture/></React.StrictMode>}</I18nProvider>)
