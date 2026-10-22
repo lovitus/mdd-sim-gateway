@@ -1,3 +1,5 @@
+# Branch disposition and integration record
+
 PR57 `archive/2026-11-06/cellular-coexistence-refusal-qualified` retains022f345;
 hosted checkoutef131613 has the same treeb9ced795. Go42170150295 and
 Android42170150265 pass; artifact13480812230 confirms20 behavioral reds/25 greens.
@@ -19,8 +21,6 @@ and Go42164603594: real install/stop/uninstall/reinstall passed; macOS Universal
 verification timed out. Fixed review found pre-disable updater restoration and
 strict inactive-readback gaps; the successor accepts the scoped repair plan.
 Full qualification and final review remain required; production is unchanged.
-
-# Branch disposition and integration record
 
 PR57 `archive/2026-11-06/cellular-coexistence-installer-red` preserves53c01d8,
 Go42161172653 and Android42161172591. Coexistence/DHCP qualification passed;
@@ -312,11 +312,23 @@ visible original row24 but failed an invalid collection-size expectation (Androi
 reports unknown). The sh/Bash condition skipped temporary old-source proof, so
 this run supplies no red evidence. Source review accepted runtime and requested
 refresh synchronization in the reply test. No product correction was required.
-PR48 `codex/windows-local-management` remains a separate draft at `15fc0d1`,
-tree `570246a94f6d8827c11a730a48f8cc59de071e77`. CI `39844561322` failed fresh
-inventory readiness after control-link connection; its fixture synchronization
-review is recorded on the PR. Further corrections await the owner's direction
-under the repeated-test-failure rule. Do not merge or drop that unique work.
+PR48 `codex/windows-local-management` resumes from `15fc0d1` rebased onto `main`.
+Initial `d5ba979` (`39831348196`), partial proof `efeb6f5` (`39836215604`), and
+readiness diagnostic `1bd0aa8` (`39840779742`) are recorded as historical candidate
+evidence. CI `39844561322` failed fresh inventory readiness after control-link
+connection; review `121a66ba` confirmed the two-sample loop exited before Core
+empty-inventory publication. Rebased `95254f5` (`45977729257`) passed all non-Windows
+jobs and emitted exact typed readiness evidence showing Windows `SCardSvr` idle-stopped
+(`pcsc_service_state=1`, `reader_condition="recovering"`) when zero smart card readers
+are present; `pcscmonitor` now handles Windows idle-stopped `SCardSvr` fail-closed.
+Run `45983801377` (`6099f4e`) passed Windows service readiness and `pcscmonitor`
+red/green, then exposed `LocalSystem` process DACL denial of `OpenProcess`
+(`PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE`) for the restricted ordinary user;
+`startLocalManagement` now scopes that read-only process identity right to the
+authorized operator SID and restores the original process DACL on revoke/close.
+Run `45986500400` (`c21eaf4`) passed all four Windows behavioral reds, unit suites
+and `TestWindowsLocalManagementJourney` (61.65s, zero skips); receipts are retained
+and the temporary counterexample mutation step is removed for clean normal CI.
 
 PR47 final `25c78a0` passed normal Go `39802816073` and original final review;
 normal merge `1bfcf9a` shares tree `f00db424c2fdfad71e835ed2fc9d3f289e9ef099`.
@@ -331,8 +343,8 @@ PR47 qualified source `7dfe66c` passed full Go `39798759586` and original source
 review; archive `archive/2026-10-22/agent-usability-qualified` preserves the temporary
 proof. Same-tree artifact `234231bc` proves the real old status path fails after
 query rights succeed and START/STOP are denied; fixed Windows race has38 passes,
-zero failures/skips. Temporary proof is removed for final normal qualification.
-No production deployment or complete M15 acceptance is implied.
+zero failures/skips. Temporary proof was removed before final normal qualification.
+That proof does not itself establish production deployment or complete M15 acceptance.
 `827be01` / `39772068347` is retained
 at `archive/2026-10-22/agent-usability-review-proof`: Mac behavioral reds and32 fixed
 passes, but Windows proof timed out before test events. Original review requires

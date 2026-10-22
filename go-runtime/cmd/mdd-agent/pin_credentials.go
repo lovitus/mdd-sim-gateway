@@ -58,6 +58,11 @@ func (store *agentPINCredentials) Save(ctx context.Context, cardID, pin, expecte
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	lock, err := lockConfigMutation(store.path)
+	if err != nil {
+		return agentlink.SIMPINConfiguration{}, err
+	}
+	defer lock.Close()
 	settings, err := readConfigForEdit(store.path, false)
 	if err != nil {
 		return agentlink.SIMPINConfiguration{}, err
@@ -83,7 +88,10 @@ func (store *agentPINCredentials) Save(ctx context.Context, cardID, pin, expecte
 	if err := settings.validate(); err != nil {
 		return agentlink.SIMPINConfiguration{}, err
 	}
-	if err := saveConfig(store.path, settings); err != nil {
+	if err := ctx.Err(); err != nil {
+		return agentlink.SIMPINConfiguration{}, err
+	}
+	if err := saveConfigLocked(store.path, settings); err != nil {
 		return agentlink.SIMPINConfiguration{}, err
 	}
 	if store.recovery != nil {
@@ -101,6 +109,11 @@ func (store *agentPINCredentials) Remove(ctx context.Context, cardID, expectedRe
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	lock, err := lockConfigMutation(store.path)
+	if err != nil {
+		return agentlink.SIMPINConfiguration{}, err
+	}
+	defer lock.Close()
 	settings, err := readConfigForEdit(store.path, false)
 	if err != nil {
 		return agentlink.SIMPINConfiguration{}, err
@@ -117,7 +130,10 @@ func (store *agentPINCredentials) Remove(ctx context.Context, cardID, expectedRe
 	if err := settings.validate(); err != nil {
 		return agentlink.SIMPINConfiguration{}, err
 	}
-	if err := saveConfig(store.path, settings); err != nil {
+	if err := ctx.Err(); err != nil {
+		return agentlink.SIMPINConfiguration{}, err
+	}
+	if err := saveConfigLocked(store.path, settings); err != nil {
 		return agentlink.SIMPINConfiguration{}, err
 	}
 	if store.recovery != nil {

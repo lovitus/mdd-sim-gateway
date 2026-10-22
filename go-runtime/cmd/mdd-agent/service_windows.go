@@ -38,8 +38,9 @@ const (
 )
 
 type windowsServiceProgram struct {
-	settings config
-	host     *managedHost
+	settings   config
+	host       *managedHost
+	management io.Closer
 }
 
 func (program *windowsServiceProgram) Start(current service.Service) error {
@@ -81,6 +82,11 @@ func (program *windowsServiceProgram) Start(current service.Service) error {
 	if err := program.host.waitReady(ready, 5*time.Second); err != nil {
 		return errors.Join(err, program.host.stop(serviceStopTimeout(program.settings)))
 	}
+	program.management, err = startLocalManagement(context.Background(), program.settings)
+	if err != nil {
+		// Management failure must not release hardware ownership or isolation.
+		log.Printf("mdd-agent local management unavailable: %v", err)
+	}
 	return nil
 }
 
@@ -108,6 +114,9 @@ func (writer windowsServiceLogWriter) Write(payload []byte) (int, error) {
 }
 
 func (program *windowsServiceProgram) Stop(service.Service) error {
+	if program.management != nil {
+		_ = program.management.Close()
+	}
 	if program.host == nil {
 		return nil
 	}

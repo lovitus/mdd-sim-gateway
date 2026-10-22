@@ -9,6 +9,7 @@ used here as proof of license compliance.
 
 | Component | Use | License | Source |
 |---|---|---|---|
+| Microsoft/go-winio v0.6.4 | Local Windows service management named pipe; distributed module license is retained by the existing Go license packager | MIT | https://github.com/microsoft/go-winio |
 | damonto/euicc-go v1.1.2 | eUICC protocol and LPA; minimal optional-IMEI compatibility patch in `go-runtime/third_party/euicc-go/MDD-PATCH.md` | MIT | https://github.com/damonto/euicc-go |
 | MddIdd/mdd-sim-gateway | GPL project lineage and substantial original gateway code | GPL-3.0-only | https://github.com/MddIdd/mdd-sim-gateway |
 | MDD VoWiFi Go Provider (`providers/vowifi-go/**`) | Native VoWiFi runtime and its maintained upstream fork | AGPL-3.0-only | https://github.com/lovitus/mdd-sim-gateway/tree/main/providers/vowifi-go |

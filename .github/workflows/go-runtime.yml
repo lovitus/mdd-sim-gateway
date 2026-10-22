@@ -381,6 +381,7 @@ jobs:
           go test
           -tags with_system_vboxusb,with_external_usbip_drivers
           -timeout 2m
+          ./internal/pcscmonitor
           ./internal/agentrawusb
           ./internal/agentusbip
           ./internal/rawmodem
@@ -393,6 +394,7 @@ jobs:
         run: >-
           go vet
           -tags with_system_vboxusb,with_external_usbip_drivers
+          ./internal/pcscmonitor
           ./internal/agentrawusb
           ./internal/agentusbip
           ./internal/rawmodem
@@ -453,6 +455,22 @@ jobs:
               & $agent service-uninstall "--config=$config" | Out-Null
             }
           }
+
+      - name: Test ordinary-user management through the real Windows service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          # Isolated hosted runner only: the fixture refuses any pre-existing Agent.
+          $env:MDD_MANAGEMENT_BINARY = Join-Path $env:RUNNER_TEMP 'mdd-agent-fresh\mdd-agent.exe'
+          $env:CGO_ENABLED = '1'
+          $output = & go -C go-runtime test -tags gui -count=1 -timeout 6m -json ./cmd/mdd-agent -run '^TestWindowsLocalManagementJourney$' 2>&1
+          $exit = $LASTEXITCODE
+          $events = @($output | ForEach-Object { try { $_ | ConvertFrom-Json -ErrorAction Stop } catch {} })
+          $passed = @($events | Where-Object { $_.Action -eq 'pass' -and $_.Test -eq 'TestWindowsLocalManagementJourney' })
+          $bad = @($events | Where-Object { $_.Action -in @('fail', 'skip') })
+          if ($exit -ne 0 -or $passed.Count -ne 1 -or $bad.Count -ne 0) { $output | Write-Output; throw 'Windows service journey failed or incomplete' }
+          Write-Output 'Windows service journey: passed=1, failed=0, skipped=0'
 
   validate-provider:
     name: Validate VoWiFi Provider
