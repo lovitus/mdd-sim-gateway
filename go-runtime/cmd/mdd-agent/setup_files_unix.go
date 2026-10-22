@@ -20,3 +20,5 @@ func protectSetupPath(path string) error {
 }
 
 func lockSetupFile(file *os.File) error { return unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB) }
+
+func protectEditedConfig(path, original string) error { return protectSetupPath(path) }

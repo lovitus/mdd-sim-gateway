@@ -322,6 +322,12 @@ Private unsubmitted worktree evidence was backed up separately, not in public ta
 
 ## Rules for subsequent work
 
+October22 desktop Agent candidate `archive/2026-10-22/agent-usability-initial`
+preserves05131ac/39768133187: successful initial behavioral counterexamples, but
+failed fixed qualification (Fyne confirmation-button fixture). PR47 stays the
+single delivery candidate; original review's five corrections supersede that
+source. The archive is not release approval or a branch to restore.
+
 October13 new-card evidence only: `archive/2026-10-13/new-card-qualified`
 retains6e63731/CI38342258088 (compiled behavioral counterexamples followed by
 fixed race/API/Chromium passes). Initial tags `new-card-initial-proof` and

@@ -28,6 +28,24 @@ type setupTransaction struct {
 	pending setupPending
 }
 
+func readPendingSetup(path string) (setupPending, error) {
+	if !filepath.IsAbs(path) {
+		return setupPending{}, os.ErrNotExist
+	}
+	payload, err := readSetupFile(path + ".setup-pending")
+	if err != nil {
+		return setupPending{}, err
+	}
+	var pending setupPending
+	if err := strictSetupJSON(payload, &pending); err != nil {
+		return setupPending{}, err
+	}
+	if pending.Version != 1 || len(pending.EnrollmentID) != 32 || pending.ConfigPath != filepath.Clean(path) {
+		return setupPending{}, errors.New("invalid pending setup")
+	}
+	return pending, nil
+}
+
 func configDigest(payload []byte) string {
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
@@ -100,15 +118,9 @@ func beginSetup(path string) (*setupTransaction, error) {
 		return nil, fmt.Errorf("state directory: %w", err)
 	}
 	if _, err = os.Lstat(path + ".setup-pending"); err == nil {
-		payload, err := readSetupFile(path + ".setup-pending")
+		tx.pending, err = readPendingSetup(path)
 		if err != nil {
 			return nil, err
-		}
-		if err = strictSetupJSON(payload, &tx.pending); err != nil {
-			return nil, err
-		}
-		if tx.pending.Version != 1 || len(tx.pending.EnrollmentID) != 32 || tx.pending.ConfigPath != filepath.Clean(path) {
-			return nil, errors.New("invalid pending setup")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -189,7 +201,7 @@ func (tx *setupTransaction) savePending() error {
 	if err != nil {
 		return err
 	}
-	return writeSetupFile(tx.path+".setup-pending", append(payload, '\n'), false)
+	return writeSetupFile(tx.path+".setup-pending", append(payload, '\n'), false, "")
 }
 
 func (tx *setupTransaction) publish() (config, error) {
@@ -204,7 +216,7 @@ func (tx *setupTransaction) publish() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
-	if err = writeSetupFile(tx.path, append(payload, '\n'), tx.pending.OriginalSHA256 == ""); err != nil {
+	if err = writeSetupFile(tx.path, append(payload, '\n'), tx.pending.OriginalSHA256 == "", ""); err != nil {
 		return config{}, err
 	}
 	settings.configPath = tx.path
@@ -212,7 +224,7 @@ func (tx *setupTransaction) publish() (config, error) {
 	return settings, nil
 }
 
-func writeSetupFile(path string, payload []byte, exclusive bool) error {
+func writeSetupFile(path string, payload []byte, exclusive bool, preserveAccessFrom string) error {
 	file, err := os.CreateTemp(filepath.Dir(path), ".mdd-setup-*")
 	if err != nil {
 		return err
@@ -220,7 +232,12 @@ func writeSetupFile(path string, payload []byte, exclusive bool) error {
 	name := file.Name()
 	defer os.Remove(name)
 	defer file.Close()
-	if err = protectSetupPath(name); err != nil {
+	if preserveAccessFrom != "" {
+		err = protectEditedConfig(name, preserveAccessFrom)
+	} else {
+		err = protectSetupPath(name)
+	}
+	if err != nil {
 		return err
 	}
 	if _, err = file.Write(payload); err != nil {
