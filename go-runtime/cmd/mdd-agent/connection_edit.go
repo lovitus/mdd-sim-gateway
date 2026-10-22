@@ -26,6 +26,14 @@ type connectionChange struct {
 	Server, TLSMode, Fingerprint, Token string
 }
 
+type connectionEditFailure struct {
+	code  string
+	cause error
+}
+
+func (failure *connectionEditFailure) Error() string { return failure.cause.Error() }
+func (failure *connectionEditFailure) Unwrap() error { return failure.cause }
+
 func readConnectionEdit(path string) (connectionEdit, error) {
 	if !filepath.IsAbs(path) {
 		return connectionEdit{}, errors.New("configuration path must be absolute")
@@ -68,18 +76,22 @@ func (edit connectionEdit) checkOriginal() error {
 }
 
 func (edit connectionEdit) save(ctx context.Context, change connectionChange) error {
+	return edit.saveGuarded(ctx, change, nil)
+}
+
+func (edit connectionEdit) saveGuarded(ctx context.Context, change connectionChange, authorize func(config) error) error {
 	lock, err := lockConfigMutation(edit.path)
 	if err != nil {
-		return err
+		return &connectionEditFailure{"management_config_locked", err}
 	}
 	defer lock.Close()
 	if err = edit.checkOriginal(); err != nil {
-		return err
+		return &connectionEditFailure{"management_edit_stale_or_invalid", err}
 	}
 	settings := edit.settings
 	settings.Agent.ServerURL, err = normalizeSetupServer(change.Server)
 	if err != nil {
-		return err
+		return &connectionEditFailure{"management_input_invalid", err}
 	}
 	switch change.TLSMode {
 	case "system":
@@ -91,18 +103,23 @@ func (edit connectionEdit) save(ctx context.Context, change connectionChange) er
 		}
 		settings.Agent.TLSFingerprint, err = normalizeSHA256(pin)
 		if err != nil {
-			return err
+			return &connectionEditFailure{"management_input_invalid", err}
 		}
 		settings.Agent.TLSMode = "pin"
 	default:
-		return errors.New("select system certificate verification or an explicit trusted certificate pin")
+		return &connectionEditFailure{"management_input_invalid", errors.New("select system certificate verification or an explicit trusted certificate pin")}
 	}
 	if strings.TrimSpace(change.Token) != "" {
 		settings.Agent.ServerToken = strings.TrimSpace(change.Token)
 	}
 	checked := settings
 	if err = checked.validate(); err != nil {
-		return err
+		return &connectionEditFailure{"management_input_invalid", err}
+	}
+	if authorize != nil {
+		if err = authorize(settings); err != nil {
+			return err
+		}
 	}
 	client, err := pintls.NewPolicyHTTPClient(settings.Agent.ServerURL, settings.Agent.TLSMode, settings.Agent.TLSFingerprint, 10*time.Second)
 	if err != nil {
@@ -118,7 +135,7 @@ func (edit connectionEdit) save(ctx context.Context, change connectionChange) er
 	// Establish the selected trust before transmitting the unchanged identity's
 	// credential. Check never enrolls, replaces a WSS owner, or starts hardware.
 	if err = peer.request(ctx, http.MethodGet, "/api/auth/status", nil, nil); err != nil {
-		return err
+		return &connectionEditFailure{"management_target_verification_failed", err}
 	}
 	var response struct {
 		OK bool `json:"ok"`
@@ -126,20 +143,54 @@ func (edit connectionEdit) save(ctx context.Context, change connectionChange) er
 	if err = peer.request(ctx, http.MethodPost, "/api/auth/agent-credentials/check", map[string]string{
 		"agent_id": settings.Agent.ID, "agent_token": settings.Agent.ServerToken,
 	}, &response); err != nil {
-		return err
+		return &connectionEditFailure{"management_credential_check_failed", err}
 	}
 	if !response.OK {
-		return errors.New("Core did not confirm the Agent credential")
+		return &connectionEditFailure{"management_credential_check_failed", errors.New("Core did not confirm the Agent credential")}
 	}
 	if err = edit.checkOriginal(); err != nil {
-		return err
+		return &connectionEditFailure{"management_edit_stale_or_invalid", err}
 	}
 	if err = ctx.Err(); err != nil {
 		return err
+	}
+	if authorize != nil {
+		if err = authorize(settings); err != nil {
+			return err
+		}
 	}
 	payload, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeSetupFile(edit.path, append(payload, '\n'), false, edit.path)
+	if err := writeSetupFile(edit.path, append(payload, '\n'), false, edit.path); err != nil {
+		return &connectionEditFailure{"management_publish_unconfirmed", err}
+	}
+	return nil
+}
+
+// A delegated editor cannot export the service's secret by changing its recipient.
+// A replacement token is explicit input; a retained token stays at its old origin
+// and trust binding. This is stricter than the full-file administrator editor.
+func checkRetainedConnectionCredential(previous, next config, replacement string) error {
+	if strings.TrimSpace(replacement) != "" {
+		return nil
+	}
+	before, err := normalizeSetupServer(previous.Agent.ServerURL)
+	if err != nil {
+		return errors.New("new target credential required")
+	}
+	a, _ := url.Parse(before)
+	b, _ := url.Parse(next.Agent.ServerURL)
+	oldMode, oldPin := previous.Agent.TLSMode, previous.Agent.TLSFingerprint
+	if oldPin != "" {
+		oldMode = "pin"
+		oldPin, err = normalizeSHA256(oldPin)
+	} else if oldMode == "" {
+		oldMode = "system"
+	}
+	if err != nil || b == nil || !strings.EqualFold(a.Host, b.Host) || oldMode != next.Agent.TLSMode || oldPin != next.Agent.TLSFingerprint {
+		return errors.New("new target credential required")
+	}
+	return nil
 }

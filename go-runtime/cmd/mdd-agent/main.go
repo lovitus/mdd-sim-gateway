@@ -98,9 +98,15 @@ func main() {
 		}
 	}
 	if len(arguments) == 0 {
-		fatalf("usage: mdd-agent <config|modem-probe|run|gui|status|topology|raw-modes|raw-mode|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
+		fatalf("usage: mdd-agent <config|modem-probe|run|gui|status|topology|raw-modes|raw-mode|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status|service-access>")
 	}
 	command := arguments[0]
+	if command == "service-access" {
+		if err := runServiceAccess(arguments[1:], os.Stdout); err != nil {
+			fatalf("service-access: %v", err)
+		}
+		return
+	}
 	if command == "repair-default-enrollment" {
 		if err := runEnrollmentRepair(arguments[1:], os.Stdout); err != nil {
 			fatalf("repair-default-enrollment: %v", err)

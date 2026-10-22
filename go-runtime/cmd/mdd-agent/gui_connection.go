@@ -18,6 +18,21 @@ func (controller *guiController) editConnection() {
 		return
 	}
 	go func() {
+		if controller.serviceClient != nil {
+			state, err := controller.serviceClient.request(controller.ctx, nil)
+			fyne.Do(func() {
+				if controller.ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					controller.releaseAction()
+					dialog.ShowError(err, controller.window)
+					return
+				}
+				controller.connectionDialogManaged(connectionEdit{path: controller.configPath, settings: state.Saved.guiConfig()}, &state)
+			})
+			return
+		}
 		edit, err := readConnectionEdit(controller.configPath)
 		fyne.Do(func() {
 			if controller.ctx.Err() != nil {
@@ -34,6 +49,10 @@ func (controller *guiController) editConnection() {
 }
 
 func (controller *guiController) connectionDialog(edit connectionEdit) {
+	controller.connectionDialogManaged(edit, nil)
+}
+
+func (controller *guiController) connectionDialogManaged(edit connectionEdit, managed *localManagementState) {
 	ctx, cancel := context.WithCancel(controller.ctx)
 	server := widget.NewEntry()
 	server.SetText(edit.settings.Agent.ServerURL)
@@ -67,6 +86,9 @@ func (controller *guiController) connectionDialog(edit connectionEdit) {
 		}
 	}
 	status := guiLabel("仅修改已保存的连接配置；原 Agent ID、控制密钥和设备策略保持不变。", false)
+	if managed != nil {
+		status.SetText("更换目标或证书信任需提供新目标 token；原凭据不会带到新目标。保存不会重启服务。")
+	}
 	identity := guiLabel("Agent ID："+edit.settings.Agent.ID+"\n配置："+edit.path, false)
 	closed, inFlight := false, false
 	var save *widget.Button
@@ -81,7 +103,11 @@ func (controller *guiController) connectionDialog(edit connectionEdit) {
 		inFlight = true
 		save.Disable()
 		setInputsEnabled(false)
-		dialog.ShowConfirm("确认连接目标", "服务端："+change.Server+"\n证书信任："+trust.Selected+"\n验证将向此目标发送当前 Agent 的凭据。保存不会重启或替换正在运行的 Agent。", func(confirmed bool) {
+		credentialNotice := "验证将向此目标发送当前 Agent 的凭据。"
+		if managed != nil {
+			credentialNotice = "验证只发送你填写的替换凭据，或在原目标与原信任不变时使用已保存凭据。"
+		}
+		dialog.ShowConfirm("确认连接目标", "服务端："+change.Server+"\n证书信任："+trust.Selected+"\n"+credentialNotice+"保存不会重启或替换正在运行的 Agent。", func(confirmed bool) {
 			if !confirmed || closed || ctx.Err() != nil {
 				inFlight = false
 				if closed {
@@ -96,13 +122,23 @@ func (controller *guiController) connectionDialog(edit connectionEdit) {
 			status.SetText("正在验证；尚未保存")
 			go func() {
 				op, finish := context.WithTimeout(ctx, 45*time.Second)
-				err := edit.save(op, change)
+				var err error
+				var result localManagementState
+				if managed == nil {
+					err = edit.save(op, change)
+				} else {
+					result, err = controller.serviceClient.request(op, &localManagementEdit{Version: localManagementVersion, Session: managed.Session, Revision: managed.Revision, Change: change})
+				}
 				finish()
 				change.Token = ""
 				var saved connectionEdit
 				var readErr error
 				if err == nil {
-					saved, readErr = readConnectionEdit(edit.path)
+					if managed == nil {
+						saved, readErr = readConnectionEdit(edit.path)
+					} else {
+						saved.settings = result.Saved.guiConfig()
+					}
 				}
 				fyne.Do(func() {
 					if controller.ctx.Err() != nil || controller.configPath != edit.path {
@@ -118,14 +154,22 @@ func (controller *guiController) connectionDialog(edit connectionEdit) {
 						controller.savedStatus.SetText("已保存；需由原 Agent 宿主重新加载后生效。当前运行进程未改变。")
 						controller.actionStatus.SetText("连接配置已保存；未自动重启")
 						if !closed {
-							status.SetText("已保存。macOS 需完整退出并重新启动原宿主；Windows 需由原服务重新启动后加载。")
+							if managed == nil {
+								status.SetText("已保存。macOS 需完整退出并重新启动原宿主；Windows 需由原服务重新启动后加载。")
+							} else {
+								status.SetText("已保存，尚未加载。请打开当前网关，在 Agent 主机页受控重启后读回；离线或迁移至其他 Core 需管理员维护。重启不会绑定本次配置修订。")
+							}
 						}
 					} else if !closed {
 						status.SetText(err.Error())
 						status.Importance = widget.DangerImportance
 						status.Refresh()
-						save.Enable()
-						setInputsEnabled(true)
+						if managed == nil {
+							save.Enable()
+							setInputsEnabled(true)
+						} else {
+							status.SetText(err.Error() + "\n请关闭编辑器并刷新，读取当前修订后再操作。")
+						}
 					}
 					if closed {
 						controller.releaseAction()
