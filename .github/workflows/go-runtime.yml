@@ -454,6 +454,129 @@ jobs:
             }
           }
 
+      # Temporary candidate-only behavioral proof; remove after retaining receipts.
+      - name: Prove new Windows management counterexamples
+        timeout-minutes: 12
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Start-Service SCardSvr
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          $files = @('connection_edit.go', 'pin_credentials.go', 'local_management_windows.go', 'gui_management_windows.go', 'gui_enabled.go')
+          $saved = @{}
+          foreach ($file in $files) {
+            $path = Join-Path 'go-runtime/cmd/mdd-agent' $file
+            $saved[$file] = [System.IO.File]::ReadAllText($path)
+          }
+          $proof = Join-Path $env:RUNNER_TEMP 'mdd-management-proof'
+          New-Item -ItemType Directory -Force $proof | Out-Null
+          # Fetch exact counterexample sources, not an assumed shallow-checkout parent.
+          git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 fetch --no-tags --depth=1 origin 1bfcf9a3539939fc12f0ed4737871b0841e8f6c9 d5ba979149315b0bef77bad4cdcbca7918e4b3f2
+          if ($LASTEXITCODE -ne 0) { throw 'Counterexample source acquisition failed; not behavioral red' }
+          function Read-Baseline([string]$revision, [string]$file, [string]$blob) {
+            $object = $revision + ':go-runtime/cmd/mdd-agent/' + $file
+            $actual = & git rev-parse $object
+            if ($LASTEXITCODE -ne 0 -or $actual -ne $blob) { throw 'Counterexample blob mismatch; not behavioral red' }
+            $content = (& git show $object) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or !$content) { throw 'Counterexample source unavailable; not behavioral red' }
+            return $content
+          }
+          function Assert-BehavioralRed([string]$name, [string]$pattern, [string]$marker, [string[]]$expected) {
+            $log = Join-Path $proof ($name + '.jsonl')
+            $output = & go -C go-runtime test -tags gui -count=1 -timeout 6m -json ./cmd/mdd-agent -run $pattern 2>&1
+            $exit = $LASTEXITCODE
+            [System.IO.File]::WriteAllLines($log, [string[]]$output, $utf8)
+            $events = @($output | ForEach-Object { try { $_ | ConvertFrom-Json -ErrorAction Stop } catch {} })
+            $failed = @($events | Where-Object { $_.Action -eq 'fail' -and $_.Test })
+            $names = @($failed | ForEach-Object { $_.Test } | Sort-Object -Unique)
+            $mismatch = @(Compare-Object @($expected | Sort-Object) $names)
+            $observed = @($events | Where-Object { $_.Test -in $expected -and $_.Output -and $_.Output.Contains($marker) })
+            $skipped = @($events | Where-Object { $_.Action -eq 'skip' })
+            if ($exit -eq 0 -or $failed.Count -ne $expected.Count -or $mismatch.Count -ne 0 -or $observed.Count -eq 0 -or $skipped.Count -ne 0) {
+              $output | Write-Output
+              throw "Missing behavioral red: $name (compilation failure is not proof)"
+            }
+            Write-Output "$name behavioral red confirmed: exact failed=$($failed.Count), skipped=0"
+          }
+          try {
+            $path = 'go-runtime/cmd/mdd-agent/connection_edit.go'
+            $changed = [regex]::Replace($saved['connection_edit.go'], '(?s)func checkRetainedConnectionCredential\(.*\z', 'func checkRetainedConnectionCredential(previous, next config, replacement string) error { return nil }')
+            [System.IO.File]::WriteAllText($path, $changed, $utf8)
+            Assert-BehavioralRed 'retained-token-recipient' '^TestManagedConnectionTransaction/new-target-retained-token$' 'RETAINED_TOKEN_TARGET' @('TestManagedConnectionTransaction', 'TestManagedConnectionTransaction/new-target-retained-token')
+            [System.IO.File]::WriteAllText($path, $saved['connection_edit.go'], $utf8)
+
+            $path = 'go-runtime/cmd/mdd-agent/pin_credentials.go'
+            $old = Read-Baseline '1bfcf9a3539939fc12f0ed4737871b0841e8f6c9' 'pin_credentials.go' '7e8875e251b3f249c29a2650e51dbe738ca85f49'
+            [System.IO.File]::WriteAllText($path, $old, $utf8)
+            Assert-BehavioralRed 'pin-rmw-ownership' '^TestPINMutationOwnsFileBeforeReading$' 'PIN_READ_BEFORE_LOCK' @('TestPINMutationOwnsFileBeforeReading', 'TestPINMutationOwnsFileBeforeReading/save', 'TestPINMutationOwnsFileBeforeReading/remove')
+            [System.IO.File]::WriteAllText($path, $saved['pin_credentials.go'], $utf8)
+
+            $path = 'go-runtime/cmd/mdd-agent/local_management_windows.go'
+            $changed = $saved['local_management_windows.go'].Replace('managementPipeAccess, grant.OperatorSID', 'windows.STANDARD_RIGHTS_REQUIRED|windows.SYNCHRONIZE|0x1ff, grant.OperatorSID')
+            [System.IO.File]::WriteAllText($path, $changed, $utf8)
+            $env:MDD_MANAGEMENT_BINARY = Join-Path $proof 'unsafe-pipe-agent.exe'
+            go -C go-runtime build -o $env:MDD_MANAGEMENT_BINARY ./cmd/mdd-agent
+            if ($LASTEXITCODE -ne 0) { throw 'Counterexample binary did not compile' }
+            Assert-BehavioralRed 'pipe-instance-rights' '^TestWindowsLocalManagementJourney$' 'PIPE_INSTANCE_RIGHT' @('TestWindowsLocalManagementJourney')
+            [System.IO.File]::WriteAllText($path, $saved['local_management_windows.go'], $utf8)
+
+            $env:MDD_MANAGEMENT_BINARY = Join-Path $env:RUNNER_TEMP 'mdd-agent-fresh\mdd-agent.exe'
+            $path = 'go-runtime/cmd/mdd-agent/gui_management_windows.go'
+            $old = Read-Baseline 'd5ba979149315b0bef77bad4cdcbca7918e4b3f2' 'gui_management_windows.go' 'be4463af73f611f0c44b2166517ff802261c6472'
+            [System.IO.File]::WriteAllText($path, $old, $utf8)
+            Assert-BehavioralRed 'gui-environment-target' '^TestWindowsLocalManagementJourney$' 'MANAGEMENT_TARGET' @('TestWindowsLocalManagementJourney')
+            [System.IO.File]::WriteAllText($path, $saved['gui_management_windows.go'], $utf8)
+
+            $path = 'go-runtime/cmd/mdd-agent/gui_enabled.go'
+            $old = Read-Baseline 'd5ba979149315b0bef77bad4cdcbca7918e4b3f2' 'gui_enabled.go' '0319c90cafcf6f4ba7126c6a0914b095b7dbb35b'
+            [System.IO.File]::WriteAllText($path, $old, $utf8)
+            Assert-BehavioralRed 'gui-persisted-modes' '^TestManagementPersistedModesReadback$' 'MANAGEMENT_MODES' @('TestManagementPersistedModesReadback')
+          }
+          finally {
+            foreach ($file in $files) {
+              [System.IO.File]::WriteAllText((Join-Path 'go-runtime/cmd/mdd-agent' $file), $saved[$file], $utf8)
+            }
+          }
+          Remove-Item Env:MDD_MANAGEMENT_BINARY -ErrorAction SilentlyContinue
+          $fixed = & go -C go-runtime test -tags gui -count=1 -timeout 2m -json ./cmd/mdd-agent -run '^Test(ManagedConnectionTransaction|PINMutationOwnsFileBeforeReading|ManagementProtectedDescriptor|ManagementPersistedModesReadback)$' 2>&1
+          $fixedExit = $LASTEXITCODE
+          [System.IO.File]::WriteAllLines((Join-Path $proof 'fixed-logic.jsonl'), [string[]]$fixed, $utf8)
+          $events = @($fixed | ForEach-Object { try { $_ | ConvertFrom-Json -ErrorAction Stop } catch {} })
+          $passed = @($events | Where-Object { $_.Action -eq 'pass' -and $_.Test })
+          $bad = @($events | Where-Object { $_.Action -in @('fail', 'skip') })
+          $missing = @(@('TestManagedConnectionTransaction', 'TestPINMutationOwnsFileBeforeReading', 'TestManagementProtectedDescriptor', 'TestManagementPersistedModesReadback') | Where-Object { $_ -notin $passed.Test })
+          if ($fixedExit -ne 0 -or $bad.Count -ne 0 -or $missing.Count -ne 0 -or $passed.Count -eq 0) { $fixed | Write-Output; throw 'Fixed management logic failed or incomplete' }
+          Write-Output "Fixed management logic: passed=$($passed.Count), failed=0, skipped=0"
+
+      - name: Test ordinary-user management through the real Windows service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          # Isolated hosted runner only: the fixture refuses any pre-existing Agent.
+          Start-Service SCardSvr
+          $env:MDD_MANAGEMENT_BINARY = Join-Path $env:RUNNER_TEMP 'mdd-agent-fresh\mdd-agent.exe'
+          $env:CGO_ENABLED = '1'
+          $output = & go -C go-runtime test -tags gui -count=1 -timeout 6m -json ./cmd/mdd-agent -run '^TestWindowsLocalManagementJourney$' 2>&1
+          $exit = $LASTEXITCODE
+          $proof = Join-Path $env:RUNNER_TEMP 'mdd-management-proof'
+          New-Item -ItemType Directory -Force $proof | Out-Null
+          [System.IO.File]::WriteAllLines((Join-Path $proof 'fixed-service-journey.jsonl'), [string[]]$output, [System.Text.UTF8Encoding]::new($false))
+          $events = @($output | ForEach-Object { try { $_ | ConvertFrom-Json -ErrorAction Stop } catch {} })
+          $passed = @($events | Where-Object { $_.Action -eq 'pass' -and $_.Test -eq 'TestWindowsLocalManagementJourney' })
+          $bad = @($events | Where-Object { $_.Action -in @('fail', 'skip') })
+          if ($exit -ne 0 -or $passed.Count -ne 1 -or $bad.Count -ne 0) { $output | Write-Output; throw 'Windows service journey failed or incomplete' }
+          Write-Output 'Windows service journey: passed=1, failed=0, skipped=0'
+
+      - name: Preserve new management proof
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-management-counterexamples
+          path: ${{ runner.temp }}/mdd-management-proof/*.jsonl
+          if-no-files-found: warn
+
   validate-provider:
     name: Validate VoWiFi Provider
     runs-on: ubuntu-latest

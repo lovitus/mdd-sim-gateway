@@ -79,6 +79,10 @@ func (controller *guiController) content() fyne.CanvasObject {
 	controller.actionStatus = guiLabel("", false)
 	controller.savedStatus = guiLabel("磁盘配置；运行进程是否已加载此版本尚未确认", false)
 	controller.savedInfo = guiLabel("", false)
+	controller.runningInfo = guiLabel("", false)
+	if controller.serviceClient == nil {
+		controller.runningInfo.Hide()
+	}
 	controller.showSavedConfig(controller.settings)
 	refresh := widget.NewButtonWithIcon("刷新", theme.ViewRefreshIcon(), controller.requestRefresh)
 	web := widget.NewButtonWithIcon("打开网关", theme.ComputerIcon(), func() {
@@ -99,7 +103,7 @@ func (controller *guiController) content() fyne.CanvasObject {
 	edit := controller.actionButton("修改连接配置", theme.SettingsIcon(), controller.editConnection)
 	edit.Importance = widget.HighImportance
 	settings := container.NewVScroll(container.NewVBox(
-		guiLabel("已保存配置", true), controller.savedStatus, controller.savedInfo,
+		controller.runningInfo, guiLabel("下次启动配置", true), controller.savedStatus, controller.savedInfo,
 		container.NewHBox(edit), widget.NewSeparator(), guiLabel("运行管理", true), controller.buttons(),
 		controller.rawModes,
 	))
@@ -169,6 +173,13 @@ func (controller *guiController) renderSnapshot(value map[string]any) {
 	} else if _, failed := value["saved_config_error"]; failed {
 		controller.savedInfo.SetText("已保存配置不可读取；请核对配置文件。")
 		controller.savedStatus.SetText("未确认磁盘配置；没有更改运行进程")
+	}
+	if state, ok := value["managed_state"].(localManagementState); ok {
+		controller.runningInfo.SetText("当前运行连接\n" + guiSavedConnection(state.Running.guiConfig(), state.Running.guiConfig()).Text)
+		controller.savedStatus.SetText("已保存；当前服务尚未加载这些连接设置")
+		if state.Loaded {
+			controller.savedStatus.SetText("当前服务运行连接与已保存连接一致")
+		}
 	}
 	local, localImportance := "本地 Agent：状态不可读取", widget.WarningImportance
 	connection, importance := "Core 连接：未确认", widget.WarningImportance

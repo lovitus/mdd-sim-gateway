@@ -49,6 +49,58 @@ References: [Fyne themes](https://docs.fyne.io/extend/custom-theme/),
 [AppTabs](https://docs.fyne.io/container/apptabs/),
 [upstream releases](https://github.com/fyne-io/fyne/releases).
 
+### Windows ordinary-user management: approved design
+
+M15 does not need a second hardware process: the existing Windows service is the
+single owner. The missing path is ordinary-user GUI access without reading its
+protected control credential or requesting SCM start/stop privileges. PR47's
+query-only status fix is already qualified; do not repeat that proof.
+
+Original reviewer approved option A on October 23 (reply `5707c78e`): reuse a local named pipe with an
+explicit installer-authorized operator SID. Keep service/configuration/binary and
+isolation ACLs private. Expose only redacted status and allowlisted connection edits,
+never tokens, arbitrary paths, shell commands or generic control-API forwarding.
+Keep exact service/PID verification, original-file CAS, cancellation and trust/token
+validation before persistence. Existing installs gain no operator automatically.
+The proposed existing-library choice is Microsoft go-winio v0.6.4; its listener
+rejects remote clients and exclusively creates the first pipe instance. Use
+individual pipe rights, not generic write (which also grants instance creation).
+
+The apply boundary is explicit: a local idle snapshot cannot replace
+Core's active-call/maintenance protection. This delivery saves through
+the service and applies through the existing Core-controlled restart; offline
+restart remains an administrator action. This would improve daily configuration,
+but does not claim the full original M15 no-admin lifecycle. Adding an Agent-to-Core
+self-maintenance protocol is not approved by this design note. The GUI opens the
+currently running Core, not the saved destination; cross-Core migration is an
+administrator operation. Restart success is not an atomic receipt for one edit:
+compare actual running settings after reconnect. A retained token stays at its
+original origin/trust binding; a changed binding requires a replacement token.
+PIN and connection writers share a lock spanning their complete read-modify-write.
+Authorization is separate from config version 1 for rollback compatibility;
+revocation invalidates existing sessions. Protect replaceable parent directories,
+not only file ACLs. The right is account-wide Core configuration authority, not
+an application-only permission. Implementation/hosted/native acceptance are pending.
+
+Failure checklist: unauthorized/remote user; counterfeit pipe or replaced service;
+late save after cancellation; stale revision; bad trust/token changing the original
+file; old service silently falling back to broad credentials; saved labeled loaded;
+restart bypassing active-call/borrow ownership. Qualify a complete isolated Windows
+service/ordinary-user configuration journey plus relevant security/state tables on
+hosted CI; no production fault injection or previously accepted proof replay.
+
+Implementation review `6099c283` requested pipe metadata read rights, preservation
+of `-config`/environment targeting and read-only persisted modem choices. The
+revised candidate includes these plus the descriptor-mask and shallow-checkout
+proof corrections. First run `39831348196` at `d5ba979` failed compilation/module
+metadata before Windows acceptance; it is not behavioral-red evidence. GUI helper
+coverage is discovery/render/editor cancel; successful save is the restricted
+client journey, not a native GUI save receipt. Revised qualification is pending.
+
+References: [Windows pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
+[service rights](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights),
+[go-winio v0.6.4](https://github.com/microsoft/go-winio/releases/tag/v0.6.4).
+
 Read the exact Go language/toolchain requirements from `providers/vowifi-go/go.mod`, `go-runtime/go.mod`
 and each nested module. Current CI uses Go 1.26.x and Node 24. Run `npm ci`, not an unconstrained dependency upgrade.
 
