@@ -400,6 +400,12 @@ jobs:
           ./internal/windowsmbn
           ./cmd/mdd-agent
 
+      - name: Test desktop Agent configuration and GUI ownership
+        working-directory: go-runtime
+        env:
+          MDD_GUI_SERVICE_TESTS: '1'
+        run: go test -tags gui -timeout 3m ./cmd/mdd-agent
+
       - name: Test fresh Windows single-service installation
         shell: pwsh
         run: |

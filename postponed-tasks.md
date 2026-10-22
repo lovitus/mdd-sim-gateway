@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### AGENT_USABILITY
+
+**State: partial; release relevance: current.** October22 full completion goal remains active. Original reviewer approved the bounded desktop plan at main09eb679. Candidate reuses Fyne overview/configuration/diagnostics, semantic theme colors, typed device and Core states, existing-config verification/save with original-file fencing, and platform-owned confirmed controls. Disk changes are not claimed loaded; no Core, Agent wire, hardware policy, service architecture or Android change. Desktop candidate and remaining Android usability are not accepted or deployed.
+
+Acceptance scope / remaining action: PR47 source7dfe66c/full Go39798759586/original review passed; archive/2026-10-22/agent-usability-qualified preserves same-tree234231bc proof: real old query path denied after query rights/control denial checks, then38 fixed Windows race passes, zero failures/skips. Earlier GUI/Mac/SCM/creation-ACL reds remain preserved; run39789003862 ultimately cancelled, not fully qualified. Native Mac590 checked three setup modes, pin/path, invalid-package rejection and isolated existing-config overview/editor/diagnostics. Local running and Core retrying are distinct; confirmed unreachable target fails without saving, config hash/mode0600 unchanged, CmdQ removes process/listener. No production connection, hardware, successful-save or Windows desktop acceptance claimed. Temporary proof removed for final normal CI/review, remaining native journeys and deployment; these remain pending. Full M15, Android usability and the broader DEVELOPMENT.md goal remain open; do not repeat qualified reds.
+
 ### EGRESS_DONOR_RECOVERY
 
 **State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.
