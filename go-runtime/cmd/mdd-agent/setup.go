@@ -28,6 +28,7 @@ type agentConnectionPackage struct {
 
 type setupInput struct {
 	Server, Fingerprint, Username, Password, Package, AgentID, Token string
+	TLSMode                                                          string
 }
 
 func normalizeSetupServer(value string) (string, error) {
@@ -77,12 +78,19 @@ func (tx *setupTransaction) configure(input setupInput) error {
 		if input.Server != "" {
 			settings.Agent.ServerURL = input.Server
 		}
-		if input.Fingerprint != "" {
+		if input.TLSMode != "" && input.TLSMode != "system" && input.TLSMode != "pin" {
+			return errors.New("unsupported certificate verification mode")
+		}
+		if input.TLSMode == "system" {
+			settings.Agent.TLSMode, settings.Agent.TLSFingerprint = "system", ""
+		} else if input.Fingerprint != "" {
 			pin, err := normalizeSHA256(input.Fingerprint)
 			if err != nil {
 				return err
 			}
 			settings.Agent.TLSMode, settings.Agent.TLSFingerprint = "pin", pin
+		} else if input.TLSMode == "pin" {
+			return errors.New("fixed certificate verification requires a trusted SHA-256 fingerprint")
 		} else if settings.Agent.TLSMode == "" && settings.Agent.TLSFingerprint == "" {
 			settings.Agent.TLSMode = "system"
 		}
