@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kardianos/service"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsdataguard"
 	"golang.org/x/sys/windows/svc"
@@ -62,7 +63,7 @@ func (program *windowsServiceProgram) Start(current service.Service) error {
 	}
 	ready := make(chan struct{})
 	host, err := newManagedHost(func(ctx context.Context) error {
-		return runHostWithReady(ctx, program.settings, worker, func() { close(ready) })
+		return runHostWithReady(ctx, program.settings, worker, func(context.Context, *agentcontrol.Controller) { close(ready) })
 	}, func(runErr error) {
 		if !program.host.readyAccepted() {
 			return
