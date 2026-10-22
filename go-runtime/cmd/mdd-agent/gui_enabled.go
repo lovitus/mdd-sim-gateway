@@ -19,24 +19,37 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawcapture"
 )
 
 //go:embed assets/mdd-agent.svg
 var guiIcon []byte
 
 type guiController struct {
-	settings   config
-	configPath string
-	window     fyne.Window
-	summary    *widget.Label
-	connection *widget.Label
-	details    *widget.Entry
-	ctx        context.Context
-	refresh    chan struct{}
-	lastRender string
+	settings       config
+	configPath     string
+	window         fyne.Window
+	summary        *widget.Label
+	connection     *widget.Label
+	service        *widget.Label
+	details        *widget.Entry
+	ctx            context.Context
+	refresh        chan struct{}
+	lastRender     string
+	devices        *fyne.Container
+	rawModes       *fyne.Container
+	savedInfo      *widget.Label
+	savedStatus    *widget.Label
+	actionStatus   *widget.Label
+	diagnosticText string
+	actionButtons  []*widget.Button
+	actionBusy     bool
+	observed       *agentcontrol.Snapshot
+	owner          *guiRuntimeOwner
 }
 
 type guiHostResult struct {
@@ -51,11 +64,12 @@ func runGUI(settings config, configPath string) error {
 	defer cancel()
 
 	application := app.NewWithID("com.mdd.agent")
+	application.Settings().SetTheme(agentTheme{Theme: theme.DefaultTheme()})
 	icon := fyne.NewStaticResource("mdd-agent.svg", guiIcon)
 	application.SetIcon(icon)
 	window := application.NewWindow("MDD Agent")
 	window.SetIcon(icon)
-	window.Resize(fyne.NewSize(760, 520))
+	window.Resize(fyne.NewSize(820, 640))
 	hostResult := make(chan guiHostResult, 1)
 	started := false
 	start := func(ready config, path string) {
@@ -64,23 +78,11 @@ func runGUI(settings config, configPath string) error {
 		}
 		started = true
 		settings, configPath = ready, path
-		summary := widget.NewLabel("正在读取 Agent 状态…")
-		summary.TextStyle = fyne.TextStyle{Bold: true}
-		connection := widget.NewLabel("Core 控制连接：状态未知")
-		connection.Wrapping = fyne.TextWrapWord
-		connection.Importance = widget.WarningImportance
-		details := widget.NewMultiLineEntry()
-		details.Disable()
-		details.Wrapping = fyne.TextWrapOff
 		controller := &guiController{
 			settings: settings, configPath: configPath, window: window,
-			summary: summary, connection: connection, details: details, ctx: ctx, refresh: make(chan struct{}, 1),
+			ctx: ctx, refresh: make(chan struct{}, 1),
 		}
-
-		buttons := controller.buttons()
-		window.SetContent(container.NewBorder(
-			container.NewVBox(summary, connection, buttons), nil, nil, nil, details,
-		))
+		window.SetContent(controller.content())
 		window.SetCloseIntercept(window.Hide)
 		quit := func() {
 			cancel()
@@ -102,14 +104,23 @@ func runGUI(settings config, configPath string) error {
 		}
 		if runtime.GOOS == "darwin" {
 			go func() {
-				host, err := startGUIHost(settings)
+				host, owner, err := startGUIHost(settings)
 				if ctx.Err() != nil && host != nil {
 					_ = host.stop(serviceStopTimeout(settings))
 					host = nil
 				}
 				hostResult <- guiHostResult{host: host, err: err}
+				fyne.Do(func() {
+					if ctx.Err() == nil {
+						controller.owner = owner
+					}
+				})
 				if err != nil && ctx.Err() == nil {
-					fyne.Do(func() { dialog.ShowError(err, window) })
+					fyne.Do(func() {
+						if ctx.Err() == nil {
+							dialog.ShowError(err, window)
+						}
+					})
 				}
 				controller.requestRefresh()
 			}()
@@ -137,44 +148,52 @@ func runGUI(settings config, configPath string) error {
 	return nil
 }
 
-func startGUIHost(settings config) (*managedHost, error) {
+func startGUIHost(settings config) (*managedHost, *guiRuntimeOwner, error) {
 	worker, err := buildWorker(settings, "gui")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ready := make(chan struct{})
+	var owner *guiRuntimeOwner
 	host, err := newManagedHost(func(ctx context.Context) error {
-		return runHostWithReady(ctx, settings, worker, func() { close(ready) })
+		return runHostWithReady(ctx, settings, worker, func(lifetime context.Context, current *agentcontrol.Controller) {
+			owner = &guiRuntimeOwner{lifetime: lifetime, runtime: current}
+			close(ready)
+		})
 	}, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := host.start(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := host.waitReady(ready, 5*time.Second); err != nil {
-		return nil, fmt.Errorf("another Agent host is already running or local control could not start: %w",
+		return nil, nil, fmt.Errorf("another Agent host is already running or local control could not start: %w",
 			errors.Join(err, host.stop(time.Second)))
 	}
-	return host, nil
+	return host, owner, nil
 }
 
 func (controller *guiController) buttons() fyne.CanvasObject {
-	refresh := widget.NewButton("刷新", controller.requestRefresh)
 	if runtime.GOOS == "windows" {
-		return container.NewHBox(
-			widget.NewButton("安装服务", func() { controller.serviceAction("install") }),
-			widget.NewButton("启动服务", func() { controller.serviceAction("start") }),
-			widget.NewButton("停止服务", func() { controller.serviceAction("stop") }),
-			widget.NewButton("卸载服务", func() { controller.serviceAction("uninstall") }),
-			widget.NewButton("Modem 模式", controller.showRawModeDialog),
-			refresh,
+		stop := controller.actionButton("停止服务", theme.MediaStopIcon(), func() { controller.serviceAction("stop") })
+		remove := controller.actionButton("卸载服务", theme.DeleteIcon(), func() { controller.serviceAction("uninstall") })
+		remove.Importance = widget.DangerImportance
+		return container.NewVBox(
+			guiLabel("Windows 服务独立运行；退出此窗口不会停止服务。", false),
+			container.NewGridWithColumns(2,
+				controller.actionButton("安装服务", theme.DownloadIcon(), func() { controller.serviceAction("install") }),
+				controller.actionButton("启动服务", theme.MediaPlayIcon(), func() { controller.serviceAction("start") }), stop, remove,
+			),
+			controller.actionButton("Modem 模式", theme.SettingsIcon(), controller.showRawModeDialog),
 		)
 	}
-	return container.NewHBox(
-		widget.NewButton("启动硬件", func() { controller.runtimeAction("start") }),
-		widget.NewButton("停止硬件", func() { controller.runtimeAction("stop") }),
-		refresh,
+	return container.NewVBox(
+		guiLabel("关闭窗口仅隐藏；退出 MDD Agent 会停止本进程。硬件启停不重新加载配置。", false),
+		container.NewGridWithColumns(2,
+			controller.actionButton("启动硬件", theme.MediaPlayIcon(), func() { controller.runtimeAction("start") }),
+			controller.actionButton("停止硬件", theme.MediaStopIcon(), func() { controller.runtimeAction("stop") }),
+		),
 	)
 }
 
@@ -202,6 +221,11 @@ func (controller *guiController) refreshLoop() {
 
 func (controller *guiController) loadSnapshot() {
 	value := map[string]any{}
+	if saved, err := readConnectionEdit(controller.configPath); err != nil {
+		value["saved_config_error"] = true
+	} else {
+		value["saved_config"] = guiSavedConnection(saved.settings, controller.settings)
+	}
 	if runtime.GOOS == "windows" {
 		var output bytes.Buffer
 		if err := controller.runWindowsService("service-status", &output); err != nil {
@@ -216,7 +240,7 @@ func (controller *guiController) loadSnapshot() {
 		}
 	}
 	var output bytes.Buffer
-	if err := runClient("status", controller.settings, &output); err != nil {
+	if err := runClientContext(controller.ctx, "status", controller.settings, &output); err != nil {
 		value["runtime_error"] = err.Error()
 	} else {
 		var snapshot agentcontrol.Snapshot
@@ -228,10 +252,10 @@ func (controller *guiController) loadSnapshot() {
 	}
 	if runtime.GOOS == "windows" {
 		output.Reset()
-		if err := runRawModeClient("raw-modes", nil, controller.settings, &output); err != nil {
+		if err := runRawModeClientContext(controller.ctx, "raw-modes", nil, controller.settings, &output); err != nil {
 			value["raw_modes_error"] = err.Error()
 		} else {
-			var modes any
+			var modes rawcapture.Snapshot
 			if err := json.Unmarshal(output.Bytes(), &modes); err != nil {
 				value["raw_modes_error"] = err.Error()
 			} else {
@@ -240,7 +264,7 @@ func (controller *guiController) loadSnapshot() {
 		}
 	}
 	output.Reset()
-	if err := runClient("topology", controller.settings, &output); err != nil {
+	if err := runClientContext(controller.ctx, "topology", controller.settings, &output); err != nil {
 		value["topology_error"] = err.Error()
 	} else {
 		var topology agentlink.TopologySnapshot
@@ -261,39 +285,21 @@ func (controller *guiController) loadSnapshot() {
 		controller.lastRender = rendered
 	}
 	fyne.Do(func() {
-		controller.summary.SetText(summary)
-		text := "Core 控制连接：状态未知（本机运行状态不代表已连接）"
-		importance := widget.WarningImportance
-		if snapshot, ok := value["runtime"].(agentcontrol.Snapshot); ok {
-			if snapshot.State != agentcontrol.StateRunning && snapshot.State != agentcontrol.StateStarting {
-				text = "Core 控制连接：运行时未运行"
-			} else if link := snapshot.CoreConnection; link != nil {
-				switch link.State {
-				case "connected":
-					text = "Core 控制连接：已连接（不代表通话已就绪）"
-					importance = widget.SuccessImportance
-				case "connecting":
-					text = "Core 控制连接：正在连接，远程设备操作尚不可用"
-				case "retrying":
-					text = "Core 控制连接：已断开，正在自动重连"
-					if !link.RetryAt.IsZero() {
-						text += "；下次尝试 " + link.RetryAt.Local().Format("15:04:05")
-					}
-				case "disconnected", "stopped":
-					text = "Core 控制连接：已断开，远程设备操作不可用"
-				}
-			}
-		} else {
-			text = "Core 控制连接：无法读取本机 Agent 状态"
+		if controller.ctx.Err() != nil {
+			return
 		}
-		controller.connection.Importance = importance
-		controller.connection.SetText(text)
-		controller.connection.Refresh()
-		controller.details.SetText(string(payload))
+		controller.observed = nil
+		if snapshot, ok := value["runtime"].(agentcontrol.Snapshot); ok {
+			controller.observed = &snapshot
+		}
+		controller.renderSnapshot(value)
 	})
 }
 
 func (controller *guiController) showRawModeDialog() {
+	if !controller.reserveAction() {
+		return
+	}
 	equipment := widget.NewEntry()
 	equipment.SetPlaceHolder("IMEI / equipment ID")
 	iccid := widget.NewEntry()
@@ -306,10 +312,14 @@ func (controller *guiController) showRawModeDialog() {
 		widget.NewFormItem("模式", mode),
 	}, func(confirmed bool) {
 		if !confirmed {
+			controller.releaseAction()
 			return
 		}
-		controller.background(func() error {
-			return runRawModeClient("raw-mode", []string{equipment.Text, iccid.Text, mode.Selected},
+		equipmentID, cardID, selectedMode := equipment.Text, iccid.Text, mode.Selected
+		controller.background(func(context.Context) error {
+			return checkGUIServiceTarget(controller.configPath, false)
+		}, func(ctx context.Context) error {
+			return runRawModeClientContext(ctx, "raw-mode", []string{equipmentID, cardID, selectedMode},
 				controller.settings, &bytes.Buffer{})
 		})
 	}, controller.window)
@@ -337,13 +347,23 @@ func guiSummary(value map[string]any) string {
 }
 
 func (controller *guiController) serviceAction(action string) {
-	controller.background(func() error {
+	label := map[string]string{"install": "安装服务", "start": "启动服务", "stop": "停止服务", "uninstall": "卸载服务"}[action]
+	if label == "" {
+		return
+	}
+	controller.confirmAction("确认服务操作", label+"\n配置："+controller.configPath+"\n停止服务会中断此 Agent 的业务。卸载仅移除已停止的服务，不删除配置或隔离保护。", func(context.Context) error {
+		return checkGUIServiceTarget(controller.configPath, action == "install")
+	}, func(ctx context.Context) error {
 		var output bytes.Buffer
-		return controller.runWindowsService("service-"+action, &output)
+		return controller.runWindowsServiceContext(ctx, "service-"+action, &output)
 	})
 }
 
 func (controller *guiController) runWindowsService(command string, output *bytes.Buffer) error {
+	return controller.runWindowsServiceContext(controller.ctx, command, output)
+}
+
+func (controller *guiController) runWindowsServiceContext(ctx context.Context, command string, output *bytes.Buffer) error {
 	current, err := os.Executable()
 	if err != nil {
 		return err
@@ -356,23 +376,107 @@ func (controller *guiController) runWindowsService(command string, output *bytes
 	if !info.Mode().IsRegular() {
 		return errors.New("packaged service/CLI executable is not a regular file")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return runOSServiceWithExecutable(command, controller.configPath, serviceExecutable, controller.settings, output)
 }
 
 func (controller *guiController) runtimeAction(action string) {
-	controller.background(func() error {
-		return runClient(action, controller.settings, &bytes.Buffer{})
+	label := map[string]string{"start": "启动硬件", "stop": "停止硬件"}[action]
+	if label == "" {
+		return
+	}
+	if controller.observed == nil {
+		dialog.ShowError(errors.New("请先读取本地运行状态"), controller.window)
+		return
+	}
+	owner := controller.owner
+	if owner == nil || owner.lifetime.Err() != nil {
+		dialog.ShowError(errors.New("此窗口未持有运行中的宿主；不会接管其他 Agent 进程"), controller.window)
+		return
+	}
+	observed := *controller.observed
+	controller.confirmAction("确认硬件操作", label+"\n此操作只影响当前宿主；停止会中断其读卡器和 Modem 业务，不会重新加载磁盘配置。", nil, func(ctx context.Context) error {
+		return owner.apply(ctx, observed, action)
 	})
 }
 
-func (controller *guiController) background(operation func() error) {
+func runGUIAction(ctx context.Context, preflight, operation func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if preflight != nil {
+		if err := preflight(ctx); err != nil {
+			return err
+		}
+	}
+	// SCM reads cannot be interrupted. Cancellation still prevents dispatch
+	// after such a read; it does not claim rollback of an already sent action.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return operation(ctx)
+}
+
+func (controller *guiController) background(preflight, operation func(context.Context) error) {
 	go func() {
-		if err := operation(); err != nil {
-			if controller.ctx.Err() == nil {
-				fyne.Do(func() { dialog.ShowError(err, controller.window) })
-			}
+		if controller.ctx.Err() != nil {
 			return
 		}
+		ctx, cancel := context.WithTimeout(controller.ctx, time.Duration(controller.settings.OperationTimeoutSeconds)*time.Second)
+		defer cancel()
+		err := runGUIAction(ctx, preflight, operation)
+		fyne.Do(func() {
+			if controller.ctx.Err() != nil {
+				return
+			}
+			controller.releaseAction()
+			if err != nil {
+				controller.actionStatus.SetText("操作未确认完成；未自动重试")
+				dialog.ShowError(err, controller.window)
+			} else {
+				controller.actionStatus.SetText("操作已返回；正在读取当前状态")
+			}
+		})
 		controller.requestRefresh()
 	}()
+}
+
+func (controller *guiController) actionButton(label string, icon fyne.Resource, action func()) *widget.Button {
+	button := widget.NewButtonWithIcon(label, icon, action)
+	controller.actionButtons = append(controller.actionButtons, button)
+	return button
+}
+
+func (controller *guiController) reserveAction() bool {
+	if controller.actionBusy || controller.ctx.Err() != nil {
+		return false
+	}
+	controller.actionBusy = true
+	for _, button := range controller.actionButtons {
+		button.Disable()
+	}
+	return true
+}
+
+func (controller *guiController) releaseAction() {
+	controller.actionBusy = false
+	for _, button := range controller.actionButtons {
+		button.Enable()
+	}
+}
+
+func (controller *guiController) confirmAction(title, message string, preflight, operation func(context.Context) error) {
+	if !controller.reserveAction() {
+		return
+	}
+	dialog.ShowConfirm(title, message, func(confirmed bool) {
+		if !confirmed || controller.ctx.Err() != nil {
+			controller.releaseAction()
+			return
+		}
+		controller.actionStatus.SetText("操作进行中")
+		controller.background(preflight, operation)
+	}, controller.window)
 }

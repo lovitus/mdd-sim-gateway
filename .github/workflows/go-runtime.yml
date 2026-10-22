@@ -400,6 +400,26 @@ jobs:
           ./internal/windowsmbn
           ./cmd/mdd-agent
 
+      - name: Test desktop Agent configuration and GUI ownership
+        working-directory: go-runtime
+        env:
+          MDD_GUI_SERVICE_TESTS: '1'
+        run: go test -tags gui -timeout 3m ./cmd/mdd-agent
+
+      - name: Temporary desktop Agent ownership counterexample
+        env:
+          MDD_GUI_SERVICE_TESTS: '1'
+        run: node tools/agent-usability-proof.mjs
+
+      - name: Retain desktop Agent ownership evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-usability-windows-${{ github.sha }}
+          path: ${{ runner.temp }}/agent-usability-proof/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Test fresh Windows single-service installation
         shell: pwsh
         run: |
@@ -1581,6 +1601,25 @@ jobs:
           cache-dependency-path: |
             agent/call-audio-helper/go.sum
             go-runtime/go.sum
+
+      - name: Temporary Agent UI and configuration counterexamples
+        env:
+          TMPDIR: ${{ runner.temp }}/mdd-agent-test-tmp
+          GOCACHE: ${{ runner.temp }}/mdd-agent-cache/go-build
+          GOMODCACHE: ${{ runner.temp }}/mdd-agent-cache/go-mod
+          GOTMPDIR: ${{ runner.temp }}/mdd-agent-test-tmp/go-tmp
+        run: |
+          mkdir -p "$TMPDIR" "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
+          node tools/agent-usability-proof.mjs
+
+      - name: Retain Agent UI and configuration evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-usability-macos-${{ github.sha }}
+          path: ${{ runner.temp }}/agent-usability-proof/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Test macOS modem and Agent boundaries
         env:
