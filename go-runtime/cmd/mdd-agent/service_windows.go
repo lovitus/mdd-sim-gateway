@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/kardianos/service"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsdataguard"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -62,7 +64,7 @@ func (program *windowsServiceProgram) Start(current service.Service) error {
 	}
 	ready := make(chan struct{})
 	host, err := newManagedHost(func(ctx context.Context) error {
-		return runHostWithReady(ctx, program.settings, worker, func() { close(ready) })
+		return runHostWithReady(ctx, program.settings, worker, func(context.Context, *agentcontrol.Controller) { close(ready) })
 	}, func(runErr error) {
 		if !program.host.readyAccepted() {
 			return
@@ -241,22 +243,40 @@ func configureWindowsServiceRecovery() error {
 }
 
 func writeWindowsServiceStatus(current service.Service, output io.Writer) error {
-	status, err := current.Status()
+	// The library's Status also requests start/stop rights. A read-only caller
+	// must not need control rights just to display the installed service state.
+	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(manager)
+	name, err := windows.UTF16PtrFromString(windowsServiceName)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.OpenService(manager, name, windows.SERVICE_QUERY_STATUS)
 	snapshot := windowsServiceSnapshot{Name: windowsServiceName, Platform: current.Platform(), Installed: true, State: "unknown"}
-	if errors.Is(err, service.ErrNotInstalled) {
+	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 		snapshot.Installed = false
 		snapshot.State = "not_installed"
-		err = nil
-	} else {
-		switch status {
-		case service.StatusRunning:
-			snapshot.State = "running"
-		case service.StatusStopped:
-			snapshot.State = "stopped"
-		}
+		return json.NewEncoder(output).Encode(snapshot)
 	}
 	if err != nil {
 		return err
+	}
+	installed := &mgr.Service{Name: windowsServiceName, Handle: handle}
+	defer installed.Close()
+	status, err := installed.Query()
+	if err != nil {
+		return err
+	}
+	switch status.State {
+	case svc.StartPending, svc.Running:
+		snapshot.State = "running"
+	case svc.PausePending, svc.Paused, svc.ContinuePending, svc.StopPending, svc.Stopped:
+		snapshot.State = "stopped"
+	default:
+		return fmt.Errorf("unknown status %v", status)
 	}
 	return json.NewEncoder(output).Encode(snapshot)
 }

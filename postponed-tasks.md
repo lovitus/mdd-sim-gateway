@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### AGENT_USABILITY
+
+**State: partial; release relevance: current.** October22 full completion goal remains active. Original reviewer approved the bounded desktop plan at main09eb679. Candidate reuses Fyne overview/configuration/diagnostics, semantic theme colors, typed device and Core states, existing-config verification/save with original-file fencing, and platform-owned confirmed controls. Disk changes are not claimed loaded; no Core, Agent wire, hardware policy, service architecture or Android change. Desktop candidate and remaining Android usability are not accepted or deployed.
+
+Acceptance scope / remaining action: PR47 prior Mac/SCM/creation-ACL counterexamples remain preserved. Original review approved1f37fbe; same-tree801c7f1 artifact from39789003862 contains3 real old-page failures and37 fixed Windows race passes, zero skip and empty stderr. Failed fixture/withdrawal runs retain their actual causes in docs/branches.md. The isolated Mac590 setup window confirmed all3 modes, pin/path controls and malformed-package rejection without enrollment or hardware startup; this is not the full saved-config/runtime journey. A newly identified service-status query incorrectly requires control permissions; the reviewer approved query-only SCM access without ACL/account changes. That correction, its restricted-token proof, final full CI, remaining native interaction and deployment are pending. Do not rerun qualified reds or infer full-goal closure; broader work remains in DEVELOPMENT.md.
+
 ### EGRESS_DONOR_RECOVERY
 
 **State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.
