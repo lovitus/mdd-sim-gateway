@@ -52,6 +52,10 @@ Android 是独立 preview。公开包及校验清单已下载核对，准确源�
 原借用和出口已恢复；其余设备仍为 v2.0.0。准确版本及未验边界见
 [部署回执](DEPLOYMENT.md#2026-10-19-pr45-linux-策略恢复)，不代表全端业务或耐久全部通过。
 
+10 月 22 日只读复核：Linux 借用与策略仍就绪；临时诊断已结束并清理，事件和结束回执
+已不可取，最初断口原因仍未知。认证失败提示正在候选分支修正，尚未部署生产；
+简化部署的 Mac GUI 接入已验，首次 CLI 默认路径旅程另行补验，不撤销已有验收。
+
 | 用途 | 固定下载入口 | 前提与部署说明 |
 | --- | --- | --- |
 | Linux amd64 服务端与 Agent | [mdd-2.0.0-linux-amd64.tar](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/mdd-2.0.0-linux-amd64.tar) | 服务端需 systemd，按下节安装；Agent 可按手动流程运行 |
