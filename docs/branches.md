@@ -1,5 +1,15 @@
 # Branch disposition and integration record
 
+October22 `codex/status-copy-acceptance-closeout` changes presentation/status records
+only; not merged or deployed. Qualified proof `ffc8a88` / `39746284080` is at
+`archive/2026-10-22/status-closeout-qualified`; temporary workflow/script removed.
+Earlier harness results are NOT CLI acceptance: `a55bf06` / `39744165413` (missing
+read fixture), `dd9486e` / `39744873054` (syntax error masked by pipeline), and
+`074c6c8` / `39745181644` (PTY prompt timeout), preserved under the same archive
+prefix as `status-closeout-initial`, `status-closeout-invalid-cli`, and
+`status-closeout-cli-timeout`. Those tags are evidence, never merge candidates.
+Actual public-binary CLI coverage and production exclusions are in DEPLOYMENT.md.
+
 October19 PR45 `codex/linux-policy-recovery` is integrated, not a merge queue.
 Approved head9bf6571 and normal merge90fde687 share tree1df9481c with deployed
 artifactbab742e. Original final review and full CI39212919170 passed; only the

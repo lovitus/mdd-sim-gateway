@@ -866,3 +866,9 @@ Follow-up review also requires intentional removal recovery
 to use the completed applier receipt plus exact disabled configuration/directory
 absence, and a failed newer observation to revoke startup readiness. Start performs
 a fresh exact read after confirmation. These branches extend the same journey.
+## October 22: typed authentication presentation
+
+The shared bilingual status and history views describe only the typed IKE/EAP
+authentication failure. Historical details cannot promote it to a specific
+network, SIM or carrier-policy diagnosis; the raw reason remains visible.
+No upstream protocol, retry, routing, desired-state or hardware behavior changes.
