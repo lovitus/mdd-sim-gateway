@@ -49,6 +49,28 @@ References: [Fyne themes](https://docs.fyne.io/extend/custom-theme/),
 [AppTabs](https://docs.fyne.io/container/apptabs/),
 [upstream releases](https://github.com/fyne-io/fyne/releases).
 
+### Android status and configuration follow-up
+
+The October23 independent client batch starts at main `1bfcf9a`; the original
+reviewer approved its plan (`dcaa936f`), not its implementation or acceptance.
+Reuse Material 1.14.0 and existing Views/UiLabels: separate Home directory warnings
+from ready counts, reveal a proven original reply card without reordering or
+changing selection, and color actual draft persistence outcomes. Editing clears
+stale saved feedback. No Core, credentials, account/identity guards, confirmation,
+USB recovery, user intent or hardware behavior changes.
+
+Failure checklist: partial/offline facts inherit ready green; unavailable service
+keeps old colors; long reply lists hide the checked card or select an unknown one;
+a refresh overrides the user's selection; failed/stale writes look saved or
+replace unsaved input. Three native regressions use existing TLS/Activity fixtures.
+The temporary API35 proof compiles old MainActivity with the new tests and requires
+named behavioral failures, then restores exact candidate bytes before the normal
+API28/35 suite. Native portrait screenshots use AndroidX test storage. These are
+UI evidence, not phone, carrier, long-session or USB qualification; current phone
+verification remains owner-skipped. PR48 stays separate and frozen pending direction.
+References: [ListView selection](https://developer.android.com/reference/android/widget/ListView#setSelection(int)),
+[AndroidX test output](https://github.com/android/android-test/blob/main/runner/monitor/java/androidx/test/platform/io/PlatformTestStorage.java).
+
 Read the exact Go language/toolchain requirements from `providers/vowifi-go/go.mod`, `go-runtime/go.mod`
 and each nested module. Current CI uses Go 1.26.x and Node 24. Run `npm ci`, not an unconstrained dependency upgrade.
 

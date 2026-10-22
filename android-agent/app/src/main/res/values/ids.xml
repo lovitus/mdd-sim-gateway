@@ -16,6 +16,7 @@
   <item type="id" name="home_connection_state" /><item type="id" name="home_availability_state" />
   <item type="id" name="home_availability_toggle" />
   <item type="id" name="home_reader_state" /><item type="id" name="home_line_state" /><item type="id" name="home_activity_state" />
+  <item type="id" name="home_directory_notice" />
   <item type="id" name="home_open_readers" /><item type="id" name="home_open_calls" />
   <item type="id" name="home_open_messages" /><item type="id" name="home_diagnostics" /><item type="id" name="home_settings" />
   <item type="id" name="home_recent_events" />
