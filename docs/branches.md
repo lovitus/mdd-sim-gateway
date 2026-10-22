@@ -1,5 +1,38 @@
 # Branch disposition and integration record
 
+October23 `codex/android-agent-status-usability` starts from main `1bfcf9a` and
+contains only the approved Android presentation/configuration-feedback follow-up.
+Qualified2f2d4c1/treeb492d749 is archived at
+`archive/2026-10-23/android-status-qualified`. Original review and Android39856193041
+passed: three compiled old-source behavioral failures, then44 passes on each
+API28/35, zero errors/skips. Actual proof checkout0e95885f has the same tree and
+expected parents. Four API35 portrait images were inspected; API28 image export
+is unverified. Cleanup removes only temporary proof infrastructure and updates
+records; runtime/resources/permanent tests are unchanged. Final CI/review and
+deployment remain pending; no phone rollout or repeated paid/hardware acceptance.
+Candidate full Go39856192921 ended cancelled at the Windows build, after two
+observation timeouts; cancellation cause is unconfirmed and is not a full pass.
+Initial `69a0e82` / Android `39854399095` is preserved at
+`archive/2026-10-23/android-status-initial`: API28 has44 passes; API35 reached
+visible original row24 but failed an invalid collection-size expectation (Android
+reports unknown). The sh/Bash condition skipped temporary old-source proof, so
+this run supplies no red evidence. Source review accepted runtime and requested
+refresh synchronization in the reply test. No product correction was required.
+PR48 `codex/windows-local-management` remains a separate draft at `15fc0d1`,
+tree `570246a94f6d8827c11a730a48f8cc59de071e77`. CI `39844561322` failed fresh
+inventory readiness after control-link connection; its fixture synchronization
+review is recorded on the PR. Further corrections await the owner's direction
+under the repeated-test-failure rule. Do not merge or drop that unique work.
+
+PR47 final `25c78a0` passed normal Go `39802816073` and original final review;
+normal merge `1bfcf9a` shares tree `f00db424c2fdfad71e835ed2fc9d3f289e9ef099`.
+The authorized desktop rollout upgraded three of four targets. The fourth
+Windows target remains on its old build with a control-link transport failure;
+the bounded read-only diagnosis did not establish its cause. Two GB Provider
+recovery exceptions remain separate, not proof of an Agent/UI regression.
+See [PR47 receipt](https://github.com/lovitus/mdd-sim-gateway/pull/47#issuecomment-6350988175).
+No all-fleet completion or repetition of qualified/paid tests is implied.
+
 PR47 qualified source `7dfe66c` passed full Go `39798759586` and original source
 review; archive `archive/2026-10-22/agent-usability-qualified` preserves the temporary
 proof. Same-tree artifact `234231bc` proves the real old status path fails after

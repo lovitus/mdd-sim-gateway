@@ -18,6 +18,42 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class LoginFlowTest {
+    @Test public void draftFeedbackDistinguishesSavedPrivateAndFailedWithoutReplacingInputs()throws Exception{
+        Context context=ApplicationProvider.getApplicationContext();ConfigStore store=new ConfigStore(context);store.clear();
+        java.lang.reflect.Field fault=ConfigStore.class.getDeclaredField("writeFault");fault.setAccessible(true);
+        try(ActivityScenario<MainActivity> scene=ActivityScenario.launch(MainActivity.class)){
+            await(scene,a->a.findViewById(R.id.gateway_password)!=null);
+            form(scene,"https://fixture.test","owner","original-fixture-password");
+            await(scene,a->((TextView)a.findViewById(R.id.login_saved)).getText().toString().equals(context.getString(R.string.login_saved)));
+            drain();assertEquals("original-fixture-password",LoginProfile.read(store.load()).password);
+            scene.onActivity(a->assertEquals("[UX-DRAFT-SAVED] Persisted draft feedback must show saved status",UiLabels.OK,((TextView)a.findViewById(R.id.login_saved)).getCurrentTextColor()));
+            fault.setBoolean(null,true);
+            scene.onActivity(a->{
+                ((EditText)a.findViewById(R.id.gateway_password)).setText("unsaved-fixture-password");
+                TextView feedback=a.findViewById(R.id.login_saved);
+                assertEquals("Old success is stale immediately after editing","",feedback.getText().toString());
+                assertEquals(UiLabels.NEUTRAL,feedback.getCurrentTextColor());
+            });
+            await(scene,a->((TextView)a.findViewById(R.id.login_saved)).getText().toString().equals(context.getString(R.string.login_save_failed)));
+            drain();assertEquals("original-fixture-password",LoginProfile.read(store.load()).password);
+            scene.onActivity(a->{
+                assertEquals(UiLabels.ERROR,((TextView)a.findViewById(R.id.login_saved)).getCurrentTextColor());
+                assertEquals("unsaved-fixture-password",((EditText)a.findViewById(R.id.gateway_password)).getText().toString());
+                assertEquals("owner",((EditText)a.findViewById(R.id.gateway_username)).getText().toString());
+                assertEquals("https://fixture.test",((EditText)a.findViewById(R.id.gateway_server)).getText().toString());
+            });
+            CommunicationUxTest.saveScreen("draft-save-failed");
+            store.retry();click(R.id.login_remember);
+            await(scene,a->((TextView)a.findViewById(R.id.login_saved)).getText().toString().equals(context.getString(R.string.password_not_saved)));
+            drain();assertEquals("",LoginProfile.read(store.load()).password);
+            scene.onActivity(a->{
+                assertEquals(UiLabels.NEUTRAL,((TextView)a.findViewById(R.id.login_saved)).getCurrentTextColor());
+                assertEquals("unsaved-fixture-password",((EditText)a.findViewById(R.id.gateway_password)).getText().toString());
+            });
+            assertTrue(store.load().optString("token").isEmpty());assertFalse(store.load().optBoolean("available"));assertFalse(store.load().optBoolean("share"));
+        }finally{store.retry();drain();context.stopService(new Intent(context,AgentService.class));store.clear();}
+    }
+
     @Test public void unauthenticatedTabsRemainDistinctAndEncryptedDraftSurvivesRecreation()throws Exception{
         Context context=ApplicationProvider.getApplicationContext();ConfigStore store=new ConfigStore(context);store.clear();
         try(ActivityScenario<MainActivity> scene=ActivityScenario.launch(MainActivity.class)){
