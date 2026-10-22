@@ -1,0 +1,59 @@
+name: Scoped status copy and published Agent journey
+on:
+  push:
+    branches: [codex/status-copy-acceptance-closeout]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Old behavior fails and fixed browser passes
+        working-directory: webui
+        run: |
+          npm ci
+          cp src/mdd/i18n.jsx "$RUNNER_TEMP/i18n.fixed"
+          cp src/mdd/views/VowifiHistory.jsx "$RUNNER_TEMP/history.fixed"
+          git show 39dfdcdc80333e304a7edc019c459066b98247a9:webui/src/mdd/i18n.jsx > src/mdd/i18n.jsx
+          git show 39dfdcdc80333e304a7edc019c459066b98247a9:webui/src/mdd/views/VowifiHistory.jsx > src/mdd/views/VowifiHistory.jsx
+          set +e
+          node tests/statusCopyBrowser.mjs > "$RUNNER_TEMP/status-red.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/status-red.log"
+          test "$result" -ne 0
+          grep -q 'AUTH_STATUS_COPY_MISSING' "$RUNNER_TEMP/status-red.log"
+          cp "$RUNNER_TEMP/i18n.fixed" src/mdd/i18n.jsx
+          cp "$RUNNER_TEMP/history.fixed" src/mdd/views/VowifiHistory.jsx
+          node tests/statusCopyBrowser.mjs
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - uses: actions/upload-artifact@v7
+        with:
+          name: status-copy-assets
+          path: |
+            go-runtime/internal/webui/assets
+            webui/browser-evidence/status-copy
+          retention-days: 7
+      - name: Published no-config CLI journey against isolated Core
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y expect libpcsclite1
+          test ! -S /run/pcscd/pcscd.comm
+          curl --fail --location --retry 2 --max-time 180 -o "$RUNNER_TEMP/release.tar" https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/mdd-2.0.0-linux-amd64.tar
+          echo "dc5fd8cd76321ea3c04be8d4b17d402d9add7365a6f6d4edcd8d7afc8184ab69  $RUNNER_TEMP/release.tar" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/public-release"
+          tar -xf "$RUNNER_TEMP/release.tar" -C "$RUNNER_TEMP/public-release"
+          node tools/status-closeout-proof.cjs "$RUNNER_TEMP/public-release/mdd-9a139f81647a" | tee "$RUNNER_TEMP/cli-receipt.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: published-cli-receipt
+          path: ${{ runner.temp }}/cli-receipt.json
+          retention-days: 7
