@@ -8,6 +8,47 @@ Docker, Python Control, VPCD and Asterisk are retired; they are not local develo
 
 ## Toolchain and native dependencies
 
+### October 22 completion goal
+
+The owner requests completion of the remaining implementation and as much missing
+acceptance as can be automated, plus usable Agent colors and configuration. This
+is an ongoing goal, not a claim that the first delivery batch closes all work.
+Preserve the existing ledger identities and accepted evidence. The implementation
+queue includes Windows least-privilege service separation, native/embedded Linux
+modem and missing bearer support, and macOS Universal packaging. The acceptance
+queue includes update restart continuity, eSIM location/operation recovery,
+archive/restore, communication ownership, country exits and donor budgets.
+Long-duration/hardware cases may be attempted only with the required environment;
+unsupported or unavailable evidence must not become a pass. Historical incident
+causes remain unknown unless new evidence identifies them. Android local modem,
+abandoned soft deletion, notarization and landscape remain excluded. Existing
+paid-operation, destructive-action, production-maintenance and isolation gates
+still apply; the goal is not permission to repeat paid tests or interrupt leases.
+
+The first batch addresses the existing Fyne desktop Agent, not a new framework:
+readable local/Core/device status, structured device rows, separate diagnostics,
+clear primary and destructive actions, and the existing three setup methods.
+Use Fyne 2.8.1's existing theme, AppTabs and Form APIs (the current upstream
+release, checked October 22). Existing configuration identity, pin, private
+permissions, pending setup and capability defaults remain authoritative. A saved
+configuration must never be labeled active until the actual runtime uses it.
+Android's Material client remains in the same goal for a separate actual-screen
+check and interaction pass; completing desktop work does not close Android work.
+
+Failure checklist: gray disabled-looking primary controls; unknown/off interpreted
+as healthy; local runtime mistaken for Core or call readiness; topology loss
+leaving stale device health; periodic refresh replacing edits or selection;
+credential/pin leakage through diagnostics; save silently starting hardware or
+rotating identity; existing config bypassing edited inputs; repeated destructive
+actions or an old result updating a newer dialog. Use the existing GUI test suite
+and GitHub-hosted jobs for behavioral red/green and qualified artifacts, followed
+by actual native window checks. Do not run local builds or duplicate accepted
+hardware/paid tests.
+
+References: [Fyne themes](https://docs.fyne.io/extend/custom-theme/),
+[AppTabs](https://docs.fyne.io/container/apptabs/),
+[upstream releases](https://github.com/fyne-io/fyne/releases).
+
 Read the exact Go language/toolchain requirements from `providers/vowifi-go/go.mod`, `go-runtime/go.mod`
 and each nested module. Current CI uses Go 1.26.x and Node 24. Run `npm ci`, not an unconstrained dependency upgrade.
 

@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -30,10 +31,10 @@ func showGUISetup(ctx context.Context, window fyne.Window, requested string, rea
 		paths = nil
 	}
 	found := discoverConfigs(paths)
+	var existingError error
 	if len(found) == 1 {
 		if found[0].Err != nil {
-			window.SetContent(widget.NewLabel(found[0].Path + ": " + found[0].Err.Error()))
-			return
+			existingError = found[0].Err
 		}
 		path = found[0].Path
 		if _, pendingErr := os.Lstat(path + ".setup-pending"); errors.Is(pendingErr, os.ErrNotExist) {
@@ -65,11 +66,15 @@ func showGUISetup(ctx context.Context, window fyne.Window, requested string, rea
 		choicePaths[label] = candidate
 	}
 	choice := widget.NewSelect(items, func(value string) { pathEntry.SetText(choicePaths[value]) })
-	message := widget.NewLabel("首次配置")
+	message := widget.NewLabel("连接 MDD 网关")
 	message.TextStyle.Bold = true
 	message.Wrapping = fyne.TextWrapWord
 	if len(found) > 1 {
 		message.SetText("发现多个配置，请选择原配置。不会迁移配置或状态目录。")
+	}
+	if existingError != nil {
+		message.SetText("已有配置不可读取：" + existingError.Error())
+		message.Importance = widget.DangerImportance
 	}
 	server := widget.NewEntry()
 	server.SetPlaceHolder("https://gateway.example:8443")
@@ -77,7 +82,9 @@ func showGUISetup(ctx context.Context, window fyne.Window, requested string, rea
 	username.SetText("admin")
 	password := widget.NewPasswordEntry()
 	pin := widget.NewEntry()
-	pin.SetPlaceHolder("留空使用系统 CA；自签证书填写可信网页提供的 SHA-256")
+	pin.SetPlaceHolder("可信网页提供的 SHA-256；不使用网络中首次看到的指纹")
+	trust := widget.NewSelect([]string{"系统证书验证", "固定证书指纹"}, nil)
+	trust.SetSelected("系统证书验证")
 	bundle := widget.NewPasswordEntry()
 	bundle.SetPlaceHolder("网页“添加 Agent”复制的接入 JSON")
 	agentID := widget.NewEntry()
@@ -85,43 +92,62 @@ func showGUISetup(ctx context.Context, window fyne.Window, requested string, rea
 	mode := widget.NewSelect([]string{"网页登录", "接入包", "已有 Agent 凭据"}, nil)
 	mode.SetSelected("网页登录")
 	commonItems := []*widget.FormItem{
-		widget.NewFormItem("已发现路径", choice), widget.NewFormItem("配置文件（绝对路径）", pathEntry),
 		widget.NewFormItem("接入方式", mode),
 	}
 	serverItem := widget.NewFormItem("Core 地址", server)
-	pinItem := widget.NewFormItem("可信证书指纹（可选）", pin)
+	pinItem := widget.NewFormItem("可信证书指纹", pin)
+	trustItem := widget.NewFormItem("证书信任", trust)
 	form := widget.NewForm()
 	updateFields := func() {
 		form.Items = append([]*widget.FormItem(nil), commonItems...)
 		switch mode.Selected {
 		case "网页登录":
-			form.Items = append(form.Items, serverItem, pinItem,
-				widget.NewFormItem("网页用户名", username), widget.NewFormItem("网页密码（不保存）", password))
+			form.Items = append(form.Items, serverItem, widget.NewFormItem("网页用户名", username), widget.NewFormItem("网页密码（不保存）", password), trustItem)
+			if trust.Selected == "固定证书指纹" {
+				form.Items = append(form.Items, pinItem)
+			}
 		case "接入包":
 			form.Items = append(form.Items, widget.NewFormItem("接入 JSON", bundle))
 		case "已有 Agent 凭据":
-			form.Items = append(form.Items, serverItem, pinItem,
-				widget.NewFormItem("Agent ID", agentID), widget.NewFormItem("Agent token", token))
+			form.Items = append(form.Items, serverItem, widget.NewFormItem("Agent ID", agentID), widget.NewFormItem("Agent token", token), trustItem)
+			if trust.Selected == "固定证书指纹" {
+				form.Items = append(form.Items, pinItem)
+			}
 		}
 		form.Refresh()
 	}
 	mode.OnChanged = func(string) { updateFields() }
+	trust.OnChanged = func(string) { updateFields() }
 	updateFields()
 	if settings, err := readConfigForEdit(pathEntry.Text, false); err == nil {
 		server.SetText(settings.Agent.ServerURL)
 		pin.SetText(settings.Agent.TLSFingerprint)
+		if settings.Agent.TLSMode == "pin" || settings.Agent.TLSFingerprint != "" {
+			trust.SetSelected("固定证书指纹")
+		}
 		agentID.SetText(settings.Agent.ID)
 		message.SetText("继续未完成配置；保留原 Agent ID、控制密钥、用户开关和状态。")
 	}
 	busy := false
+	locationForm := widget.NewForm(widget.NewFormItem("已发现路径", choice), widget.NewFormItem("配置文件（绝对路径）", pathEntry))
+	location := widget.NewAccordion(widget.NewAccordionItem("配置位置", locationForm))
+	statePresent := false
+	if filepath.IsAbs(pathEntry.Text) {
+		entries, stateErr := os.ReadDir(filepath.Join(filepath.Dir(pathEntry.Text), "state"))
+		statePresent = len(entries) > 0 || stateErr != nil && !errors.Is(stateErr, os.ErrNotExist)
+	}
+	if len(found) > 1 || existingError != nil || locationErr != nil || statePresent {
+		location.Open(0)
+	}
 	var submit *widget.Button
-	submit = widget.NewButton("验证并保存", func() {
+	submit = widget.NewButtonWithIcon("验证并保存", theme.DocumentSaveIcon(), func() {
 		if busy {
 			return
 		}
 		selected := strings.TrimSpace(pathEntry.Text)
 		if !filepath.IsAbs(selected) {
 			dialog.ShowError(errors.New("请选择绝对配置路径"), window)
+			location.Open(0)
 			return
 		}
 		if _, pendingErr := os.Lstat(selected + ".setup-pending"); errors.Is(pendingErr, os.ErrNotExist) {
@@ -133,7 +159,20 @@ func showGUISetup(ctx context.Context, window fyne.Window, requested string, rea
 		busy = true
 		submit.Disable()
 		form.Disable()
-		input := setupInput{Server: server.Text, Fingerprint: pin.Text}
+		locationForm.Disable()
+		input := setupInput{Server: server.Text, TLSMode: "system"}
+		if mode.Selected != "接入包" && trust.Selected == "固定证书指纹" {
+			if _, err := normalizeSHA256(pin.Text); err != nil {
+				busy = false
+				submit.Enable()
+				form.Enable()
+				locationForm.Enable()
+				dialog.ShowError(err, window)
+				return
+			}
+			input.Fingerprint = pin.Text
+			input.TLSMode = "pin"
+		}
 		switch mode.Selected {
 		case "网页登录":
 			input.Username, input.Password = username.Text, password.Text
@@ -161,13 +200,19 @@ func showGUISetup(ctx context.Context, window fyne.Window, requested string, rea
 				return
 			}
 			fyne.Do(func() {
+				if ctx.Err() != nil {
+					return
+				}
 				busy = false
 				submit.Enable()
 				if err != nil {
 					form.Enable()
+					locationForm.Enable()
+					location.Open(0)
 					message.SetText("配置未完成；同路径重试会继续原接入。" + warning)
 					if errors.Is(err, os.ErrPermission) {
 						message.SetText("路径不可写，请选择可写的绝对路径。未自动提权。")
+						location.Open(0)
 					}
 					dialog.ShowError(err, window)
 					return
@@ -176,8 +221,12 @@ func showGUISetup(ctx context.Context, window fyne.Window, requested string, rea
 				submit.SetText("进入 Agent")
 				submit.OnTapped = func() { ready(settings, selected) }
 				form.Disable()
+				locationForm.Disable()
 			})
 		}()
 	})
-	window.SetContent(container.NewBorder(message, submit, nil, nil, container.NewVScroll(form)))
+	submit.Importance = widget.HighImportance
+	title := guiLabel("MDD Agent", true)
+	window.SetContent(container.NewPadded(container.NewBorder(container.NewVBox(title, message, widget.NewSeparator()),
+		container.NewPadded(submit), nil, nil, container.NewVScroll(container.NewVBox(form, location)))))
 }
