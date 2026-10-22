@@ -50,6 +50,12 @@ type guiController struct {
 	actionBusy     bool
 	observed       *agentcontrol.Snapshot
 	owner          *guiRuntimeOwner
+	serviceClient  guiServiceClient
+	runningInfo    *widget.Label
+}
+
+type guiServiceClient interface {
+	request(context.Context, *localManagementEdit) (localManagementState, error)
 }
 
 type guiHostResult struct {
@@ -72,7 +78,7 @@ func runGUI(settings config, configPath string) error {
 	window.Resize(fyne.NewSize(820, 640))
 	hostResult := make(chan guiHostResult, 1)
 	started := false
-	start := func(ready config, path string) {
+	start := func(ready config, path string, serviceClient guiServiceClient) {
 		if started || ctx.Err() != nil {
 			return
 		}
@@ -81,6 +87,7 @@ func runGUI(settings config, configPath string) error {
 		controller := &guiController{
 			settings: settings, configPath: configPath, window: window,
 			ctx: ctx, refresh: make(chan struct{}, 1),
+			serviceClient: serviceClient,
 		}
 		window.SetContent(controller.content())
 		window.SetCloseIntercept(window.Hide)
@@ -130,7 +137,12 @@ func runGUI(settings config, configPath string) error {
 	}
 	window.SetCloseIntercept(func() { cancel(); application.Quit() })
 	application.Lifecycle().SetOnStarted(func() {
-		fyne.Do(func() { showGUISetup(ctx, window, configPath, start) })
+		fyne.Do(func() {
+			if showInstalledServiceGUI(ctx, window, configPath, start) {
+				return
+			}
+			showGUISetup(ctx, window, configPath, func(ready config, path string) { start(ready, path, nil) })
+		})
 	})
 	window.ShowAndRun()
 	cancel()
@@ -175,6 +187,9 @@ func startGUIHost(settings config) (*managedHost, *guiRuntimeOwner, error) {
 }
 
 func (controller *guiController) buttons() fyne.CanvasObject {
+	if controller.serviceClient != nil {
+		return guiLabel("服务由系统独立运行。在线生效请打开当前网关，在 Agent 主机页执行受控重启；离线或迁移至其他 Core 需管理员确认维护和占用。", false)
+	}
 	if runtime.GOOS == "windows" {
 		stop := controller.actionButton("停止服务", theme.MediaStopIcon(), func() { controller.serviceAction("stop") })
 		remove := controller.actionButton("卸载服务", theme.DeleteIcon(), func() { controller.serviceAction("uninstall") })
@@ -220,6 +235,43 @@ func (controller *guiController) refreshLoop() {
 }
 
 func (controller *guiController) loadSnapshot() {
+	if controller.serviceClient != nil {
+		state, err := controller.serviceClient.request(controller.ctx, nil)
+		fyne.Do(func() {
+			if controller.ctx.Err() != nil {
+				return
+			}
+			value := map[string]any{}
+			if err != nil {
+				value["saved_config_error"] = true
+				value["raw_modes_error"] = true
+				controller.runningInfo.SetText("当前运行连接：未确认；本机管理读回失败。")
+				controller.actionStatus.SetText(err.Error())
+			} else {
+				controller.settings = state.Running.guiConfig()
+				value["managed_state"] = state
+				value["service"] = map[string]any{"state": "running", "installed": true}
+				value["saved_config"] = guiSavedConfig{Text: guiSavedConnection(state.Saved.guiConfig(), state.Running.guiConfig()).Text, Changed: !state.Loaded}
+				if state.Runtime != nil {
+					value["runtime"] = *state.Runtime
+				}
+				if state.Topology != nil {
+					value["topology"] = *state.Topology
+				}
+				if state.RawModes != nil {
+					modes := rawcapture.Snapshot{Desired: state.RawModes.Desired, ModeSelections: state.RawModes.ModeSelections}
+					for _, capture := range state.RawModes.Captures {
+						modes.Captures = append(modes.Captures, rawcapture.Record{Pair: capture.Pair, Stage: capture.Stage})
+					}
+					value["raw_modes"] = modes
+				} else {
+					value["raw_modes_error"] = true
+				}
+			}
+			controller.renderSnapshot(value)
+		})
+		return
+	}
 	value := map[string]any{}
 	if saved, err := readConnectionEdit(controller.configPath); err != nil {
 		value["saved_config_error"] = true
