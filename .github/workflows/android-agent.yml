@@ -125,7 +125,9 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           script: |
+            if [[ "${{ matrix.api == 35 && github.head_ref == 'codex/android-agent-status-usability' }}" == true ]]; then bash tools/prove-android-status-ui.sh red; fi
             gradle -p android-agent --no-daemon connectedDebugAndroidTest
+            if [[ "${{ matrix.api == 35 && github.head_ref == 'codex/android-agent-status-usability' }}" == true ]]; then bash tools/prove-android-status-ui.sh green; fi
             mkdir -p android-screens
             if [[ "$GITHUB_REF" == refs/tags/android-preview-v* ]]; then test -s release-bundle/android-evidence/mdd-agent-preview.apk; fi
             if [ -f release-bundle/android-evidence/mdd-agent-preview.apk ]; then adb -P 5037 -s emulator-5554 install -r release-bundle/android-evidence/mdd-agent-preview.apk; adb -P 5037 -s emulator-5554 shell am start -W -n com.lovitus.mddagent.preview/com.lovitus.mddagent.MainActivity; adb -P 5037 -s emulator-5554 exec-out screencap -p > android-screens/setup.png; fi
@@ -135,6 +137,8 @@ jobs:
           name: android-emulator-${{ matrix.api }}
           path: |
             android-screens/
+            android-ui-proof/
+            android-agent/app/build/outputs/connected_android_test_additional_output/
             android-agent/app/build/reports/androidTests/
             android-agent/app/build/outputs/androidTest-results/
           retention-days: 14

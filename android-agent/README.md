@@ -4,6 +4,14 @@ This is a fresh native Android app, not a WebView or an exposed VPCD service. An
 
 ## Current preview milestone
 
+October23 client-only candidate: Home separates incomplete/offline observations
+from ready counts and clears stale colors when its local service is unavailable.
+Reply shows the proven original card in long lists without changing card order,
+the user's choice or either confirmation. Connection drafts distinguish saved,
+deliberately unremembered and failed writes; editing clears old success feedback
+without replacing inputs. Hosted qualification and deployment are still pending;
+this does not repeat or revoke the existing preview acceptance below.
+
 The `2.0.0-preview` release (versionCode **182**) was published on October 18 with
 the existing stable preview signing identity and application ID. Its fixed download is
 [android-preview-v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0).
