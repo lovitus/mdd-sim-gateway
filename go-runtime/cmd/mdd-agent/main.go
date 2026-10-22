@@ -213,12 +213,16 @@ func runCommandHostMode(goos, systemdInvocation string) string {
 }
 
 func runRawModeClient(command string, arguments []string, settings config, output io.Writer) error {
+	return runRawModeClientContext(context.Background(), command, arguments, settings, output)
+}
+
+func runRawModeClientContext(parent context.Context, command string, arguments []string, settings config, output io.Writer) error {
 	client, err := agentcontrol.NewClient("http://"+settings.Control.Listen, settings.Control.Token,
 		&http.Client{Timeout: time.Duration(settings.OperationTimeoutSeconds) * time.Second})
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(settings.OperationTimeoutSeconds)*time.Second)
+	ctx, cancel := context.WithTimeout(parent, time.Duration(settings.OperationTimeoutSeconds)*time.Second)
 	defer cancel()
 	var snapshot rawcapture.Snapshot
 	if command == "raw-modes" {
@@ -702,7 +706,9 @@ func runHost(ctx context.Context, settings config, worker agentcontrol.Worker) e
 	return runHostWithReady(ctx, settings, worker, nil)
 }
 
-func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.Worker, ready func()) error {
+func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.Worker, ready func(context.Context, *agentcontrol.Controller)) error {
+	ownerContext, ownerStopped := context.WithCancel(ctx)
+	defer ownerStopped()
 	if closer, ok := worker.(io.Closer); ok {
 		defer closer.Close()
 	}
@@ -729,7 +735,7 @@ func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
 	if ready != nil {
-		ready()
+		ready(ownerContext, controller)
 	}
 	startContext, cancelStart := context.WithTimeout(ctx, timeout)
 	_, startErr := controller.Start(startContext)
@@ -745,6 +751,7 @@ func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.
 			serveErr = nil
 		}
 	}
+	ownerStopped()
 	stopContext, cancelStop := context.WithTimeout(context.Background(), timeout)
 	_, stopErr := controller.Stop(stopContext)
 	cancelStop()
@@ -755,11 +762,15 @@ func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.
 }
 
 func runClient(command string, settings config, output io.Writer) error {
+	return runClientContext(context.Background(), command, settings, output)
+}
+
+func runClientContext(parent context.Context, command string, settings config, output io.Writer) error {
 	client, err := agentcontrol.NewClient("http://"+settings.Control.Listen, settings.Control.Token, &http.Client{Timeout: time.Duration(settings.OperationTimeoutSeconds) * time.Second})
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(settings.OperationTimeoutSeconds)*time.Second)
+	ctx, cancel := context.WithTimeout(parent, time.Duration(settings.OperationTimeoutSeconds)*time.Second)
 	defer cancel()
 	var result any
 	switch command {

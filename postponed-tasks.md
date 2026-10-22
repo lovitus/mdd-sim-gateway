@@ -19,6 +19,12 @@ See [current decisions](docs/decisions/2026-09-20-current-scope.md) and [scoped 
 
 ## Current open work
 
+### AGENT_USABILITY
+
+**State: partial; release relevance: current.** October22 full completion goal remains active. Original reviewer approved the bounded desktop plan at main09eb679. Candidate reuses Fyne overview/configuration/diagnostics, semantic theme colors, typed device and Core states, existing-config verification/save with original-file fencing, and platform-owned confirmed controls. Disk changes are not claimed loaded; no Core, Agent wire, hardware policy, service architecture or Android change. Desktop candidate and remaining Android usability are not accepted or deployed.
+
+Acceptance scope / remaining action: PR47 prior39768133187/39772068347 Mac counterexamples remain preserved;39778963835 passed32 fixed Mac tests and Windows SCM/creation-ACL compiled reds. Original review accepted creation-time ACL and its metadata-only assertion correction. Failed39781793235 rejects an invalid Form.Disable withdrawal: it does not disable child controls, so the earlier path-lockout explanation is withdrawn. Actual old827be01 fields remain stale across target selection, and in-flight inputs are editable. Same-batch correction explicitly freezes setup/edit controls and binds completed results; proof now uses the actual archived pages. These new GUI contracts, final CI, native interaction and deployment remain unqualified. Do not rerun already-proven reds or infer full-goal closure. Exact sources/runs/failures are in docs/branches.md; the broader queue remains in DEVELOPMENT.md.
+
 ### EGRESS_DONOR_RECOVERY
 
 **State: needs_verification; release relevance: current.** Owner's three-part October15 batch: isolate country-local preparation failures within the shared exit process; expose persistent per-ICCID borrowing limit/usage; distinguish existing HK EAP rejection from generic SWu failure. No per-country process redesign or automatic paid operations.
