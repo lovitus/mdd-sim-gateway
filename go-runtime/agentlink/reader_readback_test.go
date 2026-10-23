@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -107,11 +108,21 @@ func TestReaderSIMIdentityNegotiationDoesNotDispatchToLegacyAgent(t *testing.T) 
 			host := httptest.NewServer(server)
 			defer host.Close()
 			var calls atomic.Int32
-			entered, release := make(chan struct{}, maximumConcurrentRequests), make(chan struct{})
+			entered, release := make(chan string, maximumConcurrentRequests), make(chan struct{})
+			var diagnosticMu sync.Mutex
+			var busyResults []string
+			var enteredIDs []string
+			clientExit := "not exited"
+			var intentionalCancel atomic.Bool
+			logDiagnostics := func() {
+				diagnosticMu.Lock()
+				defer diagnosticMu.Unlock()
+				t.Logf("READBACK_DIAGNOSTIC entered=%v calls=%d completed=%v client=%s", enteredIDs, calls.Load(), busyResults, clientExit)
+			}
 			fn := readerReadbackFunc(func(ctx context.Context, request ReaderReadbackRequest) ReaderReadbackResponse {
 				calls.Add(1)
 				if strings.HasPrefix(request.OperationID, "busy-") {
-					entered <- struct{}{}
+					entered <- request.OperationID
 					select {
 					case <-release:
 					case <-ctx.Done():
@@ -126,13 +137,19 @@ func TestReaderSIMIdentityNegotiationDoesNotDispatchToLegacyAgent(t *testing.T) 
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() {
-				done <- (Client{URL: strings.Replace(host.URL, "http://", "ws://", 1) + "/v1/agent/ws", Token: testToken,
+				err := (Client{URL: strings.Replace(host.URL, "http://", "ws://", 1) + "/v1/agent/ws", Token: testToken,
 					Hello: Hello{SchemaVersion: SchemaVersion, AgentID: "agent-1", ProcessGeneration: "process-1"}, Authenticator: &fakeAuthenticator{},
 					ReaderReadback: executor, Health: func() TopologySnapshot {
 						return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
 					}, OperationTimeout: 10 * time.Second}).Run(ctx)
+				diagnosticMu.Lock()
+				clientExit = fmt.Sprintf("before_cancel=%t err=%v", !intentionalCancel.Load(), err)
+				diagnosticMu.Unlock()
+				done <- err
 			}()
 			defer func() {
+				logDiagnostics()
+				intentionalCancel.Store(true)
 				cancel()
 				select {
 				case <-done:
@@ -165,11 +182,18 @@ func TestReaderSIMIdentityNegotiationDoesNotDispatchToLegacyAgent(t *testing.T) 
 				for index := 0; index < maximumConcurrentRequests; index++ {
 					busy := request
 					busy.OperationID = fmt.Sprintf("busy-%d", index)
-					go func() { _, err := server.ReadReader(ctx, "agent-1", "process-1", busy); completed <- err }()
+					go func() {
+						result, err := server.ReadReader(ctx, "agent-1", "process-1", busy)
+						diagnosticMu.Lock()
+						busyResults = append(busyResults, fmt.Sprintf("id=%s response_id=%s state=%s code=%s err=%v", busy.OperationID, result.OperationID, result.State, result.ErrorCode, err))
+						diagnosticMu.Unlock()
+						completed <- err
+					}()
 				}
 				for index := 0; index < maximumConcurrentRequests; index++ {
 					select {
-					case <-entered:
+					case id := <-entered:
+						enteredIDs = append(enteredIDs, id)
 					case <-time.After(2 * time.Second):
 						t.Fatal("readback executor slots did not fill")
 					}
