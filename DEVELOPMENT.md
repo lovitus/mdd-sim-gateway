@@ -8,6 +8,43 @@ Docker, Python Control, VPCD and Asterisk are retired; they are not local develo
 
 ## Toolchain and native dependencies
 
+### Linux DHCP IPv4 claim lifecycle
+
+The fixed successor accepted NEXT_BATCH_992c4fb on October 23. Reuse
+insomniacslk/dhcp at c6bb46ad3f3a for Ethernet-only MM method3 IPv4, with
+claim-owned bootstrap, T1/T2 renewal, expiry, socket invalidation and existing
+owner recovery. Preserve static IPv4, user leases/quotas, active-call guards,
+configuration, pins and policy. No Core/wire changes, host DHCP scripts, main
+routes, resolv.conf writes or automatic enabling. PPP/IPv6/raw-IP DHCP and
+non-systemd managed modem remain separate gaps, not this batch's qualification.
+
+Failure checklist: bootstrap exposes ordinary traffic; wrong interface or SIM
+renews; DHCP extends user lease/quota; expired sockets revive after same-card
+reconnect; malformed options or stale replies publish; late worker downs a new
+interface; borrower/persistent owner cannot recover; MM cleanup bypasses a call;
+worker shutdown deadlocks. Hosted real DHCP/veth/netns tests must exercise the
+production guard, routes and sockets in the fixed Agent cgroup, with a working
+alternate default route. Use compiled old-method3 refusal once, then acquisition,
+T1 unicast/T2 broadcast, NAK/expiry, owner cleanup and static regression. No
+production, paid tests, PR51 qualification replay or frozen PR48 changes.
+
+References: [MM IP setup](https://modemmanager.org/docs/modemmanager/ip-connectivity-setup-in-lte-modems/),
+[DHCP upstream](https://github.com/insomniacslk/dhcp/tree/c6bb46ad3f3ada83ff1d61d5b57ed57a590289fd),
+[RFC2131](https://www.rfc-editor.org/rfc/rfc2131),
+[packet sockets](https://man7.org/linux/man-pages/man7/packet.7.html).
+Include BSD-3-Clause and the nclient4 gVisor-derived Apache-2.0 notice in the
+existing source/license inventory; do not upgrade unrelated dependencies.
+
+`tools/test-linux-dhcp.mjs` invokes the tagged existing-package Go E2E under the
+fixed `mdd-agent.service` cgroup on disposable hosted ARM64. Two real namespaces
+and veth paths exercise the original guard, DHCP server/packet exchange, marked
+routes, TCP/UDP WebSocket borrowing, DNS and original durable policy recovery.
+Only MM/AT and USB-parent sysfs stand in for hardware; a narrow fixture adapter
+substitutes that parent check while calling the original contract/netdev guard.
+The peer is outside the Agent cgroup. Temporary old-source proof must compile
+successfully and fail at the existing preparation entry. CI/source review are
+pending; this is not physical modem or production evidence.
+
 ### Linux ARM64 standalone delivery
 
 The owner-authorized successor fixed reviewer approved `LINUX_AGENT_PLAN_4297696`

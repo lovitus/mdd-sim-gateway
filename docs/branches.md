@@ -1,5 +1,21 @@
 # Branch disposition and integration record
 
+October23 `codex/linux-dhcp-bearer` starts at merged main992c4fb. The same fixed
+successor accepted NEXT_BATCH_992c4fb: Ethernet MM DHCPv4 whole-claim lifecycle,
+existing borrower/persistent-owner recovery and real hosted network qualification.
+Implementation candidate is not yet reviewed or qualified. No production or paid
+operation, no reopening PR48 or deferred hardware acceptance. The temporary
+compiled old-source E2E uses exactly992c4fb plus the same test/dependency files;
+it must fail at the existing method3 preparation entry, not at compilation.
+
+PR51 is merged992c4fb/tree09e1d4b5. Final2f8b076 passed successor266906e5,
+Go39909121038 and Android39909120959. Final artifacta8500c597bfb has the same
+tree; SHAe5c2b499c441b79743593c32a6b7f5c3dca7caae7b9fe7df6beb253dcd8c7cd5
+and complete14-stage receipt match. Archive
+`archive/2026-10-23/linux-agent-delivery` preserves the accepted final source.
+This closes the pending cleanup/merge statements below, not publication or fleet.
+See [final receipt](https://github.com/lovitus/mdd-sim-gateway/pull/51#issuecomment-6358841746).
+
 PR51 qualified `a891f5d` / Go39907297621 passed in full, fixed source review
 93f64fc1 accepted. Archive `archive/2026-10-23/linux-agent-qualified` retains the
 one-time actual old-release/installer counterexamples. Actual checkout b0de5414
