@@ -47,9 +47,9 @@ function fixture(kind, change = () => {}) {
   ctx.tar = tar;
   if (kind === 'go') {
     tar('linux', `mdd-${sha.slice(0, 12)}-linux-amd64.tar`, { [`mdd-${sha.slice(0, 12)}/manifest.json`]: JSON.stringify({ source_revision: sha, os: 'linux', architecture: 'amd64' }) });
-    for (const [folder, platform, arch] of [['arm64', 'Linux', 'arm64'], ['windows', 'Windows', 'amd64'], ['macos', 'macOS', 'arm64']]) {
+    for (const [folder, platform, arch] of [['arm64', 'Linux', 'arm64'], ['windows', 'Windows', 'amd64'], ['macos', 'macOS', 'arm64'], ['macos-universal', 'macOS', 'universal']]) {
       const name = `MDD-Agent-${platform}-${arch}`;
-      const build = `source_revision=${sha}\nsource_tree=${tree}\nsource_tree_hash=${tree}\nplatform=linux/arm64\narchitecture=${arch}\nversion=2.0.0\nteam_identifier=8WPJLUNLY8\nsigning=developer-id\n`;
+      const build = `source_revision=${sha}\nsource_tree=${arch === 'universal' ? 'clean' : tree}\nsource_tree_hash=${tree}\nplatform=linux/arm64\narchitecture=${arch}\nminimum_macos=15.0\nversion=2.0.0\nteam_identifier=8WPJLUNLY8\nsigning=developer-id\n`;
       tar(folder, `${name}.tar.gz`, { [`${name}/BUILD.txt`]: build, [`${name}/MODEM_AGENT.md`]: 'fixture guide', [`${name}/install-${platform === 'Windows' ? 'windows-agent.ps1' : 'macos-agent.sh'}`]: 'fixture installer' });
     }
     const previewTag = 'android-preview-v2.0.0';
@@ -100,6 +100,8 @@ try {
     assert.equal(test.read().latest, kind === 'go' ? test.tag : 'v1.3.14');
     if (kind === 'go') {
       const published = path.join(test.dir, 'publish-go');
+      assert(test.read().releases[test.tag].assets.some(a => a.name === 'MDD-Agent-macOS-universal.tar.gz'), 'Universal package missing from published download set');
+      assert.equal(test.read().releases[test.tag].assets.length, 8);
       assert.deepEqual(fs.readFileSync(path.join(published, 'mdd-2.0.0-linux-amd64.tar')), fs.readFileSync(path.join(published, `mdd-${sha.slice(0, 12)}-linux-amd64.tar`)));
     }
     const writes = test.read().writes;
@@ -108,6 +110,7 @@ try {
   }
   const failures = [
     ['go', 'missing package', c => fs.rmSync(path.join(c.dir, 'windows'), { recursive: true })],
+    ['go', 'missing Universal package', c => fs.rmSync(path.join(c.dir, 'macos-universal'), { recursive: true })],
     ['go', 'wrong source', c => c.tar('linux', `mdd-${sha.slice(0, 12)}-linux-amd64.tar`, { [`mdd-${sha.slice(0, 12)}/manifest.json`]: JSON.stringify({ source_revision: 'wrong', os: 'linux', architecture: 'amd64' }) })],
     ['go', 'wrong Mac signing identity', c => c.tar('macos', 'MDD-Agent-macOS-arm64.tar.gz', { 'MDD-Agent-macOS-arm64/BUILD.txt': `source_revision=${sha}\nsource_tree_hash=${tree}\narchitecture=arm64\nversion=2.0.0\nteam_identifier=wrong\nsigning=developer-id\n`, 'MDD-Agent-macOS-arm64/MODEM_AGENT.md': 'fixture guide', 'MDD-Agent-macOS-arm64/install-macos-agent.sh': 'fixture installer' })],
     ['go', 'draft preview', c => { c.state.releases['android-preview-v2.0.0'].draft = true; }],
