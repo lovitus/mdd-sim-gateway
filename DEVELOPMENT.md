@@ -88,6 +88,36 @@ References: [ListView selection](https://developer.android.com/reference/android
 Read the exact Go language/toolchain requirements from `providers/vowifi-go/go.mod`, `go-runtime/go.mod`
 and each nested module. Current CI uses Go 1.26.x and Node 24. Run `npm ci`, not an unconstrained dependency upgrade.
 
+### macOS Universal packaging
+
+Original plan review `d84e2d8f` approves this October23 batch on main `5c4e1a9`.
+Keep Fyne 2.8.1/tools 1.7.2, libusb 1.0.30 and lwIP 2.2.1. Build host-native
+packaging tools with explicit arm64/amd64 child targets, then combine all six
+Mach-O files with Apple lipo and sign from inner components to the App. Both
+inputs must share source/tree/version/resources/signing; retain the license union.
+The complete package requires macOS15+, with the original Team for signed builds.
+
+Failure checklist: host architecture leaks into Intel output; one helper stays
+thin; input resources or source disagree; unsigned or wrong-Team output replaces
+production; an incompatible package stops the old Agent before rejection; a new
+archive is uploaded but omitted from the download index. No runtime or user-state
+changes. Existing arm64 filenames/installer and all normal gates remain.
+
+Hosted E2E forces each final slice through real CLI/App config init/show in private
+temporary paths, both audio helpers through -h and both cellular helpers through
+exact missing-argument exit2. Inherited media/config environments are removed.
+It checks unchanged inputs/config and installer refusal before deployment state.
+Intel execution is Rosetta, not Intel hardware acceptance. A single temporary
+old-source qualification checks the missing-Universal publisher assertion and
+the old installer's acceptance of an incomplete helper. No local tests run;
+candidate CI, signed artifact qualification, publication and installation remain
+separate. Do not change existing v2.0.0 tags/assets or repeat paid/deferred tests.
+
+References: [Apple Universal binaries](https://developer.apple.com/documentation/apple-silicon/building-a-universal-macos-binary),
+[pinned Fyne builder](https://github.com/fyne-io/tools/blob/v1.7.2/cmd/fyne/internal/commands/build.go),
+[Apple synthesized designated requirements](https://developer.apple.com/library/archive/technotes/tn2206/),
+[Apple lipo argument parser](https://github.com/apple-oss-distributions/cctools/blob/main/misc/lipo.c).
+
 For Debian/Ubuntu development of the full Core/Agent GUI, audio helper and VoWiFi Provider:
 
 ```bash

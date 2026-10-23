@@ -15,7 +15,7 @@ All 59 original general criteria and four macOS criteria remain preserved. Curre
 | ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. Further desktop qualification is deferred from this Android PR, not a waiver of isolation. |
 | ANDROID | accepted | Native Android preview and subsequent client corrections are merged and installed under the owner's reviewed-rollout authorization. Current artifact/version evidence is in FLEET_MAIN_ALIGNMENT and DEPLOYMENT.md, not the superseded PR7 draft. Scoped acceptance remains separate from all-carrier/hardware and endurance qualification. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
-| MACOS_UNIVERSAL | needs_decision | Separate future packaging item; not bundled with notarization or claimed delivered by an arm64 build. |
+| MACOS_UNIVERSAL | required | Separate Universal packaging batch under the October22 completion goal; no notarization or implied Intel hardware acceptance. Existing arm64 delivery is preserved. |
 
 | Criterion | Implementation | Acceptance / evidence | Current requirement (original preserved in detail) |
 |---|---|---|---|
