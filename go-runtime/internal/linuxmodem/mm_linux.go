@@ -73,6 +73,7 @@ type modemManager interface {
 }
 
 type dataBearer struct {
+	Method     uint32
 	APN        string
 	ObjectPath dbus.ObjectPath
 	Interface  string
@@ -383,6 +384,7 @@ func parseDataBearer(path dbus.ObjectPath, properties map[string]dbus.Variant) (
 	connected, _ := variantValue[bool](properties, "Connected")
 	config, _ := variantValue[map[string]dbus.Variant](properties, "Ip4Config")
 	method := uint32Property(config, "method")
+	result.Method = method
 	result.Address = stringProperty(config, "address")
 	result.Prefix = uint32Property(config, "prefix")
 	result.Gateway = stringProperty(config, "gateway")
@@ -393,9 +395,14 @@ func parseDataBearer(path dbus.ObjectPath, properties map[string]dbus.Variant) (
 		}
 	}
 	result.DNS = boundedStrings(result.DNS, 3, 64)
-	if !connected || result.Interface == "" || filepath.Base(result.Interface) != result.Interface || method != 2 ||
-		result.Address == "" || result.Prefix == 0 || result.Prefix > 32 {
-		return dataBearer{}, errors.New("ModemManager bearer is not connected with usable static IPv4 configuration")
+	if !connected || result.Interface == "" || filepath.Base(result.Interface) != result.Interface || (method != 2 && method != 3) {
+		return dataBearer{}, errors.New("ModemManager bearer is not connected with a supported IPv4 method")
+	}
+	if method == 2 && (result.Address == "" || result.Prefix == 0 || result.Prefix > 32) {
+		return dataBearer{}, errors.New("ModemManager bearer has unusable static IPv4 configuration")
+	}
+	if method == 3 {
+		result.Address, result.Gateway, result.DNS, result.Prefix = "", "", nil, 0
 	}
 	return result, nil
 }

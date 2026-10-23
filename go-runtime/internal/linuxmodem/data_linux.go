@@ -4,6 +4,7 @@ package linuxmodem
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"net"
 	"net/netip"
@@ -23,6 +24,7 @@ import (
 )
 
 type dataClaim struct {
+	dhcp                                                      *dhcpClaim
 	commandSnapshot                                           modemSnapshot
 	commandEpoch                                              string
 	target                                                    agentdata.Target
@@ -51,7 +53,7 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 			return "", err
 		}
 		prober.observeDataClaims(inventory)
-		if current.target == target && !current.cleanup && current.observedData == agentmodem.DataConnected {
+		if current.target == target && !current.cleanup && current.dhcp.valid() && current.observedData == agentmodem.DataConnected {
 			return current.profile, nil
 		}
 		return "", errors.New("another cellular data session owns this modem")
@@ -140,20 +142,35 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 		return rollback(err)
 	}
 	claim.observedData = agentmodem.DataConnected
-	address, err := netip.ParsePrefix(claim.bearer.Address + "/" + strconv.FormatUint(uint64(claim.bearer.Prefix), 10))
-	if err != nil || !address.Addr().Is4() {
-		return rollback(errors.New("ModemManager returned an invalid static IPv4 address"))
-	}
-	var gateway netip.Addr
-	if strings.TrimSpace(claim.bearer.Gateway) != "" {
-		gateway, err = netip.ParseAddr(claim.bearer.Gateway)
-		if err != nil || !gateway.Is4() {
-			return rollback(errors.New("ModemManager returned an invalid IPv4 gateway"))
+	if claim.bearer.Method == 3 {
+		if err := prober.guard.CloseDataPermit(ctx, claim.route.Permit); err != nil {
+			return rollback(err)
 		}
-	}
-	claim.route, err = prober.guard.ConfigureDataRoute(ctx, permit, claim.bearer.Interface, address, gateway)
-	if err != nil {
-		return rollback(err)
+		claim.permitClosed = true
+		permit, err = prober.guard.OpenDataPermit(ctx, target.EquipmentID+"\x00"+target.CardID+"\x00"+rand.Text())
+		if err != nil {
+			return rollback(err)
+		}
+		claim.route.Permit, claim.permitClosed = permit, false
+		if err := prober.prepareDHCP(ctx, claim, owned); err != nil {
+			return rollback(err)
+		}
+	} else {
+		address, err := netip.ParsePrefix(claim.bearer.Address + "/" + strconv.FormatUint(uint64(claim.bearer.Prefix), 10))
+		if err != nil || !address.Addr().Is4() {
+			return rollback(errors.New("ModemManager returned an invalid static IPv4 address"))
+		}
+		var gateway netip.Addr
+		if strings.TrimSpace(claim.bearer.Gateway) != "" {
+			gateway, err = netip.ParseAddr(claim.bearer.Gateway)
+			if err != nil || !gateway.Is4() {
+				return rollback(errors.New("ModemManager returned an invalid IPv4 gateway"))
+			}
+		}
+		claim.route, err = prober.guard.ConfigureDataRoute(ctx, permit, claim.bearer.Interface, address, gateway)
+		if err != nil {
+			return rollback(err)
+		}
 	}
 	for _, value := range claim.bearer.DNS {
 		if address, parseErr := netip.ParseAddr(value); parseErr == nil && address.Is4() {
@@ -214,7 +231,7 @@ func (prober *Prober) DialData(ctx context.Context, target agentdata.Target, net
 		prober.mu.Unlock()
 		return nil, agentmodem.ErrOperationTargetReplaced
 	}
-	if claim.cleanup || claim.observedData != agentmodem.DataConnected {
+	if claim.cleanup || !claim.dhcp.valid() || claim.observedData != agentmodem.DataConnected {
 		prober.mu.Unlock()
 		return nil, agentmodem.ErrOperationUnavailable
 	}
@@ -225,7 +242,34 @@ func (prober *Prober) DialData(ctx context.Context, target agentdata.Target, net
 		return nil, errors.New("unsupported cellular data socket network")
 	}
 	control := markedSocketControl(copy.bearer.Interface, copy.route.Permit.Mark)
+	if copy.dhcp != nil {
+		control = dhcpSocketControl(copy.dhcp.iface.Index, copy.route.Permit.Mark)
+	}
 	dialer := &net.Dialer{Control: control}
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		if copy.dhcp != nil {
+			if !copy.dhcp.valid() {
+				return nil, agentmodem.ErrOperationUnavailable
+			}
+			if err := copy.dhcp.check(ctx); err != nil {
+				copy.dhcp.invalidate(err)
+				return nil, err
+			}
+		}
+		connection, err := dialer.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if copy.dhcp != nil {
+			if err := copy.dhcp.check(ctx); err != nil {
+				connection.Close()
+				copy.dhcp.invalidate(err)
+				return nil, err
+			}
+			return copy.dhcp.track(connection)
+		}
+		return connection, nil
+	}
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
@@ -240,7 +284,7 @@ func (prober *Prober) DialData(ctx context.Context, target agentdata.Target, net
 			if resolveNetwork != "udp" && resolveNetwork != "tcp" {
 				return nil, errors.New("unsupported cellular DNS network")
 			}
-			return (&net.Dialer{Control: control}).DialContext(resolveContext, resolveNetwork, dnsAddress)
+			return dial(resolveContext, resolveNetwork, dnsAddress)
 		}}
 		addresses, resolveErr := resolver.LookupNetIP(ctx, "ip4", host)
 		if resolveErr != nil || len(addresses) == 0 {
@@ -253,7 +297,7 @@ func (prober *Prober) DialData(ctx context.Context, target agentdata.Target, net
 	}
 	var failures []error
 	for _, destination := range targets {
-		connection, dialErr := dialer.DialContext(ctx, network, destination)
+		connection, dialErr := dial(ctx, network, destination)
 		if dialErr == nil {
 			return connection, nil
 		}
@@ -292,6 +336,9 @@ func (prober *Prober) stopDataLocked(target agentdata.Target) error {
 	if target.AttachmentID != "" && claim.target != target {
 		return agentmodem.ErrOperationTargetReplaced
 	}
+	if claim.dhcp != nil {
+		claim.dhcp.stop()
+	}
 	if !claim.cleanup {
 		if observer, ok := prober.manager.(interface {
 			VoiceIdle(context.Context, dbus.ObjectPath) (bool, error)
@@ -309,9 +356,18 @@ func (prober *Prober) stopDataLocked(target agentdata.Target) error {
 }
 
 func (prober *Prober) cleanupDataClaim(claim *dataClaim) error {
+	if claim.dhcp != nil {
+		claim.dhcp.stop()
+	}
 	cleanupContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var failures []error
+	defer func() {
+		if prober.data[claim.target.EquipmentID] == claim {
+			claim.failures++
+			claim.retryAt = time.Now().Add(time.Second << min(claim.failures-1, 6))
+		}
+	}()
 	if !claim.permitClosed {
 		if err := prober.guard.CloseDataPermit(cleanupContext, claim.route.Permit); err != nil {
 			failures = append(failures, err)
@@ -324,6 +380,20 @@ func (prober *Prober) cleanupDataClaim(claim *dataClaim) error {
 			failures = append(failures, err)
 		} else {
 			claim.routeCleaned = true
+		}
+	}
+	// Invalid DHCP traffic is already stopped; destructive MM ownership changes
+	// still require the original call guard, including rollback/retry entrypoints.
+	if claim.bearer.Method == 3 && (!claim.bearerDisconnected || !claim.inhibited) {
+		observer, ok := prober.manager.(interface {
+			VoiceIdle(context.Context, dbus.ObjectPath) (bool, error)
+		})
+		if !ok {
+			return errors.Join(append(failures, errors.New("DHCP recovery requires authoritative call state"))...)
+		}
+		idle, err := observer.VoiceIdle(cleanupContext, claim.commandSnapshot.ObjectPath)
+		if err != nil || !idle {
+			return errors.Join(append(failures, errors.Join(errors.New("DHCP recovery is waiting for idle call state"), err))...)
 		}
 	}
 	if !claim.bearerDisconnected {
@@ -348,9 +418,6 @@ func (prober *Prober) cleanupDataClaim(claim *dataClaim) error {
 		}
 		failures = append(failures, errors.New("exclusive AT owner has not recovered after data cleanup"))
 	}
-	claim.failures++
-	delay := time.Second << min(claim.failures-1, 6)
-	claim.retryAt = time.Now().Add(delay)
 	return errors.Join(failures...)
 }
 
@@ -413,6 +480,16 @@ func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmode
 	fact.Network.Data = claim.observedData
 	if fact.Network.Data == "" {
 		fact.Network.Data = agentmodem.DataUnknown
+	}
+	if !claim.dhcp.valid() {
+		fact.Condition = agentmodem.DeviceDegraded
+		fact.Capabilities.CellularData = false
+		fact.Detail = "DHCP lease invalid; data stopped, original owner recovery pending"
+		claim.dhcp.mu.Lock()
+		if claim.dhcp.err != nil {
+			fact.Detail = bounded(fact.Detail+": "+claim.dhcp.err.Error(), 1024)
+		}
+		claim.dhcp.mu.Unlock()
 	}
 	fact.Network.Profile = claim.profile
 	fact.Network.Guard = agentmodem.DataGuardFact{State: agentmodem.DataGuardProtected}

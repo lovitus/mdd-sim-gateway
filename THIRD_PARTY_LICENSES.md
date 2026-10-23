@@ -17,6 +17,8 @@ used here as proof of license compliance.
 | SagerNet/sing-usbip (`v0.0.0-20260831204559-463a80475917`) | Windows/Linux raw USB/IP exporter/importer transport, pinned to `463a80475917` by the exact replacement in `go-runtime/go.mod` | GPL-3.0-or-later | https://github.com/lovitus/sing-usbip (fork of SagerNet) |
 | SagerNet/sing-mux (`v0.3.5`) | Multiplexes all raw USB/IP logical connections inside one authenticated WSS session | GPL-3.0-or-later | https://github.com/SagerNet/sing-mux |
 | LudovicRousseau/PCSC | PC/SC middleware | BSD-3-Clause | https://github.com/LudovicRousseau/PCSC |
+| insomniacslk/dhcp (`c6bb46ad3f3a`) | Linux Ethernet DHCPv4 acquisition and packet transport; MDD owns bounded lease lifecycle | BSD-3-Clause; nclient4/ipv4.go includes Apache-2.0 gVisor code, Copyright 2018 Google LLC | https://github.com/insomniacslk/dhcp |
+| jsimonetti/rtnetlink; mdlayher/packet | Index-bound Linux private routes and restricted DHCP packet socket | MIT; MIT | https://github.com/jsimonetti/rtnetlink ; https://github.com/mdlayher/packet |
 | LudovicRousseau/CCID | USB smart-card driver | LGPL-2.1-or-later | https://github.com/LudovicRousseau/CCID |
 | libusb 1.0.30 | Static USB transport used by the macOS cellular companion | LGPL-2.1-or-later | https://github.com/libusb/libusb |
 | lwIP 2.2.1 | Private TCP/IP stack used by the macOS cellular companion | BSD-3-Clause | https://github.com/lwip-tcpip/lwip |
@@ -32,6 +34,12 @@ The table is a summary. Exact Go versions are in go.mod/go.sum; npm versions in 
 macOS native helper pins in agent/cellular-io/THIRD_PARTY.md. Distribution PC/SC/CCID dependencies remain subject
 to their own terms. Twemoji Mozilla is Copyright 2016–2018 Mozilla Foundation; its Twemoji visual artwork is
 Copyright Twitter, Inc. and contributors (CC-BY-4.0). The unmodified font/associated notices remain in the UI assets.
+
+The unmodified DHCP module retains its mixed per-file licenses. Its root BSD
+license and the full Apache-2.0 text are also shipped in `go-runtime/licenses`.
+The nclient4 IPv4 transport contains code taken from gVisor, Copyright 2018
+Google LLC, licensed under Apache-2.0. Generated dependency-license inventories
+and exact source archives remain part of the existing release packaging.
 
 ## Retired dependencies and historical notices
 
