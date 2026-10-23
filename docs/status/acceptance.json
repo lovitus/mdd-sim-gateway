@@ -1479,6 +1479,14 @@
       }
     },
     {
+      "id": "LINUX_DHCP_BEARER",
+      "state": "partial",
+      "releaseRelevance": "current",
+      "summary": "Approved NEXT_BATCH_992c4fb: native MM Ethernet DHCP IPv4 claim acquisition, T1/T2 renewal, expiry and exact invalidation through existing borrower/persistent owners. Reuse upstream DHCP and index-bound netlink; preserve static IPv4, policy, quotas and active-call guards. No Core/wire/config/pin changes.",
+      "acceptance": "Implementation candidate only. Run39942634074 qualified compiled old992 method3 refusal and cleanup ownership red/green, archived at archive/2026-10-23/linux-dhcp-counterexamples; do not repeat those one-time proofs. Full lifecycle failed at cgroup-path permit publication after DORA. R3/R5 source refinements and reviewed private read-only cgroup bind preparation await final source review/CI; borrower lifecycle is not qualified. Hardware identity/MM/AT fixtures are explicit, not physical acceptance. No production mutation, paid tests, PR48 reopening or expanded deferred scenarios. PPP/IPv6/raw-IP DHCP and non-systemd managed modem remain separate gaps.",
+      "evidence": ["DEVELOPMENT.md", "docs/branches.md", "go-runtime/internal/linuxmodem/dhcp_linux.go", "go-runtime/internal/linuxmodem/dhcp_e2e_linux_test.go", "tools/test-linux-dhcp.mjs"]
+    },
+    {
       "id": "AGENT_FIRST_RUN_SETUP",
       "state": "completed",
       "releaseRelevance": "current",
