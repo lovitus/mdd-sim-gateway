@@ -90,6 +90,10 @@ type DataPermit struct {
 	Mark      uint32
 	Owner     string
 	Interface string
+	// Dynamic bootstrap is distinct from the existing static permit. Losing
+	// its route proof must never select the static compatibility path.
+	requiresRouteRealm bool
+	routeRealm         uint32
 }
 
 type importMarker struct {
@@ -249,10 +253,10 @@ func (guard *Guard) VerifyContract(ctx context.Context) error {
 	guard.policyMu.Lock()
 	output, err := guard.run(ctx, nil, "nft", "--numeric", "--numeric-priority", "--json",
 		"list", "table", "inet", nftTableName)
-	permits := make(map[uint32]string, len(guard.permits))
+	permits := make(map[uint32]DataPermit, len(guard.permits))
 	for mark, permit := range guard.permits {
 		if permit.Interface != "" {
-			permits[mark] = permit.Interface
+			permits[mark] = permit
 		}
 	}
 	guard.policyMu.Unlock()
@@ -669,9 +673,18 @@ func (guard *Guard) installNetfilterLocked(ctx context.Context) error {
 	sort.Slice(permitMarks, func(left, right int) bool { return permitMarks[left] < permitMarks[right] })
 	for _, mark := range permitMarks {
 		permit := guard.permits[mark]
+		proof := ""
+		if permit.requiresRouteRealm {
+			if permit.routeRealm&0xffff == 0 {
+				return errors.New("DHCP permit has no owned route realm")
+			}
+			proof = " rt classid " + strconv.FormatUint(uint64(permit.routeRealm), 10)
+		} else if permit.routeRealm != 0 {
+			return errors.New("static permit contains unexpected route realm")
+		}
 		script += "add rule inet " + nftTableName + " output meta oifgroup " + group +
 			" meta oifname \"" + permit.Interface + "\" socket cgroupv2 level 2 \"" + agentCGroup +
-			"\" meta mark " + strconv.FormatUint(uint64(mark), 10) + " counter accept\n"
+			"\" meta mark " + strconv.FormatUint(uint64(mark), 10) + proof + " counter accept\n"
 	}
 	script += "add rule inet " + nftTableName + " output meta oifgroup " + group + " counter drop\n" +
 		"add rule inet " + nftTableName + " input meta iifgroup " + group + " ct state established,related counter accept\n" +
@@ -686,10 +699,10 @@ func (guard *Guard) installNetfilterLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read installed MDD cellular nftables quarantine: %w", err)
 	}
-	activePermits := make(map[uint32]string, len(guard.permits))
+	activePermits := make(map[uint32]DataPermit, len(guard.permits))
 	for mark, permit := range guard.permits {
 		if permit.Interface != "" {
-			activePermits[mark] = permit.Interface
+			activePermits[mark] = permit
 		}
 	}
 	if err := guard.verifyInstalledNFT(ctx, output, activePermits); err != nil {
@@ -1174,7 +1187,7 @@ type nftRule struct {
 	Expr   []json.RawMessage `json:"expr"`
 }
 
-func (guard *Guard) verifyInstalledNFT(ctx context.Context, payload []byte, permits map[uint32]string) error {
+func (guard *Guard) verifyInstalledNFT(ctx context.Context, payload []byte, permits map[uint32]DataPermit) error {
 	err := verifyNFTContract(payload, permits)
 	if err == nil || len(permits) == 0 {
 		return err
@@ -1240,7 +1253,7 @@ func withVerifiedCGroupLevels(payload []byte, text string) []byte {
 	return result
 }
 
-func verifyNFTContract(payload []byte, permits map[uint32]string) error {
+func verifyNFTContract(payload []byte, permits map[uint32]DataPermit) error {
 	var document nftDocument
 	if err := json.Unmarshal(payload, &document); err != nil || len(document.NFTables) == 0 {
 		return errors.New("nftables JSON is invalid or empty")
@@ -1340,8 +1353,8 @@ func validNFTDropRule(expressions []json.RawMessage) (string, bool) {
 	return groupKey, exists
 }
 
-func validNFTPermitRule(expressions []json.RawMessage, permits map[uint32]string) (uint32, bool) {
-	if len(expressions) != 6 {
+func validNFTPermitRule(expressions []json.RawMessage, permits map[uint32]DataPermit) (uint32, bool) {
+	if len(expressions) != 6 && len(expressions) != 7 {
 		return 0, false
 	}
 	groupKey, groupOK := nftGroupMatch(expressions[0])
@@ -1356,18 +1369,53 @@ func validNFTPermitRule(expressions []json.RawMessage, permits map[uint32]string
 	if !ok {
 		return 0, false
 	}
+	permit, declared := permits[mark]
+	if !declared || permit.Interface != interfaceName {
+		return 0, false
+	}
+	counter := 4
+	if permit.requiresRouteRealm {
+		if len(expressions) != 7 || permit.routeRealm&0xffff == 0 || !validNFTRouteRealm(expressions[4], permit.routeRealm) {
+			return 0, false
+		}
+		counter++
+	} else if len(expressions) != 6 || permit.routeRealm != 0 {
+		return 0, false
+	}
 	var counterItem, acceptItem map[string]json.RawMessage
-	if json.Unmarshal(expressions[4], &counterItem) != nil || len(counterItem) != 1 {
+	if json.Unmarshal(expressions[counter], &counterItem) != nil || len(counterItem) != 1 {
 		return 0, false
 	}
 	if _, exists := counterItem["counter"]; !exists {
 		return 0, false
 	}
-	if json.Unmarshal(expressions[5], &acceptItem) != nil || len(acceptItem) != 1 {
+	if json.Unmarshal(expressions[counter+1], &acceptItem) != nil || len(acceptItem) != 1 {
 		return 0, false
 	}
 	_, exists := acceptItem["accept"]
-	return mark, exists && permits[mark] == interfaceName
+	return mark, exists
+}
+
+func validNFTRouteRealm(raw json.RawMessage, realm uint32) bool {
+	var item map[string]json.RawMessage
+	if json.Unmarshal(raw, &item) != nil || len(item) != 1 || item["match"] == nil {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(item["match"], &fields) != nil || len(fields) != 3 || fields["op"] == nil || fields["left"] == nil || fields["right"] == nil {
+		return false
+	}
+	var match struct {
+		Op    string                     `json:"op"`
+		Left  map[string]json.RawMessage `json:"left"`
+		Right json.RawMessage            `json:"right"`
+	}
+	if json.Unmarshal(item["match"], &match) != nil || match.Op != "==" || len(match.Left) != 1 {
+		return false
+	}
+	var rt map[string]json.RawMessage
+	return json.Unmarshal(match.Left["rt"], &rt) == nil && len(rt) == 1 &&
+		string(rt["key"]) == `"classid"` && rawIntegerEquals(match.Right, realm)
 }
 
 func nftMetaStringMatch(raw json.RawMessage, key string) (string, bool) {

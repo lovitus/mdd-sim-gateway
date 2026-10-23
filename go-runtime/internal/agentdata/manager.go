@@ -42,6 +42,34 @@ type Backend interface {
 	StopData(context.Context, Target) error
 }
 
+// ValidityBackend binds invalidation to the prepared platform claim, not to a
+// reusable equipment ID. A closed channel stays closed across session setup.
+type ValidityBackend interface {
+	DataValidity(Target) (<-chan struct{}, error)
+}
+
+func DataValidity(backend any, target Target) (<-chan struct{}, error) {
+	if source, ok := backend.(ValidityBackend); ok {
+		done, err := source.DataValidity(target)
+		if err != nil {
+			failed := make(chan struct{})
+			close(failed)
+			return failed, err
+		}
+		return done, nil
+	}
+	return nil, nil
+}
+
+func Invalidated(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
 type Admission interface {
 	ResolveDataProfile(context.Context, Target, string, string, string) (Profile, error)
 	ValidateDataTarget(context.Context, Target) error
@@ -81,20 +109,21 @@ type Manager struct {
 var ErrSessionActive = errors.New("cellular data session is active on this modem")
 
 type dataSession struct {
-	target     Target
-	id         string
-	profile    string
-	purpose    string
-	expiresAt  time.Time
-	maxBytes   uint64
-	used       atomic.Uint64
-	ctx        context.Context
-	cancel     context.CancelFunc
-	mu         sync.Mutex
-	streams    map[string]net.Conn
-	stopMu     sync.Mutex
-	stopErr    error
-	expiryWake chan struct{}
+	target      Target
+	id          string
+	profile     string
+	purpose     string
+	expiresAt   time.Time
+	maxBytes    uint64
+	used        atomic.Uint64
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	streams     map[string]net.Conn
+	stopMu      sync.Mutex
+	stopErr     error
+	expiryWake  chan struct{}
+	invalidated <-chan struct{}
 }
 
 func NewManager(config Config) (*Manager, error) {
@@ -176,7 +205,7 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 		same := current.id == request.SessionID && current.target == target && current.expiry().Equal(request.ExpiresAt) &&
 			current.maxBytes == request.MaxBytes && current.purpose == purpose
 		manager.mu.Unlock()
-		if same {
+		if same && current.ctx.Err() == nil && !Invalidated(current.invalidated) {
 			return current.profile, nil
 		}
 		return "", errors.New("another data session owns this modem")
@@ -196,10 +225,16 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 		manager.config.Admission.DataReleased(target, request.SessionID)
 		return "", fmt.Errorf("prepare cellular data: %w", err)
 	}
+	invalidated, validityErr := DataValidity(manager.config.Backend, target)
+	if validityErr != nil {
+		failed := make(chan struct{})
+		close(failed)
+		invalidated = failed
+	}
 	sessionContext, cancel := context.WithCancel(manager.ctx)
 	current := &dataSession{target: target, id: request.SessionID, profile: profile, expiresAt: request.ExpiresAt,
 		purpose: purpose, maxBytes: request.MaxBytes, ctx: sessionContext, cancel: cancel,
-		streams: map[string]net.Conn{}, expiryWake: make(chan struct{}, 1)}
+		streams: map[string]net.Conn{}, expiryWake: make(chan struct{}, 1), invalidated: invalidated}
 	manager.mu.Lock()
 	if manager.closed || manager.items[request.EquipmentID] != nil {
 		manager.mu.Unlock()
@@ -215,6 +250,9 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 	manager.wait.Add(1)
 	manager.mu.Unlock()
 	go manager.watch(request.EquipmentID, current)
+	if Invalidated(invalidated) {
+		return "", errors.Join(errors.New("cellular data claim expired during preparation"), validityErr)
+	}
 	return profile, nil
 }
 
@@ -285,7 +323,7 @@ func (manager *Manager) renew(ctx context.Context, request agentlink.ModemDataRe
 		}
 		current.mu.Lock()
 		defer current.mu.Unlock()
-		if current.ctx.Err() != nil || request.ExpiresAt.Before(current.expiresAt) ||
+		if current.ctx.Err() != nil || Invalidated(current.invalidated) || request.ExpiresAt.Before(current.expiresAt) ||
 			request.MaxBytes != current.maxBytes || normalizeDataPurpose(request.Purpose) != current.purpose {
 			return errors.New("data session renewal does not match current owner")
 		}
@@ -443,6 +481,9 @@ func consume(current *dataSession, count uint64) error {
 func (manager *Manager) watch(equipmentID string, current *dataSession) {
 	defer manager.wait.Done()
 	manager.waitForExpiry(current)
+	// Stop existing streams before waiting for a call/lifecycle lock. Platform
+	// invalidation never extends a user lease or waits for destructive cleanup.
+	manager.closeStreams(current)
 	delay := time.Second
 	for {
 		manager.operationMu.Lock()
@@ -492,6 +533,10 @@ func (manager *Manager) waitForExpiry(current *dataSession) {
 		}
 		timer := time.NewTimer(delay)
 		select {
+		case <-current.invalidated:
+			timer.Stop()
+			current.cancel()
+			return
 		case <-current.ctx.Done():
 			timer.Stop()
 			return

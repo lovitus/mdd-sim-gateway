@@ -287,7 +287,7 @@ func TestInventoryFailureInvalidatesSIMInsertionGeneration(t *testing.T) {
 	}
 }
 
-func TestParseDataBearerRequiresConnectedStaticIPv4(t *testing.T) {
+func TestParseDataBearerPreservesStaticAndStagesDHCPIPv4(t *testing.T) {
 	path := dbus.ObjectPath("/org/freedesktop/ModemManager1/Bearer/7")
 	properties := map[string]dbus.Variant{
 		"Connected":  dbus.MakeVariant(true),
@@ -307,8 +307,9 @@ func TestParseDataBearerRequiresConnectedStaticIPv4(t *testing.T) {
 	config, _ := properties["Ip4Config"].Value().(map[string]dbus.Variant)
 	config["method"] = dbus.MakeVariant(uint32(3))
 	properties["Ip4Config"] = dbus.MakeVariant(config)
-	if _, err := parseDataBearer(path, properties); err == nil {
-		t.Fatal("DHCP bearer was accepted without a DHCP implementation")
+	bearer, err = parseDataBearer(path, properties)
+	if err != nil || bearer.Method != 3 || bearer.Address != "" || bearer.Prefix != 0 || bearer.Gateway != "" || len(bearer.DNS) != 0 {
+		t.Fatalf("DHCP must acquire its configuration before publication: %+v %v", bearer, err)
 	}
 }
 

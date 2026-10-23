@@ -157,7 +157,7 @@ func TestNFTContractAcceptsOnlyDeclaredSocketMarkPermits(t *testing.T) {
 {"rule":{"family":"inet","table":"mdd_cellular_guard","chain":"forward","expr":[{"match":{"op":"==","left":{"meta":{"key":"iifgroup"}},"right":5063748}},{"counter":{}},{"drop":null}]}},
 {"rule":{"family":"inet","table":"mdd_cellular_guard","chain":"forward","expr":[{"match":{"op":"==","left":{"meta":{"key":"oifgroup"}},"right":5063748}},{"counter":{}},{"drop":null}]}}
 ]}`)
-	if err := verifyNFTContract(payload, map[uint32]string{mark: "wwan0"}); err != nil {
+	if err := verifyNFTContract(payload, map[uint32]DataPermit{mark: {Interface: "wwan0"}}); err != nil {
 		t.Fatalf("exact declared socket permit rejected: %v", err)
 	}
 	if err := verifyNFTContract(payload, nil); err == nil {
@@ -166,14 +166,41 @@ func TestNFTContractAcceptsOnlyDeclaredSocketMarkPermits(t *testing.T) {
 	legacy := strings.Replace(string(payload), `"chain":"output","expr"`, `"chain":"output","handle":4,"expr"`, 1)
 	legacy = strings.Replace(legacy, `"cgroupv2","level":2`, `"cgroupv2"`, 1)
 	text := `meta oifgroup 5063748 meta oifname "wwan0" socket cgroupv2 level 2 "system.slice/mdd-agent.service" meta mark 1291911169 counter packets 0 bytes 0 accept # handle 4`
-	if err := verifyNFTContract(withVerifiedCGroupLevels([]byte(legacy), text), map[uint32]string{mark: "wwan0"}); err != nil {
+	if err := verifyNFTContract(withVerifiedCGroupLevels([]byte(legacy), text), map[uint32]DataPermit{mark: {Interface: "wwan0"}}); err != nil {
 		t.Fatalf("verified legacy nft output rejected: %v", err)
 	}
 	for _, invalid := range []string{"", strings.Replace(text, "level 2", "level 1", 1),
 		strings.Replace(text, "handle 4", "handle 5", 1), strings.Replace(text, agentCGroup, "system.slice/other.service", 1), text + "\n" + text} {
-		if err := verifyNFTContract(withVerifiedCGroupLevels([]byte(legacy), invalid), map[uint32]string{mark: "wwan0"}); err == nil {
+		if err := verifyNFTContract(withVerifiedCGroupLevels([]byte(legacy), invalid), map[uint32]DataPermit{mark: {Interface: "wwan0"}}); err == nil {
 			t.Fatal("missing or mismatched cgroup-level evidence accepted")
 		}
+	}
+	// The same real nft JSON contract used for static permits must require
+	// the extra predicate for a dynamic owner, not accept a static fallback.
+	dynamic := map[uint32]DataPermit{mark: {Interface: "wwan0", requiresRouteRealm: true, routeRealm: mark}}
+	if err := verifyNFTContract(payload, dynamic); err == nil {
+		t.Fatal("dynamic permit accepted without route proof")
+	}
+	proof := `{"match":{"op":"==","left":{"rt":{"key":"classid"}},"right":1291911169}},`
+	withRealm := []byte(strings.Replace(string(payload), `{"counter":{}},{"accept":null}`, proof+`{"counter":{}},{"accept":null}`, 1))
+	if err := verifyNFTContract(withRealm, dynamic); err != nil {
+		t.Fatal("exact dynamic route proof rejected", err)
+	}
+	for _, corruptProof := range []string{
+		strings.Replace(proof, "1291911169", "1291911170", 1),
+		strings.Replace(proof, `"=="`, `"!="`, 1),
+		strings.Replace(proof, `"rt"`, `"meta"`, 1),
+		strings.Replace(proof, `"classid"`, `"mark"`, 1),
+		proof + proof,
+	} {
+		corrupt := []byte(strings.Replace(string(withRealm), proof, corruptProof, 1))
+		if err := verifyNFTContract(corrupt, dynamic); err == nil {
+			t.Fatal("invalid dynamic route proof accepted", corruptProof)
+		}
+	}
+	dynamic[mark] = DataPermit{Interface: "wwan0", requiresRouteRealm: true}
+	if err := verifyNFTContract(payload, dynamic); err == nil {
+		t.Fatal("missing dynamic state silently selected static compatibility")
 	}
 }
 
