@@ -30,7 +30,7 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 | ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. Further desktop qualification is deferred from this Android PR, not a waiver of isolation. |
 | ANDROID | accepted | Native Android preview and subsequent client corrections are merged and installed under the owner's reviewed-rollout authorization. Current artifact/version evidence is in FLEET_MAIN_ALIGNMENT and DEPLOYMENT.md, not the superseded PR7 draft. Scoped acceptance remains separate from all-carrier/hardware and endurance qualification. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
-| MACOS_UNIVERSAL | required | Separate Universal packaging batch under the October22 completion goal; no notarization or implied Intel hardware acceptance. Existing arm64 delivery is preserved. |
+| MACOS_UNIVERSAL | required | PR50 closes Universal implementation and signed hosted-artifact qualification; new publication/installation and Intel hardware remain separate, notarization excluded. Existing arm64 delivery is preserved. |
 
 ## Decision provenance
 
@@ -55,19 +55,19 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 
 ### Implementation
 
-- implemented: 32
+- implemented: 33
 - needs_verification: 7
-- partial: 13
+- partial: 12
 - policy: 5
 - superseded: 6
 
 ### Acceptance / evidence
 
-- covered_by_tests: 18
+- covered_by_tests: 19
 - evidence_review_pending: 19
 - not_applicable: 11
 - pending_hardware: 13
-- pending_product: 2
+- pending_product: 1
 
 ## Current open work
 
@@ -76,6 +76,12 @@ Use traceable local records to update this ledger; latest explicit owner decisio
 **State: partial; release relevance: current.** October22 full completion goal remains active. PR47 desktop usability is merged; three of four desktop targets were upgraded, with a fourth Windows control-link exception. The two earlier GB failures are no longer current in the October23 bounded snapshot, without proof of historical cause or paid acceptance. PR49 Android presentation/configuration feedback is merged and qualified, with signed v203 retained but not installed. PR48 remains frozen at15fc0d1 pending owner direction. The wider implementation queue remains open.
 
 Acceptance scope / remaining action: PR47 source7dfe66c/full Go39798759586/original review passed; archive/2026-10-22/agent-usability-qualified preserves same-tree234231bc proof and38 fixed Windows race passes with no failures/skips. Earlier scoped GUI/Mac/SCM/ACL evidence remains valid. Final25c78a0 passed normal Go39802816073 and original final review; merge1bfcf9a shares treef00db424. Three-desktop authorized rollout and fourth-target inconclusive read-only diagnosis are recorded in PR47 receipt6350988175 and docs/branches.md; configuration/pins/intent/isolation were preserved, without paid acceptance. PR48/39844561322 failed readiness after local Core connection; do not call it qualified or silently weaken the fixture. Android source2f2d4c1 passed original reviewd6055e50 and Android39856193041: three named compiled old-source failures, then44 fixed native passes on each API28/35 with no failures/errors/skips. Four API35 portrait images were inspected; API28 image export remains unverified. Qualified archive and initial fixture/proof failure are in docs/branches.md. Cleanup3ae343a passed original review055ef221 and Android39860851491; Go39860851473 cancelled during Windows dependency preparation before build/package/upload, cause unknown. Review9fd47223 accepts a narrow phase-labelled/bounded dependency diagnostic candidate, without changing packages, sources, caches, total job budget or downstream gates; that diagnostic44c55a0 passed reviewdb9f3ca4/Android39868592424 but Go39868592415 hit install300s/124 during package downloads after update9s/0. Review1ca03902 accepts a limited existing official-mirror selection with unchanged source/signature fields, budgets and gates; new exact-candidate CI/review remain pending. Deployment is unperformed and current phone verification remains owner-skipped. Full M15 and the broader DEVELOPMENT.md goal remain open; do not repeat qualified reds or deferred/paid tests. Subsequent final receipt supersedes candidate-stage pending qualification above: PR49 final0cbf077 passed original source review, Go39871769608 after one approved same-run failed-Core/downstream rerun, and Android39871769636. Merge5c4e1a9/tree728955ab matches the qualified archive/2026-10-23/android-status-delivery; main signing39875568282 produced v203 retained privately, not installed or publicly released. PR47 October23 00:17:26UTC snapshot confirms three fresh upgraded identities, fourth Windows absent and both GB lines ready/available; see receipt6354463445. Historical failures and deferred phone/paid/endurance boundaries remain.
+
+### LINUX_ARM64_MANAGED_DELIVERY
+
+**State: needs_verification; release relevance: current.** Owner-authorized successor review approved the existing Linux ARM64 managed Agent packaging and standalone first-install batch. Add the pinned audio helper, original guard unit, complete provenance/licenses and create-only placement/pure preflight. Preserve MM static IPv4, serial AT/SIM without data, config/pin/state ownership, user switches and reader/cron compatibility; do not change Core/runtime or adopt an existing service.
+
+Acceptance scope / remaining action: Implementation and native hosted final-tar E2E are prepared but not yet built or qualified. Required evidence includes real ALSA enumeration, default/explicit private config, ownership and incomplete-package refusals, old published package missing-helper failure, and actual empty-host original-unit/guard/cgroup execution. A missing hosted prerequisite is not a skipped pass. No production/publication or physical ARM modem/audio/traffic acceptance is claimed; DHCP/PPP/IPv6 and non-systemd managed modem remain actual implementation gaps.
 
 ### EGRESS_DONOR_RECOVERY
 
@@ -113,12 +119,6 @@ Acceptance scope / remaining action: PR32 final1152132/Go38403121778 and origina
 
 Acceptance scope / remaining action: PR33 finale531446/Go38427350573 and original final review passed. archive/2026-10-14/update-maintenance-qualified retains6b718e7/Go38425248981 and17 compiled behavior reds plus old-sidebar failure, then fixed race/root/Chromium. Integrated728b788/Go38508488826 and final639f55a/Go38509927202 passed. First cutover rollback and auth mismatch remain recorded. PR35 c59056d/Go38514560874 proves actual-wrapper old401/fixed race; final431fa6b/Go38516014673 approved and merged77f23e0. Same-tree261d8e7 canonical rollout succeeded; raw maintenance IPC200, original lease released, independent empty request/status/maintenance files and workerPID0 checked before watcher enabled/waiting. No synthetic request, full in-app service restart test or opt-in real-systemd/process qualification claimed. Do not restore stale stores/status; see DEPLOYMENT.md.
 
-### ESIM_READER_LOCATION
-
-**State: needs_verification; release relevance: current.** WebUI-only relocation correction: current attachments are separated from read-only reader/profile snapshots, which are not live ownership. ICCID association only navigates SIM locations; no chip inventory/capability transfer and no historical attachment stops the live line. Existing EID-scoped deletion recovery/replay and download-job cancellation remain independently managed operations, not read-only snapshots; the history notice explicitly distinguishes their side effects.
-
-Acceptance scope / remaining action: Pinned read-only diagnosis confirms current Android SIM location and cached profiles on an old desktop observation; Android eUICC management is not implemented or added here. Hosted37916088950/ca59961 reproduced the old rendered-page grouping assertion and passed the fix, but failed stale embedded assets. Its generated UI is included in fb7dd44, whose full Go37917549682 and Android37917541611 passed. Tags archive/2026-10-09/esim-location-proof and line-visibility-qualified preserve sources. PR25 final0f491e5 passed three-party review and Go37921805744, merged0fc0ba1; its UI is included in the later Core deployments recorded in DEPLOYMENT.md, beginning PR26. Review/merge/rollout are no longer pending. A fresh production-browser relocation journey for this exact change remains unverified; later unrelated page checks do not supply that evidence. No card operation or cache-to-capability promotion.
-
 ### LINUX_MODEM_ACQUISITION
 
 **State: needs_verification; release relevance: current.** PR45 reviewed9bf6571/full CI39212919170 merged90fde687; same-tree artifactbab742e deployed only to the authorized faulty Linux Agent. Exact read-only convergence fixes healthy persistent-plus-borrower misreporting; common health admission preserves original expiry, cleanup, paid-call guards and failure/backoff. Controlled owner stop/restart/restore ended with AT/call/SMS and policy_ready, renewed original borrowing and confirmed exit consumer. Old AT recovered before binary switch during borrower pause; initial MM forced-close cause and production automatic forced-close recovery remain unproven. Compiled proof601d32e/39212493452 remains distinct from field acceptance. Deferred physical scope stays unverified. ARM64 v2.0.0 reader/card-route/IMS/messaging remain freshly ready on the unchanged post-upgrade process.
@@ -136,12 +136,6 @@ Acceptance scope / remaining action: Private timestamped exit/restore, process-e
 **State: unresolved_cause; release relevance: current.** Incoming INVITEs and local 488 responses remain scoped evidence, with further incoming diagnosis owner-deferred. One authorized self-SMS was submitted once and received; repeated carrier delivery exposed separate-report and durable-identity defects. Qualified 524bd33 contained new duplicate events but its receive reports were rejected with SIP 403. Followup 9e0ec67 passed exact-head full workflow 36264788240 and was deployed only to the affected-line trial after the owner replugged the USB reader and native permission/exact-card recovery was verified. Its registered-network-context adaptation then received SIP 202 for the already-pending carrier delivery. No new outbound SMS or manual replay occurred. September 29 review additionally found that receive reports retained the initial registration binding after same-process recovery; the current correction uses one existing-owner snapshot for both construction and send. Hosted workflow 36522474384 reproduced two compiled B1 old-behavior reversion failures, then passed 31 focused test/subtest results plus the existing registrar recovery test under race detection with zero skips. Full CI36522731598 passed, the original reviewer independently closed P2, and the same-tree artifact source2fcfda83bd51 was deployed to seven existing Provider processes and the shared entry point. The first script-only empty-field failure rolled back; the second explicit attempt completed with all leases released and both previously ready lines restored.
 
 Acceptance scope / remaining action: The original separate-report/durable-identity and registered-context/actual-wire regressions were behaviorally red before their fixes and green afterward. Exact-head full CI, the retained Linux archive and all 22 manifest entries were verified; the running Provider SHA-256 is 8d71b89cb09ac98e78315e9197a178a8c3d5355ec27307bfed0d095b63c54bd1. The owned maintenance lease was released, rollback retained, and desired configuration, shared binary and unrelated PIDs stayed unchanged. On September 26 at 23:37:08 UTC the candidate logged a real receive-report 202, after two new old-version 403 responses following reader recovery. Core history stayed at ten events with no new event across this candidate delivery and Provider generation change. Native Home/Readers and message route/history were inspected; sender, own card/number, body and Reply remain present. This verifies one carrier receive-report acceptance and scoped durable deduplication, not universal SMS/delivery-report acceptance. The reader failed again while the phone was awake and the app PID unchanged: its first automatic reset reidentified the card, the second failed at slot_status, and Core lost the card route. Do not count subsequent silence as an online no-redelivery observation, or physical replug as durable automatic recovery. No extra reset, App restart, SMS, call or PIN action was requested. Preserve earlier RP 38/outgoing 403 failures and old history. Incomplete multipart assembly retains its upstream in-memory lifetime. Core, Telegram settings, stored user intent and retry policy are unchanged; native incoming audio, USB durability and PR merge remain unaccepted. The later owner-confirmed native incoming two-way voice acceptance remains recorded under ANDROID; the older incident-stage lack of audio acceptance is historical. The new binding correction introduces no outbound SMS, replay, call-dialog rewrite or automatic retry. September 29 rollout verified all actual PID executable hashes as 2f0f55f9ef6f08f7865eb322aec85f1459757a7bd63084ef1d4738fb4aa5db8b; catalog/notification settings and unrelated Core/Agent/egress/apply processes were unchanged. Absent/disabled lines were not enabled. No new paid operation or manual replay occurred; previous carrier cause and USB durability limits remain unresolved, not deployment blockers. The original incident-stage PR/unaccepted statements above are historical, superseded only within the later explicit acceptance.
-
-### MACOS_UNIVERSAL
-
-**State: needs_verification; release relevance: current.** October22 completion goal and original plan review d84e2d8f authorize a separate Universal package batch. Explicit thin targets, six-file combination/signature verification, pre-stop installer architecture checks and exact download-set wiring are implemented as a candidate. Existing arm64 packaging and runtime behavior remain; notarization stays excluded.
-
-Acceptance scope / remaining action: Source03f5c77/treecaba776c passed original reviewdab83c6f and full Go39885181111. Archive/2026-10-23/macos-universal-qualified retains real old-publisher/installer counterexamples; artifact12471909254 records both final slices, exact no-hardware exits and pre-cutover rejections. Checkout687ffc8f shares the tree; prepare-only index12472902057 includes Universal. Temporary proof removed, permanent E2E retained. Final cleanup/normal CI and Developer ID artifact qualification remain; public release and fleet installation are separate. Intel execution is Rosetta, not physical hardware. Preserve prior arm64 evidence and existing v2.0.0 tags/assets.
 
 ## Accepted, deferred, excluded and separately prioritized work
 
@@ -184,6 +178,14 @@ Resolution (implementation_evidence): PR26-28 qualified/deployed the binding and
 Acceptance scope / remaining action: Hosted Android37917541611 and full Go37917549682 passed at fb7dd44; archive/2026-10-09/line-visibility-qualified. API28/35 each execute one compiled old-view color failure, then all26 fixed native methods pass without failures/skips. Signed v116 installed with UID/data retained and on-device APK hash verified. Portrait Calls/Messages selectors/selected rows inspected: ready/off/unavailable clearly distinct and no overlapping identity text; reader and gateway reconnected, no paid action. PR25 final0f491e5 passed three-party review and full Go37921805744, then merged0fc0ba1 with identical treeef9f29dd; archive/2026-10-09/ui-visibility-delivery. Its Android subtree matches the qualified and installed source. Final review/CI is no longer pending; later phone updates do not erase this scoped UI acceptance or imply new paid/endurance acceptance.
 
 Resolution (implementation_evidence): PR25 completed final review/CI and same-tree merge after the recorded native portrait UI inspection; the old pending-final-review label was stale.
+
+### ESIM_READER_LOCATION
+
+**State: completed; release relevance: current.** WebUI-only relocation correction: current attachments are separated from read-only reader/profile snapshots, which are not live ownership. ICCID association only navigates SIM locations; no chip inventory/capability transfer and no historical attachment stops the live line. Existing EID-scoped deletion recovery/replay and download-job cancellation remain independently managed operations, not read-only snapshots; the history notice explicitly distinguishes their side effects.
+
+Acceptance scope / remaining action: PR25 final0f491e5 passed three-party review and Go37921805744, merged0fc0ba1 and reached subsequent Core deployments. Earlier grouping counterexample37916088950/ca59961 and corrected embed qualification37917549682/37917541611 remain preserved at archive/2026-10-09/esim-location-proof and line-visibility-qualified. October23 actual production Chrome on Cored3ebc022 verified online/history grouping, read-only historical state and timestamp, same-SIM navigation from historical Android attachment to current ARM reader, and explicit absence of current eUICC management facts without cache promotion. A separate populated historical desktop snapshot showed disabled profile mutation controls and no live-line Stop action. No card Read, mutation, replay, Stop or paid operation occurred. This accepts the WebUI location/history journey, not a newly performed physical move, hardware eUICC operations or ESIM_OPERATION_OWNERSHIP recovery. Redacted receipt and private-evidence hashes are in DEPLOYMENT.md.
+
+Resolution (implementation_evidence): Reviewed and deployed PR25 now has the previously missing real production-browser history/current-location and populated-cache read-only acceptance. Independent EID operations and hardware recovery remain separately unverified.
 
 ### INBOUND_HOLD_CONTINUITY
 
@@ -348,6 +350,14 @@ Acceptance scope / remaining action: Preserve pinned provenance, patch notices a
 Acceptance scope / remaining action: Only a later explicit scope decision may schedule notarization. Do not label signed artifacts notarized.
 
 Resolution (user_decision): Owner excluded notarization and .p8 for this round, independently of Universal packaging.
+
+### MACOS_UNIVERSAL
+
+**State: completed; release relevance: current.** PR50 implements and qualifies Universal packaging: explicit thin targets, six-file combination/signature verification, pre-stop installer architecture checks and exact download-set wiring. Original reviewer accepted the merged signed artifacts. Existing arm64 packaging and runtime behavior remain; public publication and installation are separate, notarization excluded.
+
+Acceptance scope / remaining action: Final5180618 passed original review, normal Go39886954243 and Android39886954195; merge42976962 shares tree4d7f0ffc. Main39888741520 passed all ten jobs and produced original-Team Developer ID arm64/Universal packages with matching source/tree, index hashes and E2E manifests. Final native arm64 and Rosetta x86_64 slices passed CLI/App configuration entries, audio-helper help, cellular-helper argument rejections and pre-cutover incomplete-package refusal. Original final receipt2ac1684a accepted this qualification. Archive/2026-10-23/macos-universal-qualified retains real old-publisher/installer counterexamples and failures; macos-universal-delivery preserves final source. PR50 receipt6356021902 records exact artifacts and hashes. No new public Release, production installation, notarization, Intel physical-hardware or paid acceptance; existing v2.0.0 tags/assets unchanged.
+
+Resolution (implementation_evidence): Original final review, normal CI, same-tree merge and signed main-artifact qualification close the packaging batch. This is not public publication, fleet installation or Intel physical-hardware acceptance.
 
 ## Preserved historical evidence
 
@@ -1121,17 +1131,17 @@ Source/test boundaries: [`TODO_MACOS_AGENT.md`](../../TODO_MACOS_AGENT.md), [`ag
 
 ### MAC02
 
-**Implementation: partial; acceptance/evidence: pending_product.**
+**Implementation: implemented; acceptance/evidence: covered_by_tests.**
 
-**Current requirement:** Current macOS arm64 CI/signing is delivered separately. Universal packaging is a distinct future consideration. Notarization and .p8 credentials are excluded for this round and do not block delivery.
+**Current requirement:** macOS arm64 and Universal packaging/signing are qualified; retain both delivery paths and exact artifact identity. New public publication and fleet installation remain separate. Notarization and .p8 credentials are excluded for this round.
 
 Preserved original ([TODO_MACOS_AGENT.md:297](../../docs/archive/2026-09-20/TODO_MACOS_AGENT.md#L297)): universal、公证与 CI release 尚未完成；当前 Developer ID 签名不能冒充已 notarize。
 
-The original combined checkbox is historical. Preserve signing evidence; split arm64 signing, Universal packaging and excluded notarization rather than treating all three as one current product gap.
+The original combined checkbox is historical. PR50 closes Universal implementation and signed hosted-artifact qualification; publication/installation and Intel hardware are separate. Existing arm64 evidence is preserved; notarization remains excluded.
 
 Existing reports: [H-MAC-SIGNING](#h-mac-signing).
 
-Remaining scope: Universal packaging priority/acceptance is separate. No notarization/.p8 task is required this round. No claim of current production deployment.
+Remaining scope: PR50 final review/normal CI and signed main39888741520 qualify actual final arm64/Rosetta slices. No Intel physical-hardware, new public release or production installation is claimed; notarization/.p8 remains excluded. See MACOS_UNIVERSAL and docs/branches.md.
 
 Source/test boundaries: [`.github/workflows/go-runtime.yml`](../../.github/workflows/go-runtime.yml), [`TODO_MACOS_AGENT.md`](../../TODO_MACOS_AGENT.md), [`agent/cellular-io/CMakeLists.txt`](../../agent/cellular-io/CMakeLists.txt), [`go-runtime/release/install-macos-agent.sh`](../../go-runtime/release/install-macos-agent.sh), [`go-runtime/release/install-windows-agent.ps1`](../../go-runtime/release/install-windows-agent.ps1).
 

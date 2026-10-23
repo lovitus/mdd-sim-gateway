@@ -528,9 +528,9 @@ jobs:
     uses: ./.github/workflows/review-liveness.yml
 
   release-linux-arm64-agent:
-    name: Build and verify Linux arm64 reader Agent
+    name: Build and verify Linux arm64 standalone Agent
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -543,13 +543,56 @@ jobs:
           go-version-file: go-runtime/go.mod
           cache-dependency-path: go-runtime/go.sum
 
-      - name: Install native PC/SC dependencies
+      - name: Install native Agent and managed-host dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential binutils pkg-config libpcsclite-dev pcscd
+          sudo apt-get install -y -qq build-essential binutils pkg-config libpcsclite-dev pcscd libccid \
+            libasound2-dev modemmanager nftables iproute2 kmod udev jq
           test "$(uname -m)" = aarch64
           test "$(go env GOOS)/$(go env GOARCH)" = linux/arm64
           pkg-config --exists libpcsclite
+
+      - name: Prepare exact running-kernel VHCI dependency without loading it
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-arm64-agent
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_ROOT"
+          {
+            kernel=$(uname -r)
+            printf 'kernel=%s\narchitecture=%s\nimage=%s/%s\n' "$kernel" "$(dpkg --print-architecture)" "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            if [ -r "/boot/config-$kernel" ]; then
+              grep -E 'CONFIG_USBIP|CONFIG_USB_VHCI' "/boot/config-$kernel" || printf 'USBIP/VHCI config entries absent\n'
+            else
+              printf 'Running-kernel config not readable\n'
+            fi
+            if [ -d /sys/module/vhci_hcd ]; then
+              printf 'VHCI already loaded; clean first-load qualification unavailable\n'
+              exit 1
+            fi
+            if sudo timeout 10 modprobe --dry-run --verbose vhci_hcd; then
+              printf 'initial_dry_run_exit=0\n'
+            else
+              result=$?
+              printf 'initial_dry_run_exit=%s\n' "$result"
+              package="linux-modules-extra-$kernel"
+              apt-cache policy "$package"
+              sudo apt-get --simulate --no-install-recommends install "$package" > "$BUILD_ROOT/kernel-package-plan.txt"
+              cat "$BUILD_ROOT/kernel-package-plan.txt"
+              awk -v allowed="$package" '$1 == "Inst" && $2 != allowed { exit 1 } $1 == "Remv" { exit 1 }' "$BUILD_ROOT/kernel-package-plan.txt"
+              sudo apt-get install -y --no-install-recommends "$package"
+              dpkg-query -W -f='${Package} ${Version} ${Architecture}\n' "$package"
+            fi
+            if sudo timeout 10 modprobe --dry-run --verbose vhci_hcd; then
+              printf 'final_dry_run_exit=0\n'
+            else
+              result=$?
+              printf 'final_dry_run_exit=%s\n' "$result"
+              exit "$result"
+            fi
+            test ! -d /sys/module/vhci_hcd
+            printf 'VHCI remains unloaded; actual load belongs to the original guard\n'
+          } 2>&1 | tee "$BUILD_ROOT/kernel-environment.txt"
 
       - name: Validate existing headless reader and control paths on ARM64
         working-directory: go-runtime
@@ -566,6 +609,7 @@ jobs:
           payload="$BUILD_ROOT/MDD-Agent-Linux-arm64"
           mkdir -p "$payload/THIRD-PARTY-LICENSES" "$BUILD_ROOT/tools"
           go -C go-runtime build -trimpath -o "$payload/mdd-agent" ./cmd/mdd-agent
+          go -C agent/call-audio-helper build -trimpath -o "$payload/mdd-call-audio-helper" .
           GOBIN="$BUILD_ROOT/tools" go install github.com/google/go-licenses/v2@v2.0.1
           (
             cd go-runtime
@@ -576,39 +620,45 @@ jobs:
               --ignore github.com/sagernet/sing-usbip \
               --save_path "$payload/THIRD-PARTY-LICENSES/go-cli"
           )
+          (
+            cd agent/call-audio-helper
+            "$BUILD_ROOT/tools/go-licenses" save . --ignore mdd-call-audio-helper \
+              --save_path "$payload/THIRD-PARTY-LICENSES/call-audio-helper"
+          )
           cp -R go-runtime/licenses "$payload/THIRD-PARTY-LICENSES/curated"
           cp LICENSE NOTICE THIRD_PARTY_LICENSES.md "$payload/"
           cp agent/MODEM_AGENT.md "$payload/"
-          cp go-runtime/release/mdd-agent.service "$payload/"
+          cp go-runtime/release/mdd-agent.service go-runtime/release/mdd-cellular-guard.service \
+            go-runtime/release/install-linux-agent.sh "$payload/"
+          chmod 0755 "$payload/install-linux-agent.sh"
           git archive --format=tar HEAD | gzip -n > "$payload/mdd-source.tar.gz"
-          readelf -h "$payload/mdd-agent" > "$payload/ELF.txt"
-          readelf -l "$payload/mdd-agent" >> "$payload/ELF.txt"
-          grep -Eq 'Machine: +AArch64' "$payload/ELF.txt"
-          ldd "$payload/mdd-agent" > "$payload/DYNAMIC-LIBRARIES.txt"
-          ! grep -Fq 'not found' "$payload/DYNAMIC-LIBRARIES.txt"
+          for binary in mdd-agent mdd-call-audio-helper; do
+            readelf -h "$payload/$binary" | grep -Eq 'Machine: +AArch64'
+            { printf '\n%s\n' "$binary"; readelf -h "$payload/$binary"; readelf -l "$payload/$binary"; } >> "$payload/ELF.txt"
+            ldd "$payload/$binary" >> "$payload/DYNAMIC-LIBRARIES.txt"
+          done
+          if grep -Fq 'not found' "$payload/DYNAMIC-LIBRARIES.txt"; then exit 1; fi
           {
             printf 'source_revision=%s\nsource_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
-            printf 'platform=linux/arm64\ncgo=1\nbuild_tags=none\nqualification=reader-only\n'
+            printf 'platform=linux/arm64\ncgo=1\nbuild_tags=none\nqualification=hosted-package-and-zero-device-guard\n'
             go version
             getconf GNU_LIBC_VERSION
             go version -m "$payload/mdd-agent"
+            go version -m "$payload/mdd-call-audio-helper"
           } > "$payload/BUILD.txt"
           printf '%s\n' \
-            'MDD Linux ARM64 headless Agent candidate, qualified for PC/SC readers only.' \
-            'Not a Core/Provider release. No installer, audio helper or cellular guard is included.' \
-            'Requires glibc 2.39 or newer, libpcsclite1, pcscd and a compatible reader driver (libccid).' \
-            'See MODEM_AGENT.md for manual deployment; modem and raw USB must remain disabled.' \
-            'The optional unit uses /usr/libexec/mdd/mdd-agent and /var/lib/mdd-agent/config.json.' \
+            'MDD Linux ARM64 headless standalone Agent. Not a Core/Provider release.' \
+            'Reader/cron remains supported without systemd, with modem/raw USB disabled.' \
+            'Managed native MM static IPv4 and serial AT/SIM require the original systemd/cgroup-v2 guard.' \
+            'Serial does not provide cellular data. DHCP/PPP/IPv6 and non-systemd managed modem are not supported.' \
+            'Requires glibc 2.39+, libpcsclite1, pcscd/libccid; audio uses libasound2.' \
+            'Managed hosts also require udev, nftables, iproute2, kmod/vhci_hcd, system bus and jq/binutils.' \
+            'See MODEM_AGENT.md: preflight, fresh placement, config setup, startup preflight, explicit start.' \
+            'No automatic upgrade, enable/start, switch change or adoption of existing server/Agent ownership.' \
+            'Hosted empty-device qualification does not establish physical modem/audio/data-isolation acceptance.' \
             'Use one supervisor only. Keep config/state private and retain them across upgrades.' \
             'Verify the archive checksum and SHA256SUMS before installation.' \
             > "$payload/README.txt"
-          smoke="$BUILD_ROOT/config-smoke.json"
-          "$payload/mdd-agent" config init --config "$smoke" > "$BUILD_ROOT/config-view.json"
-          jq -e '.ready == false and .settings.agent.modem_enabled == false and
-            (.settings.agent.raw_usb_source_enabled // false) == false and
-            (.settings.agent.raw_usb_importer_enabled // false) == false and
-            .settings.control.listen == "127.0.0.1:35964"' "$BUILD_ROOT/config-view.json"
-          test "$(stat -c %a "$smoke")" = 600
           (
             cd "$payload"
             find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > "$BUILD_ROOT/SHA256SUMS"
@@ -618,13 +668,44 @@ jobs:
           tar -C "$BUILD_ROOT" -czf "$BUILD_ROOT/MDD-Agent-Linux-arm64.tar.gz" MDD-Agent-Linux-arm64
           (cd "$BUILD_ROOT" && sha256sum MDD-Agent-Linux-arm64.tar.gz > MDD-Agent-Linux-arm64.tar.gz.sha256)
 
-      - name: Upload ARM64 reader Agent candidate
+      - name: Qualify final archive and real standalone managed entry
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-arm64-agent
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir "$BUILD_ROOT/old-reader"
+          gh release download v2.0.0 --repo "$GITHUB_REPOSITORY" --pattern MDD-Agent-Linux-arm64.tar.gz \
+            --pattern SHA256SUMS --dir "$BUILD_ROOT/old-reader"
+          (cd "$BUILD_ROOT/old-reader" && grep '  MDD-Agent-Linux-arm64.tar.gz$' SHA256SUMS | sha256sum --check --strict)
+          git fetch --no-tags --depth=1 origin 8ed90e75853348e91ef0e9777ab7b0b8a5811986 8dac8d79e8e6a91c6a38a2a4e0f68fa29dca0a29
+          git show 8ed90e75853348e91ef0e9777ab7b0b8a5811986:go-runtime/release/install-linux-agent.sh > "$BUILD_ROOT/old-installer.sh"
+          git show 8dac8d79e8e6a91c6a38a2a4e0f68fa29dca0a29:go-runtime/release/install-linux-agent.sh > "$BUILD_ROOT/old-scan-installer.sh"
+          sudo systemctl start ModemManager.service pcscd.socket
+          sudo env PATH="$PATH" GITHUB_ACTIONS=true RUNNER_ARCH=ARM64 \
+            node tools/test-linux-agent-install.mjs "$BUILD_ROOT/MDD-Agent-Linux-arm64.tar.gz" \
+            "$BUILD_ROOT/old-reader/MDD-Agent-Linux-arm64.tar.gz" "$BUILD_ROOT/install-e2e.json" \
+            "$BUILD_ROOT/old-installer.sh" "$BUILD_ROOT/old-scan-installer.sh"
+
+      - name: Upload ARM64 standalone Agent candidate
         uses: actions/upload-artifact@v7
         with:
           name: mdd-agent-linux-arm64-${{ github.sha }}
           path: |
             ${{ runner.temp }}/mdd-arm64-agent/MDD-Agent-Linux-arm64.tar.gz
             ${{ runner.temp }}/mdd-arm64-agent/MDD-Agent-Linux-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve ARM64 installation qualification
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-agent-linux-arm64-install-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/mdd-arm64-agent/install-e2e.json
+            ${{ runner.temp }}/mdd-arm64-agent/kernel-environment.txt
+            ${{ runner.temp }}/mdd-arm64-agent/kernel-package-plan.txt
           if-no-files-found: error
           retention-days: 14
 

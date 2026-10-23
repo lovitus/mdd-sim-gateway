@@ -1358,9 +1358,9 @@
         "line": 297
       },
       "requirement": "universal、公证与 CI release 尚未完成；当前 Developer ID 签名不能冒充已 notarize。",
-      "implementation": "partial",
-      "acceptance": "pending_product",
-      "rationale": "The original combined checkbox is historical. Preserve signing evidence; split arm64 signing, Universal packaging and excluded notarization rather than treating all three as one current product gap.",
+      "implementation": "implemented",
+      "acceptance": "covered_by_tests",
+      "rationale": "The original combined checkbox is historical. PR50 closes Universal implementation and signed hosted-artifact qualification; publication/installation and Intel hardware are separate. Existing arm64 evidence is preserved; notarization remains excluded.",
       "evidence": [
         ".github/workflows/go-runtime.yml",
         "TODO_MACOS_AGENT.md",
@@ -1371,16 +1371,17 @@
       "historicalEvidence": [
         "H-MAC-SIGNING"
       ],
-      "currentRequirement": "Current macOS arm64 CI/signing is delivered separately. Universal packaging is a distinct future consideration. Notarization and .p8 credentials are excluded for this round and do not block delivery.",
+      "currentRequirement": "macOS arm64 and Universal packaging/signing are qualified; retain both delivery paths and exact artifact identity. New public publication and fleet installation remain separate. Notarization and .p8 credentials are excluded for this round.",
       "decisionRefs": [
         "MACOS_RELEASE",
-        "EVIDENCE_CONTINUITY"
+        "EVIDENCE_CONTINUITY",
+        "COMPLETION_AND_AGENT_UX"
       ],
       "workstreamRefs": [
         "MACOS_UNIVERSAL",
         "MACOS_NOTARIZATION"
       ],
-      "remainingAcceptance": "Universal packaging priority/acceptance is separate. No notarization/.p8 task is required this round. No claim of current production deployment."
+      "remainingAcceptance": "PR50 final review/normal CI and signed main39888741520 qualify actual final arm64/Rosetta slices. No Intel physical-hardware, new public release or production installation is claimed; notarization/.p8 remains excluded. See MACOS_UNIVERSAL and docs/branches.md."
     },
     {
       "id": "MAC03",
@@ -1462,6 +1463,14 @@
         "decisionRefs": ["EMBEDDED_MANUAL_DEPLOYMENT"],
         "evidence": ["DEPLOYMENT.md", "agent/MODEM_AGENT.md"]
       }
+    },
+    {
+      "id": "LINUX_ARM64_MANAGED_DELIVERY",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Owner-authorized successor review approved the existing Linux ARM64 managed Agent packaging and standalone first-install batch. Add the pinned audio helper, original guard unit, complete provenance/licenses and create-only placement/pure preflight. Preserve MM static IPv4, serial AT/SIM without data, config/pin/state ownership, user switches and reader/cron compatibility; do not change Core/runtime or adopt an existing service.",
+      "acceptance": "Implementation and native hosted final-tar E2E are prepared but not yet built or qualified. Required evidence includes real ALSA enumeration, default/explicit private config, ownership and incomplete-package refusals, old published package missing-helper failure, and actual empty-host original-unit/guard/cgroup execution. A missing hosted prerequisite is not a skipped pass. No production/publication or physical ARM modem/audio/traffic acceptance is claimed; DHCP/PPP/IPv6 and non-systemd managed modem remain actual implementation gaps.",
+      "evidence": ["agent/MODEM_AGENT.md", "DEVELOPMENT.md", "docs/branches.md", ".github/workflows/go-runtime.yml", "go-runtime/release/install-linux-agent.sh", "tools/test-linux-agent-install.mjs"]
     },
     {
       "id": "AGENT_FIRST_RUN_SETUP",
@@ -1569,11 +1578,16 @@
     },
     {
       "id": "ESIM_READER_LOCATION",
-      "state": "needs_verification",
+      "state": "completed",
       "releaseRelevance": "current",
       "summary": "WebUI-only relocation correction: current attachments are separated from read-only reader/profile snapshots, which are not live ownership. ICCID association only navigates SIM locations; no chip inventory/capability transfer and no historical attachment stops the live line. Existing EID-scoped deletion recovery/replay and download-job cancellation remain independently managed operations, not read-only snapshots; the history notice explicitly distinguishes their side effects.",
-      "acceptance": "Pinned read-only diagnosis confirms current Android SIM location and cached profiles on an old desktop observation; Android eUICC management is not implemented or added here. Hosted37916088950/ca59961 reproduced the old rendered-page grouping assertion and passed the fix, but failed stale embedded assets. Its generated UI is included in fb7dd44, whose full Go37917549682 and Android37917541611 passed. Tags archive/2026-10-09/esim-location-proof and line-visibility-qualified preserve sources. PR25 final0f491e5 passed three-party review and Go37921805744, merged0fc0ba1; its UI is included in the later Core deployments recorded in DEPLOYMENT.md, beginning PR26. Review/merge/rollout are no longer pending. A fresh production-browser relocation journey for this exact change remains unverified; later unrelated page checks do not supply that evidence. No card operation or cache-to-capability promotion.",
-      "evidence": ["webui/src/mdd/UPSTREAM.md", "webui/src/mdd/views/Esim.jsx", "webui/tests/esimRelocation.mjs"]
+      "acceptance": "PR25 final0f491e5 passed three-party review and Go37921805744, merged0fc0ba1 and reached subsequent Core deployments. Earlier grouping counterexample37916088950/ca59961 and corrected embed qualification37917549682/37917541611 remain preserved at archive/2026-10-09/esim-location-proof and line-visibility-qualified. October23 actual production Chrome on Cored3ebc022 verified online/history grouping, read-only historical state and timestamp, same-SIM navigation from historical Android attachment to current ARM reader, and explicit absence of current eUICC management facts without cache promotion. A separate populated historical desktop snapshot showed disabled profile mutation controls and no live-line Stop action. No card Read, mutation, replay, Stop or paid operation occurred. This accepts the WebUI location/history journey, not a newly performed physical move, hardware eUICC operations or ESIM_OPERATION_OWNERSHIP recovery. Redacted receipt and private-evidence hashes are in DEPLOYMENT.md.",
+      "evidence": ["webui/src/mdd/UPSTREAM.md", "webui/src/mdd/views/Esim.jsx", "webui/tests/esimRelocation.mjs", "DEPLOYMENT.md"],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Reviewed and deployed PR25 now has the previously missing real production-browser history/current-location and populated-cache read-only acceptance. Independent EID operations and hardware recovery remain separately unverified.",
+        "evidence": ["DEPLOYMENT.md", "webui/tests/esimRelocation.mjs"]
+      }
     },
     {
       "id": "INBOUND_HOLD_CONTINUITY",
@@ -2099,10 +2113,10 @@
     },
     {
       "id": "MACOS_UNIVERSAL",
-      "state": "needs_verification",
+      "state": "completed",
       "releaseRelevance": "current",
-      "summary": "October22 completion goal and original plan review d84e2d8f authorize a separate Universal package batch. Explicit thin targets, six-file combination/signature verification, pre-stop installer architecture checks and exact download-set wiring are implemented as a candidate. Existing arm64 packaging and runtime behavior remain; notarization stays excluded.",
-      "acceptance": "Source03f5c77/treecaba776c passed original reviewdab83c6f and full Go39885181111. Archive/2026-10-23/macos-universal-qualified retains real old-publisher/installer counterexamples; artifact12471909254 records both final slices, exact no-hardware exits and pre-cutover rejections. Checkout687ffc8f shares the tree; prepare-only index12472902057 includes Universal. Temporary proof removed, permanent E2E retained. Final cleanup/normal CI and Developer ID artifact qualification remain; public release and fleet installation are separate. Intel execution is Rosetta, not physical hardware. Preserve prior arm64 evidence and existing v2.0.0 tags/assets.",
+      "summary": "PR50 implements and qualifies Universal packaging: explicit thin targets, six-file combination/signature verification, pre-stop installer architecture checks and exact download-set wiring. Original reviewer accepted the merged signed artifacts. Existing arm64 packaging and runtime behavior remain; public publication and installation are separate, notarization excluded.",
+      "acceptance": "Final5180618 passed original review, normal Go39886954243 and Android39886954195; merge42976962 shares tree4d7f0ffc. Main39888741520 passed all ten jobs and produced original-Team Developer ID arm64/Universal packages with matching source/tree, index hashes and E2E manifests. Final native arm64 and Rosetta x86_64 slices passed CLI/App configuration entries, audio-helper help, cellular-helper argument rejections and pre-cutover incomplete-package refusal. Original final receipt2ac1684a accepted this qualification. Archive/2026-10-23/macos-universal-qualified retains real old-publisher/installer counterexamples and failures; macos-universal-delivery preserves final source. PR50 receipt6356021902 records exact artifacts and hashes. No new public Release, production installation, notarization, Intel physical-hardware or paid acceptance; existing v2.0.0 tags/assets unchanged.",
       "evidence": [
         "DEVELOPMENT.md",
         ".github/workflows/go-runtime.yml",
@@ -2110,9 +2124,16 @@
         "go-runtime/release/install-macos-agent.sh",
         "tools/macos-package.mjs",
         "tools/test-macos-universal.mjs",
-        "tools/publish-release.mjs"
+        "tools/publish-release.mjs",
+        "docs/branches.md"
       ],
-      "decisionRefs": ["COMPLETION_AND_AGENT_UX"]
+      "decisionRefs": ["COMPLETION_AND_AGENT_UX"],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Original final review, normal CI, same-tree merge and signed main-artifact qualification close the packaging batch. This is not public publication, fleet installation or Intel physical-hardware acceptance.",
+        "decisionRefs": ["COMPLETION_AND_AGENT_UX"],
+        "evidence": ["docs/branches.md", "tools/test-macos-universal.mjs"]
+      }
     }
   ],
   "decisions": [
@@ -2276,7 +2297,7 @@
       "id": "MACOS_UNIVERSAL",
       "disposition": "required",
       "decision": "COMPLETION_AND_AGENT_UX",
-      "summary": "Separate Universal packaging batch under the October22 completion goal; no notarization or implied Intel hardware acceptance. Existing arm64 delivery is preserved."
+      "summary": "PR50 closes Universal implementation and signed hosted-artifact qualification; new publication/installation and Intel hardware remain separate, notarization excluded. Existing arm64 delivery is preserved."
     }
   ],
   "evidenceRecords": [
