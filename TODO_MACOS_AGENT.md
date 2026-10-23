@@ -15,11 +15,11 @@ All 59 original general criteria and four macOS criteria remain preserved. Curre
 | ENABLED_4G | required | Enabling 4G requires fail-closed isolation on Windows/macOS/Linux; no host sharing, default-route fallback or user-switch override. Further desktop qualification is deferred from this Android PR, not a waiver of isolation. |
 | ANDROID | accepted | Native Android preview and subsequent client corrections are merged and installed under the owner's reviewed-rollout authorization. Current artifact/version evidence is in FLEET_MAIN_ALIGNMENT and DEPLOYMENT.md, not the superseded PR7 draft. Scoped acceptance remains separate from all-carrier/hardware and endurance qualification. |
 | MACOS_NOTARIZATION | excluded | No notarization and no .p8 credentials in this round; existing signing remains required. |
-| MACOS_UNIVERSAL | required | Separate Universal packaging batch under the October22 completion goal; no notarization or implied Intel hardware acceptance. Existing arm64 delivery is preserved. |
+| MACOS_UNIVERSAL | required | PR50 closes Universal implementation and signed hosted-artifact qualification; new publication/installation and Intel hardware remain separate, notarization excluded. Existing arm64 delivery is preserved. |
 
 | Criterion | Implementation | Acceptance / evidence | Current requirement (original preserved in detail) |
 |---|---|---|---|
 | [MAC01](docs/status/README.md#mac01) | implemented | evidence_review_pending | 复用现有 SMS/Call 领域合约已验证列表与状态读取；本轮未重复发送收费短信、未拨号，也未重做   来电接听，因此发送/接收/通话端到端保持待人工授权验收。任何 unknown 均不自动重试。 |
-| [MAC02](docs/status/README.md#mac02) | partial | pending_product | Current macOS arm64 CI/signing is delivered separately. Universal packaging is a distinct future consideration. Notarization and .p8 credentials are excluded for this round and do not block delivery. |
+| [MAC02](docs/status/README.md#mac02) | implemented | covered_by_tests | macOS arm64 and Universal packaging/signing are qualified; retain both delivery paths and exact artifact identity. New public publication and fleet installation remain separate. Notarization and .p8 credentials are excluded for this round. |
 | [MAC03](docs/status/README.md#mac03) | needs_verification | pending_hardware | runtime snapshot、配置、控制 session、数据 backend 与设备列表已由单数 `modem` 改为按   `ModemInstanceIdentity` 索引的集合；至少 2 个 Modem 同时在线，分别插拔、换卡、断线和恢复时   互不影响仍缺第二台物理 Modem 验证。首个 PoC 的单 Modem 限制不得泄漏进公共领域合约。 |
 | [MAC04](docs/status/README.md#mac04) | needs_verification | pending_hardware | 至少当前 EC20+多 PC/SC Mac 与另一品牌/协议 Modem 交叉验证；没有第二种硬件时只能标注已验   型号，不宣称通用 4G/5G 数据已完成，也不能把“可实例化”写成“多 Modem 已验收”。 |

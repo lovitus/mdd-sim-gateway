@@ -8,6 +8,40 @@ Docker, Python Control, VPCD and Asterisk are retired; they are not local develo
 
 ## Toolchain and native dependencies
 
+### Linux ARM64 standalone delivery
+
+The owner-authorized successor fixed reviewer approved `LINUX_AGENT_PLAN_4297696`
+at main42976962. Complete the existing Agent package with its pinned malgo0.11.26
+helper, original guard/Agent units, source/license inventory and fresh standalone
+placement. Reuse the existing MM staticIPv4 and serial AT/SIM paths; serial has
+no data backend. Do not modify Core, the full-server updater, runtime identity,
+policy, guard or reader/cron contracts. No dependency upgrade is needed.
+
+Failure checklist: missing helper discovered after guard mutation; helper -h
+mistaken for ALSA initialization; foreign/Core/unit/drop-in ownership overwritten;
+preflight succeeds but a target changes before install; config ready:false treated
+as valid; explicit config loses adjacent state or violates the original sandbox;
+new placement auto-starts hardware; a hosted kernel prerequisite is skipped as
+passed; zero-device readiness mistaken for physical modem/audio/no-leak acceptance.
+
+Native ARM64 hosted qualification must extract the final tar independently, use
+the real CLI/helper/installer, validate default and explicit config paths and
+refusals, and explicitly start the original unit on an empty disposable host to
+observe guard persistence, VHCI authorization and fixed cgroup. Missing hosted
+prerequisites fail qualification. Candidate a891f5d / Go39907297621 passed the
+complete final-tar journey, including actual old-package/installer counterexamples,
+original guard loading and hosted ancestor-permission restoration. The exact
+proof is retained at archive/2026-10-23/linux-agent-qualified; temporary old-source
+dependencies are removed from normal CI, not the current behavior assertions.
+No local tests/builds or production probes. Final cleanup CI/review and public
+delivery remain separate; physical hardware and unsupported bearer paths remain
+unqualified. Exact evidence is recorded in docs/branches.md.
+
+References: [ModemManager IP connectivity](https://modemmanager.org/docs/modemmanager/ip-connectivity-setup/),
+[malgo0.11.26](https://github.com/gen2brain/malgo/tree/v0.11.26),
+[systemd execution sandbox](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html),
+[USB authorization](https://docs.kernel.org/usb/authorization.html).
+
 ### October 22 completion goal
 
 The owner requests completion of the remaining implementation and as much missing
@@ -110,9 +144,12 @@ It checks unchanged inputs/config and installer refusal before deployment state.
 Intel execution is Rosetta, not Intel hardware acceptance. Qualified03f5c77 /
 Go39885181111 proves the old publisher's missing-Universal assertion and the old
 installer's acceptance of an incomplete helper; evidence/tag are in docs/branches.md.
-Temporary proof is removed; no local tests run. Final normal CI, signed artifact
-qualification, publication and installation remain
-separate. Do not change existing v2.0.0 tags/assets or repeat paid/deferred tests.
+Temporary proof is removed; no local tests run. Final5180618 passed original
+review, Go39886954243 and Android39886954195; merge42976962 shares tree4d7f0ffc.
+Main39888741520 qualified original-Team signed packages and both final slices;
+original final review2ac1684a accepted the exact artifacts (PR50 receipt6356021902).
+Publication, installation and Intel physical-hardware acceptance remain separate.
+Do not change existing v2.0.0 tags/assets or repeat paid/deferred tests.
 
 References: [Apple Universal binaries](https://developer.apple.com/documentation/apple-silicon/building-a-universal-macos-binary),
 [pinned Fyne builder](https://github.com/fyne-io/tools/blob/v1.7.2/cmd/fyne/internal/commands/build.go),
