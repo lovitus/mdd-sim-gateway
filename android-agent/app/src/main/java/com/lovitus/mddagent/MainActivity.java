@@ -28,7 +28,7 @@ public final class MainActivity extends Activity {
     private AgentService service;private boolean bound,resumed,renderedAudioControls;private LinearLayout page,content,callBox,primaryBar;private TextView status,notice,pageTitle;private BottomNavigationView navigation;private RemoteCall renderedCall;
     private String focusIncoming="";private int tab;private EditText server,pin,username,password,number,message;private Spinner lineChoice;private MaterialButtonToggleGroup routeChoice;
     private TextView readerSummary,directoryStatus;private LinearLayout readerItems,usbPermissions;private String usbPermissionState="",readerItemsState="";private Button sharingButton;private TextView capability;private JSONObject lastData;private LinearLayout messageList,messageOperations;private String messageOperationView="";private JSONObject pinnedLine;private long historyEpoch,historyAccountEpoch;private AlertDialog activeHistoryDialog;
-    private TextView homeConnection,homeAvailability,homeReaders,homeLines,homeActivity,homeUsbState,readerUsbState;private LinearLayout homeEvents;private long homeEventsRevision=-1;
+    private TextView homeConnection,homeAvailability,homeReaders,homeLines,homeDirectoryNotice,homeActivity,homeUsbState,readerUsbState;private LinearLayout homeEvents;private long homeEventsRevision=-1;
     private com.google.android.material.materialswitch.MaterialSwitch homeAvailable;
     private boolean updatingAvailability,composingMessage;
     private TextView inboxStatus;private LinearLayout inboxItems;private EditText inboxSearch;
@@ -167,7 +167,7 @@ public final class MainActivity extends Activity {
     private void confirm(String message,Runnable action){new AlertDialog.Builder(this).setMessage(message).setPositiveButton(R.string.confirm,(d,w)->{try{action.run();}catch(Exception e){error(e.getMessage());}}).setNegativeButton(R.string.cancel,null).show();}
     private void startAvailability(){if(savedConfig.optString("token").isEmpty()){tab=0;render();return;}startForegroundService(new Intent(this,AgentService.class).setAction(AgentService.START));}
     private void render(){if(content==null)return;captureDraft();captureLoginDraft();content.removeAllViews();primaryBar.removeAllViews();primaryBar.setVisibility(View.GONE);callSurfaceKey="";callBox.removeAllViews();callAudioDetails=null;messageList=null;messageOperations=null;messageOperationView="";readerSummary=null;readerItems=null;usbPermissions=null;usbPermissionState="";readerItemsState="";sharingButton=null;capability=null;directoryStatus=null;homeConnection=homeAvailability=homeReaders=homeLines=homeActivity=null;homeEvents=null;homeEventsRevision=-1;number=message=null;lineChoice=null;routeChoice=null;server=pin=username=password=null;rememberLogin=null;draftStatus=null;
-        homeUsbState=readerUsbState=null;homeAvailable=null;inboxStatus=null;inboxItems=null;inboxSearch=null;inboxVersion++;inboxLoading=false;inboxSnapshotKey="";
+        homeDirectoryNotice=homeUsbState=readerUsbState=null;homeAvailable=null;inboxStatus=null;inboxItems=null;inboxSearch=null;inboxVersion++;inboxLoading=false;inboxSnapshotKey="";
         if(renderedTab!=tab){renderedTab=tab;contentScroll.scrollTo(0,0);}
         int[] titles={R.string.home,R.string.calls,R.string.messages,R.string.readers,R.string.settings};int[] tabs={R.id.tab_home,R.id.tab_calls,R.id.tab_messages,R.id.tab_readers,R.id.tab_settings};pageTitle.setText("MDD · "+getString(titles[tab]));pageTitle.setContentDescription("page:"+new String[]{"home","calls","messages","readers","settings"}[tab]);navigation.getMenu().findItem(tabs[tab]).setChecked(true);
         if(!storageLoaded||resettingStorage){label(getString(R.string.reading_settings));return;}if(!storageError.isEmpty()){label(storageError);button(content,getString(R.string.storage_retry),this::reloadStorage);button(content,getString(R.string.storage_reset),this::requestStorageReset).setId(R.id.storage_reset);if(service!=null&&service.call!=null)button(content,getString(R.string.end_known_call),service::hangup);return;}
@@ -185,16 +185,38 @@ public final class MainActivity extends Activity {
         Button certificate=button(content,getString(R.string.certificate_options),()->{captureLoginDraft();certificateExpanded=!certificateExpanded;render();});certificate.setId(R.id.certificate_options);
         pin=input(R.string.fingerprint,false);pin.setText(loginProfile.manualPin);content.getChildAt(content.getChildCount()-1).setVisibility(certificateExpanded?View.VISIBLE:View.GONE);
         watchLogin(server,true);watchLogin(username,true);watchLogin(password,false);watchLogin(pin,false);
-        rememberLogin.setOnCheckedChangeListener((button,checked)->{captureLoginDraft();loginVersion++;persistLoginDraft();});
+        rememberLogin.setOnCheckedChangeListener((button,checked)->{captureLoginDraft();loginVersion++;draftStatus.setText("");draftStatus.setTextColor(UiLabels.NEUTRAL);persistLoginDraft();});
         Button connect=button(R.string.connect,()->login());connect.setId(R.id.connect_gateway);setLoginBusy(loginBusy);
         button(R.string.scan,()->new IntentIntegrator(this).setDesiredBarcodeFormats(IntentIntegrator.QR_CODE).setBeepEnabled(false).setPrompt(getString(R.string.setup_title)).initiateScan());
         button(R.string.import_setup,()->{EditText v=new EditText(this);v.setHint("{\"type\":\"mdd-agent-setup\",…}");new AlertDialog.Builder(this).setTitle(R.string.import_setup).setView(v).setPositiveButton(R.string.confirm,(d,w)->importSetup(v.getText().toString())).setNegativeButton(R.string.cancel,null).show();});
         button(R.string.help,()->error(getString(R.string.help_text)));}
     private void captureLoginDraft(){if(loginProfile==null||loginProfile.storageEpoch!=ConfigStore.currentEpoch()||server==null)return;loginProfile.address=server.getText().toString();loginProfile.username=username.getText().toString();loginProfile.password=password.getText().toString();loginProfile.manualPin=pin.getText().toString();loginProfile.remember=rememberLogin.isChecked();}
-    private void watchLogin(EditText field,boolean identity){field.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){if(identity){password.setText("");if(field==server){pin.setText("");loginProfile.enrollmentOrigin=loginProfile.agentID=loginProfile.agentToken="";}}captureLoginDraft();loginVersion++;draftHandler.removeCallbacks(saveDraft);draftHandler.postDelayed(saveDraft,350);}public void afterTextChanged(android.text.Editable value){}});}
+    private void watchLogin(EditText field,boolean identity){field.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){if(identity){password.setText("");if(field==server){pin.setText("");loginProfile.enrollmentOrigin=loginProfile.agentID=loginProfile.agentToken="";}}captureLoginDraft();loginVersion++;draftStatus.setText("");draftStatus.setTextColor(UiLabels.NEUTRAL);draftHandler.removeCallbacks(saveDraft);draftHandler.postDelayed(saveDraft,350);}public void afterTextChanged(android.text.Editable value){}});}
     private void persistLoginDraft(){persistLoginDraft(null);}
-    private void persistLoginDraft(Runnable success){draftHandler.removeCallbacks(saveDraft);if(resettingStorage||loginProfile==null||loginProfile.storageEpoch!=ConfigStore.currentEpoch()||!storageError.isEmpty())return;final JSONObject draft=loginProfile.persisted();final long version=loginVersion,epoch=loginProfile.storageEpoch;
-        ConfigStore.intent(()->{try{new ConfigStore(this).update(current->{if(epoch!=ConfigStore.currentEpoch())throw new IllegalStateException("Login draft owner changed");current.put("login_profile",draft);});runOnUiThread(()->{if(isDestroyed()||version!=loginVersion||epoch!=ConfigStore.currentEpoch())return;if(draftStatus!=null)draftStatus.setText(draft.optBoolean("remember")?R.string.login_saved:R.string.password_not_saved);if(success!=null)success.run();});}catch(Exception failure){runOnUiThread(()->{if(isDestroyed()||version!=loginVersion||epoch!=ConfigStore.currentEpoch())return;if(draftStatus!=null)draftStatus.setText(R.string.login_save_failed);else error(getString(R.string.login_save_failed));});}});
+    private void persistLoginDraft(Runnable success){
+        draftHandler.removeCallbacks(saveDraft);
+        if(resettingStorage||loginProfile==null||loginProfile.storageEpoch!=ConfigStore.currentEpoch()||!storageError.isEmpty())return;
+        final JSONObject draft=loginProfile.persisted();final long version=loginVersion,epoch=loginProfile.storageEpoch;
+        ConfigStore.intent(()->{
+            try{
+                new ConfigStore(this).update(current->{if(epoch!=ConfigStore.currentEpoch())throw new IllegalStateException("Login draft owner changed");current.put("login_profile",draft);});
+                runOnUiThread(()->{
+                    if(isDestroyed()||version!=loginVersion||epoch!=ConfigStore.currentEpoch())return;
+                    if(draftStatus!=null){
+                        boolean remembered=draft.optBoolean("remember");
+                        draftStatus.setText(remembered?R.string.login_saved:R.string.password_not_saved);
+                        draftStatus.setTextColor(remembered?UiLabels.OK:UiLabels.NEUTRAL);
+                    }
+                    if(success!=null)success.run();
+                });
+            }catch(Exception failure){
+                runOnUiThread(()->{
+                    if(isDestroyed()||version!=loginVersion||epoch!=ConfigStore.currentEpoch())return;
+                    if(draftStatus!=null){draftStatus.setText(R.string.login_save_failed);draftStatus.setTextColor(UiLabels.ERROR);}
+                    else error(getString(R.string.login_save_failed));
+                });
+            }
+        });
     }
     private void setLoginBusy(boolean busy){loginBusy=busy;for(EditText field:new EditText[]{server,username,password,pin})if(field!=null)field.setEnabled(!busy);if(rememberLogin!=null)rememberLogin.setEnabled(!busy);Button connect=findViewById(R.id.connect_gateway);if(connect!=null){connect.setEnabled(!busy);connect.setText(busy?R.string.connecting:R.string.connect);}}
     private boolean currentLogin(long version){return !isDestroyed()&&!isFinishing()&&loginBusy&&loginVersion==version&&loginProfile!=null&&loginProfile.storageEpoch==ConfigStore.currentEpoch();}
@@ -245,6 +267,7 @@ public final class MainActivity extends Activity {
         homeAvailable.setOnCheckedChangeListener((v,checked)->{if(updatingAvailability||service==null)return;if(checked){requestNotification();startAvailability();}else service.pause();updateHomePage();});
         homeAvailability=text("",12);homeAvailability.setId(R.id.home_availability_state);content.addView(homeAvailability);
         section(R.string.home_communications);homeLines=text("",14);homeLines.setId(R.id.home_line_state);content.addView(homeLines);
+        homeDirectoryNotice=text("",13);homeDirectoryNotice.setId(R.id.home_directory_notice);homeDirectoryNotice.setTextColor(UiLabels.WARNING);homeDirectoryNotice.setVisibility(View.GONE);content.addView(homeDirectoryNotice);
         LinearLayout lineActions=new LinearLayout(this);lineActions.setOrientation(LinearLayout.HORIZONTAL);content.addView(lineActions);
         MaterialButton calls=(MaterialButton)button(lineActions,getString(R.string.calls),()->openTab(1));calls.setId(R.id.home_open_calls);calls.setIconResource(R.drawable.ic_mdd_call);
         MaterialButton messages=(MaterialButton)button(lineActions,getString(R.string.messages),()->openTab(2));messages.setId(R.id.home_open_messages);messages.setIconResource(R.drawable.ic_mdd_message);
@@ -262,7 +285,12 @@ public final class MainActivity extends Activity {
         if(homeConnection==null)return;
         updateUsbReaderStatus(homeUsbState);
         if(homeAvailable!=null){updatingAvailability=true;homeAvailable.setChecked(service!=null&&service.available());homeAvailable.setEnabled(service!=null&&!service.intentSaving());updatingAvailability=false;}
-        if(service==null){homeConnection.setText(R.string.local_service_connecting);homeAvailability.setText(R.string.not_available);homeReaders.setText(R.string.not_available);homeLines.setText(R.string.not_available);homeActivity.setText(R.string.not_available);updateHomeEvents();return;}
+        if(service==null){
+            homeConnection.setText(R.string.local_service_connecting);homeConnection.setTextColor(UiLabels.NEUTRAL);
+            for(TextView view:new TextView[]{homeAvailability,homeReaders,homeLines,homeActivity}){view.setText(R.string.not_available);view.setTextColor(UiLabels.NEUTRAL);}
+            homeDirectoryNotice.setText("");homeDirectoryNotice.setTextColor(UiLabels.WARNING);homeDirectoryNotice.setVisibility(View.GONE);
+            updateHomeEvents();return;
+        }
         homeConnection.setText(service.connection.render(this));
         homeConnection.setTextColor(UiLabels.statusColor(service.connection));
         homeAvailability.setText(getString(R.string.home_availability_status,getString(service.available()?R.string.availability_on:R.string.paused)));
@@ -279,9 +307,12 @@ public final class MainActivity extends Activity {
         }
         homeLines.setText(getString(R.string.home_ready_lines,calls,sms,lines.length()));
         homeLines.setTextColor(!service.online()||calls+sms==0?UiLabels.WARNING:UiLabels.OK);
-        if(!service.online())homeLines.append("\n"+getString(service.connection.resource==R.string.link_upgrade?R.string.core_mobile_endpoint_required:R.string.directory_offline));
-        else if(lines.length()==0)homeLines.append("\n"+getString(R.string.directory_empty));
-        if(service.snapshot.optBoolean("incomplete"))homeLines.append("\n"+getString(R.string.status_partial));
+        String directoryNote="";
+        if(!service.online())directoryNote=getString(service.connection.resource==R.string.link_upgrade?R.string.core_mobile_endpoint_required:R.string.directory_offline);
+        else if(lines.length()==0)directoryNote=getString(R.string.directory_empty);
+        if(service.snapshot.optBoolean("incomplete"))directoryNote+=(directoryNote.isEmpty()?"":"\n")+getString(R.string.status_partial);
+        homeDirectoryNotice.setText(directoryNote);homeDirectoryNotice.setTextColor(UiLabels.WARNING);
+        homeDirectoryNotice.setVisibility(directoryNote.isEmpty()?View.GONE:View.VISIBLE);
         JSONObject privateState=service.config();JSONArray operations=Json.array(privateState,"message_operations");int unresolved=0;
         for(int i=0;i<operations.length();i++){JSONObject row=operations.optJSONObject(i);if(row!=null&&!MessageJournal.resolved(row))unresolved++;}
         String call=service.call==null?getString(R.string.call_recovery_none):service.call.state.render(this);
@@ -610,6 +641,7 @@ public final class MainActivity extends Activity {
                 }).setNegativeButton(R.string.cancel,null).create();
             list.setOnItemClickListener((parent,view,index,id)->{selected[0]=index;dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);});
             dialog.show();dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(selected[0]>=0);
+            if(selected[0]>=0)list.setSelection(selected[0]);
         },this::error);
     }
     private void prepareReply(AgentService owner,long account,String id,String card,String mode,String target){

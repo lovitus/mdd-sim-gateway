@@ -53,6 +53,77 @@ public class CommunicationUxTest {
         }
     }
 
+    @Test public void homeSeparatesPartialObservationAndClearsStalePresentation()throws Exception{
+        try(Fixture fixture=new Fixture(true,0,false);ActivityScenario<MainActivity> scene=fixture.launch()){
+            await(scene,a->contains(a.getWindow().getDecorView(),context.getString(R.string.status_partial)));
+            saveScreen("home-partial");
+            scene.onActivity(a->{
+                TextView counts=a.findViewById(R.id.home_line_state),warning=a.findViewById(R.id.home_directory_notice);
+                // Old source puts both messages in counts; reach its actual misleading color.
+                TextView displayedWarning=warning==null?counts:warning;
+                assertTrue(displayedWarning.getText().toString().contains(context.getString(R.string.status_partial)));
+                assertEquals("[UX-HOME-PARTIAL] Partial observation must not inherit ready green",UiLabels.WARNING,displayedWarning.getCurrentTextColor());
+                assertEquals(context.getString(R.string.home_ready_lines,1,1,1),counts.getText().toString());
+                assertEquals(UiLabels.OK,counts.getCurrentTextColor());
+                assertNotSame(counts,warning);
+            });
+            AtomicReference<ServiceConnection> binding=new AtomicReference<>();
+            scene.onActivity(a->{try{
+                java.lang.reflect.Field field=MainActivity.class.getDeclaredField("binding");field.setAccessible(true);binding.set((ServiceConnection)field.get(a));
+                // Exercise the existing Activity callback, not physical Service/USB recovery.
+                binding.get().onServiceDisconnected(new ComponentName(context,AgentService.class));
+                for(int id:new int[]{R.id.home_connection_state,R.id.home_availability_state,R.id.home_reader_state,R.id.home_line_state,R.id.home_activity_state})
+                    assertEquals("Unavailable service must clear previous readiness color",UiLabels.NEUTRAL,((TextView)a.findViewById(id)).getCurrentTextColor());
+                assertEquals(View.GONE,a.findViewById(R.id.home_directory_notice).getVisibility());
+            }catch(ReflectiveOperationException e){throw new AssertionError(e);}});
+            saveScreen("home-service-unavailable");
+            scene.onActivity(a->binding.get().onServiceConnected(new ComponentName(context,AgentService.class),fixture.service.onBind(new Intent())));
+            fixture.sendSnapshot(false);
+            await(scene,a->!fixture.service.snapshot.optBoolean("incomplete")&&a.findViewById(R.id.home_directory_notice)!=null&&a.findViewById(R.id.home_directory_notice).getVisibility()==View.GONE);
+            scene.onActivity(a->{
+                assertEquals("",((TextView)a.findViewById(R.id.home_directory_notice)).getText().toString());
+                assertEquals(UiLabels.OK,((TextView)a.findViewById(R.id.home_line_state)).getCurrentTextColor());
+            });
+            fixture.assertOnlyMutations();
+        }
+    }
+
+    @Test public void longReplyDirectoryShowsProvenCardWithoutChangingUserChoice()throws Exception{
+        try(Fixture fixture=new Fixture(false,24,false);ActivityScenario<MainActivity> scene=fixture.launch()){
+            scene.onActivity(a->a.findViewById(R.id.tab_messages).performClick());
+            clickText("Archived preview");waitText("first history page");
+            clickText(context.getString(R.string.message_reply));waitText(context.getString(R.string.message_reply_choose));
+            AccessibilityNodeInfo list=waitNode(context.getPackageName()+":id/reply_line_list",true);
+            AccessibilityNodeInfo checked=visibleChecked(list);
+            assertNotNull("[UX-REPLY-VISIBLE] Proven original card must be visible without scrolling the test",checked);
+            assertTrue(checked.getText().toString().contains("Server SIM"));
+            assertEquals("Directory order is unchanged",24,checked.getCollectionItemInfo().getRowIndex());
+            // API35 ListView reports unknown collection dimensions; use its actual end position.
+            assertFalse("Original row24 is the final row",list.getActionList().contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD));
+            saveScreen("reply-original-visible");
+            AtomicBoolean refreshed=new AtomicBoolean();
+            Runnable afterActivity=()->{if(fixture.service.snapshot.optBoolean("incomplete"))refreshed.set(true);};
+            scene.onActivity(a->fixture.service.addListener(afterActivity));
+            try{
+                clickText("Alternative 23");fixture.sendSnapshot(true);
+                // Registered after the Activity listener: the distinct snapshot and UI update ran.
+                await(scene,a->refreshed.get());
+                list=waitNode(context.getPackageName()+":id/reply_line_list",true);checked=visibleChecked(list);
+                assertNotNull(checked);assertTrue("A later user choice must not be restored to the original card",checked.getText().toString().contains("Alternative 23"));
+            }finally{scene.onActivity(a->fixture.service.removeListener(afterActivity));}
+            dialog(false);fixture.assertOnlyMutations();
+        }
+        try(Fixture fixture=new Fixture(false,24,true);ActivityScenario<MainActivity> scene=fixture.launch()){
+            scene.onActivity(a->a.findViewById(R.id.tab_messages).performClick());
+            clickText("Archived preview");waitText("first history page");
+            clickText(context.getString(R.string.message_reply));waitText(context.getString(R.string.reply_current_card_warning));
+            AccessibilityNodeInfo list=waitNode(context.getPackageName()+":id/reply_line_list",true);
+            assertFalse("Unknown historical identity must not select row zero",hasChecked(list));
+            assertFalse(waitNode("android:id/button1",true).isEnabled());
+            dialog(false);fixture.assertOnlyMutations();
+        }
+    }
+
     @Test public void lineAvailabilitySummaryAndFullTextFollowCallAndSmsStates(){
         InstrumentationRegistry.getInstrumentation().runOnMainSync(()->{
             LineStatusView row=new LineStatusView(context);
@@ -215,21 +286,27 @@ public class CommunicationUxTest {
         final AtomicInteger statusReads=new AtomicInteger();final List<JSONObject> mutations=new CopyOnWriteArrayList<>();
         final AtomicBoolean olderRead=new AtomicBoolean();final CountDownLatch online=new CountDownLatch(1),bound=new CountDownLatch(1),answer=new CountDownLatch(1);
         volatile AgentService service;volatile boolean failFirstRelease,failedHistory;volatile int answerStatus=409;volatile String answerCode="call_busy";
+        final JSONArray directoryLines=new JSONArray();final boolean initialIncomplete,unknownHistory;
+        volatile WebSocket mobileSocket;private final AtomicInteger snapshotSequence=new AtomicInteger();
         final ServiceConnection connection=new ServiceConnection(){public void onServiceConnected(ComponentName name,IBinder binder){service=((AgentService.LocalBinder)binder).service();bound.countDown();}public void onServiceDisconnected(ComponentName name){}};
-        Fixture()throws Exception{
+        Fixture()throws Exception{this(false,0,false);}
+        Fixture(boolean incomplete,int otherLines,boolean unknown)throws Exception{
+            initialIncomplete=incomplete;unknownHistory=unknown;
+            for(int i=0;i<otherLines;i++)directoryLines.put(Json.obj("id","alternative-"+i,"line_id","alternative-"+i,"name","Alternative "+i,"card_id",String.format(java.util.Locale.ROOT,"8944100000000001%03d",i),"enabled",true,"sim",Json.obj("msisdn","+1555011"+String.format(java.util.Locale.ROOT,"%04d",i)),"operations",Json.object(line(),"operations")));
+            directoryLines.put(line());
             store.clear();HeldCertificate certificate=new HeldCertificate.Builder().addSubjectAlternativeName("localhost").build();
             gateway.useHttps(new HandshakeCertificates.Builder().heldCertificate(certificate).build().sslSocketFactory(),false);
             gateway.setDispatcher(new okhttp3.mockwebserver.Dispatcher(){@Override public MockResponse dispatch(RecordedRequest request){
                 String path=request.getPath(),method=request.getMethod();
                 if(!method.equals("GET"))mutations.add(Json.obj("method",method,"path",path,"body",request.getBody().clone().readUtf8()));
                 if(path.equals("/api/auth/status"))return json(Json.obj("authenticated",true,"username","fixture-admin","token","fixture-session","csrf","fixture-csrf"));
-                if(path.equals("/v1/mobile/ws"))return new MockResponse().withWebSocketUpgrade(new WebSocketListener(){@Override public void onOpen(WebSocket ws,Response r){ws.send(Json.obj("type","mobile.snapshot","schema_version",1,"sequence",1,"data",Json.obj("lines",new JSONArray().put(line()),"messages",new JSONArray(),"cellular_calls",new JSONArray())).toString());online.countDown();}});
-                if(path.equals("/v1/catalog/lines")||path.equals("/v1/lines"))return json(Json.obj("lines",new JSONArray().put(line())));
+                if(path.equals("/v1/mobile/ws"))return new MockResponse().withWebSocketUpgrade(new WebSocketListener(){@Override public void onOpen(WebSocket ws,Response r){mobileSocket=ws;sendSnapshot(initialIncomplete);online.countDown();}});
+                if(path.equals("/v1/catalog/lines")||path.equals("/v1/lines"))return json(Json.obj("lines",directoryLines));
                 if(path.equals("/v1/catalog/lines/line")||path.equals("/v1/lines/line"))return json(line());
                 if(path.equals("/v1/messages/conversations?all=true")){conversationReads.incrementAndGet();return json(Json.obj("conversations",new JSONArray().put(Json.obj("line_id","line","transport","cellular","peer",peer,"count",75,"last",message("a".repeat(64),"Archived preview")))));}
                 if(path.startsWith("/v1/messages?page=true")){
                     boolean older="50".equals(request.getRequestUrl().queryParameter("before"));if(older)olderRead.set(true);
-                    JSONArray rows=new JSONArray();for(int n=older?1:26;n<=(older?25:75);n++)rows.put(message(String.format(java.util.Locale.ROOT,"%064x",n),older?"older retained SMS "+n:"first history page "+n));
+                    JSONArray rows=new JSONArray();for(int n=older?1:26;n<=(older?25:75);n++){JSONObject item=message(String.format(java.util.Locale.ROOT,"%064x",n),older?"older retained SMS "+n:"first history page "+n);if(unknownHistory)item.remove("event_id");rows.put(item);}
                     return json(Json.obj("messages",rows,"next_before",older?"":"50"));
                 }
                 if(path.equals("/v1/media/leases")&&method.equals("POST"))return json(Json.obj("session_id","loser-only","ws_path","/fixture-media"));
@@ -248,6 +325,7 @@ public class CommunicationUxTest {
             store.save(Json.obj("server",gateway.url("/").toString().replaceAll("/$",""),"pin",Json.sha(certificate.certificate().getEncoded()),"token","fixture-session","csrf","fixture-csrf","available",true,"share",false));
             assertTrue(context.bindService(new Intent(context,AgentService.class),connection,Context.BIND_AUTO_CREATE));
         }
+        void sendSnapshot(boolean incomplete){assertTrue(mobileSocket.send(Json.obj("type","mobile.snapshot","schema_version",1,"sequence",snapshotSequence.incrementAndGet(),"data",Json.obj("lines",new JSONArray().put(line()),"incomplete",incomplete,"messages",new JSONArray(),"cellular_calls",new JSONArray())).toString()));}
         ActivityScenario<MainActivity> launch()throws Exception{ActivityScenario<MainActivity> scene=ActivityScenario.launch(MainActivity.class);assertTrue(bound.await(10,TimeUnit.SECONDS));assertTrue(online.await(10,TimeUnit.SECONDS));await(scene,a->service.online());return scene;}
         void assertOnlyMutations(String... permitted)throws Exception{
             Set<String> allow=new HashSet<>(Arrays.asList(permitted));
@@ -267,6 +345,12 @@ public class CommunicationUxTest {
     private static void await(ActivityScenario<MainActivity> scene,java.util.function.Predicate<MainActivity> condition,String message)throws Exception{long end=SystemClock.elapsedRealtime()+12000;AtomicBoolean matched=new AtomicBoolean();while(!matched.get()&&SystemClock.elapsedRealtime()<end){InstrumentationRegistry.getInstrumentation().waitForIdleSync();scene.onActivity(a->matched.set(condition.test(a)));if(!matched.get())SystemClock.sleep(100);}assertTrue(message,matched.get());}
     private static AccessibilityNodeInfo waitNode(String value,boolean id)throws Exception{android.app.UiAutomation ui=InstrumentationRegistry.getInstrumentation().getUiAutomation();android.accessibilityservice.AccessibilityServiceInfo info=ui.getServiceInfo();info.flags|=android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;ui.setServiceInfo(info);long end=SystemClock.elapsedRealtime()+10000;while(SystemClock.elapsedRealtime()<end){ui.waitForIdle(100,5000);AccessibilityNodeInfo root=ui.getRootInActiveWindow();if(root!=null)for(AccessibilityNodeInfo node:id?root.findAccessibilityNodeInfosByViewId(value):root.findAccessibilityNodeInfosByText(value))if(node.isVisibleToUser())return node;SystemClock.sleep(100);}throw new AssertionError("Native control missing: "+value);}
     private static boolean hasChecked(AccessibilityNodeInfo node){if(node.isChecked())return true;for(int i=0;i<node.getChildCount();i++){AccessibilityNodeInfo child=node.getChild(i);if(child!=null&&hasChecked(child))return true;}return false;}
+    private static AccessibilityNodeInfo visibleChecked(AccessibilityNodeInfo node){if(node.isChecked()&&node.isVisibleToUser())return node;for(int i=0;i<node.getChildCount();i++){AccessibilityNodeInfo child=node.getChild(i);if(child!=null){AccessibilityNodeInfo found=visibleChecked(child);if(found!=null)return found;}}return null;}
+    static void saveScreen(String name)throws Exception{
+        InstrumentationRegistry.getInstrumentation().getUiAutomation().waitForIdle(200,5000);
+        android.graphics.Bitmap bitmap=InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();assertNotNull(bitmap);
+        try(java.io.OutputStream out=androidx.test.platform.io.PlatformTestStorageRegistry.getInstance().openOutputFile("ui-evidence/"+name+".png")){assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,out));}finally{bitmap.recycle();}
+    }
     private static void clickText(String text)throws Exception{AccessibilityNodeInfo node=waitNode(text,false);while(node!=null&&!node.isClickable())node=node.getParent();assertNotNull(node);assertTrue(node.performAction(AccessibilityNodeInfo.ACTION_CLICK));}
     private static void waitText(String text)throws Exception{assertNotNull(waitNode(text,false));}
     private static void dialog(boolean yes)throws Exception{assertTrue(waitNode("android:id/button"+(yes?"1":"2"),true).performAction(AccessibilityNodeInfo.ACTION_CLICK));InstrumentationRegistry.getInstrumentation().getUiAutomation().waitForIdle(200,5000);}
