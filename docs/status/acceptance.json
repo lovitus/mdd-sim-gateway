@@ -1479,6 +1479,14 @@
       }
     },
     {
+      "id": "LINUX_DHCP_BEARER",
+      "state": "partial",
+      "releaseRelevance": "current",
+      "summary": "Approved NEXT_BATCH_992c4fb: native MM Ethernet DHCP IPv4 claim acquisition, T1/T2 renewal, expiry and exact invalidation through existing borrower/persistent owners. Reuse upstream DHCP and index-bound netlink; preserve static IPv4, policy, quotas and active-call guards. No Core/wire/config/pin changes.",
+      "acceptance": "Still unqualified. Diagnostic39986314729/tree27f49252 confirmed same-cellular-interface fallback after private-route loss, without observed host-default leakage. Source-approved fecef696/tree5c96475d passed realm counterexamples red/green in run40476145065 but failed original T2 broadcast renewal; later lifecycle was not reached. Preserve archive/2026-10-27/linux-dhcp-t2-red. Fixed reviewer approved DHCP-only raw broadcast with lease source and existing write deadlines; full original hosted qualification remains pending. Reader ordinary/race passed; historical timeout remains unconfirmed. Owner authorized bounded repair/CI/review, not production. Original method3/cleanup counterexamples remain archived and are not repeated. No paid/deferred hardware expansion. PPP/IPv6/raw-IP DHCP and non-systemd managed modem remain separate gaps.",
+      "evidence": ["DEVELOPMENT.md", "docs/branches.md", "go-runtime/internal/linuxmodem/dhcp_linux.go", "go-runtime/internal/linuxmodem/dhcp_e2e_linux_test.go", "tools/test-linux-dhcp.mjs"]
+    },
+    {
       "id": "AGENT_FIRST_RUN_SETUP",
       "state": "completed",
       "releaseRelevance": "current",
