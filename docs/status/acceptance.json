@@ -1479,6 +1479,14 @@
       }
     },
     {
+      "id": "LINUX_DHCP_BEARER",
+      "state": "partial",
+      "releaseRelevance": "current",
+      "summary": "Approved NEXT_BATCH_992c4fb: native MM Ethernet DHCP IPv4 claim acquisition, T1/T2 renewal, expiry and exact invalidation through existing borrower/persistent owners. Reuse upstream DHCP and index-bound netlink; preserve static IPv4, policy, quotas and active-call guards. No Core/wire/config/pin changes.",
+      "acceptance": "Still unqualified. Diagnostic39986314729/tree27f49252 confirmed same-cellular-interface fallback after private-route loss without observed host-default leakage. Realm counterexamples passed red/green40476145065; source-approved1ac2762/treeeeec76fa then passed T2, NAK/expiry/quotas/owner recovery and route-only withdrawal in40479004518. The run stopped at fixture realm syntax; an independent reader diagnostic exposed a prior-response/deferred-slot-release setup assumption. The fixed reviewer accepted equal-value uint32 decimal arguments and fresh-connection saturation, with product/limits unchanged; later permit/realm/lifecycle remains pending. Preserve archive/2026-10-27/linux-dhcp-fixture-red and earlier reds. Earlier reader passes remain valid; older undiagnosed timeouts are not retroactively explained. Owner authorized bounded repair/CI/review, not production. No paid/deferred hardware expansion; PPP/IPv6/raw-IP DHCP and non-systemd managed modem remain separate gaps.",
+      "evidence": ["DEVELOPMENT.md", "docs/branches.md", "go-runtime/internal/linuxmodem/dhcp_linux.go", "go-runtime/internal/linuxmodem/dhcp_e2e_linux_test.go", "tools/test-linux-dhcp.mjs"]
+    },
+    {
       "id": "AGENT_FIRST_RUN_SETUP",
       "state": "completed",
       "releaseRelevance": "current",

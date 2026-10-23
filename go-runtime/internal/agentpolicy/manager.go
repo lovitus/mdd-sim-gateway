@@ -901,7 +901,12 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 	for _, owned := range connection.OwnedTargets() {
 		health, supportsHealth := manager.config.Runtime.(connectionHealthRuntime)
 		checkControl := false
-		if target, present := current[owned.EquipmentID]; present && target == owned {
+		invalidated, validityErr := agentdata.DataValidity(connection, owned)
+		if validityErr != nil {
+			blocked[owned.EquipmentID] = validityErr
+			continue
+		}
+		if target, present := current[owned.EquipmentID]; present && target == owned && !agentdata.Invalidated(invalidated) {
 			if dataStates[owned.EquipmentID] == agentmodem.DataUnknown {
 				blocked[owned.EquipmentID] = errors.New("cellular bearer state is unknown")
 				manager.mu.Lock()

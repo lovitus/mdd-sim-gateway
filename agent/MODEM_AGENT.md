@@ -202,17 +202,20 @@ sudo mdd-agent config setup -config /var/lib/mdd-agent/config.json
 sudo systemctl enable --now mdd-agent.service
 ```
 
-Linux 的 PC/SC/eUICC 与已实现 ModemManager/static-IP data isolation 按 capability 暴露。DHCP、PPP、IPv6
-bearer 或未完成宿主隔离的设备必须 typed fail closed；不得因为接口获得地址就把它变成宿主默认出口。
+Linux 的 PC/SC/eUICC 与 ModemManager/static-IP data isolation 按 capability 暴露。
+本批增加 Ethernet DHCP IPv4 的受隔离租约生命周期，尚待 CI 和终审，不代表已部署。
+raw-IP DHCP、PPP、IPv6 bearer 或未完成宿主隔离的设备仍 fail closed；不得因为接口获得地址就把它变成宿主默认出口。
+DHCP 仅设置该连接的私有地址、路由与 DNS；续租不延长用户借用期限或额度。租约失效会关闭旧连接，
+由原策略协调器在通话保护下回收并恢复，既不改 4G/借用/漫游开关，也不回落宿主默认网络。
 
 ### ARM64 独立 managed Agent 首装
 
-新的 ARM64 候选包补齐现有音频 helper、原始两个 systemd unit 和首装入口。此批尚待 hosted
-资格验证，不代表已发布、已升级生产或已验收 ARM64 实体 modem。旧 v2.0.0 reader-only 资产不变。
+ARM64 包已补齐现有音频 helper、原始两个 systemd unit 和首装入口，并经 PR51 的 hosted
+空设备资格验证；不代表已发布、已升级生产或已验收 ARM64 实体 modem。旧 v2.0.0 reader-only 资产不变。
 此入口不接管完整 Core 安装，不做升级，也不迁移已有 reader/cron owner；已有用户继续原部署方式。
 
 范围：原生 USB ModemManager 支持现有受隔离的 static IPv4；显式 serial 支持 AT/SIM，
-不提供蜂窝数据。DHCP、PPP、IPv6 和无 systemd 的 managed modem 仍未实现。串口后端要求
+不提供蜂窝数据。Ethernet DHCP 见上方本批范围；raw-IP DHCP、PPP、IPv6 和无 systemd 的 managed modem 仍未实现。串口后端要求
 ModemManager 不存在，或已经 inactive 且 disabled/masked；安装器不会替用户停止它。
 
 先按下节核对下载 tar 的外层哈希，再完整解包。managed 模式要求 root、systemd/cgroup v2、

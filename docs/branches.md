@@ -1,5 +1,48 @@
 # Branch disposition and integration record
 
+October27 1ac2762/treeeeec76fa passed source review; run40479004518 qualified T2
+and route-only withdrawal, then failed fixture realm syntax and reader saturation
+setup. Archive `archive/2026-10-27/linux-dhcp-fixture-red` retains that evidence.
+The fixed reviewer accepted only equal-value decimal realm arguments and fresh
+reader saturation connections. Full hosted qualification remains pending.
+
+October27 fecef696/tree5c96475d source review passed, but run40476145065 failed
+at T2 broadcast renewal; retain `archive/2026-10-27/linux-dhcp-t2-red`. The fixed
+reviewer accepted DHCP-only raw broadcast/source preservation plus existing
+exchange write deadlines. Original full lifecycle qualification is still pending.
+
+October27 owner authorized PR52's bounded product repair after the single
+diagnostic run39986314729, exact merge97be8fd9/tree27f49252. c797b05 proves
+private-route-loss acceptance via the original cellular interface, not a host
+default leak. Fixed successor recommends owned DHCP route realms plus strict
+existing OUTPUT permission/readback/cleanup. Source and CI remain pending;
+reader ordinary/race diagnostics passed without explaining the historical timeout.
+No speculative reader fix, merge, deployment or paid acceptance is implied.
+
+October23 PR52 candidate50c0b2d / run39942634074 remains unqualified: permit
+publication failed at the fixed cgroup path after DORA. Old compiled992 method3
+refusal and cleanup red/green did pass; source/proof are preserved at
+`archive/2026-10-23/linux-dhcp-counterexamples`, and the one-time machinery is
+removed from normal CI. Successor review accepted R1/R2/R4; R3 synchronization,
+R5 existing negative evidence and the reviewed read-only cgroup bind preparation
+are corrected together. This is the second automatic E2E correction; another
+failure stops automatic test repairs. No production changes. Initialbf8faaa /
+run39939080172 remains failed with its original runtime cause unproven.
+
+October23 `codex/linux-dhcp-bearer` starts at merged main992c4fb. The same fixed
+successor accepted NEXT_BATCH_992c4fb: Ethernet MM DHCPv4 whole-claim lifecycle,
+existing borrower/persistent-owner recovery and real hosted network qualification.
+Implementation candidate still awaits full source approval and qualification.
+No production or paid operation, no reopening PR48 or deferred hardware acceptance.
+
+PR51 is merged992c4fb/tree09e1d4b5. Final2f8b076 passed successor266906e5,
+Go39909121038 and Android39909120959. Final artifacta8500c597bfb has the same
+tree; SHAe5c2b499c441b79743593c32a6b7f5c3dca7caae7b9fe7df6beb253dcd8c7cd5
+and complete14-stage receipt match. Archive
+`archive/2026-10-23/linux-agent-delivery` preserves the accepted final source.
+This closes the pending cleanup/merge statements below, not publication or fleet.
+See [final receipt](https://github.com/lovitus/mdd-sim-gateway/pull/51#issuecomment-6358841746).
+
 PR51 qualified `a891f5d` / Go39907297621 passed in full, fixed source review
 93f64fc1 accepted. Archive `archive/2026-10-23/linux-agent-qualified` retains the
 one-time actual old-release/installer counterexamples. Actual checkout b0de5414
