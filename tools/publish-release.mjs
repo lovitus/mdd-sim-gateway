@@ -70,13 +70,17 @@ if (kind === 'go') {
   assert(fs.statSync(linux).size <= (512 << 20), 'Linux archive exceeds updater limit');
   add(linux);
   add(linux, `mdd-${version}-linux-amd64.tar`);
-  for (const [folder, platform, architecture] of [['arm64', 'Linux', 'arm64'], ['windows', 'Windows', 'amd64'], ['macos', 'macOS', 'arm64']]) {
+  for (const [folder, platform, architecture] of [['arm64', 'Linux', 'arm64'], ['windows', 'Windows', 'amd64'], ['macos', 'macOS', 'arm64'], ['macos-universal', 'macOS', 'universal']]) {
     const name = `MDD-Agent-${platform}-${architecture}`;
     const archive = one(folder, x => x === `${name}.tar.gz`);
     const build = fields(tarText(archive, `${name}/BUILD.txt`));
     assert.equal(build.source_revision, sha, `${platform} source mismatch`);
     assert.equal(platform === 'Linux' ? build.source_tree : build.source_tree_hash, tree, `${platform} tree mismatch`);
     assert.equal(platform === 'Linux' ? build.platform : build.architecture, platform === 'Linux' ? 'linux/arm64' : architecture);
+    if (architecture === 'universal') {
+      assert.equal(build.minimum_macos, '15.0');
+      assert.equal(build.source_tree, 'clean');
+    }
     if (platform === 'macOS' && !(mode && process.env.GITHUB_EVENT_NAME === 'pull_request')) {
       assert.equal(build.team_identifier, '8WPJLUNLY8');
       assert.equal(build.signing, 'developer-id');
@@ -198,7 +202,7 @@ if (kind === 'go') {
 }
 if (!release) {
   const notes = kind === 'go'
-    ? `Go-only release from ${sha} (tree ${tree}).\n\nLinux amd64 server/Agent; Linux ARM64 reader-only (glibc >=2.39, PC/SC); Windows amd64 Agent; macOS arm64 Developer ID signed, not notarized. Linux version alias and revision archive are identical. Verify SHA256SUMS before installation.\n\n[Download, first installation and existing-Go upgrade instructions](https://github.com/${repo}/blob/${sha}/README.md#-快速开始). This is not an automatic Python/Docker migration or a production rollout. [Matching Android preview](https://github.com/${repo}/releases/tag/android-preview-v${version}) remains a preview. Hardware/endurance deferrals remain unchanged.`
+    ? `Go-only release from ${sha} (tree ${tree}).\n\nLinux amd64 server/Agent; Linux ARM64 reader-only (glibc >=2.39, PC/SC); Windows amd64 Agent; macOS 15+ arm64 and Universal (Apple Silicon/Intel), Developer ID signed, not notarized. Linux version alias and revision archive are identical. Verify SHA256SUMS before installation.\n\n[Download, first installation and existing-Go upgrade instructions](https://github.com/${repo}/blob/${sha}/README.md#-快速开始). This is not an automatic Python/Docker migration or a production rollout. [Matching Android preview](https://github.com/${repo}/releases/tag/android-preview-v${version}) remains a preview. Hardware/endurance deferrals remain unchanged.`
     : `Native Android ${version}-preview, versionCode ${versionCode}; source ${sha}, tree ${tree}.\n\nStable existing preview signing identity and application ID; no uninstall required for compatible earlier previews. Android 9+, optional reader sharing and server calls/SMS. Verify SHA256SUMS and signature.txt.\n\n[Matching Go Core v${version}](https://github.com/${repo}/releases/tag/v${version}) is published separately after its gates pass; that link may not exist yet. Do not use the old Python 1.x Latest as a fallback. [Setup and scoped acceptance](https://github.com/${repo}/blob/${sha}/android-agent/README.md). No fleet upgrade, new paid operation or extended endurance acceptance is implied.`;
   const result = spawnSync('gh', ['release', 'create', tag, '--repo', repo, '--verify-tag', '--draft', '--latest=false', ...(kind === 'android' ? ['--prerelease'] : []), '--title', `MDD ${kind === 'android' ? 'Android preview ' : ''}${version}`, '--notes', notes], { encoding: 'utf8', timeout: 25000 });
   release = releaseFor(tag);

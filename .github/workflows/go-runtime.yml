@@ -1574,7 +1574,7 @@ jobs:
           retention-days: 1
 
   release-macos-arm64:
-    name: Build macOS arm64 Agent
+    name: Build macOS arm64 and Universal Agents
     needs:
       - validate-core
     runs-on: macos-15
@@ -1629,6 +1629,16 @@ jobs:
           cache-dependency-path: |
             agent/call-audio-helper/go.sum
             go-runtime/go.sum
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Require both executable architectures
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(/usr/bin/arch -x86_64 /usr/bin/uname -m)" = x86_64
 
       - name: Test macOS modem and Agent boundaries
         env:
@@ -1740,8 +1750,45 @@ jobs:
           fi
           codesign --verify --strict "$output/mdd-agent"
           codesign --verify --deep --strict "$output/MDD Agent.app"
+
+      - name: Build Intel input and combine signed Universal package
+        env:
+          MDD_SIGNING_IDENTITY: ${{ steps.developer_id.outputs.identity }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          MDD_SHARED_CACHE_ROOT: ${{ runner.temp }}/mdd-agent-cache
+          TMPDIR: ${{ runner.temp }}/mdd-agent-build-tmp
+        run: |
+          set -euo pipefail
+          export GO_LICENSES="$RUNNER_TEMP/mdd-tools/go-licenses"
+          set --
+          if [[ -n "$MDD_SIGNING_IDENTITY" ]]; then
+            set -- --identity "$MDD_SIGNING_IDENTITY" --team-id 8WPJLUNLY8
+          fi
+          go-runtime/release/build-macos-agent.sh --arch amd64 \
+            --output "$RUNNER_TEMP/MDD-Agent-macOS-amd64" \
+            --version "$(cat VERSION)" --build "$BUILD_NUMBER" "$@"
+          node tools/macos-package.mjs combine \
+            --arm64 "$RUNNER_TEMP/MDD-Agent-macOS-arm64" \
+            --amd64 "$RUNNER_TEMP/MDD-Agent-macOS-amd64" \
+            --output "$RUNNER_TEMP/MDD-Agent-macOS-universal" "$@"
+
+      - name: Exercise final Universal slices and cutover preflight without hardware
+        env:
+          TMPDIR: ${{ runner.temp }}/mdd-agent-build-tmp
+        run: |
+          set -euo pipefail
+          node tools/test-macos-universal.mjs \
+            "$RUNNER_TEMP/MDD-Agent-macOS-arm64" \
+            "$RUNNER_TEMP/MDD-Agent-macOS-universal" > "$RUNNER_TEMP/macos-universal-evidence.json"
+          cat "$RUNNER_TEMP/macos-universal-evidence.json"
+
+      - name: Archive qualified macOS packages
+        run: |
+          set -euo pipefail
           tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/MDD-Agent-macOS-arm64.tar.gz" \
             MDD-Agent-macOS-arm64
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/MDD-Agent-macOS-universal.tar.gz" \
+            MDD-Agent-macOS-universal
 
       - name: Upload macOS Agent package
         uses: actions/upload-artifact@v7
@@ -1750,6 +1797,21 @@ jobs:
           path: ${{ runner.temp }}/MDD-Agent-macOS-arm64.tar.gz
           if-no-files-found: error
           retention-days: 1
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mdd-agent-macos-universal-${{ github.sha }}
+          path: ${{ runner.temp }}/MDD-Agent-macOS-universal.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-universal-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/macos-universal-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
 
   publish-tagged-release:
     name: Verify download set and publish exact release tags
@@ -1795,6 +1857,10 @@ jobs:
         with:
           name: mdd-agent-macos-arm64-${{ github.sha }}
           path: ${{ runner.temp }}/release-assets/macos
+      - uses: actions/download-artifact@v8
+        with:
+          name: mdd-agent-macos-universal-${{ github.sha }}
+          path: ${{ runner.temp }}/release-assets/macos-universal
 
       - name: Verify packages, version alias and publication handoff
         env:

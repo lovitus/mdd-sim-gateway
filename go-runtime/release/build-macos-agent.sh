@@ -9,6 +9,7 @@ build_number="1"
 output=""
 identity=""
 team_id=""
+architecture="arm64"
 go_licenses="${GO_LICENSES-}"
 deployment_target="15.0"
 libusb_archive="libusb-1.0.30.tar.bz2"
@@ -19,7 +20,7 @@ lwip_url="https://github.com/lwip-tcpip/lwip/archive/refs/tags/STABLE-2_2_1_RELE
 lwip_sha256="ce0b7461c0ad9602c376f0bf07c5eb7253b48c7bf66f011c6bf3e2a96731c539"
 
 usage() {
-	printf '%s\n' "usage: build-macos-agent.sh --output /absolute/path [--version x.y.z] [--build number] [--identity Developer-ID --team-id TEAM]"
+	printf '%s\n' "usage: build-macos-agent.sh --output /absolute/path [--arch arm64|amd64] [--version x.y.z] [--build number] [--identity Developer-ID --team-id TEAM]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -44,6 +45,10 @@ while [ "$#" -gt 0 ]; do
 		team_id=${2-}
 		shift 2
 		;;
+	--arch)
+		architecture=${2-}
+		shift 2
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -54,6 +59,12 @@ while [ "$#" -gt 0 ]; do
 		;;
 	esac
 done
+
+case "$architecture" in
+arm64) macho_arch=arm64 ;;
+amd64) macho_arch=x86_64 ;;
+*) printf '%s\n' '--arch must be arm64 or amd64' >&2; exit 2 ;;
+esac
 
 if [ -n "$identity" ] || [ -n "$team_id" ]; then
 	if [ -z "$identity" ] || [ "$identity" = - ] || ! printf '%s\n' "$team_id" | grep -Eq '^[A-Z0-9]{10}$'; then
@@ -146,6 +157,7 @@ else
 fi
 : "${GOTMPDIR:=$TMPDIR/go-tmp}"
 export GOCACHE GOMODCACHE GOTMPDIR
+export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 mkdir -p "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
 
 download_root="${MDD_SHARED_CACHE_ROOT:-$staging/cache}/downloads/macos-agent"
@@ -194,8 +206,8 @@ lwip_source="$source_root/lwip/lwip-STABLE-2_2_1_RELEASE"
 libusb_prefix="$prefix_root/libusb"
 (
 	cd "$libusb_source"
-	CFLAGS="-arch arm64 -mmacosx-version-min=$deployment_target" \
-	LDFLAGS="-arch arm64 -mmacosx-version-min=$deployment_target" \
+	CFLAGS="-arch $macho_arch -mmacosx-version-min=$deployment_target" \
+	LDFLAGS="-arch $macho_arch -mmacosx-version-min=$deployment_target" \
 		./configure --prefix="$libusb_prefix" --disable-shared --enable-static
 	make -j "$(sysctl -n hw.ncpu)"
 	make install
@@ -208,7 +220,7 @@ libusb_prefix="$prefix_root/libusb"
 cellular_build="$staging/cellular-build"
 cmake -S "$cellular_source" -B "$cellular_build" \
 	-DCMAKE_BUILD_TYPE=Release \
-	-DCMAKE_OSX_ARCHITECTURES=arm64 \
+	-DCMAKE_OSX_ARCHITECTURES="$macho_arch" \
 	-DCMAKE_OSX_DEPLOYMENT_TARGET="$deployment_target" \
 	-DLWIP_DIR="$lwip_source" \
 	-DLIBUSB_ROOT="$libusb_prefix"
@@ -223,8 +235,9 @@ fi
 (
 	cd "$audio_source"
 	GOWORK=off go mod verify
-	GOWORK=off go test ./...
-	GOWORK=off go build -trimpath -o "$helper_root/mdd-call-audio-helper" .
+	GOWORK=off CGO_ENABLED=1 GOOS=darwin GOARCH="$architecture" go test ./...
+	GOWORK=off CGO_ENABLED=1 GOOS=darwin GOARCH="$architecture" \
+		go build -trimpath -o "$helper_root/mdd-call-audio-helper" .
 )
 
 source_revision=$(git -C "$repository_root" rev-parse HEAD)
@@ -235,7 +248,7 @@ fi
 
 (
 	cd "$runtime_root"
-	CGO_ENABLED=1 go build -trimpath \
+	CGO_ENABLED=1 GOOS=darwin GOARCH="$architecture" go build -trimpath \
 		-ldflags "-linkmode=external -extldflags=-Wl,-sectcreate,__TEXT,__info_plist,$cli_info_plist" \
 		-o "$payload/mdd-agent" ./cmd/mdd-agent
 )
@@ -272,26 +285,30 @@ printf '%s\n' \
 
 (
 	cd "$runtime_root"
-	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 GOFLAGS= \
+	CGO_ENABLED=1 GOOS=darwin GOARCH="$architecture" GOFLAGS= \
 		"$go_licenses" save ./cmd/mdd-agent \
 		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
 		--save_path "$payload/licenses/go-cli"
-	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 GOFLAGS=-tags=gui \
+	CGO_ENABLED=1 GOOS=darwin GOARCH="$architecture" GOFLAGS=-tags=gui \
 		"$go_licenses" save ./cmd/mdd-agent \
 		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
 		--save_path "$payload/licenses/go-gui"
 )
 (
 	cd "$audio_source"
-	GOWORK=off CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 GOFLAGS= \
+	GOWORK=off CGO_ENABLED=1 GOOS=darwin GOARCH="$architecture" GOFLAGS= \
 		"$go_licenses" save . \
 		--ignore mdd-call-audio-helper \
 		--save_path "$payload/licenses/go-audio-helper"
 )
 
+mkdir -p "$staging/tools"
+# Packaging tools execute on the host; only their build subprocess targets Intel.
+GOWORK=off GOOS=darwin GOARCH="$(go env GOHOSTARCH)" GOBIN="$staging/tools" \
+	go install "fyne.io/tools/cmd/fyne@$fyne_tools_version"
 (
 	cd "$staging"
-	GOWORK=off go run "fyne.io/tools/cmd/fyne@$fyne_tools_version" package \
+	GOWORK=off CGO_ENABLED=1 GOOS=darwin GOARCH="$architecture" "$staging/tools/fyne" package \
 		--target darwin \
 		--source-dir "$runtime_root/cmd/mdd-agent" \
 		--tags gui \
@@ -311,6 +328,8 @@ if [ ! -f "$app_executable" ]; then
 fi
 /usr/libexec/PlistBuddy -c 'Delete :NSMicrophoneUsageDescription' "$payload/$app_name.app/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c 'Add :NSMicrophoneUsageDescription string MDD Agent uses the exact USB modem audio device for cellular calls.' "$payload/$app_name.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Delete :LSMinimumSystemVersion' "$payload/$app_name.app/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $deployment_target" "$payload/$app_name.app/Contents/Info.plist"
 install -m 0755 "$helper_root/mdd-cellular-io" "$payload/$app_name.app/Contents/MacOS/mdd-cellular-io"
 install -m 0755 "$helper_root/mdd-call-audio-helper" "$payload/$app_name.app/Contents/MacOS/mdd-call-audio-helper"
 
@@ -324,11 +343,12 @@ if [ -n "$identity" ]; then
 	codesign --force --timestamp --options runtime --entitlements "$entitlements" --sign "$identity" "$payload/$app_name.app"
 	signing=developer-id
 else
-	codesign --force --sign - "$payload/mdd-cellular-io"
-	codesign --force --entitlements "$entitlements" --sign - "$payload/mdd-call-audio-helper"
+	# Ad-hoc default identifiers can differ across slices; production signing stays unchanged.
+	codesign --force --sign - --identifier com.mdd.agent.cellular-io "$payload/mdd-cellular-io"
+	codesign --force --entitlements "$entitlements" --sign - --identifier com.mdd.agent.audio-helper "$payload/mdd-call-audio-helper"
 	codesign --force --entitlements "$entitlements" --sign - "$payload/mdd-agent"
-	codesign --force --sign - "$payload/$app_name.app/Contents/MacOS/mdd-cellular-io"
-	codesign --force --entitlements "$entitlements" --sign - "$payload/$app_name.app/Contents/MacOS/mdd-call-audio-helper"
+	codesign --force --sign - --identifier com.mdd.agent.cellular-io "$payload/$app_name.app/Contents/MacOS/mdd-cellular-io"
+	codesign --force --entitlements "$entitlements" --sign - --identifier com.mdd.agent.audio-helper "$payload/$app_name.app/Contents/MacOS/mdd-call-audio-helper"
 	codesign --force --entitlements "$entitlements" --sign - "$app_executable"
 	codesign --force --entitlements "$entitlements" --sign - "$payload/$app_name.app"
 	signing=ad-hoc-development
@@ -365,7 +385,8 @@ printf '%s\n' \
 printf '%s\n' \
 	"version=$version" \
 	"build=$build_number" \
-	"architecture=$(uname -m)" \
+	"architecture=$architecture" \
+	"minimum_macos=$deployment_target" \
 	"source_revision=$source_revision" \
 	"source_tree=$source_state" \
 	"source_tree_hash=$(git -C "$repository_root" rev-parse HEAD^{tree})" \
