@@ -205,6 +205,58 @@ sudo systemctl enable --now mdd-agent.service
 Linux 的 PC/SC/eUICC 与已实现 ModemManager/static-IP data isolation 按 capability 暴露。DHCP、PPP、IPv6
 bearer 或未完成宿主隔离的设备必须 typed fail closed；不得因为接口获得地址就把它变成宿主默认出口。
 
+### ARM64 独立 managed Agent 首装
+
+新的 ARM64 候选包补齐现有音频 helper、原始两个 systemd unit 和首装入口。此批尚待 hosted
+资格验证，不代表已发布、已升级生产或已验收 ARM64 实体 modem。旧 v2.0.0 reader-only 资产不变。
+此入口不接管完整 Core 安装，不做升级，也不迁移已有 reader/cron owner；已有用户继续原部署方式。
+
+范围：原生 USB ModemManager 支持现有受隔离的 static IPv4；显式 serial 支持 AT/SIM，
+不提供蜂窝数据。DHCP、PPP、IPv6 和无 systemd 的 managed modem 仍未实现。串口后端要求
+ModemManager 不存在，或已经 inactive 且 disabled/masked；安装器不会替用户停止它。
+
+先按下节核对下载 tar 的外层哈希，再完整解包。managed 模式要求 root、systemd/cgroup v2、
+udev、nftables、iproute2、kmod 的 `vhci_hcd`、system bus；原生 USB 也需要该 guard 的 VHCI
+授权边界。另需 bash、jq、binutils/coreutils、glibc 2.39+、libpcsclite1、pcscd/libccid 和
+libasound2；MM 后端需要运行中的 ModemManager。若安装了 NetworkManager，原 guard 仍会
+校验合并后的隔离规则。预检缺依赖就报原始层级，不加载模块、不运行 guard、不改系统网络。
+原服务的三个写例外目录必须已存在且为 root-owned 可信真实目录：
+`/etc/NetworkManager/conf.d`、`/etc/udev/rules.d`、
+`/etc/systemd/system/multi-user.target.wants`。即使没装 NetworkManager，guard 也需要第一个目录。
+缺失时预检提前拒绝，管理员可用 `sudo install -d -m 0755` 只准备缺少的目录；不改已有目录权限。
+
+```sh
+sudo bash ./MDD-Agent-Linux-arm64/install-linux-agent.sh preflight --candidate ./MDD-Agent-Linux-arm64
+sudo bash ./MDD-Agent-Linux-arm64/install-linux-agent.sh install --candidate ./MDD-Agent-Linux-arm64
+sudo /usr/libexec/mdd/mdd-agent config setup -config /var/lib/mdd-agent/config.json
+# 用 BUILD.txt 中的完整 source_revision 替换 REVISION。
+sudo bash /opt/mdd-agent/releases/REVISION/install-linux-agent.sh start-preflight \
+  --candidate /opt/mdd-agent/releases/REVISION
+```
+
+`install` 只创建版本目录、固定 CLI 链接和原 unit 链接并 daemon-reload；**不 enable/start**。
+helper 留在真实 CLI 同一版本目录，固定 `/usr/libexec/mdd/mdd-agent` 链接也能定位它。
+发现 Core、已有/未知 unit、drop-in、guard 或 Agent owner 时拒绝，不覆盖、不停进程。
+失败时保留已放置对象及未启动版本目录，并要求管理员核对归属；不以事后 inode 判断自动删除，
+避免误删并发替换的 owner。首次启动前再次拒绝晚到的 guard 文件／表；观察失败不是“未存在”。
+
+首次没有默认配置可先放程序，输出 `needs_config`，不算就绪。已有配置不重新初始化。
+`config show` 的退出成功不等于 `ready:true`；startup preflight 会拒绝未完成配置。
+它只证明本地先决条件，不证明 Core 已连接、guard 已生效或 modem 已可用。
+配置向导默认仍关闭 modem/raw USB，不为了通过检查自动打开；启用 modem 是用户的显式配置决定。
+检查通过后，由用户确认无现有业务 owner 再运行 `sudo systemctl enable --now mdd-agent.service`。
+这会启动原运行时；只有显式启用 modem 时才应用持久 guard。随后按实际本地/Core 状态核对。
+
+保留显式 `-config`：三个入口均可加 `-config /var/lib/my-agent/config.json`，必须是已有的
+root-owned `0600` 文件、root 私有可写持久目录。仅增加同名 unit 的 ExecStart drop-in，
+不复制/改权限/迁移配置，不移动相邻 state 或未完成 setup；重复使用相同路径。
+已有相邻 `state/` 必须为 root-owned `0700` 真实目录，内部持久文件为非链接的 `0600` 私有文件。
+现存 `raw-modem-handoffs.db` 无法由首装入口证明恢复归属，故保留并拒绝，交回原部署／恢复流程；
+不把 JSON raw 开关关闭当作无未完成 handoff 的证据。该预检只用于首次启动，不代替后续原部署维护。
+为保持原服务沙箱，只接受 `/var/lib` 或 `/opt` 下的规范路径（不含空格、链接或 systemd
+specifier）；`/home`、`/etc` 不满足原 unit 的读写约束时清晰拒绝，不放宽保护。
+用户账户的无 systemd reader/cron 配置仍走下一节，不自动转成 root managed 服务。
+
 ### 嵌入式设备手动部署
 
 2026-10-02 用户决定：保留现有运行时、安装器和隔离逻辑，增加独立的手动部署流程。用户自行下载、
@@ -213,9 +265,10 @@ bearer 或未完成宿主隔离的设备必须 typed fail closed；不得因为�
 
 **先确认范围和依赖：**
 
-- 使用对应架构和 libc 的 GitHub workflow 工件。Linux 完整服务端包仍为 amd64；新增原生
-  `ubuntu-24.04-arm` job 提供独立 `MDD-Agent-Linux-arm64.tar.gz`，发布到正式版本的 reader-only 资产，仅覆盖 headless reader
-  路径，需要 glibc 2.39 或更新版本。以精确 workflow 的成功结果为准，不把新增 job 当成已验收。
+- 使用对应架构和 libc 的 GitHub workflow 工件。Linux 完整服务端包仍为 amd64；原生
+  `ubuntu-24.04-arm` job 提供独立 `MDD-Agent-Linux-arm64.tar.gz`。已发布 v2.0.0 是 reader-only；
+  新候选的 managed 首装范围见上节，不可套用到旧包。需要 glibc 2.39 或更新版本。
+  以精确 workflow 的成功结果为准，不把新增 job 当成已验收。
   ARMv7、OpenWrt/musl 不在此范围；不在目标板上现场构建或下载不明来源替代品。
 - Reader 需要系统提供匹配的 PC/SC 库、`pcscd` 和读卡器驱动（例如 libccid），并允许运行用户访问
   pcscd。由用户按发行版方式启动和保活 pcscd；已有实例不要重复启动。Agent 和 pcscd 都不必由

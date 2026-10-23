@@ -1,5 +1,64 @@
 # Branch disposition and integration record
 
+October23 `codex/linux-agent-delivery` starts at main42976962. The authorized
+successor fixed reviewer approved LINUX_AGENT_PLAN_4297696: complete the ARM64
+package, fresh standalone placement/pure preflight and hosted final-tar/empty-host
+qualification, without runtime or Core ownership changes. Source/CI/final review
+are pending. This batch also reconciles the accepted PR50 qualification and actual
+eSIM location/history display evidence; it does not repeat those tests or reopen
+frozen PR48. No production deployment, public release or paid operation is claimed.
+
+Initial PR51 `8ed90e7` / Go39899087043 is retained at
+`archive/2026-10-23/linux-agent-initial`. Final-tar ELF/source/dependencies/ALSA
+enumeration passed; the real old published CLI reported missing audio helper,
+but the harness expected exit1 instead of its actual fatalf exit2. Source review
+required six confined fixes: ready modem-off return status, raw rather than
+redacted fixture config, sandbox directories, actual adjacent state/recovery
+ownership, fresh guard recheck and non-destructive failed placement. The corrected
+candidate retains temporary old-installer behavior comparisons for qualification.
+The same run separately failed unchanged Core race
+TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration at initial donor
+apply with egress_runtime_unavailable. Its cause is unproven; no runtime/test
+expectation was changed or gate waived. No managed execution qualification yet.
+
+Corrected `8dac8d7` / Go39900560187 is retained at
+`archive/2026-10-23/linux-agent-preflight`. Final-tar checks and real old/new
+helper comparison passed; installation stopped at the VHCI environment preflight.
+Other jobs, including full Core race, passed; the prior Core cause remains unknown.
+Successor review accepted the six primary fixes, requiring complete scan-error
+propagation. Its environment review approved exact running-kernel official module
+preparation with original diagnostics and an unloaded-before-start assertion;
+no kernel replacement, gate bypass or runtime change. Managed qualification is
+still pending, not inferred from package or dependency checks.
+
+Source-approved `1bed4e0` / Go39903258208 is preserved at
+`archive/2026-10-23/linux-agent-kernel-plan`. Its environment receipt confirms
+VHCI is configured as a module but absent from the running kernel's directory.
+The exact official ARM64 modules package exists; its required `wireless-regdb`
+dependency triggered the strict plan rejection before installation. Preparation
+now names and records that dependency explicitly; no other package/removal or
+kernel replacement is allowed. Product E2E did not run in this attempt.
+
+`52d70dd` / Go39905081803 is preserved at
+`archive/2026-10-23/linux-agent-hosted-prerequisites`. Exact kernel dependencies
+and unloaded-state checks passed; the first installer comparison then rejected a
+writable deployment ancestor. Official hosted images set `/opt` to 0777. The
+review-approved second harness correction records actual ancestors, preserves the
+product rejection, temporarily prepares only an exact root-owned 0777 `/opt`, and
+restores its original mode via the same directory FD even after cleanup errors.
+No product permission gate changes. If this E2E still fails, retain evidence and
+stop further automatic corrections to it; installation/guard remain unqualified.
+
+PR50 is merged `42976962` (tree `4d7f0ffc`). Final `5180618`, original review,
+normal Go `39886954243` and Android `39886954195` passed; archive
+`archive/2026-10-23/macos-universal-delivery` preserves that source. Main signing
+`39888741520` passed all ten jobs. Downloaded original-Team Developer ID packages
+matched source/tree, index hashes and final native-arm64/Rosetta-x86_64 E2E receipts.
+Original final review `2ac1684a` closes this qualification; public release, fleet
+installation, Intel hardware and excluded notarization are not claimed. This
+supersedes candidate-stage pending source/CI/signing wording below, not old failures.
+See [PR50 receipt](https://github.com/lovitus/mdd-sim-gateway/pull/50#issuecomment-6356021902).
+
 October23 `codex/macos-universal-delivery` starts from main `5c4e1a9` for the
 original-review-approved (`d84e2d8f`) Universal package batch. Candidate source,
 hosted qualification and merge are pending; no published tag or fleet is changed.
