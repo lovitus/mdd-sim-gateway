@@ -1479,6 +1479,14 @@
       }
     },
     {
+      "id": "LINUX_DHCP_BEARER",
+      "state": "partial",
+      "releaseRelevance": "current",
+      "summary": "Approved NEXT_BATCH_992c4fb: native MM Ethernet DHCP IPv4 claim acquisition, T1/T2 renewal, expiry and exact invalidation through existing borrower/persistent owners. Reuse upstream DHCP and index-bound netlink; preserve static IPv4, policy, quotas and active-call guards. No Core/wire/config/pin changes.",
+      "acceptance": "Still unqualified. Diagnostic39986314729 confirmed same-cellular-interface fallback after private-route loss without observed host-default leakage. Realm counterexamples passed red/green40476145065. Full40485463089/tree3b118f3a passed both short-lease original-interface/no-IPv4 readbacks and prior lifecycle/realm/permit checks; recovery40485464771 passed. Later static admission failed; cancellation/malformed cases had no wire evidence and are not qualified. Preserve archive/2026-10-28/linux-dhcp-tail-red and prior reds. October28 owner authorizes the fixed reviewer's remaining original-tail fixture correction: await old borrower release, fresh exact SIM generation and readiness, actual deadline/lifetime errors with corresponding DHCP exchanges, exact replacement interface and IPv4. Product, topology and original time limits are unchanged. Source/normal full CI/final review remain pending; merge authorized only after they pass. Historical rejecting facts were not logged, so cached-generation setup is a source explanation, not a measured incident cause. No production or paid/deferred hardware expansion; PPP/IPv6/raw-IP DHCP and non-systemd managed modem remain separate gaps.",
+      "evidence": ["DEVELOPMENT.md", "docs/branches.md", "go-runtime/internal/linuxmodem/dhcp_linux.go", "go-runtime/internal/linuxmodem/dhcp_e2e_linux_test.go", "tools/test-linux-dhcp.mjs"]
+    },
+    {
       "id": "AGENT_FIRST_RUN_SETUP",
       "state": "completed",
       "releaseRelevance": "current",
