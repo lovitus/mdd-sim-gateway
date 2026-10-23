@@ -80,6 +80,26 @@ validate_candidate() {
 	fi
 	codesign --verify --deep --strict "$candidate/MDD Agent.app" >/dev/null
 	codesign --verify --strict "$candidate/mdd-agent" >/dev/null
+	# Reject incompatible code before touching launchd, the current link or state.
+	app_binary=$(plist_string "$candidate/MDD Agent.app/Contents/Info.plist" CFBundleExecutable)
+	case "$app_binary" in ''|*/*|.|..) printf '%s\n' 'invalid App executable' >&2; exit 1 ;; esac
+	required_arches=$(uname -m)
+	if [ -f "$candidate/BUILD.txt" ] && grep -Fxq 'architecture=universal' "$candidate/BUILD.txt"; then
+		required_arches='arm64 x86_64'
+		minimum=$(plist_string "$candidate/MDD Agent.app/Contents/Info.plist" LSMinimumSystemVersion)
+		[ "$minimum" = 15.0 ] && [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 15 ] || {
+			printf '%s\n' 'Universal package requires macOS 15 or newer' >&2; exit 1;
+		}
+	fi
+	for executable in "$candidate/mdd-agent" "$candidate/mdd-cellular-io" \
+		"$candidate/mdd-call-audio-helper" "$candidate/MDD Agent.app/Contents/MacOS/$app_binary" \
+		"$candidate/MDD Agent.app/Contents/MacOS/mdd-cellular-io" \
+		"$candidate/MDD Agent.app/Contents/MacOS/mdd-call-audio-helper"; do
+		# required_arches contains only the fixed platform names above.
+		lipo -verify_arch $required_arches "$executable" >/dev/null || {
+			printf '%s\n' 'candidate is missing a required architecture' >&2; exit 1;
+		}
+	done
 	if [ -L "$current" ] && [ -d "$current/MDD Agent.app" ]; then
 		candidate_requirement=$(codesign -d -r- "$candidate/MDD Agent.app" 2>&1 | sed -n '/^designated =>/p')
 		current_requirement=$(codesign -d -r- "$current/MDD Agent.app" 2>&1 | sed -n '/^designated =>/p')
