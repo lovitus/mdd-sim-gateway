@@ -1,5 +1,29 @@
 # Branch disposition and integration record
 
+October23 PR52 candidate50c0b2d / run39942634074 remains unqualified: permit
+publication failed at the fixed cgroup path after DORA. Old compiled992 method3
+refusal and cleanup red/green did pass; source/proof are preserved at
+`archive/2026-10-23/linux-dhcp-counterexamples`, and the one-time machinery is
+removed from normal CI. Successor review accepted R1/R2/R4; R3 synchronization,
+R5 existing negative evidence and the reviewed read-only cgroup bind preparation
+are corrected together. This is the second automatic E2E correction; another
+failure stops automatic test repairs. No production changes. Initialbf8faaa /
+run39939080172 remains failed with its original runtime cause unproven.
+
+October23 `codex/linux-dhcp-bearer` starts at merged main992c4fb. The same fixed
+successor accepted NEXT_BATCH_992c4fb: Ethernet MM DHCPv4 whole-claim lifecycle,
+existing borrower/persistent-owner recovery and real hosted network qualification.
+Implementation candidate still awaits full source approval and qualification.
+No production or paid operation, no reopening PR48 or deferred hardware acceptance.
+
+PR51 is merged992c4fb/tree09e1d4b5. Final2f8b076 passed successor266906e5,
+Go39909121038 and Android39909120959. Final artifacta8500c597bfb has the same
+tree; SHAe5c2b499c441b79743593c32a6b7f5c3dca7caae7b9fe7df6beb253dcd8c7cd5
+and complete14-stage receipt match. Archive
+`archive/2026-10-23/linux-agent-delivery` preserves the accepted final source.
+This closes the pending cleanup/merge statements below, not publication or fleet.
+See [final receipt](https://github.com/lovitus/mdd-sim-gateway/pull/51#issuecomment-6358841746).
+
 PR51 qualified `a891f5d` / Go39907297621 passed in full, fixed source review
 93f64fc1 accepted. Archive `archive/2026-10-23/linux-agent-qualified` retains the
 one-time actual old-release/installer counterexamples. Actual checkout b0de5414

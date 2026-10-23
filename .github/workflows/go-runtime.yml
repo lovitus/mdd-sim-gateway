@@ -651,8 +651,8 @@ jobs:
           printf '%s\n' \
             'MDD Linux ARM64 headless standalone Agent. Not a Core/Provider release.' \
             'Reader/cron remains supported without systemd, with modem/raw USB disabled.' \
-            'Managed native MM static IPv4 and serial AT/SIM require the original systemd/cgroup-v2 guard.' \
-            'Serial does not provide cellular data. DHCP/PPP/IPv6 and non-systemd managed modem are not supported.' \
+            'Managed native MM static/Ethernet DHCP IPv4 and serial AT/SIM require the original systemd/cgroup-v2 guard.' \
+            'Serial does not provide cellular data. Raw-IP DHCP/PPP/IPv6 and non-systemd managed modem are not supported.' \
             'Requires glibc 2.39+, libpcsclite1, pcscd/libccid; audio uses libasound2.' \
             'Managed hosts also require udev, nftables, iproute2, kmod/vhci_hcd, system bus and jq/binutils.' \
             'See MODEM_AGENT.md: preflight, fresh placement, config setup, startup preflight, explicit start.' \
@@ -688,6 +688,26 @@ jobs:
             ${{ runner.temp }}/mdd-arm64-agent/MDD-Agent-Linux-arm64.tar.gz
             ${{ runner.temp }}/mdd-arm64-agent/MDD-Agent-Linux-arm64.tar.gz.sha256
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Compile Linux DHCP production-entry qualification
+        working-directory: go-runtime
+        run: go test -race -tags mdd_linux_dhcp_e2e -c -o "$RUNNER_TEMP/mdd-dhcp-e2e" ./internal/linuxmodem
+
+      # One-time old-entry and cleanup red/green proofs: run39942634074.
+      - name: Qualify full DHCP claim lifecycle
+        run: |
+          set -euo pipefail
+          sudo env GITHUB_ACTIONS=true PATH="$PATH" node tools/test-linux-dhcp.mjs \
+            "$RUNNER_TEMP/mdd-dhcp-e2e" "$RUNNER_TEMP/mdd-arm64-agent/dhcp-after.json"
+
+      - name: Preserve DHCP qualification receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-linux-dhcp-${{ github.sha }}
+          path: ${{ runner.temp }}/mdd-arm64-agent/dhcp-*
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Preserve ARM64 installation qualification
