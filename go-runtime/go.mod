@@ -14,7 +14,11 @@ require (
 	github.com/deploymenttheory/go-bindings-win32 v0.5.0
 	github.com/ebfe/scard v0.0.0-20241214075232-7af069cabc25
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/insomniacslk/dhcp v0.0.0-20261014062924-c6bb46ad3f3a
+	github.com/jsimonetti/rtnetlink v1.3.5
 	github.com/kardianos/service v1.3.0
+	github.com/mdlayher/netlink v1.7.2
+	github.com/mdlayher/packet v1.1.2
 	github.com/moby/sys/atomicwriter v0.1.0
 	github.com/sagernet/sing v0.8.13
 	github.com/sagernet/sing-mux v0.3.5
@@ -29,6 +33,14 @@ require (
 	golang.org/x/crypto v0.55.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
+)
+
+require (
+	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/josharian/native v1.1.0 // indirect
+	github.com/mdlayher/socket v0.4.1 // indirect
+	github.com/pierrec/lz4/v4 v4.1.14 // indirect
+	github.com/u-root/uio v0.0.0-20230220225925-ffce2a382923 // indirect
 )
 
 require (
@@ -72,7 +84,7 @@ require (
 	golang.org/x/exp/typeparams v0.0.0-20220218215828-6cf2b201936e // indirect
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/mod v0.38.0
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/net v0.57.0
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect

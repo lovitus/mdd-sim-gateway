@@ -15,12 +15,13 @@ import (
 )
 
 type entry struct {
-	target     agentdata.Target
-	requested  agentdata.Profile
-	profile    string
-	connected  bool
-	persistent bool
-	borrowed   bool
+	target      agentdata.Target
+	requested   agentdata.Profile
+	profile     string
+	connected   bool
+	persistent  bool
+	borrowed    bool
+	invalidated <-chan struct{}
 }
 
 type Manager struct {
@@ -63,7 +64,7 @@ func (manager *Manager) SetPersistent(ctx context.Context, target agentdata.Targ
 		delete(manager.items, target.EquipmentID)
 		return nil
 	}
-	if current != nil && current.target == target && current.connected && current.requested == profile {
+	if current != nil && current.target == target && current.connected && current.requested == profile && !agentdata.Invalidated(current.invalidated) {
 		current.persistent = true
 		return nil
 	}
@@ -82,7 +83,11 @@ func (manager *Manager) SetPersistent(ctx context.Context, target agentdata.Targ
 	if err != nil {
 		return err
 	}
-	manager.items[target.EquipmentID] = &entry{target: target, requested: profile, profile: name, connected: true, persistent: true}
+	invalidated, err := agentdata.DataValidity(manager.backend, target)
+	manager.items[target.EquipmentID] = &entry{target: target, requested: profile, profile: name, connected: true, persistent: true, invalidated: invalidated}
+	if err != nil || agentdata.Invalidated(invalidated) {
+		return errors.Join(errors.New("prepared cellular claim is no longer valid"), err)
+	}
 	return nil
 }
 
@@ -97,6 +102,9 @@ func (manager *Manager) PrepareData(ctx context.Context, target agentdata.Target
 		if current.borrowed {
 			return "", errors.New("another cellular data borrower is active")
 		}
+		if agentdata.Invalidated(current.invalidated) {
+			return "", agentmodem.ErrOperationUnavailable
+		}
 		if current.connected && current.requested == profile {
 			current.borrowed = true
 			return current.profile, nil
@@ -109,19 +117,34 @@ func (manager *Manager) PrepareData(ctx context.Context, target agentdata.Target
 	if err != nil {
 		return "", err
 	}
-	manager.items[target.EquipmentID] = &entry{target: target, requested: profile, profile: name, connected: true, borrowed: true}
+	invalidated, err := agentdata.DataValidity(manager.backend, target)
+	manager.items[target.EquipmentID] = &entry{target: target, requested: profile, profile: name, connected: true, borrowed: true, invalidated: invalidated}
+	if err != nil || agentdata.Invalidated(invalidated) {
+		manager.items[target.EquipmentID].borrowed = false
+		return "", errors.Join(errors.New("prepared cellular claim is no longer valid"), err)
+	}
 	return name, nil
 }
 
 func (manager *Manager) DialData(ctx context.Context, target agentdata.Target, network, address string) (net.Conn, error) {
 	manager.mu.Lock()
 	current := manager.items[target.EquipmentID]
-	ready := current != nil && current.target == target && current.connected && current.borrowed
+	ready := current != nil && current.target == target && current.connected && current.borrowed && !agentdata.Invalidated(current.invalidated)
 	manager.mu.Unlock()
 	if !ready {
 		return nil, agentmodem.ErrOperationTargetReplaced
 	}
 	return manager.backend.DialData(ctx, target, network, address)
+}
+
+func (manager *Manager) DataValidity(target agentdata.Target) (<-chan struct{}, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	current := manager.items[target.EquipmentID]
+	if current == nil || current.target != target {
+		return nil, agentmodem.ErrOperationTargetReplaced
+	}
+	return current.invalidated, nil
 }
 
 func (manager *Manager) StopData(ctx context.Context, target agentdata.Target) error {
@@ -149,7 +172,7 @@ func (manager *Manager) Persistent(target agentdata.Target) bool {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	current := manager.items[target.EquipmentID]
-	return current != nil && current.target == target && current.connected && current.persistent
+	return current != nil && current.target == target && current.connected && current.persistent && !agentdata.Invalidated(current.invalidated)
 }
 
 // PersistentMatches observes the original owner without setting persistent or
@@ -158,7 +181,7 @@ func (manager *Manager) PersistentMatches(target agentdata.Target, profile agent
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	current := manager.items[target.EquipmentID]
-	return current != nil && current.target == target && current.connected && current.persistent && current.requested == profile
+	return current != nil && current.target == target && current.connected && current.persistent && current.requested == profile && !agentdata.Invalidated(current.invalidated)
 }
 
 func (manager *Manager) OwnedTargets() []agentdata.Target {
