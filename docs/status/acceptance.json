@@ -1479,6 +1479,14 @@
       }
     },
     {
+      "id": "LINUX_DHCP_BEARER",
+      "state": "partial",
+      "releaseRelevance": "current",
+      "summary": "Approved NEXT_BATCH_992c4fb: native MM Ethernet DHCP IPv4 claim acquisition, T1/T2 renewal, expiry and exact invalidation through existing borrower/persistent owners. Reuse upstream DHCP and index-bound netlink; preserve static IPv4, policy, quotas and active-call guards. No Core/wire/config/pin changes.",
+      "acceptance": "Original source review accepted f4a3359/tree49a18953. Run40625230150 tested merge02cf12b5 with the identical tree: full DHCP E2E passed57.80s, complete=true, mainExit=0, cleanupErrors=[], host namespaces/mount unchanged. Actual silent-init DISCOVER/deadline, malformed matching-XID OFFER/ACK/lifetime rejection, fresh exact SIM generation, static recovery and exact replacement IPv4 passed with prior lifecycle/realm/permit cases. Archive/2026-10-28/linux-dhcp-tail-qualified retains proof; prior route-loss and fixture reds remain historical evidence. Whole CI stopped in the unrelated Core browser recording step because Chrome failed to start within15s; no business assertion ran and the cause is unproven. Remove only the reviewed completed PR52-only route-proof step, retaining permanent regressions and full E2E. Product, topology and original timeouts unchanged; final normal CI and original final review remain pending before authorized merge. No production or paid/deferred hardware expansion; PPP/IPv6/raw-IP DHCP and non-systemd managed modem remain separate gaps.",
+      "evidence": ["DEVELOPMENT.md", "docs/branches.md", "go-runtime/internal/linuxmodem/dhcp_linux.go", "go-runtime/internal/linuxmodem/dhcp_e2e_linux_test.go", "tools/test-linux-dhcp.mjs"]
+    },
+    {
       "id": "AGENT_FIRST_RUN_SETUP",
       "state": "completed",
       "releaseRelevance": "current",

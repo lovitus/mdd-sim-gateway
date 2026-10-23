@@ -8,6 +8,113 @@ Docker, Python Control, VPCD and Asterisk are retired; they are not local develo
 
 ## Toolchain and native dependencies
 
+### Linux DHCP IPv4 claim lifecycle
+
+October28 original source review accepted f4a3359/tree49a18953. Run40625230150
+qualified the full DHCP lifecycle in57.80s: actual cancellation/malformed wire,
+fresh exact SIM generation, static recovery and exact same-name replacement.
+Receipt complete=true, mainExit=0, cleanupErrors=[], host namespaces/mount unchanged.
+Archive `archive/2026-10-28/linux-dhcp-tail-qualified` retains source and one-time
+route-proof red/green. The unrelated Core job stopped before recording assertions
+because Chrome did not start within its existing15s limit; cause remains unproven.
+Remove only the completed PR52-only proof step; retain permanent tests/full E2E.
+Product, topology and timeouts are unchanged. Final normal CI and original review
+remain required before merge; no production or paid hardware acceptance implied.
+
+October27 owner authorized the fixed successor's route-loss repair. Preserve
+c797b05/tree27f49252 and run39986314729 as the actual red: bound cellular sockets
+used an unowned on-link route after private-default deletion, without observed
+host-default leakage. Add owned-route realms and exact nft classid matching only
+for DHCP; retain static/bootstrap behavior. Recheck realm ownership, complete
+inventories, numeric interface identity, publication/readback and exact deletion.
+The original fixture also checks existing TCP/UDP at that deletion boundary.
+Reader timeout remains unconfirmed (both diagnostic suites passed); no speculative
+reader edit, production change or paid operation. Full qualification is pending.
+The completed implementation review requires iproute2's read-only binary
+`route save table all`, `rule save` and `address save` inventories: zero exit,
+empty stderr, bounded complete output and strict numeric-object decoding.
+This preserves DONE-only interruption detection missing from the pinned Go
+transport; mutations still use its numeric-ifindex codec and exclusive ACKs.
+The archived PR52-only hosted counterexample step restored the old flat
+permit acceptance and zero-exit-only completion behavior and proved named
+runtime failures. It is removed after qualification; permanent regressions remain.
+The original route-loss red is retained rather than replayed.
+Run40475039191 stopped at the unexported `RTA_NH_ID` constant before DHCP
+qualification. The revised candidate uses Linux UAPI value30 and includes the
+fixed source review's tagged-test import and nft numeric-string realm fixes;
+neither that failed build nor source review alone qualifies this batch.
+Source-approved fecef696/tree5c96475d failed run40476145065 at the original T2
+broadcast ACK assertion; realm counterexamples passed red/green, later lifecycle
+was not reached. Retain this red at `archive/2026-10-27/linux-dhcp-t2-red`.
+The same reviewer accepted DHCP-only raw broadcast with a frozen lease source,
+separate broadcast-capable receive wrapper and the existing exchange write
+deadline. T1/data realm checks and original E2E assertions/timeouts are unchanged.
+Run40479004518/treeeeec76fa passed T2 and route-only withdrawal, then stopped
+at the fixture's slash-form realm argument; use the same full uint32 decimal.
+Its reader diagnostic exposed a prior-response/deferred-slot-release assumption;
+the fixed review accepted fresh-connection saturation, preserving all original
+capacity/scope/time limits. Earlier undiagnosed reader timeouts remain unconfirmed.
+Run40482148703/tree3e035ff9 passed reader, permit and realm checks, then failed
+the short-lease address assertion. IPv4-only iproute2 output omits addressless
+links; owner/reviewer approved all-family readback of the original interface,
+strictly no IPv4 and bounded diagnostics. No product or timeout change; actual
+cleanup and the remaining lifecycle still require the normal hosted result.
+
+The fixed successor accepted NEXT_BATCH_992c4fb on October 23. Reuse
+insomniacslk/dhcp at c6bb46ad3f3a for Ethernet-only MM method3 IPv4, with
+claim-owned bootstrap, T1/T2 renewal, expiry, socket invalidation and existing
+owner recovery. Preserve static IPv4, user leases/quotas, active-call guards,
+configuration, pins and policy. No Core/wire changes, host DHCP scripts, main
+routes, resolv.conf writes or automatic enabling. PPP/IPv6/raw-IP DHCP and
+non-systemd managed modem remain separate gaps, not this batch's qualification.
+
+Failure checklist: bootstrap exposes ordinary traffic; wrong interface or SIM
+renews; DHCP extends user lease/quota; expired sockets revive after same-card
+reconnect; malformed options or stale replies publish; late worker downs a new
+interface; borrower/persistent owner cannot recover; MM cleanup bypasses a call;
+worker shutdown deadlocks. Hosted real DHCP/veth/netns tests must exercise the
+production guard, routes and sockets in the fixed Agent cgroup, with a working
+alternate default route. Use compiled old-method3 refusal once, then acquisition,
+T1 unicast/T2 broadcast, NAK/expiry, owner cleanup and static regression. No
+production, paid tests, PR51 qualification replay or frozen PR48 changes.
+
+References: [MM IP setup](https://modemmanager.org/docs/modemmanager/ip-connectivity-setup-in-lte-modems/),
+[DHCP upstream](https://github.com/insomniacslk/dhcp/tree/c6bb46ad3f3ada83ff1d61d5b57ed57a590289fd),
+[RFC2131](https://www.rfc-editor.org/rfc/rfc2131),
+[packet sockets](https://man7.org/linux/man-pages/man7/packet.7.html).
+Include BSD-3-Clause and the nclient4 gVisor-derived Apache-2.0 notice in the
+existing source/license inventory; do not upgrade unrelated dependencies.
+
+`tools/test-linux-dhcp.mjs` invokes the tagged existing-package Go E2E under the
+fixed `mdd-agent.service` cgroup on disposable hosted ARM64. Three real namespaces
+and veth paths exercise the original guard, DHCP server/packet exchange, marked
+routes, TCP/UDP WebSocket borrowing, DNS and original durable policy recovery.
+Only MM/AT and USB-parent sysfs stand in for hardware; a narrow fixture adapter
+substitutes that parent check while calling the original contract/netdev guard.
+The peer is outside the Agent cgroup. Run39942634074 qualified the compiled old
+method3 entry refusal and the failed-inventory cleanup red/green counterexample;
+their one-time machinery is archived at `archive/2026-10-23/linux-dhcp-counterexamples`.
+Current full CI/source review are
+pending; this is not physical modem or production evidence. DNS changes invalidate
+the old claim and rebuild through the original owner; unadvertised renewal DNS
+inherits only that same validated lease. DHCP MTU/hostname/search/NTP options are
+not applied to the host. The R1-R5 source review is addressed in the same batch:
+datagram DNS semantics, voice-protected partial MM cleanup, expiry before permit
+publication, failed-link-inventory ownership and the approved negative traffic /
+lease cases. Run39939080172 did not qualify DHCP; its E2E failed and root-only
+scratch files also blocked artifact upload. The revised harness emits the result
+and exports readable receipts before deleting only its own scratch directory.
+Run39942634074 reached DORA, then failed permit publication because the fixed
+cgroup path was unavailable after `ip netns exec` replaced sysfs. The reviewed
+second harness correction preserves the existing cgroup2 mount with read-only
+binds in private mount namespaces, validates exact process membership, and
+compares the host's full cgroup mountinfo before/after cleanup. No new cgroup2
+mount, fake hierarchy or weakened guard is allowed. Current R3/R5 refinements
+serialize expiry decisions with renewals and independently qualify route/permit
+withdrawal using chain-specific drop counters and a fenced packet observer.
+If this second correction still fails, preserve evidence and stop automatic
+test repairs. This does not qualify borrower lifecycle or physical hardware yet.
+
 ### Linux ARM64 standalone delivery
 
 The owner-authorized successor fixed reviewer approved `LINUX_AGENT_PLAN_4297696`
