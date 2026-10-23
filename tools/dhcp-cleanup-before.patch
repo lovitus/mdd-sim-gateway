@@ -1,0 +1,12 @@
+diff --git a/go-runtime/internal/linuxdataguard/dynamic_linux.go b/go-runtime/internal/linuxdataguard/dynamic_linux.go
+--- a/go-runtime/internal/linuxdataguard/dynamic_linux.go
++++ b/go-runtime/internal/linuxdataguard/dynamic_linux.go
+@@ -238,7 +238,7 @@
+ 		// Only a successful complete dump produces ENODEV here. A failed
+ 		// enumeration is not proof of disappearance.
+-		if !errors.Is(err, unix.ENODEV) {
++		if _, lookupErr := net.InterfaceByIndex(state.iface.Index); lookupErr == nil {
+ 			return errors.Join(append(failures, err)...)
+ 		}
+ 		state.address = nil
+ 		route.linkEnabled = false

@@ -14,6 +14,7 @@ import (
 )
 
 type DataRoute struct {
+	dynamic                                                       *dynamicRoute
 	Permit                                                        DataPermit
 	Interface                                                     string
 	Address                                                       netip.Prefix
@@ -103,6 +104,9 @@ func (guard *Guard) CloseDataRoute(ctx context.Context, route *DataRoute) error 
 func (guard *Guard) CleanupDataRoute(route *DataRoute) error { return guard.rollbackDataRoute(route) }
 
 func (guard *Guard) rollbackDataRoute(route *DataRoute) error {
+	if route != nil && route.dynamic != nil {
+		return guard.cleanupDynamicRoute(route)
+	}
 	if route == nil || route.Interface == "" || route.Table == 0 {
 		return nil
 	}
