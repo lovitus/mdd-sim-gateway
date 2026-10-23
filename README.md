@@ -67,6 +67,10 @@ Android 是独立 preview。公开包及校验清单已下载核对，准确源�
 | macOS arm64 Agent | [MDD-Agent-macOS-arm64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/MDD-Agent-macOS-arm64.tar.gz) | macOS 15+；原 Developer ID 签名，未公证；[配置和安装](agent/MODEM_AGENT.md#macos) |
 | Android 9+ 原生客户端（预览） | [独立 Android preview](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0) | 原 application ID/稳定 preview 签名，独立 versionCode；读卡器可选，不支持本机 modem |
 
+macOS Universal（arm64 + Intel，macOS 15+）正在独立构建资格验证，尚未公开发布。
+现有 v2.0.0 下载不变；Actions 候选不代表正式发行或 Intel 实机验收，详见
+[通用包说明](go-runtime/release/README.md#universal-candidate)。
+
 从 [v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0) 同时下载 `SHA256SUMS`，核对所选文件后再解包。
 Linux 用 `sha256sum 文件名`，macOS 用 `shasum -a 256 文件名`，Windows 用
 `Get-FileHash -Algorithm SHA256 文件名`，与清单对应行完整比较；Android 使用其独立 preview 的清单。

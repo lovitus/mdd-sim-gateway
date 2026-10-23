@@ -1,5 +1,32 @@
 # Branch disposition and integration record
 
+October23 `codex/macos-universal-delivery` starts from main `5c4e1a9` for the
+original-review-approved (`d84e2d8f`) Universal package batch. Candidate source,
+hosted qualification and merge are pending; no published tag or fleet is changed.
+Initial3a22cb2/Go39880715702 is retained at
+`archive/2026-10-23/macos-universal-initial`: both thin builds completed, but the
+combiner rejected a missing parsed code identity before Universal E2E/proof.
+Original review29c48c6d separately found incorrect lipo preflight argument order.
+The same batch fixes that order and recognizes Apple's documented synthesized
+DR prefix; signature/identity/architecture requirements are not relaxed.
+
+PR49 is now merged `5c4e1a9` (tree `728955ab`). Exact `0cbf077` source review
+and Android39871769636 passed; Go39871769608 passed after one approved same-run
+failed-Core/downstream rerun. Its first Chrome startup failure and earlier
+failures below remain evidence. Archive `archive/2026-10-23/android-status-delivery`
+preserves the qualified head. Main signing39875568282 produced preview v203;
+the artifact is retained, not installed or publicly released. This supersedes
+candidate-stage pending statements below, not phone/endurance qualification.
+See [PR49 receipt](https://github.com/lovitus/mdd-sim-gateway/pull/49#issuecomment-6354204050).
+
+PR47 October23 00:17:26UTC bounded read-only follow-up confirms all three upgraded
+desktop identities still report1bfcf9a. The fourth Windows is absent from the
+current Core directory and remains unupgraded. Both previously failing GB lines
+now independently report tunnel/IMS readiness and availability, draining=false;
+this supersedes their older unrecovered snapshot, not historical causality or
+paid-call/SMS/endurance acceptance. No upgrade/restart or second probe occurred.
+See [PR47 follow-up](https://github.com/lovitus/mdd-sim-gateway/pull/47#issuecomment-6354463445).
+
 October23 `codex/android-agent-status-usability` starts from main `1bfcf9a` and
 contains the approved Android presentation/configuration-feedback follow-up and
 the narrowly reviewed Windows CI dependency-stage diagnostics described below.

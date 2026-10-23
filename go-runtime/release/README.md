@@ -36,6 +36,29 @@ records both facts separately. Notarization and physical installation validation
 are not implied by a successful signature. Secret values must never be written
 into this repository or passed through workflow inputs.
 
+### Universal candidate
+
+The macOS job now builds the existing arm64 archive and a separate
+`MDD-Agent-macOS-universal.tar.gz` candidate for macOS15 or newer. Universal is
+not part of the already published v2.0.0 download set. No old tag or asset is
+replaced; publication requires a separately qualified future version.
+
+`build-macos-agent.sh --arch arm64|amd64` defaults to arm64. Fyne and license
+tools run on the host while every binary/static dependency targets the selected
+architecture. `node tools/macos-package.mjs combine --arm64 ABS --amd64 ABS
+--output NEW_ABS` validates both input manifests, source/build/resources and
+signing, combines all six executables, preserves license differences, then
+signs and regenerates checksums in new staging. Signed inputs additionally
+require `--identity ID --team-id 8WPJLUNLY8`; no fallback to ad-hoc is allowed.
+
+Final verification checks exact arm64/x86_64 slices, system-only dependencies,
+load targets, per-slice signatures and component-specific entitlements.
+`tools/test-macos-universal.mjs ARM64_ABS UNIVERSAL_ABS` exercises real config
+entry points and no-hardware helper exits through both slices. Intel executes
+under Rosetta in hosted CI, not on a qualified Intel modem/reader host. The
+installer rejects missing slices before stopping the existing owner. No new
+runtime, default capability, configuration/pin or isolation behavior is added.
+
 Source: https://github.com/apple-actions/import-codesign-certs/tree/v7.0.0 and
 https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications.
 
@@ -331,7 +354,10 @@ directories, and reloads systemd. It preserves `/etc/mdd`, every `/var/lib/mdd*`
 The GitHub workflow publishes standard downloadable archives for the Linux release and desktop Agent
 packages, and keeps them short-lived for its internal cross-job gates. A pushed `v*` tag
 is published only after the Linux fresh-host lifecycle, both desktop builds and
-native ARM64 reader job pass. The release job downloads exactly those four artifacts.
+native ARM64 reader job pass. The release job downloads exactly five artifacts,
+including the separate macOS arm64 and Universal archives. Future Go publication
+has eight assets including the Linux alias and both manifests; the already
+published v2.0.0 and independent Android set remain unchanged.
 `tools/publish-release.mjs` verifies their source/tree/platform metadata and includes
 both the original Linux revision archive and a byte-identical `mdd-<version>-linux-amd64.tar`
 alias required by the unchanged updater. `RELEASE.json` and `SHA256SUMS` identify every
