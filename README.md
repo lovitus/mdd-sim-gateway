@@ -22,7 +22,7 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 2. **统一 HTTPS/WSS 入口**：
    - 页面、管理 API、Agent 和浏览器 PCM 都复用一个公开 TCP 入口，不要求用户确认服务器网卡 IP，也不暴露 RTP 端口。
 3. **跨平台统一 Agent**：
-   - 当前公开 v2.0.0 提供 **Linux amd64 服务端/Agent、Linux ARM64 reader-only Agent、Windows amd64 Agent、macOS arm64 Agent**。v2.1.0 候选增加 ARM64 managed Agent 包和 macOS Universal 包；不能宣称所有硬件免驱或所有架构已验收。
+   - 当前公开 v2.1.0 提供 **Linux amd64 服务端/Agent、Linux ARM64 headless Agent、Windows amd64 Agent、macOS arm64 和 Universal Agent**；不能宣称所有硬件免驱或所有架构已验收。
    - macOS 默认 **PC/SC-only**，Modem、音频和私有数据能力保留安全门禁；不为满足清单擅自开启。Windows、macOS、Linux 均为远程 Agent 的当前目标。
    - 三大平台开启 4G 时必须强制独占隔离；隔离失败不放行、不回落宿主网络、不覆盖用户开关。
    - 本轮不做 macOS 公证，不使用 `.p8`；arm64 与 Universal 发布均须保留原 Developer ID 签名。
@@ -42,14 +42,16 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 
 ### 1. 服务端部署（默认 Go artifact）
 
-**v2.0.0 已正式发布（2026-10-18）：** 以下固定下载入口已公开，Go `v2.0.0` 是当前 Latest；
+**v2.1.0 已正式发布（2026-10-28）：** 以下固定下载入口已公开，Go `v2.1.0` 是当前 Latest；
 Android 是独立 preview。公开包及校验清单已下载核对，准确源码和 CI 见
-[发布回执](DEPLOYMENT.md#2026-10-18-v200-正式发布非生产升级)。发布没有自动升级现有设备。
+[发布回执](DEPLOYMENT.md#2026-10-28-v210-正式发布非生产升级)。发布没有自动升级现有设备。
+旧 [v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0) 的资产和验收记录保持不变；
+其中 ARM64 包是 reader-only，不能套用新版 managed 安装说明。
 旧 `v1.3.14` 属于 Python/Docker 时代；Actions 临时工件也不是正式下载入口。
 
 10 月 19 日已按后续授权升级生产服务端和六台桌面/Linux Agent；指定 Android 手机已安装 v182，
 本轮应用内验证按用户决定跳过。随后 PR45 仅升级故障 Linux Agent，策略已恢复就绪、
-原借用和出口已恢复；其余设备仍为 v2.0.0。准确版本及未验边界见
+原借用和出口已恢复；该次回执的其余设备为 v2.0.0。后续版本及未验边界见
 [部署回执](DEPLOYMENT.md#2026-10-19-pr45-linux-策略恢复)，不代表全端业务或耐久全部通过。
 
 10 月 22 日 PR46 已合并并按授权仅切换 Core，认证失败文案已部署；原借用/出口已恢复，
@@ -61,24 +63,20 @@ Android 是独立 preview。公开包及校验清单已下载核对，准确源�
 
 | 用途 | 固定下载入口 | 前提与部署说明 |
 | --- | --- | --- |
-| Linux amd64 服务端与 Agent | [mdd-2.0.0-linux-amd64.tar](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/mdd-2.0.0-linux-amd64.tar) | 服务端需 systemd，按下节安装；Agent 可按手动流程运行 |
-| Linux ARM64 读卡器 Agent | [MDD-Agent-Linux-arm64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/MDD-Agent-Linux-arm64.tar.gz) | glibc >=2.39、PC/SC、pcscd/libccid；仅 reader，不含 Core/Provider/modem guard；可不使用 systemd |
-| Windows amd64 Agent | [MDD-Agent-Windows-amd64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/MDD-Agent-Windows-amd64.tar.gz) | [首次服务安装与已有服务升级](agent/MODEM_AGENT.md#windows)；程序未做 Authenticode 签名 |
-| macOS arm64 Agent | [MDD-Agent-macOS-arm64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/MDD-Agent-macOS-arm64.tar.gz) | macOS 15+；原 Developer ID 签名，未公证；[配置和安装](agent/MODEM_AGENT.md#macos) |
-| Android 9+ 原生客户端（预览） | [独立 Android preview](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0) | 原 application ID/稳定 preview 签名，独立 versionCode；读卡器可选，不支持本机 modem |
+| Linux amd64 服务端与 Agent | [mdd-2.1.0-linux-amd64.tar](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.1.0/mdd-2.1.0-linux-amd64.tar) | 服务端需 systemd，按下节安装；Agent 可按手动流程运行 |
+| Linux ARM64 Agent | [MDD-Agent-Linux-arm64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.1.0/MDD-Agent-Linux-arm64.tar.gz) | glibc >=2.39、PC/SC、音频 helper；[managed 首装](agent/MODEM_AGENT.md#arm64-独立-managed-agent-首装)需 systemd/cgroup/guard；[reader 手动运行](agent/MODEM_AGENT.md#嵌入式设备手动部署)可不用 systemd；不含 Core/Provider/GUI |
+| Windows amd64 Agent | [MDD-Agent-Windows-amd64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.1.0/MDD-Agent-Windows-amd64.tar.gz) | [首次服务安装与已有服务升级](agent/MODEM_AGENT.md#windows)；程序未做 Authenticode 签名 |
+| macOS arm64 Agent | [MDD-Agent-macOS-arm64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.1.0/MDD-Agent-macOS-arm64.tar.gz) | macOS 15+、Apple Silicon；原 Developer ID 签名，未公证；[配置和安装](agent/MODEM_AGENT.md#macos) |
+| macOS Universal Agent | [MDD-Agent-macOS-universal.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.1.0/MDD-Agent-macOS-universal.tar.gz) | macOS 15+、arm64/x86_64；原 Developer ID 签名，未公证；Intel 实体硬件验收仍单列 |
+| Android 9+ 原生客户端（预览） | [2.1.0-preview / v228](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.1.0) | 原 application ID/稳定 preview 签名，独立 versionCode；读卡器可选，不支持本机 modem |
 
-macOS Universal（arm64 + Intel，macOS 15+）已完成 PR50 的构建及签名工件资格验证，尚未公开发布。
-现有 v2.0.0 下载不变；Actions 候选不代表正式发行或 Intel 实机验收，详见
-[通用包说明](go-runtime/release/README.md#universal-candidate)。
-
-**v2.1.0 正在准备，尚未发布。** 本次候选汇集已评审、通过 CI 并合并的 Agent 界面改进（PR47/49）、
-macOS Universal（PR50）、ARM64 独立 managed Agent 包（PR51）和 Linux Ethernet DHCP IPv4（PR52）。
+本次发行汇集 Agent 界面改进（PR47/49）、macOS Universal（PR50）、ARM64 独立 managed Agent 包
+（PR51）和 Linux Ethernet DHCP IPv4（PR52），已通过原评审、完整 CI 和实际签名发布门禁。
 ARM64 managed 模式需 systemd/cgroup 与原隔离 guard；无 systemd 的 reader 手动部署保持可用。
-候选仍须通过原有完整 CI、终审和实际签名发布门禁，不更新上面的 v2.0.0 下载，也不自动升级设备。
-Android 同批版本为 `2.1.0-preview`，保留 application ID、签名和递增 versionCode。
-尚未发布的工件、已部署版本与缺失的现场验收分别记录在[当前台账](docs/status/README.md)。
+发布不自动升级设备；PR48、未支持 bearer、Intel 实体硬件与其他延期验收保持原边界。
+已部署版本与缺失的现场验收分别记录在[当前台账](docs/status/README.md)。
 
-从 [v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0) 同时下载 `SHA256SUMS`，核对所选文件后再解包。
+从 [v2.1.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.1.0) 同时下载 `SHA256SUMS`，核对所选文件后再解包。
 Linux 用 `sha256sum 文件名`，macOS 用 `shasum -a 256 文件名`，Windows 用
 `Get-FileHash -Algorithm SHA256 文件名`，与清单对应行完整比较；Android 使用其独立 preview 的清单。
 `RELEASE.json` 记录源码、tree 和资产哈希；Linux 版本号包与源码 revision 包逐字节相同。
@@ -89,7 +87,7 @@ Linux 用 `sha256sum 文件名`，macOS 用 `shasum -a 256 文件名`，Windows 
 
 ```bash
 mkdir mdd-install
-tar -xf mdd-2.0.0-linux-amd64.tar -C mdd-install
+tar -xf mdd-2.1.0-linux-amd64.tar -C mdd-install
 cd mdd-install
 # 将 <revision> 替换为本目录中实际的 mdd-* 子目录后缀：
 sudo ./install-release.sh install "$PWD/mdd-<revision>"

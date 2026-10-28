@@ -23,6 +23,27 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 `85d615826dfd686398a0159a3839a1f35ea5a05fe8b4e1788d08b235145ac3b8`、
 `8962e1c24c24d5fafc956a03a127cee4a843e06cf8708653797f103841165fa2`。
 
+## 2026-10-28 v2.1.0 正式发布（非生产升级）
+
+PR53 `d0fc89c` 通过原终审和正常 Go `40636084731`／Android `40636084681`；
+实际测试 `c5838e4` 与合并 `90e9881a8551fa36b23e52f0aa01ef070f752bf1` 同树
+`617cc7469500b66ff48541f90114924deebe6ba4`。两个正式 tag 均固定在该合并提交。
+
+| 发行 | 原 tag workflow | 真实结果 |
+| --- | --- | --- |
+| [Android 2.1.0-preview](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.1.0) | [40638015971](https://github.com/lovitus/mdd-sim-gateway/actions/runs/40638015971) | 全部通过，v228，原包名／稳定签名，非 debug；prerelease |
+| [Go v2.1.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.1.0) | [40639141778](https://github.com/lovitus/mdd-sim-gateway/actions/runs/40639141778) | 全部通过，五类包、两个 Linux 别名及两份清单共八资产；Latest 读回确认 |
+
+先完成 Android 的七个公开文件下载及校验，再发布同提交 Go；Go 八个公开文件均已下载校验。
+两份 RELEASE.json 的 source/tree 与上述提交精确一致；Linux 两个别名哈希相同。
+macOS arm64／Universal 本次实际签名均为 Developer ID、Team `8WPJLUNLY8`，未公证；
+Windows 仍未做 Authenticode 签名。ARM64 包含 CLI/helper/原 unit/首装工具，不扩大实体硬件验收。
+Go 首次等待达 600 秒上限，第二次对同一 run 返回成功；没有重跑 workflow。
+Android／Go 索引 SHA-256 分别为 `be9d9729c15da87fafb8fe11479738ab1e983f0adf6c7fa4803d93ec91849b9d`、
+`ee54fa29f68f112d7cbede753379c7614456647d6d5e87d225cd8f847bfa5850`，各文件哈希见公开清单。
+未覆盖旧 tag/资产，未升级或重启现场设备，未改变配置、pin、开关、隔离或借用，未重复付费测试。
+PR48、Windows Mesh 故障、手机跳过及硬件／耐久延期保持原处置；不能以发布成功关闭完整目标。
+
 ## 2026-10-28 出口维护与独立 Windows 诊断
 
 用户专项授权的共享出口维护已完成一次受保护应用：仅修正已批准的 GB 节点入口，
