@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/mod/semver"
+
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/adminauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
@@ -69,6 +71,12 @@ const (
 	mediaLeaseTTL      = 12 * time.Hour
 	shutdownTimeout    = 10 * time.Second
 )
+
+// releaseVersion is set from VERSION by the release build. It is a product
+// version for display and update comparison, never a substitute for the actual
+// module/VCS identity or the strict installed-release manifest and image hash.
+// Ordinary development builds retain their existing build-info fallback.
+var releaseVersion string
 
 type config struct {
 	HostModem *provideradmin.HostModemBinding `json:"host_modem,omitempty"`
@@ -802,6 +810,12 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("load embedded WebUI: %w", err)
 	}
 	runtimeInfo := core.RuntimeInfoForBuild()
+	if releaseVersion != "" {
+		if semver.Canonical("v"+releaseVersion) != "v"+releaseVersion {
+			return errors.New("invalid compiled release version")
+		}
+		runtimeInfo.BuildVersion = releaseVersion
+	}
 	runtimeInfo.StateTTL = settings.TTLSeconds
 	runtimeInfo.Public.Listen = settings.Public.Listen
 	if len(certificate.Certificate) == 0 {
