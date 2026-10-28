@@ -724,6 +724,8 @@ jobs:
 
   release-linux-amd64:
     name: Build verified Linux amd64 release
+    outputs:
+      product-version: ${{ steps.linux-build.outputs.product_version }}
     needs:
       - validate-core
       - validate-provider
@@ -767,13 +769,17 @@ jobs:
           test "$(git -C "$source" rev-parse HEAD)" = d2758a023cd7f4174a5a5fa4ff66e487d4342ba0
 
       - name: Build release executables
+        id: linux-build
         env:
           BUILD_ROOT: ${{ runner.temp }}/mdd-build
         run: |
           set -euo pipefail
           mkdir -p "$BUILD_ROOT/bin"
           mkdir -p "$BUILD_ROOT/source"
-          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-core" ./cmd/mdd-core
+          release_version=$(cat VERSION)
+          [[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          printf 'product_version=%s\n' "$release_version" >> "$GITHUB_OUTPUT"
+          go -C go-runtime build -trimpath -ldflags "-X main.releaseVersion=$release_version" -o "$BUILD_ROOT/bin/mdd-core" ./cmd/mdd-core
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-agent" ./cmd/mdd-agent
           go -C agent/call-audio-helper build -trimpath -o "$BUILD_ROOT/bin/mdd-call-audio-helper" .
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-release" ./cmd/mdd-release
@@ -971,6 +977,68 @@ jobs:
           # download. Keep only the shortest GitHub-supported fallback window.
           retention-days: 1
 
+      - name: Prepare separate update continuity qualification
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+          UPDATE_QUALIFICATION_OUTPUT: ${{ runner.temp }}/mdd-update-qualification
+        run: |
+          set -euo pipefail
+          export UPDATE_RELEASE_SOURCE="$RUNNER_TEMP/mdd-release/mdd-${GITHUB_SHA:0:12}"
+          node tools/build-update-qualification.mjs
+
+      - name: Upload isolated update qualification inputs
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-update-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/mdd-update-qualification/
+          if-no-files-found: error
+          retention-days: 1
+
+  validate-system-update:
+    name: Browser update through real root worker and systemd
+    needs:
+      - release-linux-amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # No product checkout, alternate installer, test Core or systemctl shim.
+      # The separate fresh-artifact gate below still consumes the normal tar.
+      - name: Download update qualification inputs
+        uses: actions/download-artifact@v8
+        with:
+          name: mdd-update-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/update-qualification
+
+      - name: Set up browser driver runtime
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Prepare browser and host dependencies before fixture mapping
+        run: |
+          set -euo pipefail
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pcscd libnss3-tools
+          command -v google-chrome
+          cd "$RUNNER_TEMP/update-qualification"
+          npm ci --ignore-scripts
+
+      - name: Qualify version regression and complete browser update
+        run: node "$RUNNER_TEMP/update-qualification/test-system-update.mjs"
+
+      - name: Preserve bounded update receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-update-continuity-${{ github.sha }}
+          path: ${{ runner.temp }}/update-qualification/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
   validate-fresh-linux-artifact:
     name: Install fresh artifact without source checkout
     needs:
@@ -1151,6 +1219,7 @@ jobs:
       - name: Prove TLS login, authenticated WSS and zero paid state
         env:
           MDD_CI_PASSWORD: fresh-artifact-ci-password
+          EXPECTED_PRODUCT_VERSION: ${{ needs.release-linux-amd64.outputs.product-version }}
         run: |
           set -euo pipefail
           request="$RUNNER_TEMP/login-request.json"
@@ -1191,6 +1260,9 @@ jobs:
 
           common=(--fail --silent --show-error --cacert "$MDD_CI_CA_PATH" \
             --resolve localhost:8443:127.0.0.1 -b "$cookie_jar")
+          curl "${common[@]}" https://localhost:8443/v1/system/runtime |
+            jq -e --arg expected "$EXPECTED_PRODUCT_VERSION" --arg source "$GITHUB_SHA" \
+              '.build_version == $expected and .vcs_revision == $source and .vcs_modified == false' >/dev/null
           curl "${common[@]}" https://localhost:8443/v1/lines |
             jq -e '.lines == []' >/dev/null
           curl "${common[@]}" 'https://localhost:8443/v1/calls?limit=100' |
@@ -1911,6 +1983,7 @@ jobs:
     name: Verify download set and publish exact release tags
     needs:
       - validate-fresh-linux-artifact
+      - validate-system-update
       - release-windows-amd64
       - release-macos-arm64
       - release-linux-arm64-agent

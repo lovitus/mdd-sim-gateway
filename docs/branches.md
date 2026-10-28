@@ -6,7 +6,9 @@ Original fixed source review and Go `40645037422` / Android `40645037653` passed
 [Exact staging receipt](https://github.com/lovitus/mdd-sim-gateway/pull/55#issuecomment-6462676916)
 records legitimate-package old failure, fixed16-case/public-tar passes and hashes.
 Only the completed temporary proof is removed; product/regression remain identical.
-Final normal CI and review still gate merge. No field or full in-app restart
+PR55 merged `620b153`; final Go `40646568030`, Android `40646568017` and the
+original complete final review passed, shared tree `af9d26f6`.
+No field or full in-app restart
 acceptance, publication or old-tag replacement is implied.
 
 PR53 release delivery is merged as `90e9881a8551fa36b23e52f0aa01ef070f752bf1`.
