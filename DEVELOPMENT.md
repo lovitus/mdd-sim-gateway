@@ -6,6 +6,30 @@ reports for provenance reconciliation; not revalidated by this review does not m
 The supported build/install surfaces are Go binaries plus the embedded React UI and manifest-listed native helpers.
 Docker, Python Control, VPCD and Asterisk are retired; they are not local development prerequisites.
 
+## Updater staging permissions
+
+The October28 fixed review accepted a bounded repair of `FetchAndStage`:
+regular files were written as0600 and then rejected by the release manifest's
+strict0644/0755 checks. Preserve private staging and all digest/path/type/size/
+duplicate/manifest guards. Accept only raw tar0644/0755, copy privately, then
+chmod the held descriptor before closing; reject special bits without masking.
+Failure checklist: executable permissions lost to creation/umask, special bits
+silently masked, tar/manifest disagreement, incomplete writes, wrong fixture
+layout hiding the defect, or published bytes mistaken for installed code.
+
+The existing test now constructs and prevalidates a complete release directory,
+then exercises actual staging with external HTTP responses substituted. One
+hosted qualification will compare fixed old sourcea565497 with the candidate
+and stage the immutable v2.1.0 public tar (source90e9881, SHA-256
+`503360cf9c3a35c3bc1a85414b4e1b5d1a7757143ee977722425210cc7f4bd12`).
+Only staging/strict bundle validation is claimed; no archive program is executed.
+Qualification is pending. Remove the temporary old-source/public-tar entry after
+archiving evidence, retaining the permanent regression and normal CI gates.
+Old installed updaters require the existing controlled upgrade path to acquire
+this repair; a newer download alone cannot fix the old extractor. Existing
+release tags/assets and production stay unchanged; full in-app restart acceptance
+remains open and paid/deferred acceptance is not repeated.
+
 ## Toolchain and native dependencies
 
 ### v2.1.0 delivery

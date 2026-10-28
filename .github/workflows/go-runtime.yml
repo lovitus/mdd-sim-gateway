@@ -274,6 +274,60 @@ jobs:
         working-directory: go-runtime
         run: go mod verify
 
+      # One-time updater permissions proof; remove after archived qualification.
+      - name: Qualify updater staging permissions against old source and public release
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/updater-stage-proof"
+          mkdir -p "$evidence"
+          product=go-runtime/internal/systemupdate/updater.go
+          cp "$product" "$evidence/candidate.go"
+          trap 'cp "$evidence/candidate.go" "$product"' EXIT
+          git fetch --no-tags --depth=1 origin a5654974e38a2a9a279d753011ea0cea41ab28ca
+          git show a5654974e38a2a9a279d753011ea0cea41ab28ca:"$product" > "$product"
+          sha256sum "$product" "$evidence/candidate.go" > "$evidence/source-sha256.txt"
+          set +e
+          go -C go-runtime test -count=1 -json -run '^TestFetchAndStageReleaseContract$' ./internal/systemupdate > "$evidence/old.jsonl" 2> "$evidence/old.stderr"
+          red_exit=$?
+          set -e
+          test "$red_exit" -ne 0
+          python3 - "$evidence/old.jsonl" <<'PYPROOF'
+          import json, sys
+          events = [json.loads(line) for line in open(sys.argv[1])]
+          name = 'TestFetchAndStageReleaseContract/valid_permissions'
+          assert any(e.get('Test') == name and e.get('Action') == 'fail' for e in events), 'not a compiled legitimate-package behavior failure'
+          assert any(e.get('Test') == name and 'valid release staging failed: release archive contains no valid release directory' in e.get('Output', '') for e in events), 'wrong red cause'
+          assert not any(e.get('Action') == 'skip' for e in events), 'unexpected skipped proof'
+          PYPROOF
+          cp "$evidence/candidate.go" "$product"
+          cmp "$product" "$evidence/candidate.go"
+          git diff --exit-code -- "$product"
+          curl --fail --location --max-time 120 -o "$evidence/v2.1.0.tar" https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.1.0/mdd-2.1.0-linux-amd64.tar
+          printf '%s  %s\n' 503360cf9c3a35c3bc1a85414b4e1b5d1a7757143ee977722425210cc7f4bd12 "$evidence/v2.1.0.tar" | sha256sum --check
+          MDD_QUALIFICATION_RELEASE_TAR="$evidence/v2.1.0.tar" go -C go-runtime test -race -count=1 -json -tags updater_stage_qualification -run '^(TestFetchAndStageReleaseContract|TestPublishedReleaseStageQualification)$' ./internal/systemupdate > "$evidence/fixed.jsonl" 2> "$evidence/fixed.stderr"
+          python3 - "$evidence/fixed.jsonl" <<'PYPROOF'
+          import json, sys
+          events = [json.loads(line) for line in open(sys.argv[1])]
+          for name in ('TestFetchAndStageReleaseContract', 'TestPublishedReleaseStageQualification'):
+              assert any(e.get('Test') == name and e.get('Action') == 'pass' for e in events), name
+          assert not any(e.get('Action') in ('fail', 'skip') for e in events), 'failed/skipped fixed qualification'
+          PYPROOF
+          git diff --exit-code -- "$product"
+          printf 'baseline=a5654974e38a2a9a279d753011ea0cea41ab28ca\ncandidate=%s\narchive-source=90e9881a8551fa36b23e52f0aa01ef070f752bf1\n' "$GITHUB_SHA" > "$evidence/receipt.txt"
+
+      - name: Retain updater staging qualification
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: updater-stage-proof-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/updater-stage-proof/*.jsonl
+            ${{ runner.temp }}/updater-stage-proof/*.stderr
+            ${{ runner.temp }}/updater-stage-proof/*.txt
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Test Core runtime
         working-directory: go-runtime
         run: go test -timeout 2m ./...
