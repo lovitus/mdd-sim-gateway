@@ -8,17 +8,19 @@ Docker, Python Control, VPCD and Asterisk are retired; they are not local develo
 
 ## Toolchain and native dependencies
 
-### v2.1.0 delivery candidate
+### v2.1.0 delivery
 
-The fixed reviewer accepted the complete delivery plan based on main `fbe46f3`.
-This candidate packages merged PR47/49 UI, PR50 Universal, PR51 ARM64 delivery
+The fixed reviewer accepted the complete delivery plan and PR53 final source/CI.
+Merge `90e9881` and both release tags share the reviewed tree `617cc746`.
+This release packages merged PR47/49 UI, PR50 Universal, PR51 ARM64 delivery
 and PR52 DHCP work through the existing workflows. Only release labels/notes and
 documentation change; runtime, installers, permissions, topology and timeouts do not.
-Go `2.1.0` and Android `2.1.0-preview` remain unpublished until their exact-tag
-gates finish. Preserve the completed v2.0.0 receipt and actual public links.
-Normal Go/Android CI and final source review are required. Do not rerun archived
+Android `40638015971` and Go `40639141778` passed their real tag gates; all seven
+Android/eight Go public assets were downloaded and verified, including original
+signing and APK code228. See DEPLOYMENT.md for the actual publication receipt.
+The completed v2.0.0 receipt and assets remain intact. Do not rerun archived
 one-time reds, paid/field tests, frozen PR48 or deferred compatibility matrices.
-After qualified merge, both tags must resolve to the same exact approved commit:
+The publication contract requires both tags to resolve to the same exact approved commit:
 Android first, then Go only after the complete signed preview is public. Tag push
 starts automatic publication, so the release authorization boundary precedes it.
 Verify the new Android code exceeds retained v203, the stable signer/application

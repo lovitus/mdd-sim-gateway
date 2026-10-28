@@ -17,11 +17,13 @@ passed; merge5c4e1a9 retains tree728955ab. Signed main run39875568282 produced
 retained v203, not installed or publicly released. Current phone acceptance
 remains owner-skipped; this does not revoke earlier acceptance.
 
-The next candidate is **2.1.0-preview, not yet published**. It packages those
-merged client changes with the same application ID and stable preview signer.
-The existing workflow supplies its increasing versionCode; the new APK must be
-newer than retained v203 as well as public v182. Normal CI, final review and
-exact-tag signed publication remain required; no phone or Core is updated by publication.
+The current public preview is [2.1.0-preview / v228](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.1.0).
+Original source review, normal CI and signed tag workflow `40638015971` passed.
+All seven public assets were downloaded and checksummed; source `90e9881` matches
+the Go v2.1.0 tag exactly. The non-debug APK preserves its application ID and
+stable preview signer; code228 exceeds retained203 and public182. Install as an
+update without uninstalling a compatible preview, after verifying its own
+SHA256SUMS/signature.txt. This publication did not update a phone or Core.
 
 The `2.0.0-preview` release (versionCode **182**) was published on October 18 with
 the existing stable preview signing identity and application ID. Its fixed download is
@@ -31,7 +33,7 @@ the APK and its own SHA256SUMS/signature.txt, verify them, then install as an up
 without uninstalling a compatible earlier preview. Do not substitute an old VPCD APK
 or an unknown signer. Connect to the matching Go Core, not the old Python 1.x release.
 The same-source [Go v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0)
-is the stable Latest; Android remains a prerelease. Publishing did not upgrade any
+was the stable Latest at that release; Android remains a prerelease. Publishing did not upgrade any
 phone or Core. The separately authorized October19 rollout installed v182 with
 data retained; the owner skipped application/reader acceptance because no readers
 were attached. See DEPLOYMENT.md; installation is not an app/reader acceptance claim.

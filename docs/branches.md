@@ -1,5 +1,14 @@
 # Branch disposition and integration record
 
+PR53 release delivery is merged as `90e9881a8551fa36b23e52f0aa01ef070f752bf1`.
+Reviewed `d0fc89c`, tested `c5838e4` and merge share tree
+`617cc7469500b66ff48541f90114924deebe6ba4`; original final review and normal
+Go `40636084731` / Android `40636084681` passed. Both new v2.1.0 tags point to
+that exact merge; Android `40638015971` then Go `40639141778` published successfully.
+[Candidate receipt](https://github.com/lovitus/mdd-sim-gateway/pull/53#issuecomment-6461363801)
+and DEPLOYMENT.md distinguish source qualification, actual publication and unchanged
+field deployments. The following documentation closure does not move either tag.
+
 October28 PR52 is **merged** as `fbe46f378c81888937e09b73ca243b7a67c46f42`.
 Final `a866156` and tested checkout `54ec9d52` share tree
 `7c8094ac15831ae799d0752ec83ef694ee2553cb` with that merge. Full normal

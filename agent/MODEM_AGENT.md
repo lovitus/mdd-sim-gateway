@@ -42,7 +42,7 @@ GUI 在同一窗口完成配置后进入原平台运行入口。无 TTY 的 run�
 Fyne 接入包导入、保存、连接、退出后同身份重连通过；临时凭据已撤销。
 这不是硬件或全平台实机验收，精确边界见 [部署回执](../DEPLOYMENT.md)。
 
-## 桌面界面候选（尚未发布）
+## 桌面界面与配置
 
 本批沿用同一 Fyne 程序，分为概览、配置和脱敏诊断。概览分别显示本地运行、Core 连接、
 读卡器身份、Modem 数据与隔离；停用、无卡和未知不冒充通信就绪。刷新仅读取已有状态。
@@ -63,7 +63,7 @@ PR47 最终 `25c78a0` 已通过原终审及完整 `39802816073`，合并为 `1bf
 重连分别着色，不可达目标验证失败后原文件不变，退出后无遗留进程。没有连接生产或读卡。
 上述隔离检查不替代成功保存、新身份接入、Windows 原生桌面及硬件验收；各自既有证据见
 [部署回执](../DEPLOYMENT.md)。临时证明入口已归档移除；三台桌面目标已完成升级，
-第四台 Windows 的 Mesh 控制链路尚未恢复。v2.1.0 正式包仍待发布；PR48 低权限架构保持冻结。
+第四台 Windows 的 Mesh 控制链路尚未恢复。v2.1.0 正式包已发布，未在本批升级现场；PR48 低权限架构保持冻结。
 
 ## 共同安全边界
 
@@ -83,7 +83,7 @@ PR47 最终 `25c78a0` 已通过原终审及完整 `39802816073`，合并为 `1bf
 ## 获取 release
 
 从根 [README 下载表](../README.md#-快速开始) 选择固定版本；核对同一 Release 的外层 SHA-256，
-再解包并保留整个目录、许可证和内层清单。Go `v2.0.0` 已公开，`v2.1.0` 尚为候选；
+再解包并保留整个目录、许可证和内层清单。当前 Go `v2.1.0` 已公开，旧 `v2.0.0` 资产保留；
 新包能力不能套用到旧下载，不要用旧 Python 1.x 包替代。
 Windows 与 macOS 包内分别附带现有安装入口（源文件路径如下）：
 
@@ -172,8 +172,8 @@ deployment="$HOME/Library/Application Support/MDD Agent/deployment"
 
 已有安装沿用实际 config/state/mode，不重做向导、不改原身份；`--mode cli` 仍需安装器规定的
 用户 launchd 会话。纯 headless 手动运行可使用 `./mdd-agent run -config "$config"`，不同时开 App。
-arm64 包要求 macOS 15+、Apple Silicon；Universal 候选同时包含 arm64/x86_64，要求 macOS 15+。
-Universal 已通过 PR50 签名工件资格验证，待 v2.1.0 正式发布，不代表 Intel 实机验收。
+arm64 包要求 macOS 15+、Apple Silicon；Universal 包同时包含 arm64/x86_64，要求 macOS 15+。
+Universal 已通过 PR50 及 v2.1.0 的实际签名发布资格，不代表 Intel 实机验收。
 两个发布包都须保留原 Developer ID；未公证不等于未签名。
 
 只读核对当前 LaunchAgent：
@@ -208,7 +208,7 @@ sudo systemctl enable --now mdd-agent.service
 
 Linux 的 PC/SC/eUICC 与 ModemManager/static-IP data isolation 按 capability 暴露。
 Ethernet DHCP IPv4 的受隔离租约生命周期已通过 PR52 原终审和完整 `40626366156` 并合并；
-v2.1.0 发布及实机部署仍未完成，不把 hosted 网络验收当作实体 modem 验收。
+v2.1.0 已发布，本批未部署到实机，不把 hosted 网络验收当作实体 modem 验收。
 raw-IP DHCP、PPP、IPv6 bearer 或未完成宿主隔离的设备仍 fail closed；不得因为接口获得地址就把它变成宿主默认出口。
 DHCP 仅设置该连接的私有地址、路由与 DNS；续租不延长用户借用期限或额度。租约失效会关闭旧连接，
 由原策略协调器在通话保护下回收并恢复，既不改 4G/借用/漫游开关，也不回落宿主默认网络。
@@ -216,7 +216,7 @@ DHCP 仅设置该连接的私有地址、路由与 DNS；续租不延长用户�
 ### ARM64 独立 managed Agent 首装
 
 ARM64 包已补齐现有音频 helper、原始两个 systemd unit 和首装入口，并经 PR51 的 hosted
-空设备资格验证；不代表已发布、已升级生产或已验收 ARM64 实体 modem。旧 v2.0.0 reader-only 资产不变。
+空设备资格验证，已包含在 v2.1.0 发行中；不代表已升级生产或已验收 ARM64 实体 modem。旧 v2.0.0 reader-only 资产不变。
 此入口不接管完整 Core 安装，不做升级，也不迁移已有 reader/cron owner；已有用户继续原部署方式。
 
 范围：原生 USB ModemManager 支持现有受隔离的 static IPv4；显式 serial 支持 AT/SIM，
@@ -275,7 +275,7 @@ specifier）；`/home`、`/etc` 不满足原 unit 的读写约束时清晰拒绝
 
 - 使用对应架构和 libc 的 GitHub workflow 工件。Linux 完整服务端包仍为 amd64；原生
   `ubuntu-24.04-arm` job 提供独立 `MDD-Agent-Linux-arm64.tar.gz`。已发布 v2.0.0 是 reader-only；
-  新候选的 managed 首装范围见上节，不可套用到旧包。需要 glibc 2.39 或更新版本。
+  v2.1.0 的 managed 首装范围见上节，不可套用到旧包。需要 glibc 2.39 或更新版本。
   以精确 workflow 的成功结果为准，不把新增 job 当成已验收。
   ARMv7、OpenWrt/musl 不在此范围；不在目标板上现场构建或下载不明来源替代品。
 - Reader 需要系统提供匹配的 PC/SC 库、`pcscd` 和读卡器驱动（例如 libccid），并允许运行用户访问

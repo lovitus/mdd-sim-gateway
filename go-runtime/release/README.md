@@ -1,9 +1,9 @@
 # Go Release Packages
 
-## Linux ARM64 Agent candidate
+## Linux ARM64 Agent package
 
 The normal Go workflow uses `ubuntu-24.04-arm` to build the existing headless
-`cmd/mdd-agent`, CGO/PC/SC and `mdd-audio-helper`. It runs the existing suites and
+`cmd/mdd-agent`, CGO/PC/SC and `mdd-call-audio-helper`. It runs the existing suites and
 qualifies the final tar's CLI, helper and fresh managed installation with the
 original guard/Agent units. This is not an ARM64 Core/Provider or GUI release.
 No hardware is present in CI; hosted qualification is not physical modem or reader acceptance.
@@ -13,8 +13,8 @@ its SHA-256. The payload retains per-file hashes, exact source/tree/build identi
 ELF/loader/dependency reports, licenses, complete repository source and the existing
 guard and Agent units plus `install-linux-agent.sh`. It requires glibc 2.39 or
 newer and the platform dependencies in the [Agent guide](../../agent/MODEM_AGENT.md#linux).
-The published v2.0.0 asset remains reader-only; the complete package is a v2.1.0
-candidate, not yet public. It is never consumed by the server updater.
+The published v2.0.0 asset remains reader-only; the complete package is public
+in v2.1.0. It is never consumed by the server updater.
 [Managed first installation](../../agent/MODEM_AGENT.md#arm64-独立-managed-agent-首装)
 requires systemd/cgroup and the existing isolation prerequisites, does not adopt
 an existing owner and does not enable/start services during installation.
@@ -41,13 +41,15 @@ records both facts separately. Notarization and physical installation validation
 are not implied by a successful signature. Secret values must never be written
 into this repository or passed through workflow inputs.
 
-### Universal candidate
+<a id="universal-candidate"></a>
+
+### Universal package
 
 The macOS job now builds the existing arm64 archive and a separate
-`MDD-Agent-macOS-universal.tar.gz` candidate for macOS15 or newer. Universal is
+`MDD-Agent-macOS-universal.tar.gz` for macOS15 or newer. Universal is
 not part of the already published v2.0.0 download set. PR50 source and signed
-artifact qualification are complete; v2.1.0 publication still requires its own
-exact-tag Developer ID checks. No old tag or asset is replaced.
+artifact qualification are complete; v2.1.0 passed its own exact-tag Developer ID
+checks and is public. No old tag or asset was replaced. See the [publication receipt](../../DEPLOYMENT.md#2026-10-28-v210-正式发布非生产升级).
 
 `build-macos-agent.sh --arch arm64|amd64` defaults to arm64. Fyne and license
 tools run on the host while every binary/static dependency targets the selected
@@ -361,8 +363,8 @@ The GitHub workflow publishes standard downloadable archives for the Linux relea
 packages, and keeps them short-lived for its internal cross-job gates. A pushed `v*` tag
 is published only after the Linux fresh-host lifecycle, both desktop builds and
 native ARM64 final-package/managed-install job pass. The release job downloads exactly five artifacts,
-including the separate macOS arm64 and Universal archives. Future Go publication
-has eight assets including the Linux alias and both manifests; the already
+including the separate macOS arm64 and Universal archives. Go v2.1.0 publication
+has eight assets including the Linux alias and both manifests; the previously
 published v2.0.0 and independent Android set remain unchanged.
 `tools/publish-release.mjs` verifies their source/tree/platform metadata and includes
 both the original Linux revision archive and a byte-identical `mdd-<version>-linux-amd64.tar`
