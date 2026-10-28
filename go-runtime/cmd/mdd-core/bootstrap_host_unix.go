@@ -5,7 +5,8 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -408,10 +409,13 @@ func bootstrapToken(entropy io.Reader) (string, error) {
 }
 
 func bootstrapTLSIdentity(entropy io.Reader, now time.Time, hostname string) ([]byte, []byte, string, string, error) {
-	public, private, err := ed25519.GenerateKey(entropy)
+	// Fresh browser-facing identities must work with Chrome and NSS trust stores.
+	// Existing installations never reach this generator and keep their exact pins.
+	private, err := ecdsa.GenerateKey(elliptic.P256(), entropy)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
+	public := &private.PublicKey
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := cryptorand.Int(entropy, serialLimit)
 	if err != nil {

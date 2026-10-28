@@ -1,5 +1,14 @@
 # Go Release Packages
 
+## Linux Core service startup
+
+The Core, provider-apply and egress units require `Type=exec` support (introduced
+in [systemd 240](https://github.com/systemd/systemd/blob/v240/NEWS#L30-L43)).
+Restart completion must follow execution of the target binary before the updater
+checks its live image. Core maintenance recovery remains a separate check.
+The installer does not enforce this version requirement automatically. The
+systemd 219 compatibility note below applies only to the Provider template.
+
 ## Linux ARM64 Agent package
 
 The normal Go workflow uses `ubuntu-24.04-arm` to build the existing headless

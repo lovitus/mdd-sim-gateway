@@ -42,7 +42,7 @@ Go 首次等待达 600 秒上限，第二次对同一 run 返回成功；没有�
 Android／Go 索引 SHA-256 分别为 `be9d9729c15da87fafb8fe11479738ab1e983f0adf6c7fa4803d93ec91849b9d`、
 `ee54fa29f68f112d7cbede753379c7614456647d6d5e87d225cd8f847bfa5850`，各文件哈希见公开清单。
 未覆盖旧 tag/资产，未升级或重启现场设备，未改变配置、pin、开关、隔离或借用，未重复付费测试。
-PR48、Windows Mesh 故障、手机跳过及硬件／耐久延期保持原处置；不能以发布成功关闭完整目标。
+PR48、Windows 根因未明、手机跳过及硬件／耐久延期保持原处置；不能以发布成功关闭完整目标。
 
 ## 2026-10-28 出口维护与独立 Windows 诊断
 
@@ -54,14 +54,16 @@ HK consumer 重新使用原 donor 当前端口；保留 donor session/generation
 原评审接受限定回执；原公网路径故障原因未因此确诊，不重复该维护。
 私有 apply 回执 SHA-256 `538b96a494bc11d3333d0df66ec350d0b0b118a8feb76e254b443469054880fc`。
 
-另一台 Windows 的失联仍未恢复，与上述维护分开：04:27 UTC 本地 Agent 读回确认原
-EC20/SIM/AT ready、data disconnected/guard protected，但控制连接仍在 connecting。
-从该 Windows 经当前 Core LAN 完成精确原 pin TLS；Mesh 路径仍失败。EasyTier 旧进程
-约439万句柄、3.10GiB private bytes、高丢包，并仍映射已卸载 Proxifier 的模块。
-这是进程/路径异常证据，不证明唯一根因或系统端口耗尽；句柄不等于 socket。
-原评审接受一次原版本、原用户、原配置退出/重开 owner 的方案，现场状态与哈希已保存。
-该新维护窗口尚待用户明确批准，未重启或升级；第四台 Windows 的 PR47 部署仍未完成。
-原始身份、配置和诊断只保留私有证据，不进入 Git；没有新增付费或硬件变更测试。
+另一台 Windows 的独立故障已有范围明确的恢复：04:27 UTC 原 EC20/SIM/AT
+就绪而控制链路失联；旧 EasyTier 高句柄及残留 Proxifier 模块是异常证据，不能等同
+端口耗尽或唯一根因。用户授权的一次正常退出/原样启动已经执行。07:10 UTC 旧
+EasyTier 退出后，原 MDD Agent **未重启**便重新连上 Core；07:21 UTC 服务端确认
+原设备/卡/代际，数据断开和隔离保护、用户开关及配置保持。恢复早于新 EasyTier
+进程启动；读回显示使用原有 TUN 路径，不能称为新 Mesh 已恢复或根因已修复。
+原评审完整接受这个限定结果。用户后续自行处理远程桌面并要求不再恢复，已停止
+该维护，不重复重启或付费测试。第四台 Windows 的 PR47 UI 升级仍未完成。
+原始身份、配置和日志只保留私有证据；诊断报告 SHA-256
+`c8e0e2564eba3c489313e39a56045d1417b811e5b0c249c3fbfe3e7fba431f06`。
 
 ## 2026-10-22 PR46 合并、Core 部署与限定页面验收
 
