@@ -183,6 +183,12 @@ func extractTar(archivePath, root string) error {
 			if header.Size < 0 || header.Size > maximumReleaseArchiveBytes {
 				return errors.New("release archive member is too large")
 			}
+			// Validate the raw tar mode before conversion: masking would silently
+			// accept setuid/setgid/sticky files. These are the release contract's
+			// only regular-file modes; the manifest still verifies each role.
+			if header.Mode != 0o644 && header.Mode != 0o755 {
+				return errors.New("release archive member mode is unsupported")
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
 			}
@@ -191,9 +197,18 @@ func extractTar(archivePath, root string) error {
 				return err
 			}
 			_, copyErr := io.CopyN(output, reader, header.Size)
+			var modeErr error
+			if copyErr == nil {
+				// Keep partial writes private, then restore exact permissions on
+				// the held descriptor, independently of the process umask.
+				modeErr = output.Chmod(os.FileMode(header.Mode))
+			}
 			closeErr := output.Close()
 			if copyErr != nil {
 				return copyErr
+			}
+			if modeErr != nil {
+				return modeErr
 			}
 			if closeErr != nil {
 				return closeErr
