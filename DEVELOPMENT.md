@@ -6,6 +6,30 @@ reports for provenance reconciliation; not revalidated by this review does not m
 The supported build/install surfaces are Go binaries plus the embedded React UI and manifest-listed native helpers.
 Docker, Python Control, VPCD and Asterisk are retired; they are not local development prerequisites.
 
+## Updater staging permissions
+
+The October28 fixed review accepted a bounded repair of `FetchAndStage`:
+regular files were written as0600 and then rejected by the release manifest's
+strict0644/0755 checks. Preserve private staging and all digest/path/type/size/
+duplicate/manifest guards. Accept only raw tar0644/0755, copy privately, then
+chmod the held descriptor before closing; reject special bits without masking.
+Failure checklist: executable permissions lost to creation/umask, special bits
+silently masked, tar/manifest disagreement, incomplete writes, wrong fixture
+layout hiding the defect, or published bytes mistaken for installed code.
+
+PR55 candidate `94a93a2`, tested `6d19f533`, tree `02bddab6` passed Go
+`40645037422`, Android `40645037653` and the original fixed source review.
+`archive/2026-10-28/updater-stage-qualified` retains the one-time proof: compiled
+old source `a565497` rejects a valid complete release; fixed code passes all16
+contract cases and the immutable public v2.1.0 tar (source `90e9881`,22 artifacts).
+[Exact qualification receipt](https://github.com/lovitus/mdd-sim-gateway/pull/55#issuecomment-6462676916)
+records hashes and boundaries. The temporary workflow/public-tar test is removed;
+the permanent regression and original CI remain. Final cleanup CI/review gate merge.
+Only staging/strict bundle validation is claimed, not installation preflight or
+full in-app restart continuity. Old installed updaters need the existing controlled
+upgrade path to acquire this repair; a newer download alone cannot fix the old
+extractor. Existing release tags/assets and production stay unchanged.
+
 ## Toolchain and native dependencies
 
 ### v2.1.0 delivery

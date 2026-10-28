@@ -1,5 +1,14 @@
 # Branch disposition and integration record
 
+PR55 `archive/2026-10-28/updater-stage-qualified` preserves candidate `94a93a2`,
+tested `6d19f533` and shared tree `02bddab634ad3c75917ef2a629fb758a4aa44970`.
+Original fixed source review and Go `40645037422` / Android `40645037653` passed.
+[Exact staging receipt](https://github.com/lovitus/mdd-sim-gateway/pull/55#issuecomment-6462676916)
+records legitimate-package old failure, fixed16-case/public-tar passes and hashes.
+Only the completed temporary proof is removed; product/regression remain identical.
+Final normal CI and review still gate merge. No field or full in-app restart
+acceptance, publication or old-tag replacement is implied.
+
 PR53 release delivery is merged as `90e9881a8551fa36b23e52f0aa01ef070f752bf1`.
 Reviewed `d0fc89c`, tested `c5838e4` and merge share tree
 `617cc7469500b66ff48541f90114924deebe6ba4`; original final review and normal
