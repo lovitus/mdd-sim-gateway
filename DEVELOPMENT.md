@@ -6,6 +6,116 @@ reports for provenance reconciliation; not revalidated by this review does not m
 The supported build/install surfaces are Go binaries plus the embedded React UI and manifest-listed native helpers.
 Docker, Python Control, VPCD and Asterisk are retired; they are not local development prerequisites.
 
+## Hosted browser update continuity
+
+The fixed reviewer accepted the October28 `620b153` plan after correcting its
+version prerequisite. The public v2.1.0 Core embeds module `(devel)` and its real
+VCS revision; that SHA is not a comparable product version. Normal Linux builds
+now inject `VERSION` into `main.releaseVersion`, retaining original Go/module/VCS,
+dirty and manifest identity. Development fallback and checker guards stay intact.
+
+Failure checklist: uncomparable running version; colliding release IDs; watcher or
+sandbox failure; duplicate activation; lost maintenance owner after restart;
+old authenticated session incorrectly retained; configuration/Agent replacement;
+fixture trust or cleanup failure. No production, paid or deferred hardware tests.
+
+The separate hosted consumer installs complete same-source qualification packages
+with distinct IDs and test semvers through the original installer. The old main
+is compiled once to demonstrate real runtime/check refusal, not compilation failure.
+The fixed journey uses Chrome, real authentication, original root updater/path,
+three real systemd replacements and original maintenance recovery/release. It checks
+cancel, one confirmation, the original cookie being rejected with HTTP401,
+reauthentication and the original operation's result. A retained modal is closed
+through its visible action before opening Update status; empty Provider records
+accept only the existing null/empty-array representations. Success also requires
+the worker's normal terminal state, a healthy waiting watcher and no failed
+invocation hidden by a later successful run.
+Only the external release HTTPS boundary is synthetic. Temporary trust/hosts are
+restored after owned workers stop; failure remains failure. The normal no-checkout
+fresh-artifact gate and public asset selection remain separate and required.
+Complete journey qualification is **pending**. Existing PR55 reds are not
+repeated. No public-version data migration, physical Provider drain, paid continuity
+or production upgrade is claimed. Archive/remove the one-time old-main builder
+only after its behavioral evidence is preserved; retain the permanent journey.
+
+First hosted candidate `829f8cb` / tested `1136671e` / tree `b08439f7`:
+Go `40658961131` failed only at the new consumer's certificate import; Android
+`40658961065` and the normal fresh-artifact/version gate passed. The complete
+stderr reports `SEC_ERROR_ADDING_CERT`; actual NSS package versions were not saved.
+Missing `-a` is not a confirmed cause: NSS also decodes PEM downstream. No version
+red or update green was reached;
+zero apply requests and successful cleanup are retained in
+[the failure receipt](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6464852607).
+The [corrected finding](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6465041321)
+and original review limit the retry to pre-import package versions, public-key type
+and public DER evidence, explicit `-a`, then binary DER digest readback. Failure
+stops the journey and still runs cleanup. The original certificate, trust, command
+limits and product are unchanged; no algorithm substitution or TLS bypass.
+
+The bounded retry `d980d42` / tested `406ef6ce` / tree `6bb8fac8` failed
+at the same import in Go `40663130810`; Android `40663131018` passed.
+[Exact certificate evidence](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6465487861)
+records NSS/tools `2:3.98-1ubuntu0.3`, original Ed25519 public DER, zero apply
+and successful cleanup. The original review traced the failure through NSS3.98's
+unsupported public-key extraction to its generic import error; Chrome handshake
+failure was not observed because the browser had not started.
+
+The scoped product correction uses ECDSA-P256 only for fresh bootstrap identities;
+existing files, SANs, permissions, lifetime, PKCS#8, pin computation and refusal
+of partial/existing state are unchanged. Existing bootstrap coverage now also
+retains complete legacy Ed25519 material byte-for-byte. This is preservation
+coverage, not a separate old-code failure claim. The above actual import failure
+is the compatibility counterexample; strict NSS import and real Chrome login in
+the unchanged hosted journey must establish the fixed behavior. Record the actual
+Chrome version without upgrading NSS or replacing certificates in the fixture.
+The version red still overlays only old main; all three packages use the fixed
+bootstrap. Full journey qualification remains pending.
+
+Candidate `b43b812` / tested `1d6fa0e9` / tree `5ca21995`: Go `40666923268`
+attempt2 passed strict P256/NSS3.98 import, actual Chrome login, the old-version
+behavioral red, Agent registration and Cancel. After one confirmed update, the
+first Core image check failed with `unknown/health/update_fixed_service_unconfirmed`.
+Android `40666923103` passed; complete cleanup does not prove maintenance recovery.
+[Failure receipt](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6466242675)
+and `archive/2026-10-28/update-continuity-health-red` preserve the evidence.
+The owner authorized one reviewed diagnostic continuation on October29: only the
+existing E2E failure branch captures exact classified worker errors and one later
+unit/running-image snapshot before original cleanup. Limits:25s total,3s/64KiB per
+command,128 journal rows and128KiB retained report. Unknown messages stay hidden;
+ambiguity/limits/read errors remain explicit. Later host reads do not prove the
+worker's earlier view. Product, assertions, units, topology and timeouts stay fixed;
+the result returns to the same reviewer without automatic further repair or rerun.
+
+Diagnostic candidate `97d4d0c` / tested `2903c274` / tree `416ff3c0`:
+Go `40827744418` confirms the original worker's `image_mismatch` branch;
+Android `40827744423` passed. A later stable Core snapshot matches the target,
+but does not establish the worker-time PID/image. Original cleanup completed.
+[Complete result and review](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6489856588)
+confirm a startup-contract gap, not the exact historical mismatched executable.
+The owner authorized only the three fixed units' `Type=simple` to `Type=exec`
+correction, necessary documentation and one original complete hosted validation.
+Retain this red evidence and all existing assertions, diagnostics and budgets.
+Check the actual loaded Types in the existing process snapshots; do not add
+sleep, digest retries or new compatibility matrices. See the release README for
+the systemd capability prerequisite. Complete qualification is still pending.
+
+Candidate `268549b` / tested `4920ab15` / tree `8105aec4`: Go `40832320836`
+passed the actual update, three target images and original maintenance release;
+Android `40832320884` passed. The original Agent/process/config stayed unchanged,
+but the one-shot registration assertion ran before its minimum30s reconnect delay.
+The [complete fixed review](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6490696757)
+accepts the product correction, not full qualification or proof of eventual recovery.
+The owner authorized only the existing observer correction: updater completion,
+reauthentication and Agent observation share one original600s absolute deadline.
+Keep bounded backoff; reject malformed/auth/request errors, wrong/empty generation
+and late success. Recheck the original process/image and configuration after actual
+registration. No product, topology, total budget or deployment change. Preserve
+`archive/2026-10-29/update-continuity-exec-partial`; one original CI and final review follow.
+
+References: [Go module version stamping](https://go.dev/doc/go1.24),
+[Chromium local certificate trust](https://chromium.googlesource.com/chromium/src.git/+/refs/heads/main/docs/linux/cert_management.md),
+[systemd path activation](https://freedesktop.org/software/systemd/man/latest/systemd.path.html).
+
 ## Updater staging permissions
 
 The October28 fixed review accepted a bounded repair of `FetchAndStage`:
@@ -24,7 +134,9 @@ old source `a565497` rejects a valid complete release; fixed code passes all16
 contract cases and the immutable public v2.1.0 tar (source `90e9881`,22 artifacts).
 [Exact qualification receipt](https://github.com/lovitus/mdd-sim-gateway/pull/55#issuecomment-6462676916)
 records hashes and boundaries. The temporary workflow/public-tar test is removed;
-the permanent regression and original CI remain. Final cleanup CI/review gate merge.
+the permanent regression and original CI remain. PR55 merged `620b153` after
+normal Go `40646568030`, Android `40646568017` and full original final review;
+reviewed/tested/merge tree is `af9d26f6`.
 Only staging/strict bundle validation is claimed, not installation preflight or
 full in-app restart continuity. Old installed updaters need the existing controlled
 upgrade path to acquire this repair; a newer download alone cannot fix the old

@@ -4,7 +4,7 @@ After=network-online.target mdd-core.service
 Wants=network-online.target mdd-core.service
 
 [Service]
-Type=simple
+Type=exec
 User=mdd
 Group=mdd
 StateDirectory=mdd-egress
