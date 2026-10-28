@@ -4,14 +4,19 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -147,29 +152,73 @@ func TestBootstrapHostnameSANIsSafeAndBounded(t *testing.T) {
 }
 
 func TestBootstrapHostRefusesAnyExistingTargetWithoutMutation(t *testing.T) {
-	layout, uid, gid := bootstrapTestLayout(t)
-	if err := os.Mkdir(layout.ConfigDirectory, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sentinel := []byte("existing configuration\n")
-	if err := os.WriteFile(layout.configPath(), sentinel, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := bootstrapHost(hostBootstrapOptions{
-		Layout: layout, PublicListen: "0.0.0.0:8443", Username: "admin", Password: []byte("replacement"),
-		ServiceUID: uid, ServiceGID: gid, RootUID: uid, RootGID: gid,
-	})
-	if err == nil || !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("existing target err=%v", err)
-	}
-	current, readErr := os.ReadFile(layout.configPath())
-	if readErr != nil || !bytes.Equal(current, sentinel) {
-		t.Fatalf("existing file changed payload=%q err=%v", current, readErr)
-	}
-	for _, path := range []string{layout.authPath(), layout.tlsDirectory(), layout.StateDirectory, layout.SystemStateDirectory} {
-		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
-			t.Fatalf("bootstrap mutated %s after preflight failure: %v", path, statErr)
-		}
+	for _, legacyIdentity := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy_ed25519=%t", legacyIdentity), func(t *testing.T) {
+			layout, uid, gid := bootstrapTestLayout(t)
+			options := hostBootstrapOptions{
+				Layout: layout, PublicListen: "0.0.0.0:8443", Username: "admin", Password: []byte("replacement"),
+				ServiceUID: uid, ServiceGID: gid, RootUID: uid, RootGID: gid,
+			}
+			original := map[string][]byte{layout.configPath(): []byte("existing configuration\n")}
+			if legacyIdentity {
+				// Use a complete real installation, then retain an old-format TLS
+				// identity. Fresh bootstrap must refuse it without rotating pins.
+				if _, err := bootstrapHost(options); err != nil {
+					t.Fatal(err)
+				}
+				public, private, err := ed25519.GenerateKey(cryptorand.Reader)
+				if err != nil {
+					t.Fatal(err)
+				}
+				template := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"localhost"},
+					NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+					KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+				der, err := x509.CreateCertificate(cryptorand.Reader, template, template, public, private)
+				if err != nil {
+					t.Fatal(err)
+				}
+				key, err := x509.MarshalPKCS8PrivateKey(private)
+				if err != nil {
+					t.Fatal(err)
+				}
+				original = map[string][]byte{
+					layout.tlsCertPath(): pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+					layout.tlsKeyPath():  pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}),
+				}
+				for _, file := range []string{layout.configPath(), layout.authPath()} {
+					original[file], err = os.ReadFile(file)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else if err := os.Mkdir(layout.ConfigDirectory, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for file, payload := range original {
+				if err := os.WriteFile(file, payload, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			entropy := &bootstrapReadCounter{}
+			options.Entropy = entropy
+			_, err := bootstrapHost(options)
+			if err == nil || !strings.Contains(err.Error(), "already exists") || entropy.reads != 0 {
+				t.Fatalf("existing target err=%v entropy reads=%d", err, entropy.reads)
+			}
+			for file, payload := range original {
+				current, readErr := os.ReadFile(file)
+				if readErr != nil || !bytes.Equal(current, payload) {
+					t.Fatalf("existing file changed: %s err=%v", file, readErr)
+				}
+			}
+			if !legacyIdentity {
+				for _, file := range []string{layout.authPath(), layout.tlsDirectory(), layout.StateDirectory, layout.SystemStateDirectory} {
+					if _, statErr := os.Lstat(file); !os.IsNotExist(statErr) {
+						t.Fatalf("bootstrap mutated %s after preflight failure: %v", file, statErr)
+					}
+				}
+			}
+		})
 	}
 }
 

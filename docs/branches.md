@@ -1,12 +1,22 @@
 # Branch disposition and integration record
 
+PR56 `archive/2026-10-28/update-continuity-cert-red` retains `829f8cb`;
+`archive/2026-10-28/update-continuity-cert-diagnostic` retains `d980d42`.
+Go `40658961131` / `40663130810` failed at original certificate import before
+login/update; both Android runs passed. The latter preserves actual NSS3.98,
+Ed25519 public DER and successful cleanup. DEVELOPMENT.md links exact receipts
+and the accepted fresh-bootstrap-only P256 correction. Neither candidate is
+qualified for merge or deployment; do not restore them as fixes.
+
 PR55 `archive/2026-10-28/updater-stage-qualified` preserves candidate `94a93a2`,
 tested `6d19f533` and shared tree `02bddab634ad3c75917ef2a629fb758a4aa44970`.
 Original fixed source review and Go `40645037422` / Android `40645037653` passed.
 [Exact staging receipt](https://github.com/lovitus/mdd-sim-gateway/pull/55#issuecomment-6462676916)
 records legitimate-package old failure, fixed16-case/public-tar passes and hashes.
 Only the completed temporary proof is removed; product/regression remain identical.
-Final normal CI and review still gate merge. No field or full in-app restart
+PR55 merged `620b153`; final Go `40646568030`, Android `40646568017` and the
+original complete final review passed, shared tree `af9d26f6`.
+No field or full in-app restart
 acceptance, publication or old-tag replacement is implied.
 
 PR53 release delivery is merged as `90e9881a8551fa36b23e52f0aa01ef070f752bf1`.
