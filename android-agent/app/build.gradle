@@ -9,7 +9,7 @@ android {
         minSdk 28
         targetSdk 36
         versionCode Integer.parseInt(System.getenv('MDD_ANDROID_VERSION_CODE') ?: '1')
-        versionName '2.0.0-preview'
+        versionName '2.1.0-preview'
         def revision = System.getenv('GITHUB_SHA') ?: ''
         resValue 'string', 'source_revision', (revision ==~ /[0-9a-fA-F]{40}/ ? revision.toLowerCase() : 'unknown')
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'

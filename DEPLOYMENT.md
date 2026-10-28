@@ -23,6 +23,25 @@ Windows、macOS、Linux 远程 Agent 仍是产品要求；Android 预览里程�
 `85d615826dfd686398a0159a3839a1f35ea5a05fe8b4e1788d08b235145ac3b8`、
 `8962e1c24c24d5fafc956a03a127cee4a843e06cf8708653797f103841165fa2`。
 
+## 2026-10-28 出口维护与独立 Windows 诊断
+
+用户专项授权的共享出口维护已完成一次受保护应用：仅修正已批准的 GB 节点入口，
+HK consumer 重新使用原 donor 当前端口；保留 donor session/generation、配置、pin、
+用户开关和隔离。Core、Agents、Providers 未重启；共享出口子进程按维护计划替换。
+01:58 UTC 有界观察及真实 Chrome 确认两条当前 GB 线路已恢复 IMS 与页面能力就绪。
+本地 SOCKS 认证没有发 CONNECT，不代表蜂窝 WAN 吞吐；未拨号、发短信或扩展预算/故障验收。
+原评审接受限定回执；原公网路径故障原因未因此确诊，不重复该维护。
+私有 apply 回执 SHA-256 `538b96a494bc11d3333d0df66ec350d0b0b118a8feb76e254b443469054880fc`。
+
+另一台 Windows 的失联仍未恢复，与上述维护分开：04:27 UTC 本地 Agent 读回确认原
+EC20/SIM/AT ready、data disconnected/guard protected，但控制连接仍在 connecting。
+从该 Windows 经当前 Core LAN 完成精确原 pin TLS；Mesh 路径仍失败。EasyTier 旧进程
+约439万句柄、3.10GiB private bytes、高丢包，并仍映射已卸载 Proxifier 的模块。
+这是进程/路径异常证据，不证明唯一根因或系统端口耗尽；句柄不等于 socket。
+原评审接受一次原版本、原用户、原配置退出/重开 owner 的方案，现场状态与哈希已保存。
+该新维护窗口尚待用户明确批准，未重启或升级；第四台 Windows 的 PR47 部署仍未完成。
+原始身份、配置和诊断只保留私有证据，不进入 Git；没有新增付费或硬件变更测试。
+
 ## 2026-10-22 PR46 合并、Core 部署与限定页面验收
 
 批准头 `d0ed08d`、正常合并 `5a6c7e2`、实际工件 `d3ebc0221b6c` 的完整 tree
