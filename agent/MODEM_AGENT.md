@@ -57,12 +57,13 @@ macOS 硬件启停不重新加载磁盘；需要完整退出并重新启动原�
 SCM 服务；启停／卸载先核对对应程序和配置，再确认操作。卸载仍要求服务已停止，不删除
 配置或隔离保护。没有自动提权、强杀、自动重试或服务分层改造。只读服务状态查询仅要求
 原有查询权，不再额外申请启停权；不调整生产 ACL 或授予控制权限。原首次接入证据保持有效。
-PR47 `7dfe66c` 已通过原评审及完整 `39798759586`；精确反例与修复结果保存在
+PR47 最终 `25c78a0` 已通过原终审及完整 `39802816073`，合并为 `1bfcf9a`；精确反例与修复结果保存在
 `archive/2026-10-22/agent-usability-qualified`，早期失败见 [分支记录](../docs/branches.md)。
 真实 Mac 窗口已检查三种接入表单及隔离配置下的概览、配置、诊断；本地运行与 Core
 重连分别着色，不可达目标验证失败后原文件不变，退出后无遗留进程。没有连接生产或读卡。
-这不替代成功保存、新身份接入、Windows 原生桌面及硬件验收。临时证明入口已归档移除；
-最终正常 CI、交付评审和部署仍待完成，生产界面未更新，完整低权限架构也未交付。
+上述隔离检查不替代成功保存、新身份接入、Windows 原生桌面及硬件验收；各自既有证据见
+[部署回执](../DEPLOYMENT.md)。临时证明入口已归档移除；三台桌面目标已完成升级，
+第四台 Windows 的 Mesh 控制链路尚未恢复。v2.1.0 正式包仍待发布；PR48 低权限架构保持冻结。
 
 ## 共同安全边界
 
@@ -82,7 +83,8 @@ PR47 `7dfe66c` 已通过原评审及完整 `39798759586`；精确反例与修复
 ## 获取 release
 
 从根 [README 下载表](../README.md#-快速开始) 选择固定版本；核对同一 Release 的外层 SHA-256，
-再解包并保留整个目录、许可证和内层清单。Go `v2.0.0` 已公开；不要用旧 Python 1.x 包替代。
+再解包并保留整个目录、许可证和内层清单。Go `v2.0.0` 已公开，`v2.1.0` 尚为候选；
+新包能力不能套用到旧下载，不要用旧 Python 1.x 包替代。
 Windows 与 macOS 包内分别附带现有安装入口（源文件路径如下）：
 
 - `go-runtime/release/install-windows-agent.ps1`
@@ -170,7 +172,9 @@ deployment="$HOME/Library/Application Support/MDD Agent/deployment"
 
 已有安装沿用实际 config/state/mode，不重做向导、不改原身份；`--mode cli` 仍需安装器规定的
 用户 launchd 会话。纯 headless 手动运行可使用 `./mdd-agent run -config "$config"`，不同时开 App。
-包要求 macOS 15+、Apple Silicon，保留 Developer ID；未公证不等于未签名。
+arm64 包要求 macOS 15+、Apple Silicon；Universal 候选同时包含 arm64/x86_64，要求 macOS 15+。
+Universal 已通过 PR50 签名工件资格验证，待 v2.1.0 正式发布，不代表 Intel 实机验收。
+两个发布包都须保留原 Developer ID；未公证不等于未签名。
 
 只读核对当前 LaunchAgent：
 
@@ -203,7 +207,8 @@ sudo systemctl enable --now mdd-agent.service
 ```
 
 Linux 的 PC/SC/eUICC 与 ModemManager/static-IP data isolation 按 capability 暴露。
-本批增加 Ethernet DHCP IPv4 的受隔离租约生命周期，尚待 CI 和终审，不代表已部署。
+Ethernet DHCP IPv4 的受隔离租约生命周期已通过 PR52 原终审和完整 `40626366156` 并合并；
+v2.1.0 发布及实机部署仍未完成，不把 hosted 网络验收当作实体 modem 验收。
 raw-IP DHCP、PPP、IPv6 bearer 或未完成宿主隔离的设备仍 fail closed；不得因为接口获得地址就把它变成宿主默认出口。
 DHCP 仅设置该连接的私有地址、路由与 DNS；续租不延长用户借用期限或额度。租约失效会关闭旧连接，
 由原策略协调器在通话保护下回收并恢复，既不改 4G/借用/漫游开关，也不回落宿主默认网络。

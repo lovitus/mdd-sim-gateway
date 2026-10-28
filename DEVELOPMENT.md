@@ -8,18 +8,37 @@ Docker, Python Control, VPCD and Asterisk are retired; they are not local develo
 
 ## Toolchain and native dependencies
 
+### v2.1.0 delivery candidate
+
+The fixed reviewer accepted the complete delivery plan based on main `fbe46f3`.
+This candidate packages merged PR47/49 UI, PR50 Universal, PR51 ARM64 delivery
+and PR52 DHCP work through the existing workflows. Only release labels/notes and
+documentation change; runtime, installers, permissions, topology and timeouts do not.
+Go `2.1.0` and Android `2.1.0-preview` remain unpublished until their exact-tag
+gates finish. Preserve the completed v2.0.0 receipt and actual public links.
+Normal Go/Android CI and final source review are required. Do not rerun archived
+one-time reds, paid/field tests, frozen PR48 or deferred compatibility matrices.
+After qualified merge, both tags must resolve to the same exact approved commit:
+Android first, then Go only after the complete signed preview is public. Tag push
+starts automatic publication, so the release authorization boundary precedes it.
+Verify the new Android code exceeds retained v203, the stable signer/application
+ID, both original-Team Mac signatures, and all eight Go/seven Android assets.
+Failure checklist: stale links mislabeled with new capabilities; PR/merge/tag
+identity confused; missing helper/Universal; APK downgrade or signer change;
+publication mistaken for deployment. Keep partial drafts and original bytes;
+never move tags, overwrite assets or claim a missing Go release after preview success.
+
 ### Linux DHCP IPv4 claim lifecycle
 
-October28 original source review accepted f4a3359/tree49a18953. Run40625230150
-qualified the full DHCP lifecycle in57.80s: actual cancellation/malformed wire,
-fresh exact SIM generation, static recovery and exact same-name replacement.
-Receipt complete=true, mainExit=0, cleanupErrors=[], host namespaces/mount unchanged.
-Archive `archive/2026-10-28/linux-dhcp-tail-qualified` retains source and one-time
-route-proof red/green. The unrelated Core job stopped before recording assertions
-because Chrome did not start within its existing15s limit; cause remains unproven.
-Remove only the completed PR52-only proof step; retain permanent tests/full E2E.
-Product, topology and timeouts are unchanged. Final normal CI and original review
-remain required before merge; no production or paid hardware acceptance implied.
+PR52 final `a866156` passed full normal Go `40626366156` and the original
+final review. Merge `fbe46f3` and tested checkout `54ec9d52` share tree
+`7c8094ac15831ae799d0752ec83ef694ee2553cb`. Full DHCP E2E passed in57.66s;
+the complete receipt reports exit0, no cleanup errors and unchanged host
+namespaces/mounts. The final ARM64 standalone-install receipt also passed.
+`archive/2026-10-28/linux-dhcp-final` and the final receipts in docs/branches.md
+supersede pending source/CI/merge statements in the historical sequence below.
+Permanent tests/full E2E remain; only completed one-time proof was removed.
+No publication, production deployment or physical/paid acceptance is implied.
 
 October27 owner authorized the fixed successor's route-loss repair. Preserve
 c797b05/tree27f49252 and run39986314729 as the actual red: bound cellular sockets
@@ -94,8 +113,8 @@ substitutes that parent check while calling the original contract/netdev guard.
 The peer is outside the Agent cgroup. Run39942634074 qualified the compiled old
 method3 entry refusal and the failed-inventory cleanup red/green counterexample;
 their one-time machinery is archived at `archive/2026-10-23/linux-dhcp-counterexamples`.
-Current full CI/source review are
-pending; this is not physical modem or production evidence. DNS changes invalidate
+Final full CI/source review are accepted above; this is not physical modem or
+production evidence. DNS changes invalidate
 the old claim and rebuild through the original owner; unadvertised renewal DNS
 inherits only that same validated lease. DHCP MTU/hostname/search/NTP options are
 not applied to the host. The R1-R5 source review is addressed in the same batch:
@@ -140,9 +159,9 @@ complete final-tar journey, including actual old-package/installer counterexampl
 original guard loading and hosted ancestor-permission restoration. The exact
 proof is retained at archive/2026-10-23/linux-agent-qualified; temporary old-source
 dependencies are removed from normal CI, not the current behavior assertions.
-No local tests/builds or production probes. Final cleanup CI/review and public
-delivery remain separate; physical hardware and unsupported bearer paths remain
-unqualified. Exact evidence is recorded in docs/branches.md.
+No local tests/builds or production probes. PR51 final cleanup, full CI and
+original review passed before merge992c4fb; exact evidence is in docs/branches.md.
+Public delivery, physical hardware and unsupported bearer paths remain separate.
 
 References: [ModemManager IP connectivity](https://modemmanager.org/docs/modemmanager/ip-connectivity-setup/),
 [malgo0.11.26](https://github.com/gen2brain/malgo/tree/v0.11.26),

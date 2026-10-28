@@ -12,7 +12,16 @@ deliberately unremembered and failed writes; editing clears old success feedback
 without replacing inputs. Source2f2d4c1 passed original review and Android39856193041:
 three old-source behavioral failures, then44 fixed native passes on each API28/35.
 API35 portrait screenshots were inspected; API28 screenshot export is unverified.
-Final normal CI and deployment remain pending; this does not revoke earlier acceptance.
+PR49 final normal Go39871769608/Android39871769636 and original final review
+passed; merge5c4e1a9 retains tree728955ab. Signed main run39875568282 produced
+retained v203, not installed or publicly released. Current phone acceptance
+remains owner-skipped; this does not revoke earlier acceptance.
+
+The next candidate is **2.1.0-preview, not yet published**. It packages those
+merged client changes with the same application ID and stable preview signer.
+The existing workflow supplies its increasing versionCode; the new APK must be
+newer than retained v203 as well as public v182. Normal CI, final review and
+exact-tag signed publication remain required; no phone or Core is updated by publication.
 
 The `2.0.0-preview` release (versionCode **182**) was published on October 18 with
 the existing stable preview signing identity and application ID. Its fixed download is
@@ -23,7 +32,9 @@ without uninstalling a compatible earlier preview. Do not substitute an old VPCD
 or an unknown signer. Connect to the matching Go Core, not the old Python 1.x release.
 The same-source [Go v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0)
 is the stable Latest; Android remains a prerelease. Publishing did not upgrade any
-phone or Core. The last actual phone receipt remains v178 in DEPLOYMENT.md.
+phone or Core. The separately authorized October19 rollout installed v182 with
+data retained; the owner skipped application/reader acceptance because no readers
+were attached. See DEPLOYMENT.md; installation is not an app/reader acceptance claim.
 
 October 17 new-card repair (PR42 merged and scoped startup accepted): Android now negotiates the existing
 `sim_identity` readback and reads the default EF_SMSP record, ported from

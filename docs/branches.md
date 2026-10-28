@@ -1,5 +1,15 @@
 # Branch disposition and integration record
 
+October28 PR52 is **merged** as `fbe46f378c81888937e09b73ca243b7a67c46f42`.
+Final `a866156` and tested checkout `54ec9d52` share tree
+`7c8094ac15831ae799d0752ec83ef694ee2553cb` with that merge. Full normal
+Go `40626366156` and the original final review passed; final DHCP and ARM64
+install receipts are complete. `archive/2026-10-28/linux-dhcp-final` retains
+source. [Final acceptance](https://github.com/lovitus/mdd-sim-gateway/pull/52#issuecomment-6460074994)
+and [merge receipt](https://github.com/lovitus/mdd-sim-gateway/pull/52#issuecomment-6460102273)
+supersede the historical pending-CI/merge wording below, without erasing failures
+or implying publication, production deployment or physical/paid acceptance.
+
 October28 `archive/2026-10-28/linux-dhcp-tail-qualified` preserves f4a3359,
 reviewed tree49a18953 and run40625230150. Tested merge02cf12b5 has the same tree.
 Full hosted DHCP E2E passed; complete receipt, clean teardown and real negative

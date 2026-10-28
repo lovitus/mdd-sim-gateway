@@ -22,10 +22,10 @@ Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Pyt
 2. **统一 HTTPS/WSS 入口**：
    - 页面、管理 API、Agent 和浏览器 PCM 都复用一个公开 TCP 入口，不要求用户确认服务器网卡 IP，也不暴露 RTP 端口。
 3. **跨平台统一 Agent**：
-   - 发布矩阵为 **Linux amd64 服务端/Agent、Linux ARM64 reader-only Agent、Windows amd64 Agent、macOS arm64 Agent**；不能宣称所有硬件免驱或所有架构已验收。
+   - 当前公开 v2.0.0 提供 **Linux amd64 服务端/Agent、Linux ARM64 reader-only Agent、Windows amd64 Agent、macOS arm64 Agent**。v2.1.0 候选增加 ARM64 managed Agent 包和 macOS Universal 包；不能宣称所有硬件免驱或所有架构已验收。
    - macOS 默认 **PC/SC-only**，Modem、音频和私有数据能力保留安全门禁；不为满足清单擅自开启。Windows、macOS、Linux 均为远程 Agent 的当前目标。
    - 三大平台开启 4G 时必须强制独占隔离；隔离失败不放行、不回落宿主网络、不覆盖用户开关。
-   - 本轮不做 macOS 公证，不使用 `.p8`；现有签名检查保留，Universal 包装另行记录。
+   - 本轮不做 macOS 公证，不使用 `.p8`；arm64 与 Universal 发布均须保留原 Developer ID 签名。
    - **原生 Android 客户端已阶段性交付为预览版**：可共享受支持的读卡器，也可不插读卡器，使用服务器线路接打电话、收发短信；不是已退役的 VPCD APK。当前安装版本与既有实机证据见 [版本化状态](docs/status/README.md)，长时间 USB/休眠、耗电及极端切网验收仍单独记录。
 4. **证书固定与最小生命周期动作**：
    - Agent 使用保存的证书指纹；安装器的状态检查同时验证本地 CA 证书和服务端 SPKI pin，禁止 `-k`。
@@ -67,9 +67,16 @@ Android 是独立 preview。公开包及校验清单已下载核对，准确源�
 | macOS arm64 Agent | [MDD-Agent-macOS-arm64.tar.gz](https://github.com/lovitus/mdd-sim-gateway/releases/download/v2.0.0/MDD-Agent-macOS-arm64.tar.gz) | macOS 15+；原 Developer ID 签名，未公证；[配置和安装](agent/MODEM_AGENT.md#macos) |
 | Android 9+ 原生客户端（预览） | [独立 Android preview](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.0.0) | 原 application ID/稳定 preview 签名，独立 versionCode；读卡器可选，不支持本机 modem |
 
-macOS Universal（arm64 + Intel，macOS 15+）正在独立构建资格验证，尚未公开发布。
+macOS Universal（arm64 + Intel，macOS 15+）已完成 PR50 的构建及签名工件资格验证，尚未公开发布。
 现有 v2.0.0 下载不变；Actions 候选不代表正式发行或 Intel 实机验收，详见
 [通用包说明](go-runtime/release/README.md#universal-candidate)。
+
+**v2.1.0 正在准备，尚未发布。** 本次候选汇集已评审、通过 CI 并合并的 Agent 界面改进（PR47/49）、
+macOS Universal（PR50）、ARM64 独立 managed Agent 包（PR51）和 Linux Ethernet DHCP IPv4（PR52）。
+ARM64 managed 模式需 systemd/cgroup 与原隔离 guard；无 systemd 的 reader 手动部署保持可用。
+候选仍须通过原有完整 CI、终审和实际签名发布门禁，不更新上面的 v2.0.0 下载，也不自动升级设备。
+Android 同批版本为 `2.1.0-preview`，保留 application ID、签名和递增 versionCode。
+尚未发布的工件、已部署版本与缺失的现场验收分别记录在[当前台账](docs/status/README.md)。
 
 从 [v2.0.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.0.0) 同时下载 `SHA256SUMS`，核对所选文件后再解包。
 Linux 用 `sha256sum 文件名`，macOS 用 `shasum -a 256 文件名`，Windows 用
