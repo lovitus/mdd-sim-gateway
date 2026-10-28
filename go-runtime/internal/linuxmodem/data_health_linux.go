@@ -23,6 +23,9 @@ func (prober *Prober) ConnectionNeedsRecovery(ctx context.Context, target agentp
 	if _, exact := claim.policyProfiles(target); !exact {
 		return false, agentmodem.ErrOperationTargetReplaced
 	}
+	if !claim.dhcp.valid() {
+		return true, nil
+	}
 	commands, ok := prober.manager.(modemCommandRuntime)
 	if !ok {
 		return false, nil

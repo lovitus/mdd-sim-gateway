@@ -14,6 +14,7 @@ import (
 )
 
 type DataRoute struct {
+	dynamic                                                       *dynamicRoute
 	Permit                                                        DataPermit
 	Interface                                                     string
 	Address                                                       netip.Prefix
@@ -32,7 +33,7 @@ func (guard *Guard) ConfigureDataRoute(ctx context.Context, permit DataPermit, i
 	route := DataRoute{Permit: permit, Interface: interfaceName, Address: address, Gateway: gateway, Table: permit.Mark}
 	guard.policyMu.Lock()
 	current := guard.permits[permit.Mark]
-	if current.Owner == "" || current.Owner != permit.Owner || current.Interface != "" && current.Interface != interfaceName {
+	if current.Owner == "" || current.Owner != permit.Owner || current.Interface != "" && current.Interface != interfaceName || current.requiresRouteRealm {
 		guard.policyMu.Unlock()
 		return DataRoute{}, errors.New("cellular data permit is not active")
 	}
@@ -103,6 +104,9 @@ func (guard *Guard) CloseDataRoute(ctx context.Context, route *DataRoute) error 
 func (guard *Guard) CleanupDataRoute(route *DataRoute) error { return guard.rollbackDataRoute(route) }
 
 func (guard *Guard) rollbackDataRoute(route *DataRoute) error {
+	if route != nil && route.dynamic != nil {
+		return guard.cleanupDynamicRoute(route)
+	}
 	if route == nil || route.Interface == "" || route.Table == 0 {
 		return nil
 	}
