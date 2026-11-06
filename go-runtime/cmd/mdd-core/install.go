@@ -170,6 +170,8 @@ func (gate systemdRemovalGate) VerifyInactiveDisabled(ctx context.Context) error
 		"mdd-egress.service":         {},
 		"mdd-agent.service":          {},
 		"mdd-cellular-guard.service": {},
+		"mdd-updater.path":           {},
+		"mdd-updater.service":        {},
 	}
 	configured, err := configuredProviderUnits(gate.providerCurrent)
 	if err != nil {

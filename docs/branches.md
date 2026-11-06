@@ -1,4 +1,39 @@
+PR57 `archive/2026-11-06/cellular-coexistence-browser-start-red` preservesaed1112,
+Android42168926068 success and Go42168926174 Chrome startup timeout. Refusal proof
+was not reached. Successor accepts fixture design with one explicit stop marker;
+product and all original timing/gates remain unchanged.
+
+PR57 `archive/2026-11-06/cellular-coexistence-refusal-fixture-red` preservesf7d53b0
+and Go42167267055. Product source accepted; all original gates passed, new refusal
+driver failed at parsing (not behavioral red). First fixture correction also adds
+four successor-requested path inputs; product and timeout remain unchanged.
+
+PR57 `archive/2026-11-06/cellular-coexistence-updater-refusal-red` preserves255f32e
+and Go42164603594: real install/stop/uninstall/reinstall passed; macOS Universal
+verification timed out. Fixed review found pre-disable updater restoration and
+strict inactive-readback gaps; the successor accepts the scoped repair plan.
+Full qualification and final review remain required; production is unchanged.
+
 # Branch disposition and integration record
+
+PR57 `archive/2026-11-06/cellular-coexistence-installer-red` preserves53c01d8,
+Go42161172653 and Android42161172591. Coexistence/DHCP qualification passed;
+the later existing uninstall flow exposed linked-unit disable-before-stop failure.
+The fixed reviewer accepted bounded installer ordering/updater protection and the
+existing verified reinstall recovery path; final full CI/review remain pending.
+
+PR57 `archive/2026-11-06/cellular-coexistence-full-ci-red` preserves9adccdd,
+accepted final source, Android42158250483 and failed Go42158250610. Only the
+reviewed DHCP lifecycle fixture and systemd version command are corrected in the
+same delivery batch; product/UI stay unchanged. Original CI/final review pending.
+
+November6 `archive/2026-11-06/cellular-coexistence-qualified` preserves18c31d0
+and related8-package race run42157268521. Fixed source review accepted8222c7d;
+18c31d0 only corrects three malformed test-request fields and retires repeated reds.
+Initial/review-red archive tags preserve b5db829/8222c7d and both seven-case proofs.
+The complete batch keeps borrowing independent from voice while protecting physical
+cleanup and original owners. Final normal CI/review gate merge; no deployment,
+paid call or PR56 acceptance is implied. See DEVELOPMENT.md for exact artifacts.
 
 PR55 `archive/2026-10-28/updater-stage-qualified` preserves candidate `94a93a2`,
 tested `6d19f533` and shared tree `02bddab634ad3c75917ef2a629fb758a4aa44970`.
