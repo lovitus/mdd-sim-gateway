@@ -857,6 +857,7 @@ jobs:
               ./cmd/mdd-core ./cmd/mdd-agent ./cmd/mdd-release ./cmd/mdd-updater \
               --ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
               --ignore github.com/sagernet/sing/common \
+              --ignore github.com/sagernet/sing/protocol \
               --ignore github.com/sagernet/sing-mux \
               --ignore github.com/sagernet/sing-usbip \
               --save_path "$license_root/go-runtime"

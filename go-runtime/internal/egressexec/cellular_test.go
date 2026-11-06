@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -159,6 +158,7 @@ func TestCellularProfileBecomesRuntimeSOCKSAndRenewsOneSession(t *testing.T) {
 	var mu sync.Mutex
 	posts, deletes := 0, 0
 	port := 32123
+	failing := false
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer "+token {
 			response.WriteHeader(http.StatusUnauthorized)
@@ -166,6 +166,10 @@ func TestCellularProfileBecomesRuntimeSOCKSAndRenewsOneSession(t *testing.T) {
 		}
 		mu.Lock()
 		defer mu.Unlock()
+		if failing && request.Method == http.MethodPost {
+			response.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if request.Method == http.MethodDelete {
 			deletes++
 			response.WriteHeader(http.StatusNoContent)
@@ -189,13 +193,15 @@ func TestCellularProfileBecomesRuntimeSOCKSAndRenewsOneSession(t *testing.T) {
 	client.now = func() time.Time { return now }
 	config := egressconfig.Config{SchemaVersion: 2, Enabled: true, MissingPolicy: "error", RefreshMinutes: 30,
 		Profiles: map[string]egressconfig.Profile{"sim-gb": {Name: "Data SIM", Type: "cellular_sim", SIMICCID: "8985200000000000001"}},
-		Exits:    map[string]egressconfig.Exit{"gb": {Enabled: true, ProfileID: "sim-gb"}}}
+		Exits:    map[string]egressconfig.Exit{"gb": {Enabled: true, ProfileID: "sim-gb"}, "fr": {Enabled: true, Mode: "direct"}}}
 	runtimeConfig, err := client.prepare(t.Context(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	profile := runtimeConfig.Profiles["sim-gb"]
-	if profile.Type != "socks5" || profile.Server != "127.0.0.1" || profile.Port != 32123 || profile.Password != "secret-a" {
+	// sing-box is pointed at the exit's fixed relay; the lease port is never published.
+	if profile.Type != "socks5" || profile.Server != "127.0.0.1" || profile.Port == 32123 || profile.Port < 1 ||
+		profile.Username == "user-a" || profile.Password == "" {
 		t.Fatalf("runtime profile=%+v", profile)
 	}
 	if config.Profiles["sim-gb"].Type != "cellular_sim" || config.Profiles["sim-gb"].Password != "" {
@@ -232,44 +238,43 @@ func TestCellularProfileBecomesRuntimeSOCKSAndRenewsOneSession(t *testing.T) {
 	if strings.Contains(string(status), "secret-a") || strings.Contains(string(status), "user-a") {
 		t.Fatal("runtime credentials leaked into status")
 	}
-	// Same saved generation, different temporary SOCKS route: do not silently
-	// advertise the new port while the shared process still runs the old one.
+	// A borrowed route can move to another lease port, or go unavailable for a
+	// while, without reconfiguring the shared sing-box process.
 	document.Proxy = config
 	document.AttemptID = "initial-apply"
 	runner, controller, statusPath := newTestExecutor(t, document)
 	runner.cellular = client
 	runner.reconcile(context.Background())
+	before := readExecutorStatus(t, statusPath)
 	mu.Lock()
 	port = 32124
 	mu.Unlock()
 	now = now.Add(cellularRenewEvery + time.Second)
 	runner.reconcile(context.Background())
-	pending := readExecutorStatus(t, statusPath)
-	if !pending.PendingApply || pending.RuntimeConfirmed || pending.Exits["gb"].Ready || controller.starts != 1 {
-		t.Fatal("temporary route escaped coordinated apply", pending)
+	moved := readExecutorStatus(t, statusPath)
+	if moved.PendingApply || !moved.RuntimeConfirmed || !moved.Exits["gb"].Ready || controller.starts != 1 ||
+		moved.ConfigIdentity != before.ConfigIdentity {
+		t.Fatal("lease port change reconfigured the shared sing-box process", moved)
 	}
-	document.AttemptID = "explicit-drained-apply"
-	writeEgressDocument(t, runner.settings.DesiredPath, document)
-	runner.reconcile(context.Background())
-	confirmed := readExecutorStatus(t, statusPath)
-	if !confirmed.RuntimeConfirmed || confirmed.AttemptID != document.AttemptID || controller.starts != 2 {
-		t.Fatal("coordinated route update was not confirmed", confirmed)
-	}
-	// The shared executable can remain alive after its old donor disappears.
-	// A rejected replacement must not renew the old route's readiness evidence.
 	mu.Lock()
+	failing = true
+	mu.Unlock()
+	now = now.Add(cellularRenewEvery + time.Second)
+	runner.reconcile(context.Background())
+	outage := readExecutorStatus(t, statusPath)
+	if outage.Exits["gb"].Ready || outage.Exits["gb"].Error == "" || !outage.Exits["fr"].Ready || controller.starts != 1 ||
+		!controller.processes[0].running || outage.ConfigIdentity != before.ConfigIdentity {
+		t.Fatal("lease outage restarted or leaked into the shared sing-box process", outage)
+	}
+	mu.Lock()
+	failing = false
 	port = 32125
 	mu.Unlock()
 	now = now.Add(cellularRenewEvery + time.Second)
-	document.AttemptID = "rejected-route-apply"
-	writeEgressDocument(t, runner.settings.DesiredPath, document)
-	controller.checkError = errors.New("candidate rejected")
-	for range 2 {
-		runner.reconcile(context.Background())
-		rejected := readExecutorStatus(t, statusPath)
-		if !rejected.RuntimeConfirmed || rejected.Outcome != "unavailable" || rejected.Exits["gb"].Ready || rejected.Exits["gb"].ProxyPort != 0 || controller.starts != 2 || runner.child != nil {
-			t.Fatal("rejected route did not reach confirmed stopped state without revoked donor readiness", rejected)
-		}
+	runner.reconcile(context.Background())
+	restored := readExecutorStatus(t, statusPath)
+	if !restored.Exits["gb"].Ready || restored.PendingApply || controller.starts != 1 {
+		t.Fatal("lease recovery did not restore the exit without restarting", restored)
 	}
 	disabled := config
 	disabled.Enabled = false
@@ -494,8 +499,11 @@ func TestPendingCellularLeaseRetainsOwnerForCancellation(t *testing.T) {
 		Exits: map[string]egressconfig.Exit{"gb": {Enabled: true, ProfileID: "sim-gb"}}}
 	for range 2 {
 		view, err := client.prepare(t.Context(), config)
-		if err != nil || view.Profiles["sim-gb"].RuntimeError != "cellular_lease_preparing" || view.Profiles["sim-gb"].Type != "cellular_sim" {
+		if err != nil || view.Profiles["sim-gb"].RuntimeError != "cellular_lease_preparing" {
 			t.Fatal("preparing lease was exposed as usable or reported invalid")
+		}
+		if relay := client.relays["sim-gb"]; relay == nil || relay.upstream.Available {
+			t.Fatal("preparing lease reached the relay as a usable upstream")
 		}
 	}
 	if current := client.leases["sim-gb"]; current == nil || current.SessionID != "pending-session" {
