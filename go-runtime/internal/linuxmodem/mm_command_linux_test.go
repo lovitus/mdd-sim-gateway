@@ -83,7 +83,12 @@ func TestDataOwnerOffersOnlyModemManagerCommandCandidate(t *testing.T) {
 	}
 	prober.data["equipment"].cleanup = true
 	candidates, err = prober.enumerateAT()
+	if err != nil || len(candidates) != 1 || candidates[0].Name != "mm-command:1" {
+		t.Fatal("cleanup hid the original status/hangup command owner")
+	}
+	prober.data["equipment"].inhibited = true
+	candidates, err = prober.enumerateAT()
 	if err != nil || len(candidates) != 0 {
-		t.Fatal("cleanup allowed command ownership")
+		t.Fatal("inhibited modem exposed an obsolete MM command owner")
 	}
 }
