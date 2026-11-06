@@ -147,6 +147,30 @@ func (manager *Manager) DataValidity(target agentdata.Target) (<-chan struct{}, 
 	return current.invalidated, nil
 }
 
+// RecoverData keeps the exact logical borrower and persistent intent while
+// replacing only its disconnected bearer. Caller holds data and paid-call
+// lifecycle gates and has freshly checked the SIM and observed disconnection.
+func (manager *Manager) RecoverData(ctx context.Context, target agentdata.Target, profile agentdata.Profile) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	current := manager.items[target.EquipmentID]
+	if current == nil || current.target != target || !current.borrowed || current.requested != profile || agentdata.Invalidated(current.invalidated) {
+		return agentmodem.ErrOperationTargetReplaced
+	}
+	// Retry partial Prepare rollback as well as the old connected claim.
+	if err := manager.backend.StopData(ctx, target); err != nil {
+		return err
+	}
+	current.connected = false
+	name, err := manager.backend.PrepareData(ctx, target, profile)
+	if err != nil {
+		return err
+	}
+	current.profile, current.connected = name, true
+	current.invalidated, err = agentdata.DataValidity(manager.backend, target)
+	return err
+}
+
 func (manager *Manager) StopData(ctx context.Context, target agentdata.Target) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

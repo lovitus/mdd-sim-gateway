@@ -73,6 +73,7 @@ func Invalidated(done <-chan struct{}) bool {
 type Admission interface {
 	ResolveDataProfile(context.Context, Target, string, string, string) (Profile, error)
 	ValidateDataTarget(context.Context, Target) error
+	ValidateDataLease(context.Context, Target) error
 	DataPrepared(Target, string, string)
 	DataCleanup(Target, string, string)
 	DataReleased(Target, string)
@@ -112,6 +113,7 @@ type dataSession struct {
 	target      Target
 	id          string
 	profile     string
+	resolved    Profile
 	purpose     string
 	expiresAt   time.Time
 	maxBytes    uint64
@@ -233,7 +235,7 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 	}
 	sessionContext, cancel := context.WithCancel(manager.ctx)
 	current := &dataSession{target: target, id: request.SessionID, profile: profile, expiresAt: request.ExpiresAt,
-		purpose: purpose, maxBytes: request.MaxBytes, ctx: sessionContext, cancel: cancel,
+		purpose: purpose, resolved: resolved, maxBytes: request.MaxBytes, ctx: sessionContext, cancel: cancel,
 		streams: map[string]net.Conn{}, expiryWake: make(chan struct{}, 1), invalidated: invalidated}
 	manager.mu.Lock()
 	if manager.closed || manager.items[request.EquipmentID] != nil {
@@ -259,9 +261,8 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 func (manager *Manager) open(ctx context.Context, request agentlink.ModemDataRequest) error {
 	manager.operationMu.Lock()
 	defer manager.operationMu.Unlock()
-	return manager.config.Coordinator.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
-		return manager.openLocked(operationContext, request)
-	})
+	// Opening a guarded network socket does not transfer modem control ownership.
+	return manager.openLocked(ctx, request)
 }
 
 func (manager *Manager) openLocked(ctx context.Context, request agentlink.ModemDataRequest) error {
@@ -317,23 +318,23 @@ func (manager *Manager) renew(ctx context.Context, request agentlink.ModemDataRe
 	if current == nil || current.id != request.SessionID || current.target != targetFor(request) {
 		return errors.New("data session target was replaced")
 	}
-	return manager.config.Coordinator.DoAuxiliary(ctx, request.EquipmentID, func(context.Context) error {
-		if err := manager.config.Admission.ValidateDataTarget(ctx, current.target); err != nil {
-			return err
-		}
-		current.mu.Lock()
-		defer current.mu.Unlock()
-		if current.ctx.Err() != nil || Invalidated(current.invalidated) || request.ExpiresAt.Before(current.expiresAt) ||
-			request.MaxBytes != current.maxBytes || normalizeDataPurpose(request.Purpose) != current.purpose {
-			return errors.New("data session renewal does not match current owner")
-		}
-		current.expiresAt = request.ExpiresAt
-		select {
-		case current.expiryWake <- struct{}{}:
-		default:
-		}
-		return nil
-	})
+	// Renew the logical lease even when a voice call temporarily suspends data.
+	// Exact identity, policy, quota and platform invalidation still apply.
+	if err := manager.config.Admission.ValidateDataLease(ctx, current.target); err != nil {
+		return err
+	}
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	if current.ctx.Err() != nil || Invalidated(current.invalidated) || request.ExpiresAt.Before(current.expiresAt) ||
+		request.MaxBytes != current.maxBytes || normalizeDataPurpose(request.Purpose) != current.purpose {
+		return errors.New("data session renewal does not match current owner")
+	}
+	current.expiresAt = request.ExpiresAt
+	select {
+	case current.expiryWake <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 func (current *dataSession) expiry() time.Time {
@@ -524,6 +525,8 @@ func (manager *Manager) watch(equipmentID string, current *dataSession) {
 }
 
 func (manager *Manager) waitForExpiry(current *dataSession) {
+	recovery := time.NewTicker(30 * time.Second)
+	defer recovery.Stop()
 	for {
 		expiresAt := current.expiry()
 		delay := time.Until(expiresAt)
@@ -547,11 +550,58 @@ func (manager *Manager) waitForExpiry(current *dataSession) {
 				default:
 				}
 			}
+		case <-recovery.C:
+			timer.Stop()
+			manager.recoverConnection(current)
 		case <-timer.C:
 			current.cancel()
 			return
 		}
 	}
+}
+
+func (manager *Manager) recoverConnection(current *dataSession) {
+	backend, ok := manager.config.Backend.(interface {
+		RecoverData(context.Context, Target, Profile) error
+	})
+	if !ok {
+		return
+	}
+	health, ok := manager.config.Admission.(interface {
+		DataRecoveryNeeded(context.Context, Target) (bool, error)
+	})
+	if !ok {
+		return
+	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	if current.ctx.Err() != nil || Invalidated(current.invalidated) {
+		return
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	if expiry := current.expiry(); expiry.Before(deadline) {
+		deadline = expiry
+	}
+	ctx, cancel := context.WithDeadline(current.ctx, deadline)
+	defer cancel()
+	_ = manager.config.Coordinator.DoAuxiliary(ctx, current.target.EquipmentID, func(ctx context.Context) error {
+		if err := manager.config.Admission.ValidateDataLease(ctx, current.target); err != nil {
+			return err
+		}
+		recover, err := health.DataRecoveryNeeded(ctx, current.target)
+		if err != nil || !recover {
+			return err
+		}
+		manager.closeStreams(current)
+		if err := backend.RecoverData(ctx, current.target, current.resolved); err != nil {
+			return err
+		}
+		invalidated, err := DataValidity(manager.config.Backend, current.target)
+		if err == nil {
+			current.invalidated = invalidated
+		}
+		return err
+	})
 }
 
 func (manager *Manager) stop(_ context.Context, request agentlink.ModemDataRequest) error {
@@ -587,7 +637,29 @@ func (manager *Manager) stop(_ context.Context, request agentlink.ModemDataReque
 	return err
 }
 
-// DoAuxiliary serializes a call/raw/SIM operation with data lifecycle changes
+// DoCall serializes call admission with physical data lifecycle changes. A
+// logical borrower does not own the voice service; only unfinished cleanup
+// prevents admitting a new paid call. Existing hangup/status/renew bypass it.
+func (manager *Manager) DoCall(ctx context.Context, equipmentID string, callback func(context.Context) error) error {
+	if callback == nil {
+		return errors.New("nil modem call operation")
+	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	manager.mu.Lock()
+	cleaning, closed := manager.cleanup[equipmentID] != nil, manager.closed
+	current := manager.items[equipmentID]
+	manager.mu.Unlock()
+	if closed {
+		return context.Canceled
+	}
+	if cleaning || current != nil && (current.ctx.Err() != nil || Invalidated(current.invalidated)) {
+		return ErrSessionActive
+	}
+	return callback(ctx)
+}
+
+// DoAuxiliary serializes a raw/SIM operation with data lifecycle changes
 // and rejects it while the exact modem still owns a prepared or open data
 // session. Transport-loss cleanup deliberately bypasses this method and calls
 // Manager.Close so a broken WSS can never strand a raw USB attachment.
@@ -616,7 +688,9 @@ func (manager *Manager) closeSession(current *dataSession) error {
 	defer current.stopMu.Unlock()
 	manager.config.Admission.DataCleanup(current.target, current.id, current.purpose)
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	current.stopErr = manager.config.Backend.StopData(stopCtx, current.target)
+	current.stopErr = manager.config.Coordinator.DoAuxiliary(stopCtx, current.target.EquipmentID, func(ctx context.Context) error {
+		return manager.config.Backend.StopData(ctx, current.target)
+	})
 	cancel()
 	if current.stopErr == nil {
 		manager.config.Admission.DataReleased(current.target, current.id)

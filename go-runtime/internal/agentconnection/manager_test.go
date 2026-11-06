@@ -94,3 +94,40 @@ func TestReleaseStaleRetainsFailedOrBorrowedOwnerUntilSafeCleanup(t *testing.T) 
 		t.Fatalf("borrowed stale owner was stopped err=%v stops=%d", err, backend.stops)
 	}
 }
+
+func TestBorrowerRecoveryPreservesLogicalOwnerAcrossPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	backend := &testBackend{stopFailures: 1}
+	manager, _ := New(backend)
+	target := agentdata.Target{AttachmentID: "attachment", EquipmentID: "equipment", CardID: "card", SIMSessionGeneration: "generation"}
+	profile := agentdata.Profile{Name: "carrier", APN: "internet"}
+	if err := manager.SetPersistent(ctx, target, profile, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.PrepareData(ctx, target, profile); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RecoverData(ctx, target, profile); err == nil {
+		t.Fatal("failed physical stop was hidden")
+	}
+	if len(manager.OwnedTargets()) != 1 {
+		t.Fatal("partial failure lost original owner")
+	}
+	if err := manager.RecoverData(ctx, target, profile); err != nil {
+		t.Fatal(err)
+	}
+	if backend.prepares != 2 || backend.stops != 2 || !manager.PersistentMatches(target, profile) {
+		t.Fatal("recovery lost persistent intent or did not restore bearer")
+	}
+	if err := manager.ReleaseStale(ctx, target); !errors.Is(err, agentdata.ErrSessionActive) {
+		t.Fatal("recovery dropped borrowed ownership")
+	}
+	replacement := target
+	replacement.SIMSessionGeneration = "replacement"
+	if err := manager.RecoverData(ctx, replacement, profile); err == nil || backend.prepares != 2 || backend.stops != 2 {
+		t.Fatal("recovery crossed SIM identity")
+	}
+	if err := manager.StopData(ctx, target); err != nil || backend.stops != 2 {
+		t.Fatal("borrower stop disrupted retained persistent intent")
+	}
+}

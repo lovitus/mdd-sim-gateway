@@ -78,6 +78,11 @@ func TestForcedCloseRecoveryRequiresExactModemManagerError(t *testing.T) {
 
 type busyVoiceManager struct{ testModemManager }
 
+func (manager *busyVoiceManager) Inhibit(ctx context.Context, uid string, inhibit bool) error {
+	_ = manager.testModemManager.Inhibit(ctx, uid, inhibit)
+	return errors.New("voice is active")
+}
+
 func (*busyVoiceManager) VoiceIdle(context.Context, dbus.ObjectPath) (bool, error) { return false, nil }
 
 func TestDataRecoveryCannotInhibitAModemWithAnActiveCall(t *testing.T) {
@@ -151,5 +156,31 @@ func TestDisconnectedDataCannotDialAndKeepsATFailureVisible(t *testing.T) {
 	}
 	if fact.AT.Detail != "ttyUSB2 has been forced close" || fact.AT.CallSignalling || fact.AT.SMS {
 		t.Fatalf("AT fault hidden: %+v", fact.AT)
+	}
+}
+
+func TestStaticDataCleanupRetainsVoiceOwnerUntilIdle(t *testing.T) {
+	target := agentdata.Target{EquipmentID: "equipment", AttachmentID: "attachment", CardID: "card", SIMSessionGeneration: "sim-generation"}
+	claim := &dataClaim{target: target, cleanup: true, permitClosed: true, routeCleaned: true,
+		commandSnapshot: modemSnapshot{ObjectPath: "/org/freedesktop/ModemManager1/Modem/1"}, bearer: dataBearer{Method: 2}}
+	manager := &busyVoiceManager{}
+	prober := &Prober{manager: manager, data: map[string]*dataClaim{target.EquipmentID: claim},
+		atSnapshot: map[string]agentat.Snapshot{"attachment": {State: "ready", Port: "mm-command:1", CallSignalling: true}}}
+	if err := prober.cleanupDataClaim(claim); err == nil || claim.inhibited || claim.bearerDisconnected || len(manager.inhibits) != 0 {
+		t.Fatal("static cleanup bypassed active voice guard")
+	}
+	current := &ownedDevice{usb: usbGeneration{AttachmentID: "attachment", Generation: "usb-generation"},
+		lastFact: agentmodem.Fact{AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID, ContinuityEpoch: "usb-generation",
+			SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: target.CardID, SessionGeneration: target.SIMSessionGeneration}}}
+	fact := prober.dataFact(current, claim)
+	for _, action := range []agentmodem.OperationAction{agentmodem.OperationCallStatus, agentmodem.OperationCallHangup} {
+		if err := agentmodem.ValidateOperationTarget([]agentmodem.Fact{fact}, agentmodem.Operation{AttachmentID: target.AttachmentID,
+			EquipmentID: target.EquipmentID, CardID: target.CardID, SIMSessionGeneration: target.SIMSessionGeneration, Action: action}); err != nil {
+			t.Fatalf("cleanup hid the exact independent voice control path: %s %v", action, err)
+		}
+	}
+	claim.inhibited = true
+	if fact := prober.dataFact(current, claim); fact.AT.State == agentmodem.ATControlReady {
+		t.Fatal("switched owner remained ready")
 	}
 }

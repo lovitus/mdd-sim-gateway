@@ -1,0 +1,45 @@
+name: Cellular coexistence one-time proof
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/cellular-call-data-coexistence]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Install existing native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+      - name: Build exact embedded UI
+        working-directory: webui
+        run: |
+          npm ci
+          MDD_KEEP_EMBED_SOURCE=1 npm run build:go
+      - name: Prove restored failures and fixed behavior
+        run: node tools/cellular-coexistence-proof.mjs
+      - name: Preserve bounded proof and deterministic embedded UI
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cellular-coexistence-proof-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/cellular-coexistence-proof
+            go-runtime/internal/webui/assets
+          retention-days: 7
+          if-no-files-found: error
