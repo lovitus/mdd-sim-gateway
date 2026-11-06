@@ -306,7 +306,28 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	if err != nil || result.State != "applied" {
 		t.Fatal("initial donor did not apply", result, err)
 	}
+	beforeSwap, err := egressdesired.ReadRuntime(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A lease swap only moves the fixed relay upstream, so the shared sing-box
+	// configuration must stay identical and the native check is not reached.
 	egressSnapshot.Config.Profiles["donor"] = egressconfig.Profile{Name: "Donor fixture", Type: "cellular_sim", SIMICCID: "8985200000000000002"}
+	egressSnapshot, err = egressStore.PutExpected(egressSnapshot.Config, egressSnapshot.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = restarted.ApplyEgress(t.Context(), egressSnapshot.Revision, catalogSnapshot.Revision)
+	if err != nil || result.State != "applied" {
+		t.Fatal("donor lease swap did not apply", result, err)
+	}
+	afterSwap, err := egressdesired.ReadRuntime(statusPath)
+	if err != nil || afterSwap.ConfigIdentity != beforeSwap.ConfigIdentity {
+		t.Fatal("donor lease swap changed the shared configuration", afterSwap, err)
+	}
+	// A native rejection must still settle fail-closed. Change the shared
+	// configuration (HK becomes a plain SOCKS5 exit) so the native check runs.
+	egressSnapshot.Config.Profiles["donor"] = egressconfig.Profile{Name: "Donor fixture", Type: "socks5", Server: "127.0.0.1", Port: 1080}
 	egressSnapshot, err = egressStore.PutExpected(egressSnapshot.Config, egressSnapshot.Revision)
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +338,7 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	}
 	result, err = restarted.ApplyEgress(t.Context(), egressSnapshot.Revision, catalogSnapshot.Revision)
 	if err != nil || result.State != "unavailable" {
-		t.Fatal("rejected donor attempt did not finish fail closed", result, err)
+		t.Fatal("rejected native configuration did not finish fail closed", result, err)
 	}
 	confirmed, err := egressdesired.ReadRuntime(statusPath)
 	if err != nil || confirmed.Outcome != "unavailable" || confirmed.Exits["gb"].Ready || confirmed.Exits["hk"].ProxyPort != 0 {

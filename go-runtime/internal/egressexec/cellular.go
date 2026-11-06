@@ -11,8 +11,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +59,17 @@ type cellularClient struct {
 	now       func() time.Time
 	leases    map[string]*cellularLease
 	retry     map[string]time.Time
+	relays    map[string]*cellularRelay
+	// relayRecords keeps each exit's relay port and credentials stable across
+	// lease changes. An empty relayStatePath keeps them in memory only.
+	relayRecords   map[string]cellularRelayRecord
+	relayStatePath string
+}
+
+type cellularRelayRecord struct {
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 func newCellularClient(coreURL, tokenPath string) (*cellularClient, error) {
@@ -73,7 +86,8 @@ func newCellularClient(coreURL, tokenPath string) (*cellularClient, error) {
 		return nil, errors.New("cellular egress token path is invalid")
 	}
 	return &cellularClient{base: strings.TrimRight(parsed.String(), "/"), tokenPath: tokenPath,
-		http: &http.Client{Timeout: 20 * time.Second}, now: time.Now, leases: map[string]*cellularLease{}}, nil
+		http: &http.Client{Timeout: 20 * time.Second}, now: time.Now, leases: map[string]*cellularLease{},
+		relays: map[string]*cellularRelay{}}, nil
 }
 
 func (client *cellularClient) authorize(request *http.Request) error {
@@ -108,17 +122,24 @@ func (client *cellularClient) prepare(ctx context.Context, config egressconfig.C
 			copy.Profiles[id] = profile
 			continue
 		}
-		lease, err := client.ensure(ctx, id, profile)
+		relay, err := client.relayFor(id)
 		if err != nil {
-			profile.RuntimeError = "cellular_lease_unavailable"
-			if errors.Is(err, errCellularPreparing) {
-				profile.RuntimeError = "cellular_lease_preparing"
-			}
+			profile.RuntimeError = "cellular_relay_unavailable"
 			copy.Profiles[id] = profile
 			continue
 		}
-		copy.Profiles[id] = egressconfig.Profile{Name: profile.Name, Type: "socks5", Server: "127.0.0.1",
-			Port: lease.ListenPort, Username: lease.Username, Password: lease.Password, RuntimeMode: "cellular_sim"}
+		// The lease result only moves the relay's upstream. The endpoint sing-box
+		// sees is fixed, so a borrowed-route outage cannot reconfigure the shared process.
+		_, err = client.ensure(ctx, id, profile)
+		endpoint := egressconfig.Profile{Name: profile.Name, Type: "socks5", Server: "127.0.0.1",
+			Port: relay.port, Username: relay.username, Password: relay.password, RuntimeMode: "cellular_sim"}
+		if err != nil {
+			endpoint.RuntimeError = "cellular_lease_unavailable"
+			if errors.Is(err, errCellularPreparing) {
+				endpoint.RuntimeError = "cellular_lease_preparing"
+			}
+		}
+		copy.Profiles[id] = endpoint
 	}
 	client.stopUnused(ctx, used)
 	return copy, nil
@@ -128,7 +149,101 @@ func (client *cellularClient) ensure(ctx context.Context, profileID string, prof
 	lock := client.profileLock(profileID)
 	lock.Lock()
 	defer lock.Unlock()
-	return client.ensureLocked(ctx, profileID, profile)
+	lease, err := client.ensureLocked(ctx, profileID, profile)
+	client.syncRelay(profileID, lease, err)
+	return lease, err
+}
+
+// relayFor returns the exit's fixed endpoint, creating it on first use. Its
+// port and credentials are persisted, so a restarted executor keeps the
+// identity sing-box was configured with whenever the port is still free.
+func (client *cellularClient) relayFor(profileID string) (*cellularRelay, error) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if relay := client.relays[profileID]; relay != nil {
+		return relay, nil
+	}
+	if err := client.loadRelayRecordsLocked(); err != nil {
+		return nil, err
+	}
+	record := client.relayRecords[profileID]
+	if record.Username == "" || record.Password == "" {
+		username, password, err := newCellularRelayCredentials()
+		if err != nil {
+			return nil, err
+		}
+		record.Username, record.Password = username, password
+	}
+	listener, err := listenCellularRelay(record.Port)
+	if err != nil {
+		return nil, err
+	}
+	record.Port = listener.Addr().(*net.TCPAddr).Port
+	if client.relayRecords[profileID] != record {
+		client.relayRecords[profileID] = record
+		if err := client.saveRelayRecordsLocked(); err != nil {
+			_ = listener.Close()
+			return nil, err
+		}
+	}
+	relay := newCellularRelay(listener, record.Port, record.Username, record.Password)
+	client.relays[profileID] = relay
+	go relay.serve()
+	return relay, nil
+}
+
+func (client *cellularClient) loadRelayRecordsLocked() error {
+	if client.relayRecords != nil {
+		return nil
+	}
+	client.relayRecords = map[string]cellularRelayRecord{}
+	if client.relayStatePath == "" {
+		return nil
+	}
+	payload, err := os.ReadFile(client.relayStatePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// A damaged or null state file resets every relay identity and must never leave a nil map.
+	if json.Unmarshal(payload, &client.relayRecords) != nil || client.relayRecords == nil {
+		client.relayRecords = map[string]cellularRelayRecord{}
+	}
+	return nil
+}
+
+func (client *cellularClient) saveRelayRecordsLocked() error {
+	if client.relayStatePath == "" {
+		return nil
+	}
+	payload, err := json.Marshal(client.relayRecords)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(client.relayStatePath, payload, 0o600)
+}
+
+// syncRelay moves the exit's relay to the lease that just succeeded, or
+// marks it unavailable so new flows are refused and stale flows are closed.
+func (client *cellularClient) syncRelay(profileID string, lease *cellularLease, err error) {
+	client.mu.Lock()
+	relay := client.relays[profileID]
+	client.mu.Unlock()
+	if relay == nil {
+		return
+	}
+	if err != nil || lease == nil || lease.State != "ready" {
+		relay.setUpstream(cellularRelayUpstream{})
+		return
+	}
+	relay.setUpstream(relayUpstreamFor(lease))
+}
+
+func relayUpstreamFor(lease *cellularLease) cellularRelayUpstream {
+	return cellularRelayUpstream{Available: true, Address: net.JoinHostPort("127.0.0.1", strconv.Itoa(lease.ListenPort)),
+		Username: lease.Username, Password: lease.Password}
 }
 
 func (client *cellularClient) profileLock(id string) *sync.Mutex {
@@ -228,6 +343,13 @@ func (client *cellularClient) deferRetry(profileID string) {
 
 func (client *cellularClient) stopUnused(ctx context.Context, used map[string]struct{}) {
 	client.mu.Lock()
+	for id, relay := range client.relays {
+		if _, keep := used[id]; !keep {
+			// Refuse new flows before the lease is released; the record keeps the port.
+			relay.close()
+			delete(client.relays, id)
+		}
+	}
 	ids := make([]string, 0, len(client.leases))
 	for id := range client.leases {
 		ids = append(ids, id)
@@ -292,7 +414,8 @@ func (client *cellularClient) keepAlive(ctx context.Context) {
 				current := client.leases[id]
 				client.mu.Unlock()
 				if current == lease && ctx.Err() == nil {
-					_, _ = client.ensureLocked(ctx, id, egressconfig.Profile{SIMICCID: lease.CardID})
+					renewed, renewErr := client.ensureLocked(ctx, id, egressconfig.Profile{SIMICCID: lease.CardID})
+					client.syncRelay(id, renewed, renewErr)
 				}
 			}()
 		}
