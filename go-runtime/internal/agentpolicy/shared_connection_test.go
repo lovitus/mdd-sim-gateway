@@ -357,3 +357,107 @@ func TestSharedConnectionNewPolicyFailureRetainsReasonAndRetry(t *testing.T) {
 		t.Fatal("failed convergence changed the new user intent or bearer")
 	}
 }
+
+func TestBorrowedLeaseSurvivesVoiceDataSuspensionWithoutLosingIdentity(t *testing.T) {
+	fixture := newSharedFixture(t)
+	request := fixture.borrow(t, time.Now().Add(time.Minute))
+	_, _, err := fixture.calls.Begin(agentcall.Record{SchemaVersion: 1, LeaseID: "voice-lease", OperationID: "voice-operation",
+		AttachmentID: fixture.target.AttachmentID, EquipmentID: fixture.target.EquipmentID, CardID: fixture.target.CardID,
+		Direction: "out", ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.calls.ClearTarget(fixture.target.AttachmentID, fixture.target.EquipmentID, fixture.target.CardID)
+	fixture.hardware.mu.Lock()
+	fixture.hardware.facts[0].Network.Data = agentmodem.DataDisconnected
+	fixture.hardware.mu.Unlock()
+	request.Action, request.OperationID = agentlink.ModemDataRenew, "renew-suspended"
+	request.ExpiresAt = request.ExpiresAt.Add(time.Second)
+	if response := fixture.data.ExecuteModemData(context.Background(), request); response.Failure != nil {
+		t.Fatalf("natural voice suspension cancelled logical borrowing: %+v", response)
+	}
+	if err := fixture.policy.ValidateDataTarget(context.Background(), fixture.target); !errors.Is(err, ErrBearerUnconfirmed) {
+		t.Fatalf("suspended data became usable: %v", err)
+	}
+	fixture.reconcile(t)
+	if fixture.hardware.starts != 1 || fixture.hardware.stops != 0 {
+		t.Fatal("voice safety window changed physical ownership")
+	}
+	fixture.requireUnchanged(t)
+	for _, field := range []string{"attachment", "card", "generation"} {
+		changed := request
+		switch field {
+		case "attachment":
+			changed.AttachmentID += "-changed"
+		case "card":
+			changed.CardID = "8985200000000000002"
+		case "generation":
+			changed.SIMSessionGeneration += "-changed"
+		}
+		if response := fixture.data.ExecuteModemData(context.Background(), changed); response.Failure == nil {
+			t.Fatalf("renew accepted changed %s", field)
+		}
+	}
+	fixture.hardware.mu.Lock()
+	fixture.hardware.facts[0].SIM.SessionGeneration = "replacement"
+	fixture.hardware.mu.Unlock()
+	if response := fixture.data.ExecuteModemData(context.Background(), request); response.Failure == nil {
+		t.Fatal("renew inherited a replacement SIM")
+	}
+}
+
+func TestCoexistenceTransportCloseRetainsCleanupUntilVoiceEnds(t *testing.T) {
+	f := newSharedFixture(t)
+	policy := f.stored
+	policy.Desired.ConnectionEnabled = false
+	var err error
+	f.stored, err = f.policy.config.Store.PutExpected(policy, policy.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	request := f.borrow(t, time.Now().Add(time.Minute))
+	_, _, err = f.calls.Begin(agentcall.Record{SchemaVersion: 1, LeaseID: "voice", OperationID: "answer", AttachmentID: f.target.AttachmentID,
+		EquipmentID: f.target.EquipmentID, CardID: f.target.CardID, Direction: "in", ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.calls.ClearTarget(f.target.AttachmentID, f.target.EquipmentID, f.target.CardID)
+	f.hardware.mu.Lock()
+	stops := f.hardware.stops
+	f.hardware.mu.Unlock()
+	if err := f.data.Close(); !errors.Is(err, agentcall.ErrAuxiliaryDuringCall) {
+		t.Fatalf("closed data manager lost voice guard: %v", err)
+	}
+	call, err := agentcall.NewManager(f.calls, f.hardware)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// WSS manager is gone; the original connection owner and call store survive.
+	if err := f.policy.BindCoordinator(call); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	f.hardware.mu.Lock()
+	during := f.hardware.stops
+	f.hardware.mu.Unlock()
+	if during != stops {
+		t.Fatal("transport close disrupted active voice")
+	}
+	if err := f.calls.ClearTarget(f.target.AttachmentID, f.target.EquipmentID, f.target.CardID); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := f.hardware.Probe(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(time.Hour)
+	f.policy.reconcileConnectionOwners(t.Context(), facts)
+	f.hardware.mu.Lock()
+	after := f.hardware.stops
+	f.hardware.mu.Unlock()
+	if after != stops+1 || len(f.connection.OwnedTargets()) != 0 || f.policy.DataLeaseActive(request.EquipmentID) {
+		t.Fatalf("transport loss stranded cleanup ownership: stops=%d want=%d owners=%d lease=%t", after, stops+1, len(f.connection.OwnedTargets()), f.policy.DataLeaseActive(request.EquipmentID))
+	}
+	f.requireUnchanged(t)
+}
