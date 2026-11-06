@@ -28,6 +28,8 @@ const (
 	cellularMaxBytes   = uint64(1 << 40)
 )
 
+var errCellularPreparing = errors.New("cellular borrowing is waiting for the voice safety window")
+
 type cellularLease struct {
 	ProfileID  string
 	CardID     string
@@ -109,6 +111,9 @@ func (client *cellularClient) prepare(ctx context.Context, config egressconfig.C
 		lease, err := client.ensure(ctx, id, profile)
 		if err != nil {
 			profile.RuntimeError = "cellular_lease_unavailable"
+			if errors.Is(err, errCellularPreparing) {
+				profile.RuntimeError = "cellular_lease_preparing"
+			}
 			copy.Profiles[id] = profile
 			continue
 		}
@@ -153,6 +158,9 @@ func (client *cellularClient) ensureLocked(ctx context.Context, profileID string
 			delete(client.leases, profileID)
 			client.mu.Unlock()
 		} else if now.Before(current.nextRenew) && now.Before(current.ExpiresAt) {
+			if current.State == "preparing" {
+				return nil, errCellularPreparing
+			}
 			return current, nil
 		}
 	}
@@ -188,15 +196,24 @@ func (client *cellularClient) ensureLocked(ctx context.Context, profileID string
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 8193))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&lease) != nil || decoder.Decode(&struct{}{}) != io.EOF || lease.SessionID == "" ||
-		lease.State != "ready" || lease.ListenPort < 1 || lease.Username == "" || lease.Password == "" ||
 		lease.ExpiresAt.Before(expiresAt.Add(-time.Second)) {
 		return nil, errors.New("Core returned an invalid cellular egress lease")
+	}
+	if lease.State == "ready" {
+		if lease.ListenPort < 1 || lease.Username == "" || lease.Password == "" {
+			return nil, errors.New("Core returned incomplete cellular egress credentials")
+		}
+	} else if lease.State != "preparing" || lease.ListenPort != 0 || lease.Username != "" || lease.Password != "" {
+		return nil, errors.New("Core returned an invalid cellular egress state")
 	}
 	lease.ProfileID, lease.CardID, lease.Purpose, lease.nextRenew = profileID, profile.SIMICCID, purpose, now.Add(cellularRenewEvery)
 	client.mu.Lock()
 	client.leases[profileID] = &lease
 	delete(client.retry, profileID)
 	client.mu.Unlock()
+	if lease.State == "preparing" {
+		return nil, errCellularPreparing
+	}
 	return &lease, nil
 }
 

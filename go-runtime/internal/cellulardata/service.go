@@ -74,6 +74,7 @@ type session struct {
 	stopMu       sync.Mutex
 	stopDone     bool
 	ready        bool
+	deferred     bool
 	service      *Service
 	id           string
 	lineID       string
@@ -266,10 +267,6 @@ func (service *Service) create(ctx context.Context, lineID, purpose, profile str
 	if expiresAt.Before(now) {
 		return nil, errors.New("invalid cellular data expiry")
 	}
-	operation, err := randomID("prepare")
-	if err != nil {
-		return nil, err
-	}
 	listener, err := net.Listen("tcp", service.config.Listen)
 	if err != nil {
 		return nil, err
@@ -314,23 +311,12 @@ func (service *Service) create(ctx context.Context, lineID, purpose, profile str
 		current.stopMu.Unlock()
 		return nil, errors.Join(err, current.stop("cancelled_before_prepare"))
 	}
-	operationContext, cancel := context.WithTimeout(ctx, 45*time.Second)
-	prepared, err := service.config.Agents.ExecuteModemData(operationContext, target.AgentID, target.ProcessGeneration, agentlink.ModemDataRequest{
-		OperationID: operation, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID, CardID: target.CardID,
-		SIMSessionGeneration: target.SIMSessionGeneration,
-		Action:               agentlink.ModemDataPrepare, SessionID: sessionID, Profile: profile, Purpose: wirePurpose(purpose),
-		ExpiresAt: expiresAt, MaxBytes: maxBytes,
-	})
-	cancel()
-	if err != nil {
+	err = current.prepareLocked(ctx)
+	if err != nil && !waitingForCall(err) {
 		current.stopMu.Unlock()
 		return nil, errors.Join(err, current.stop("prepare_failed"))
 	}
-	current.mu.Lock()
-	current.profile = prepared.Profile
-	current.ready = true
 	closed := current.ctx.Err() != nil
-	current.mu.Unlock()
 	current.stopMu.Unlock()
 	if closed {
 		return nil, errors.Join(context.Canceled, current.stop("prepare_cancelled"))
@@ -358,7 +344,7 @@ func (service *Service) EnsureOwned(ctx context.Context, lineID, purpose, profil
 		return created.view(true), nil
 	}
 	current.mu.Lock()
-	ownedProfile, ready := current.profile, current.ready
+	ownedProfile, ready, deferred := current.profile, current.ready, current.deferred
 	current.mu.Unlock()
 	if current.purpose != purpose || current.requestedMax != maxBytes || profile != "" && ownedProfile != profile {
 		return sessionView{}, errors.New("another cellular data owner is active")
@@ -369,7 +355,7 @@ func (service *Service) EnsureOwned(ctx context.Context, lineID, purpose, profil
 		}
 		return service.EnsureOwned(ctx, lineID, purpose, profile, expiresAt, maxBytes, operationID)
 	}
-	if !ready {
+	if !ready && !deferred {
 		return sessionView{}, errors.New("cellular data owner is preparing")
 	}
 	if err := current.renew(ctx, operationID, expiresAt); err != nil {
@@ -478,12 +464,60 @@ func (service *Service) lineForCard(cardID string) (string, error) {
 	return lineID, nil
 }
 
+// Only a definite pre-prepare paid-call refusal is deferred. Timeout/transport
+// failures can have dispatched physical work and still take normal stop cleanup.
+func waitingForCall(err error) bool {
+	var remote *agentlink.RemoteError
+	return errors.As(err, &remote) && remote.Kind == "not_ready" && remote.Code == "modem_paid_call_active"
+}
+
+// Caller holds stopMu. Retain the one session, reservation and exact target
+// across a voice safety window; never publish ready until Agent confirms it.
+func (current *session) prepareLocked(ctx context.Context) error {
+	operation, err := randomID("prepare")
+	if err != nil {
+		return err
+	}
+	current.mu.Lock()
+	request := agentlink.ModemDataRequest{OperationID: operation, AttachmentID: current.target.AttachmentID,
+		EquipmentID: current.target.EquipmentID, CardID: current.target.CardID,
+		SIMSessionGeneration: current.target.SIMSessionGeneration, Action: agentlink.ModemDataPrepare,
+		SessionID: current.id, Profile: current.profile, Purpose: wirePurpose(current.purpose),
+		ExpiresAt: current.expiresAt, MaxBytes: current.maxBytes}
+	current.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	prepared, err := current.service.config.Agents.ExecuteModemData(ctx, current.target.AgentID, current.target.ProcessGeneration, request)
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	current.deferred = waitingForCall(err)
+	if err == nil {
+		current.profile, current.ready = prepared.Profile, true
+	}
+	return err
+}
+
 func (current *session) renew(ctx context.Context, operationID string, expiresAt time.Time) error {
 	current.stopMu.Lock()
 	defer current.stopMu.Unlock()
 	if current.ctx.Err() != nil {
 		return errors.New("cellular data owner is closing")
 	}
+	current.mu.Lock()
+	if current.deferred {
+		if expiresAt.Before(current.expiresAt) {
+			current.mu.Unlock()
+			return errors.New("cellular data expiry cannot move backwards")
+		}
+		current.expiresAt = expiresAt
+		current.mu.Unlock()
+		select {
+		case current.expiryWake <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	current.mu.Unlock()
 	request := agentlink.ModemDataRequest{OperationID: operationID, AttachmentID: current.target.AttachmentID,
 		EquipmentID: current.target.EquipmentID, CardID: current.target.CardID,
 		SIMSessionGeneration: current.target.SIMSessionGeneration,
@@ -520,6 +554,8 @@ func (current *session) expiry() time.Time {
 }
 
 func (current *session) watchExpiry() {
+	retry := time.NewTicker(5 * time.Second)
+	defer retry.Stop()
 	for {
 		delay := time.Until(current.expiry())
 		if delay <= 0 {
@@ -531,6 +567,23 @@ func (current *session) watchExpiry() {
 		case <-current.ctx.Done():
 			timer.Stop()
 			return
+		case <-retry.C:
+			timer.Stop()
+			current.stopMu.Lock()
+			current.mu.Lock()
+			deferred := current.deferred
+			current.mu.Unlock()
+			var err error
+			if deferred && current.ctx.Err() == nil && time.Now().Before(current.expiry()) {
+				ctx, cancel := context.WithDeadline(current.ctx, current.expiry())
+				err = current.prepareLocked(ctx)
+				cancel()
+			}
+			current.stopMu.Unlock()
+			if err != nil && !waitingForCall(err) {
+				current.stop("deferred_prepare_failed")
+				return
+			}
 		case <-current.expiryWake:
 			if !timer.Stop() {
 				select {
@@ -566,7 +619,7 @@ func (remoteResolver) Resolve(ctx context.Context, _ string) (context.Context, n
 
 func (current *session) dial(ctx context.Context, network, address string) (net.Conn, error) {
 	current.mu.Lock()
-	if current.ctx.Err() != nil || current.used.Load() >= current.maxBytes {
+	if current.ctx.Err() != nil || !current.ready || current.used.Load() >= current.maxBytes {
 		current.mu.Unlock()
 		return nil, errors.New("cellular data session is closed or exhausted")
 	}
