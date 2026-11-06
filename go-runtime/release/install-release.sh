@@ -224,9 +224,18 @@ provider_units() {
 
 assert_inactive() {
   unit=$1
-  state=$(/bin/systemctl is-active "$unit" 2>/dev/null || true)
+  load_state=$(/bin/systemctl show --property=LoadState --value "$unit") ||
+    fail "cannot verify load state of $unit"
+  case "$load_state" in
+    loaded) ;;
+    not-found) [ "${2:-}" = after-disable ] || fail "$unit is unexpectedly absent" ;;
+    *) fail "$unit load state is unverifiable ($load_state)" ;;
+  esac
+  state=$(/bin/systemctl show --property=ActiveState --value "$unit") ||
+    fail "cannot verify inactive state of $unit"
   case "$state" in
-    active|activating|reloading|deactivating) fail "$unit did not reach an inactive terminal state ($state)" ;;
+    inactive|failed) ;;
+    *) fail "$unit did not reach a verified inactive terminal state ($state)" ;;
   esac
 }
 
@@ -282,6 +291,22 @@ stop_server_services() {
   say "stopped Go server services; boot enablement and the independent endpoint Agent were left unchanged"
 }
 
+restore_uninstall_updater() {
+  uninstall_status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$uninstall_restore_path" = yes ]; then
+    if /bin/systemctl start mdd-updater.path &&
+        restored_path_state=$(/bin/systemctl show --property=ActiveState --value mdd-updater.path) &&
+        [ "$restored_path_state" = active ]; then
+      say "uninstall stopped before disable; restored the previously active updater path" >&2
+    else
+      say "$PROGRAM: uninstall aborted; restoring the previously active updater path failed; check mdd-updater.path" >&2
+      [ "$uninstall_status" -ne 0 ] || uninstall_status=1
+    fi
+  fi
+  exit "$uninstall_status"
+}
+
 uninstall_software() {
   require_host
   installed_core=/usr/lib/mdd/current/mdd-core
@@ -293,22 +318,58 @@ uninstall_software() {
   # removal re-acquires the same lock and repeats every check after systemd has
   # been quiesced, so this preflight is never treated as durable authority.
   "$installed_core" uninstall-release -check-only
-  /bin/systemctl disable --now mdd-provider-apply.service
-  providers=$(provider_units)
-  for unit in $providers; do /bin/systemctl disable --now "$unit"; done
-  /bin/systemctl disable --now mdd-core.service mdd-egress.service mdd-agent.service mdd-cellular-guard.service
+  uninstall_restore_path=no
+  trap restore_uninstall_updater EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  updater_units=
+  if [ -e /etc/systemd/system/mdd-updater.path ]; then
+    updater_path_state=$(/bin/systemctl show --property=ActiveState --value mdd-updater.path) ||
+      fail "cannot verify updater path state; refusing to uninstall"
+    case "$updater_path_state" in
+      active) uninstall_restore_path=yes ;;
+      inactive|failed) ;;
+      *) fail "updater path state is not stable ($updater_path_state); refusing to uninstall" ;;
+    esac
+    /bin/systemctl stop mdd-updater.path
+    updater_units=mdd-updater.path
+  fi
+  if [ -e /etc/systemd/system/mdd-updater.service ]; then
+    updater_state=$(/bin/systemctl show --property=ActiveState --value mdd-updater.service) ||
+      fail "cannot verify updater state; refusing to uninstall"
+    case "$updater_state" in
+      inactive|failed) ;;
+      *) fail "updater is not idle ($updater_state); wait for the update to finish before retrying uninstall" ;;
+    esac
+    updater_units="$updater_units mdd-updater.service"
+  fi
 
-  # Re-enumerate after stopping the apply helper. A late unit cannot hide
-  # between the first inventory and the destructive transaction.
-  providers=$(provider_units)
-  assert_inactive mdd-provider-apply.service
-  assert_not_enabled mdd-provider-apply.service
-  for unit in $providers; do
-    assert_inactive "$unit"
-    assert_not_enabled "$unit"
+  # Linked unit files can disappear during disable's daemon-reload. Finish
+  # every stop before disabling any unit; never stop an in-progress updater.
+  providers_before=$(provider_units)
+  /bin/systemctl stop mdd-provider-apply.service
+  providers_after=$(provider_units)
+  MDD_PROVIDER_UNITS=
+  for provider_unit in $providers_before $providers_after; do
+    append_provider_unit "$provider_unit"
   done
-  for unit in mdd-core.service mdd-egress.service mdd-agent.service mdd-cellular-guard.service; do
-    assert_inactive "$unit"
+  providers=$MDD_PROVIDER_UNITS
+  for unit in $providers; do /bin/systemctl stop "$unit"; done
+  /bin/systemctl stop mdd-core.service mdd-egress.service mdd-agent.service mdd-cellular-guard.service
+  removal_units="mdd-provider-apply.service $providers mdd-core.service mdd-egress.service mdd-agent.service mdd-cellular-guard.service $updater_units"
+  for unit in $removal_units; do assert_inactive "$unit"; done
+  # disable can partially remove links even on failure. Beyond this boundary,
+  # recovery must use the verified installer, never restart the path implicitly.
+  uninstall_restore_path=no
+  if ! /bin/systemctl disable $removal_units; then
+    fail "service disable failed; software and data were retained. Use the retained, verified same-version release with '$PROGRAM install /absolute/path/to/mdd-RELEASE' to restore managed links, then retry uninstall; install does not start or enable services"
+  fi
+
+  # Keep both original inventories after unlinking; Remove also re-enumerates
+  # and checks service state while holding the installation lock.
+  for unit in $removal_units; do
+    assert_inactive "$unit" after-disable
     assert_not_enabled "$unit"
   done
   "$installed_core" uninstall-release

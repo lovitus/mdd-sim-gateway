@@ -6,6 +6,72 @@ reports for provenance reconciliation; not revalidated by this review does not m
 The supported build/install surfaces are Go binaries plus the embedded React UI and manifest-listed native helpers.
 Docker, Python Control, VPCD and Asterisk are retired; they are not local development prerequisites.
 
+## Cellular voice and borrowing coexistence
+
+November6 owner decision: a logical data borrower must not prohibit cellular
+Dial/Answer; voice-induced data suspension is acceptable. Preserve exact SIM
+identity, durable paid-call leases, independent hangup, user intent and isolation.
+The fixed reviewer accepted this direction before implementation. Two reported
+calls failed before answer; their historical Agent error was not retained. A
+nonpaid read reproduced the shared data-admission refusal, not a carrier failure.
+
+This candidate separates logical Renew/Open from destructive modem ownership
+changes. Borrowing requested during a paid call stays preparing under one Core
+owner/budget; a retained disconnected borrower recovers only after the voice gate.
+Probe no longer performs destructive cleanup as a side effect of hangup/status.
+Failure checklist: lifetime mutual exclusion; lost pending owner/reservation;
+unknown bearer treated as disconnected; stale SIM accepted; expiry cleanup or
+background probe disrupting voice; false ready; default-network fallback.
+
+Fixed source review accepted8222c7d. Run42153737616/b5db829 preserves the
+original seven behavioral reds; run42156044160/8222c7d preserves seven additional
+review-defect reds. Its green phase caught malformed test requests; the first
+fixture correction supplies the required renewal purpose and identity-only Stop,
+without changing product validation or assertions. Run42157268521/18c31d0 passes
+all eight related race packages, including forced-control-close, Answer/Hangup,
+DHCP/partial recovery and transport-close cleanup. The optional real-Xray case
+is skipped in this limited proof; normal CI retains its existing external coverage.
+Archive `archive/2026-11-06/cellular-coexistence-qualified` retains that candidate.
+Artifact13474994265 (SHA256 a6a0d99d105360e050b82e403c1548386f847eedd25a02ea599a79b471f98065)
+supplies the same-source embedded UI. Temporary proof is removed; both completed
+red sets are not rerun. Final original CI and delivery review remain required.
+Existing command-owner test expectations are corrected: cleanup retains the exact
+MM status/hangup channel until inhibition, while direct tty remains unavailable.
+No production change, repeat paid call or deferred hardware qualification is claimed.
+
+Final-source review accepted9adccdd; Android42158250483 passed. Go42158250610
+found two fixture defects: DHCP still expected physical invalidation to cancel
+the logical borrower, and fresh-install version detection invoked a daemon absent
+from PATH. The fixed reviewer accepted retaining/renewing the exact original
+borrower before identity-only Stop and using `systemctl --version` with the same
+minimum version. Original isolation, expiry/quota, SIM replacement and time limits
+remain. Archive `cellular-coexistence-full-ci-red` preserves the failed candidate;
+corrected original CI and final review remain required.
+
+Go42161172653/53c01d8 passes the full DHCP lifecycle and both corrected fixtures;
+Android42161172591 passes. The later uninstall step exposes a separate linked-unit
+failure: `disable --now` removes the release link before stopping the service.
+The fixed reviewer accepts stopping first, retaining Provider inventories across
+apply shutdown, then disabling together. Stop the packaged updater trigger and
+refuse an active/unverifiable updater; recheck both units in the locked removal gate.
+If disable partially fails, retain software/data and manually reinstall the same
+verified release with the existing `install` entry before retrying strict uninstall.
+That repairs managed links without enabling/starting services or changing config;
+no relaxed preflight or automatic recovery is introduced. Existing uninstall/reinstall
+E2E remains the gate; no production uninstall or paid operation is authorized.
+
+Go42164603594/255f32e passes the original real install/stop/uninstall/reinstall
+journey; its separate macOS Universal verifier timed out at90s, so full CI is not
+qualified. The completed fixed review requires restoring the originally active
+updater path on pre-disable refusal and strict inactive readback. Its full-length
+successor accepts the scoped EXIT/signal recovery, with no restore once disable
+starts. Ordinary stop uses the same strict status check without new recovery.
+The existing hosted fresh-install job adds whole-entrypoint refusal/state cases
+in a private mount namespace; the actual installed Core preflight is retained,
+only the systemctl dependency is fault-injected, and disable always fails before
+removal. One-time255f32e counterexamples are distinct from the permanent cases.
+No local execution, new timeout, production operation or paid acceptance is implied.
+
 ## Updater staging permissions
 
 The October28 fixed review accepted a bounded repair of `FetchAndStage`:

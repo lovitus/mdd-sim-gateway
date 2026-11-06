@@ -31,6 +31,7 @@ const zh = {
   'Healthy exits applied. Unavailable countries: {countries}': '健康出口已应用；以下国家仍不可用：{countries}',
   'runtime route changed; coordinated apply required': '出口运行地址已变化，需要重新应用；其他健康出口保留。',
   'one or more country exits are unavailable': '部分国家出口不可用，请查看对应国家的状态。',
+  'cellular_lease_preparing': '借用线路已保留，正在等待通话结束后准备数据连接。',
   'cellular_lease_unavailable': '借用会话不可用，请检查流量卡开关、额度及设备状态。',
   'egress_runtime_unavailable': '出口已安全关闭，但没有可用国家；请检查节点后重新应用。',
   'egress_previous_runtime_restored': '新配置未生效，原运行配置已保留或恢复。',

@@ -18,7 +18,14 @@ const (
 	hangupRetryMaximum = 30 * time.Second
 )
 
-var ErrAuxiliaryDuringCall = errors.New("modem auxiliary operation is blocked by a paid-call lease")
+type paidCallConflict struct{}
+
+func (paidCallConflict) Error() string {
+	return "modem auxiliary operation is blocked by a paid-call lease"
+}
+func (paidCallConflict) ModemDataCode() string { return "modem_paid_call_active" }
+
+var ErrAuxiliaryDuringCall = paidCallConflict{}
 
 // Manager is the only paid-call operator exposed by the Agent. The durable
 // record is committed before ATD/ATA and is removed only after fresh CLCC
