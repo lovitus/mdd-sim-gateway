@@ -7,11 +7,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
 
 const managerTestToken = "0123456789abcdef0123456789abcdef"
@@ -37,6 +40,7 @@ func (passAdmission) ResolveDataProfile(_ context.Context, _ Target, requested, 
 	return Profile{Name: requested, AllowRoaming: true}, nil
 }
 func (passAdmission) ValidateDataTarget(context.Context, Target) error { return nil }
+func (passAdmission) ValidateDataLease(context.Context, Target) error  { return nil }
 func (passAdmission) DataPrepared(Target, string, string)              {}
 func (passAdmission) DataCleanup(Target, string, string)               {}
 func (passAdmission) DataReleased(Target, string)                      {}
@@ -81,6 +85,25 @@ func (backend *fakeBackend) peer(index int) net.Conn {
 	}
 }
 
+type voiceHardware struct{ active bool }
+
+func (voice *voiceHardware) Operate(_ context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
+	switch operation.Action {
+	case agentmodem.OperationCallDial:
+		voice.active = true
+	case agentmodem.OperationCallHangup:
+		voice.active = false
+	case agentmodem.OperationCallStatus:
+	default:
+		return agentmodem.OperationResult{}, errors.New("unexpected voice operation")
+	}
+	state := "idle"
+	if voice.active {
+		state = "active"
+	}
+	return agentmodem.OperationResult{Call: agentmodem.CallResult{State: state, Authoritative: true, TerminalConfirmed: !voice.active}}, nil
+}
+
 func TestManagerBridgesTCPAndUDPAndStopsBackend(t *testing.T) {
 	tokens := agentlink.TokenResolverFunc(func(context.Context, string) (string, error) { return managerTestToken, nil })
 	broker, err := NewBroker(tokens, nil)
@@ -92,9 +115,19 @@ func TestManagerBridgesTCPAndUDPAndStopsBackend(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	backend := &fakeBackend{}
+	store, err := agentcall.Open(filepath.Join(t.TempDir(), "calls.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	voice := &voiceHardware{}
+	calls, err := agentcall.NewManager(store, voice)
+	if err != nil {
+		t.Fatal(err)
+	}
 	manager, err := NewManager(Config{Context: ctx, ServerURL: server.URL, ServerToken: managerTestToken,
 		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: &http.Client{Timeout: 5 * time.Second},
-		Backend: backend, Coordinator: passCoordinator{}, Admission: passAdmission{}})
+		Backend: backend, Coordinator: calls, Admission: passAdmission{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +138,23 @@ func TestManagerBridgesTCPAndUDPAndStopsBackend(t *testing.T) {
 	if result := manager.ExecuteModemData(context.Background(), prepare); result.Failure != nil || result.State != "ready" || result.Profile != "profile-a" {
 		t.Fatalf("prepare=%+v", result)
 	}
+	operation := agentmodem.Operation{OperationID: "voice-dial", AttachmentID: prepare.AttachmentID,
+		EquipmentID: prepare.EquipmentID, CardID: prepare.CardID, Action: agentmodem.OperationCallDial,
+		LeaseID: "voice-lease", Number: "+15550100123"}
+	if err := manager.DoCall(ctx, prepare.EquipmentID, func(ctx context.Context) error {
+		_, err := calls.Operate(ctx, operation)
+		return err
+	}); err != nil || !voice.active {
+		t.Fatalf("borrower blocked call: %v", err)
+	}
+	defer func() { operation.Action = agentmodem.OperationCallHangup; _, _ = calls.Operate(ctx, operation) }()
+	renew := prepare
+	renew.Purpose = "manual"
+	renew.Action, renew.OperationID, renew.ExpiresAt = agentlink.ModemDataRenew, "renew-during-call", expires.Add(time.Minute)
+	if response := manager.ExecuteModemData(ctx, renew); response.Failure != nil {
+		t.Fatalf("call blocked data renewal: %+v", response)
+	}
+	expires = renew.ExpiresAt
 	for index, network := range []string{"tcp", "udp"} {
 		streamID := "stream-" + network
 		if err := broker.Reserve(Reservation{AgentID: "agent-a", ProcessGeneration: "process-a", SessionID: "session-a", StreamID: streamID,
@@ -152,6 +202,26 @@ func TestManagerBridgesTCPAndUDPAndStopsBackend(t *testing.T) {
 	}
 	stop := agentlink.ModemDataRequest{OperationID: "stop-a", AttachmentID: "attachment-a", EquipmentID: "862547055201716",
 		CardID: "8985200000000000001", Action: agentlink.ModemDataStop, SessionID: "session-a"}
+	if result := manager.ExecuteModemData(ctx, stop); result.Failure == nil || result.Failure.Code != "modem_paid_call_active" {
+		t.Fatalf("data cleanup lost active paid-call protection: %+v", result)
+	}
+	backend.mu.Lock()
+	prematureStops := backend.stops
+	backend.mu.Unlock()
+	if prematureStops != 0 {
+		t.Fatal("data cleanup touched hardware during voice")
+	}
+	if err := manager.DoCall(ctx, prepare.EquipmentID, func(context.Context) error { t.Fatal("cleanup admitted a new call"); return nil }); err == nil {
+		t.Fatal("cleanup ownership released early")
+	}
+	operation.Action = agentmodem.OperationCallRenew
+	if _, err := calls.Operate(ctx, operation); err != nil {
+		t.Fatalf("cleanup blocked voice renewal: %v", err)
+	}
+	operation.Action = agentmodem.OperationCallHangup
+	if result, err := calls.Operate(ctx, operation); err != nil || !result.Call.TerminalConfirmed {
+		t.Fatalf("independent hangup: %v %+v", err, result)
+	}
 	if result := manager.ExecuteModemData(context.Background(), stop); result.Failure != nil || result.State != "stopped" {
 		t.Fatalf("stop=%+v", result)
 	}

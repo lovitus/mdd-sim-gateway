@@ -500,8 +500,12 @@ func TestLinuxDHCPClaimLifecycle(t *testing.T) {
 	cycle := 0
 	var oldStream net.Conn
 	var oldUDP net.Conn
+	var currentBorrower *agentlink.ModemDataRequest
 	leaseDuration, budget := time.Minute, uint64(1<<20)
 	borrow := func() net.Conn {
+		if currentBorrower != nil {
+			t.Fatal("previous logical borrower has not been released")
+		}
 		cycle++
 		session := fmt.Sprintf("session-%d", cycle)
 		expires := time.Now().Add(leaseDuration)
@@ -509,6 +513,9 @@ func TestLinuxDHCPClaimLifecycle(t *testing.T) {
 		if response := data.ExecuteModemData(ctx, request); response.Failure != nil {
 			t.Fatalf("borrow: %+v", response)
 		}
+		identity := request
+		identity.Purpose = "manual"
+		currentBorrower = &identity
 		var tcp net.Conn
 		for _, network := range []string{"tcp", "udp"} {
 			stream := session + "-" + network
@@ -543,6 +550,18 @@ func TestLinuxDHCPClaimLifecycle(t *testing.T) {
 			}
 		}
 		return tcp
+	}
+	stopBorrower := func() {
+		if currentBorrower == nil {
+			return
+		}
+		request := *currentBorrower
+		request.OperationID, request.Action = "stop-"+request.SessionID, agentlink.ModemDataStop
+		request.ExpiresAt, request.MaxBytes = time.Time{}, 0
+		if response := data.ExecuteModemData(ctx, request); response.Failure != nil {
+			t.Fatalf("stop original borrower: %+v", response)
+		}
+		currentBorrower = nil
 	}
 	oldStream = borrow()
 	defer oldStream.Close()
@@ -605,13 +624,36 @@ func TestLinuxDHCPClaimLifecycle(t *testing.T) {
 		}
 	}
 	recoverOwner := func() {
-		dhcpE2EAwait(t, 5*time.Second, "borrower admission was not released", func() bool {
-			return data.DoAuxiliary(ctx, target.EquipmentID, func(context.Context) error { return nil }) == nil
-		})
+		if currentBorrower != nil {
+			// DHCP invalidation closes sockets, not the user's logical lease.
+			// Prove its original identity/lifetime survives before ending this
+			// scenario explicitly; never extend it to make the assertion pass.
+			request := *currentBorrower
+			if !time.Now().Before(request.ExpiresAt) {
+				t.Fatal("borrower expired before retained-owner check")
+			}
+			request.OperationID, request.Action = "renew-"+request.SessionID, agentlink.ModemDataRenew
+			if response := data.ExecuteModemData(ctx, request); response.Failure != nil {
+				t.Fatalf("DHCP invalidation cancelled logical borrower: %+v", response)
+			}
+			called := false
+			if err := data.DoCall(ctx, target.EquipmentID, func(context.Context) error { called = true; return nil }); err != nil || !called {
+				t.Fatalf("invalidated data blocked call admission: %v", err)
+			}
+			auxiliary := false
+			err := data.DoAuxiliary(ctx, target.EquipmentID, func(context.Context) error { auxiliary = true; return nil })
+			if !errors.Is(err, agentdata.ErrSessionActive) || auxiliary {
+				t.Fatalf("retained borrower lost raw-operation ownership: %v", err)
+			}
+		}
 		mm.mu.Lock()
 		mm.idle = true
 		mm.mu.Unlock()
 		dhcpE2EMode(t, "renew")
+		stopBorrower()
+		dhcpE2EAwait(t, 5*time.Second, "stopped borrower admission was not released", func() bool {
+			return data.DoAuxiliary(ctx, target.EquipmentID, func(context.Context) error { return nil }) == nil
+		})
 		dhcpE2EAwait(t, 8*time.Second, "existing policy did not recover persistent owner", func() bool { policy.ReconcilePolicies(ctx, probe()); return owner.Persistent(target) })
 		after, found, err := store.Get(target.EquipmentID, target.CardID)
 		if err != nil || !found || after != stored {
@@ -687,6 +729,7 @@ func TestLinuxDHCPClaimLifecycle(t *testing.T) {
 	dhcpE2EAwait(t, 5*time.Second, "expired borrower retained admission", func() bool {
 		return data.DoAuxiliary(ctx, target.EquipmentID, func(context.Context) error { return nil }) == nil
 	})
+	currentBorrower = nil // Natural user expiry, verified above; no explicit Stop.
 	leaseDuration, budget = time.Minute, 1024
 	oldStream = borrow()
 	defer oldStream.Close()
@@ -758,6 +801,7 @@ func TestLinuxDHCPClaimLifecycle(t *testing.T) {
 	dhcpE2EAwait(t, 5*time.Second, "quota borrower retained admission", func() bool {
 		return data.DoAuxiliary(ctx, target.EquipmentID, func(context.Context) error { return nil }) == nil
 	})
+	currentBorrower = nil // Quota terminated this lease without changing persistent intent.
 
 	// No borrower: retain the cleanup owner through partial MM failure, then
 	// recheck voice state before the still-pending Inhibit transaction.
@@ -1144,6 +1188,9 @@ func TestLinuxDHCPClaimLifecycle(t *testing.T) {
 	if owner.Persistent(target) {
 		t.Fatal("replaced SIM retained old claim")
 	}
+	// Keep the replacement-triggered socket/claim checks above. End the old
+	// logical session with its saved generation before adopting the fresh SIM.
+	stopBorrower()
 	if err := owner.StopData(ctx, target); err != nil {
 		t.Fatal(err)
 	}

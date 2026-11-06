@@ -971,6 +971,20 @@ jobs:
           # download. Keep only the shortest GitHub-supported fallback window.
           retention-days: 1
 
+      - name: Prepare uninstall refusal regression fixture
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/uninstall-refusal-fixture"
+          cp tools/test-uninstall-refusal.mjs "$RUNNER_TEMP/uninstall-refusal-fixture/"
+
+      - name: Upload uninstall refusal regression fixture
+        uses: actions/upload-artifact@v7
+        with:
+          name: uninstall-refusal-fixture-${{ github.sha }}
+          path: ${{ runner.temp }}/uninstall-refusal-fixture
+          if-no-files-found: error
+          retention-days: 1
+
   validate-fresh-linux-artifact:
     name: Install fresh artifact without source checkout
     needs:
@@ -1244,7 +1258,7 @@ jobs:
             -o /dev/null -w '%{http_code}' \
             https://localhost:8443/v1/system/status)
           test "$unauthenticated_status" = 401
-          systemd_major=$(systemd --version | awk 'NR == 1 {print $2}')
+          systemd_major=$(systemctl --version | awk 'NR == 1 {print $2}')
           test "$systemd_major" -ge 230
           system_status="$RUNNER_TEMP/system-status.json"
           for attempt in $(seq 1 60); do
@@ -1482,6 +1496,8 @@ jobs:
               /etc/systemd/system/mdd-core.service \
               /etc/systemd/system/mdd-agent.service \
               /etc/systemd/system/mdd-cellular-guard.service \
+              /etc/systemd/system/mdd-updater.path \
+              /etc/systemd/system/mdd-updater.service \
               /etc/systemd/system/mdd-provider-apply.service \
               /etc/systemd/system/mdd-egress.service \
               /etc/systemd/system/mdd-vowifi@.service; do
@@ -1490,7 +1506,7 @@ jobs:
           test ! -d /usr/lib/mdd/releases
           test ! -d /usr/libexec/mdd
           for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service \
-              mdd-agent.service mdd-cellular-guard.service "$enabled_provider" "$loaded_provider"; do
+              mdd-agent.service mdd-cellular-guard.service mdd-updater.path mdd-updater.service "$enabled_provider" "$loaded_provider"; do
             state=$(systemctl is-active "$unit" 2>/dev/null || true)
             test "$state" != active
             enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)
@@ -1526,6 +1542,31 @@ jobs:
           done
           test "$(systemctl is-active mdd-agent.service || true)" = inactive
           test ! -s "$legacy_trace"
+
+      - name: Download exact uninstall refusal fixture
+        uses: actions/download-artifact@v8
+        with:
+          pattern: uninstall-refusal-fixture-*
+          path: ${{ runner.temp }}/uninstall-refusal-fixture
+          merge-multiple: true
+
+      - name: Verify uninstall refusal preserves updater and durable state
+        run: |
+          set -euo pipefail
+          sudo env "RUNNER_TEMP=$RUNNER_TEMP" node \
+            "$RUNNER_TEMP/uninstall-refusal-fixture/test-uninstall-refusal.mjs" \
+            "$RUNNER_TEMP/fresh/install-release.sh" \
+            > "$RUNNER_TEMP/uninstall-refusal.json"
+          cat "$RUNNER_TEMP/uninstall-refusal.json"
+
+      - name: Retain uninstall refusal receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: uninstall-refusal-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/uninstall-refusal.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Stop fresh-host services
         if: always()
