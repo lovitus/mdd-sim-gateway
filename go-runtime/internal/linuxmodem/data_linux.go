@@ -382,18 +382,37 @@ func (prober *Prober) cleanupDataClaim(claim *dataClaim) error {
 			claim.routeCleaned = true
 		}
 	}
-	// Invalid DHCP traffic is already stopped; destructive MM ownership changes
-	// still require the original call guard, including rollback/retry entrypoints.
-	if claim.bearer.Method == 3 && (!claim.bearerDisconnected || !claim.inhibited) {
+	// Data is already stopped. Static and DHCP claims both require authoritative
+	// voice idle before destructive ownership recovery, including rollback.
+	if !claim.bearerDisconnected || !claim.inhibited {
+		if claim.commandSnapshot.ObjectPath == "" {
+			inventory, err := prober.manager.Inventory(cleanupContext)
+			if err != nil {
+				return errors.Join(append(failures, err)...)
+			}
+			var selected modemSnapshot
+			matches := 0
+			for _, snapshot := range inventory {
+				if snapshot.UID == claim.uid && snapshot.EquipmentID == claim.target.EquipmentID &&
+					snapshot.ICCID == claim.target.CardID && snapshot.SIMState == agentmodem.SIMReady && snapshot.ObjectPath != "" {
+					selected = snapshot
+					matches++
+				}
+			}
+			if matches != 1 {
+				return errors.Join(append(failures, errors.New("data recovery requires an exact current modem"))...)
+			}
+			claim.commandSnapshot = selected
+		}
 		observer, ok := prober.manager.(interface {
 			VoiceIdle(context.Context, dbus.ObjectPath) (bool, error)
 		})
 		if !ok {
-			return errors.Join(append(failures, errors.New("DHCP recovery requires authoritative call state"))...)
+			return errors.Join(append(failures, errors.New("data recovery requires authoritative call state"))...)
 		}
 		idle, err := observer.VoiceIdle(cleanupContext, claim.commandSnapshot.ObjectPath)
 		if err != nil || !idle {
-			return errors.Join(append(failures, errors.Join(errors.New("DHCP recovery is waiting for idle call state"), err))...)
+			return errors.Join(append(failures, errors.Join(errors.New("data recovery is waiting for idle call state"), err))...)
 		}
 	}
 	if !claim.bearerDisconnected {
@@ -421,13 +440,20 @@ func (prober *Prober) cleanupDataClaim(claim *dataClaim) error {
 	return errors.Join(failures...)
 }
 
-func (prober *Prober) retryDataCleanup() {
+// PendingDataCleanup is observed by the policy reconciler, which takes the
+// data/call lifecycle gates before StopData. This also recovers partial Prepare
+// rollbacks with no connection-manager entry, without doing cleanup in Probe.
+func (prober *Prober) PendingDataCleanup() []agentdata.Target {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
 	now := time.Now()
+	var targets []agentdata.Target
 	for _, claim := range prober.data {
 		if claim.cleanup && !now.Before(claim.retryAt) {
-			_ = prober.cleanupDataClaim(claim)
+			targets = append(targets, claim.target)
 		}
 	}
+	return targets
 }
 
 func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmodem.Fact {
@@ -465,7 +491,7 @@ func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmode
 	}
 	fact.Capabilities.CellularData = true
 	fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable, Detail: "ModemManager command channel has not been confirmed"}
-	if !claim.cleanup && claim.commandSnapshot.ObjectPath != "" {
+	if !claim.inhibited && claim.commandSnapshot.ObjectPath != "" {
 		if at, ok := prober.atSnapshot[current.usb.AttachmentID]; ok {
 			fact.AT.Detail = at.Detail
 			if at.State == "ready" {

@@ -457,3 +457,56 @@ func TestCellularPrepareFailurePreservesUnrelatedLeaseAndRenewal(t *testing.T) {
 			initialAPosts, aPosts, client.leases)
 	}
 }
+
+func TestPendingCellularLeaseRetainsOwnerForCancellation(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if _, err := scopedtoken.Ensure(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	deleted, posts := false, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodDelete {
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		posts++
+		var input struct {
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"session_id": "pending-session", "line_id": "line-a", "state": "preparing",
+			"purpose": "egress:sim-gb", "listen_port": 0, "expires_at": input.ExpiresAt, "max_bytes": cellularMaxBytes, "used_bytes": 0})
+	}))
+	defer server.Close()
+	client, err := newCellularClient(server.URL, tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := egressconfig.Config{Enabled: true, Profiles: map[string]egressconfig.Profile{"sim-gb": {Type: "cellular_sim", SIMICCID: "8985200000000000001"}},
+		Exits: map[string]egressconfig.Exit{"gb": {Enabled: true, ProfileID: "sim-gb"}}}
+	for range 2 {
+		view, err := client.prepare(t.Context(), config)
+		if err != nil || view.Profiles["sim-gb"].RuntimeError != "cellular_lease_preparing" || view.Profiles["sim-gb"].Type != "cellular_sim" {
+			t.Fatal("preparing lease was exposed as usable or reported invalid")
+		}
+	}
+	if current := client.leases["sim-gb"]; current == nil || current.SessionID != "pending-session" {
+		t.Fatal("pending owner forgotten")
+	}
+	if _, err := client.prepare(t.Context(), egressconfig.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !deleted || posts != 1 || len(client.leases) != 0 {
+		t.Fatal("pending cancellation did not stop original owner")
+	}
+}

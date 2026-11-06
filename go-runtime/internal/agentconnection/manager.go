@@ -15,13 +15,14 @@ import (
 )
 
 type entry struct {
-	target      agentdata.Target
-	requested   agentdata.Profile
-	profile     string
-	connected   bool
-	persistent  bool
-	borrowed    bool
-	invalidated <-chan struct{}
+	target         agentdata.Target
+	requested      agentdata.Profile
+	profile        string
+	connected      bool
+	persistent     bool
+	borrowed       bool
+	releasePending bool
+	invalidated    <-chan struct{}
 }
 
 type Manager struct {
@@ -54,7 +55,7 @@ func (manager *Manager) SetPersistent(ctx context.Context, target agentdata.Targ
 			return agentdata.ErrSessionActive
 		}
 		current.persistent = false
-		if !current.connected {
+		if !current.connected && !current.releasePending {
 			delete(manager.items, target.EquipmentID)
 			return nil
 		}
@@ -64,7 +65,7 @@ func (manager *Manager) SetPersistent(ctx context.Context, target agentdata.Targ
 		delete(manager.items, target.EquipmentID)
 		return nil
 	}
-	if current != nil && current.target == target && current.connected && current.requested == profile && !agentdata.Invalidated(current.invalidated) {
+	if current != nil && current.target == target && current.connected && !current.releasePending && current.requested == profile && !agentdata.Invalidated(current.invalidated) {
 		current.persistent = true
 		return nil
 	}
@@ -72,7 +73,7 @@ func (manager *Manager) SetPersistent(ctx context.Context, target agentdata.Targ
 		if current.borrowed {
 			return agentdata.ErrSessionActive
 		}
-		if current.connected {
+		if current.connected || current.releasePending {
 			if err := manager.backend.StopData(ctx, current.target); err != nil {
 				return err
 			}
@@ -99,7 +100,7 @@ func (manager *Manager) PrepareData(ctx context.Context, target agentdata.Target
 		if current.target != target {
 			return "", agentmodem.ErrOperationTargetReplaced
 		}
-		if current.borrowed {
+		if current.borrowed || current.releasePending {
 			return "", errors.New("another cellular data borrower is active")
 		}
 		if agentdata.Invalidated(current.invalidated) {
@@ -147,6 +148,63 @@ func (manager *Manager) DataValidity(target agentdata.Target) (<-chan struct{}, 
 	return current.invalidated, nil
 }
 
+// RecoverData keeps the exact logical borrower and persistent intent while
+// replacing only its disconnected bearer. Caller holds data and paid-call
+// lifecycle gates and has freshly checked the SIM and observed disconnection.
+func (manager *Manager) RecoverData(ctx context.Context, target agentdata.Target, profile agentdata.Profile) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	current := manager.items[target.EquipmentID]
+	if current == nil || current.target != target || !current.borrowed || current.requested != profile || current.releasePending {
+		return agentmodem.ErrOperationTargetReplaced
+	}
+	// Retry partial Prepare rollback as well as the old connected claim.
+	if err := manager.backend.StopData(ctx, target); err != nil {
+		return err
+	}
+	current.connected = false
+	name, err := manager.backend.PrepareData(ctx, target, profile)
+	if err != nil {
+		return err
+	}
+	current.profile, current.connected = name, true
+	current.invalidated, err = agentdata.DataValidity(manager.backend, target)
+	return err
+}
+
+// ReleaseBorrower transfers only logical cleanup ownership. It does not touch
+// hardware and can run while voice is active. The persistent connection manager
+// outlives a lost Core WSS and retains any deferred physical cleanup.
+func (manager *Manager) ReleaseBorrower(target agentdata.Target) (bool, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	current := manager.items[target.EquipmentID]
+	if current == nil {
+		return true, nil
+	}
+	if current.target != target {
+		return false, agentmodem.ErrOperationTargetReplaced
+	}
+	current.borrowed = false
+	if current.persistent && current.connected && !agentdata.Invalidated(current.invalidated) && !current.releasePending {
+		return true, nil
+	}
+	current.releasePending = true
+	return false, nil
+}
+
+func (manager *Manager) PendingDataCleanup() []agentdata.Target {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	var result []agentdata.Target
+	for _, current := range manager.items {
+		if current.releasePending {
+			result = append(result, current.target)
+		}
+	}
+	return result
+}
+
 func (manager *Manager) StopData(ctx context.Context, target agentdata.Target) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -158,7 +216,7 @@ func (manager *Manager) StopData(ctx context.Context, target agentdata.Target) e
 		return agentmodem.ErrOperationTargetReplaced
 	}
 	current.borrowed = false
-	if current.persistent {
+	if current.persistent && !current.releasePending {
 		return nil
 	}
 	if err := manager.backend.StopData(ctx, target); err != nil {
@@ -207,7 +265,7 @@ func (manager *Manager) ReleaseStale(ctx context.Context, target agentdata.Targe
 	if current.borrowed {
 		return agentdata.ErrSessionActive
 	}
-	if current.connected {
+	if current.connected || current.releasePending {
 		if err := manager.backend.StopData(ctx, target); err != nil {
 			return err
 		}
