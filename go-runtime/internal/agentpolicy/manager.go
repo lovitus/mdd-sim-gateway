@@ -515,6 +515,30 @@ func (manager *Manager) ResolveDataProfile(ctx context.Context, target agentdata
 }
 
 func (manager *Manager) ValidateDataTarget(ctx context.Context, target agentdata.Target) error {
+	return manager.validateLease(ctx, target, true)
+}
+
+// ValidateDataLease checks the same SIM and policy without requiring a live
+// bearer. A carrier may suspend data during voice without cancelling borrowing.
+func (manager *Manager) ValidateDataLease(ctx context.Context, target agentdata.Target) error {
+	return manager.validateLease(ctx, target, false)
+}
+
+func (manager *Manager) DataRecoveryNeeded(ctx context.Context, target agentdata.Target) (bool, error) {
+	facts, _, err := manager.observeDataTarget(ctx, target, false)
+	if err != nil {
+		return false, err
+	}
+	for _, fact := range facts {
+		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID && fact.SIM.ICCID == target.CardID {
+			// Unknown is not evidence authorizing Disconnect/Inhibit.
+			return fact.Network.Data == agentmodem.DataDisconnected, nil
+		}
+	}
+	return false, agentmodem.ErrOperationTargetReplaced
+}
+
+func (manager *Manager) validateLease(ctx context.Context, target agentdata.Target, requireBearer bool) error {
 	manager.mu.Lock()
 	lease := manager.leases[target.EquipmentID]
 	manager.mu.Unlock()
@@ -533,11 +557,15 @@ func (manager *Manager) ValidateDataTarget(ctx context.Context, target agentdata
 			return ErrFlightMode
 		}
 	}
-	_, _, err := manager.validateDataTarget(ctx, target)
+	_, _, err := manager.observeDataTarget(ctx, target, requireBearer)
 	return err
 }
 
 func (manager *Manager) validateDataTarget(ctx context.Context, target agentdata.Target) ([]agentmodem.Fact, bool, error) {
+	return manager.observeDataTarget(ctx, target, true)
+}
+
+func (manager *Manager) observeDataTarget(ctx context.Context, target agentdata.Target, requireBearer bool) ([]agentmodem.Fact, bool, error) {
 	facts, err := manager.config.Runtime.Probe(ctx)
 	if err != nil {
 		return nil, false, err
@@ -556,7 +584,8 @@ func (manager *Manager) validateDataTarget(ctx context.Context, target agentdata
 	if matches != 1 {
 		return facts, false, agentmodem.ErrOperationTargetReplaced
 	}
-	// Prepare, Open and Renew share this read-only admission check. In particular,
+	// Prepare and Open require a usable bearer. Renew tolerates suspension,
+	// but must still reject a known broken control owner. In particular,
 	// expiry must not let a new borrower reacquire the same forced-closed claim
 	// before the existing policy owner gets to ReleaseStale. Never re-enter the
 	// data/call coordinator here: the caller already holds those lifecycle locks.
@@ -564,7 +593,7 @@ func (manager *Manager) validateDataTarget(ctx context.Context, target agentdata
 		manager.mu.RLock()
 		connection := manager.config.Connection
 		manager.mu.RUnlock()
-		if connection != nil && matched.Network.Data != agentmodem.DataConnected {
+		if requireBearer && connection != nil && matched.Network.Data != agentmodem.DataConnected {
 			for _, owned := range connection.OwnedTargets() {
 				if owned == target {
 					return facts, roaming, ErrBearerUnconfirmed
@@ -622,6 +651,18 @@ func (manager *Manager) DataLeaseActive(equipmentID string) bool {
 // selected platform profile and software radio. Data remains lease-driven;
 // roaming is enforced when the lease is prepared.
 func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmodem.Fact) {
+	if recovery, ok := manager.config.Runtime.(interface {
+		PendingDataCleanup() []agentdata.Target
+		StopData(context.Context, agentdata.Target) error
+	}); ok {
+		for _, target := range recovery.PendingDataCleanup() {
+			// Existing borrower cleanup is owned by agentdata; orphan Prepare
+			// rollback is retried here only after the same paid-call gate.
+			_ = manager.coordinatorNow().DoAuxiliary(ctx, target.EquipmentID, func(ctx context.Context) error {
+				return recovery.StopData(ctx, target)
+			})
+		}
+	}
 	manager.observeDiscovery(facts)
 	blockedConnections := manager.reconcileConnectionOwners(ctx, facts)
 	for _, fact := range facts {
@@ -879,6 +920,12 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 	if connection == nil {
 		return blocked
 	}
+	pending := map[agentdata.Target]bool{}
+	if source, ok := connection.(interface{ PendingDataCleanup() []agentdata.Target }); ok {
+		for _, target := range source.PendingDataCleanup() {
+			pending[target] = true
+		}
+	}
 	current := make(map[string]agentdata.Target)
 	dataStates := make(map[string]agentmodem.DataState)
 	atStates := make(map[string]agentmodem.ATControlState)
@@ -906,7 +953,7 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 			blocked[owned.EquipmentID] = validityErr
 			continue
 		}
-		if target, present := current[owned.EquipmentID]; present && target == owned && !agentdata.Invalidated(invalidated) {
+		if target, present := current[owned.EquipmentID]; present && target == owned && !pending[owned] && !agentdata.Invalidated(invalidated) {
 			if dataStates[owned.EquipmentID] == agentmodem.DataUnknown {
 				blocked[owned.EquipmentID] = errors.New("cellular bearer state is unknown")
 				manager.mu.Lock()
@@ -951,6 +998,13 @@ func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []a
 			manager.setFailure(owned.EquipmentID, owned.CardID, code)
 			blocked[owned.EquipmentID] = err
 		} else {
+			// A disconnected data manager can hand cleanup to this longer-lived
+			// owner. Clear its projection only after physical release succeeds.
+			manager.mu.Lock()
+			if lease := manager.leases[owned.EquipmentID]; lease.State == "cleanup" {
+				delete(manager.leases, owned.EquipmentID)
+			}
+			manager.mu.Unlock()
 			manager.setReady(owned.EquipmentID, owned.CardID)
 		}
 	}
