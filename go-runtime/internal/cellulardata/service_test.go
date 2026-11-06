@@ -23,11 +23,12 @@ import (
 const internalTestToken = "0123456789abcdef0123456789abcdef"
 
 type fakeAgents struct {
-	stopErr  error
-	prepare  func()
-	mu       sync.Mutex
-	requests []agentlink.ModemDataRequest
-	manager  *agentdata.Manager
+	stopErr    error
+	prepareErr error
+	prepare    func()
+	mu         sync.Mutex
+	requests   []agentlink.ModemDataRequest
+	manager    *agentdata.Manager
 }
 
 func (fake *fakeAgents) ResolveModemDataTargetForCard(cardID string) (agentlink.ModemTarget, error) {
@@ -39,8 +40,11 @@ func (fake *fakeAgents) ResolveRenewableModemDataTargetForCard(cardID string) (a
 func (fake *fakeAgents) ExecuteModemData(_ context.Context, _, _ string, request agentlink.ModemDataRequest) (agentlink.ModemDataResponse, error) {
 	fake.mu.Lock()
 	fake.requests = append(fake.requests, request)
-	stopErr := fake.stopErr
+	stopErr, prepareErr := fake.stopErr, fake.prepareErr
 	fake.mu.Unlock()
+	if request.Action == agentlink.ModemDataPrepare && prepareErr != nil {
+		return agentlink.ModemDataResponse{}, prepareErr
+	}
 	if request.Action == agentlink.ModemDataPrepare && fake.prepare != nil {
 		fake.prepare()
 	}
@@ -182,6 +186,7 @@ func (passDataAdmission) ResolveDataProfile(_ context.Context, _ agentdata.Targe
 	return agentdata.Profile{Name: requested, AllowRoaming: true}, nil
 }
 func (passDataAdmission) ValidateDataTarget(context.Context, agentdata.Target) error { return nil }
+func (passDataAdmission) ValidateDataLease(context.Context, agentdata.Target) error  { return nil }
 func (passDataAdmission) DataPrepared(agentdata.Target, string, string)              {}
 func (passDataAdmission) DataCleanup(agentdata.Target, string, string)               {}
 func (passDataAdmission) DataReleased(agentdata.Target, string)                      {}
@@ -569,4 +574,77 @@ func authenticateSOCKS(conn net.Conn, username, password string) error {
 		return io.ErrUnexpectedEOF
 	}
 	return nil
+}
+
+func TestCallDeferredBorrowKeepsOneOwnerAndResumesAutomatically(t *testing.T) {
+	catalog, err := linecatalog.Open(t.TempDir()+"/catalog.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
+	const card = "8985200000000000001"
+	_, err = catalog.Put(linecatalog.Line{SchemaVersion: 1, ID: "line-a", Enabled: true, CardID: card,
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", IMEI: "862547055201716"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgets, err := egressconfig.Open(t.TempDir()+"/budgets.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer budgets.Close()
+	broker, _ := agentdata.NewBroker(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) { return internalTestToken, nil }), nil)
+	agents := &fakeAgents{prepareErr: &agentlink.RemoteError{Kind: "not_ready", Code: "modem_paid_call_active"}}
+	service, err := New(Config{Context: context.Background(), Catalog: catalog, Agents: agents, Broker: broker, Budgets: budgets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	expires := time.Now().Add(time.Minute)
+	initial, err := service.EnsureOwned(context.Background(), "line-a", "egress:gb", "", expires, 4096, "ensure-deferred")
+	if err != nil || initial.State != "preparing" || initial.Username != "" || initial.ListenPort != 0 {
+		t.Fatalf("borrow intent rejected or falsely ready: %+v %v", initial, err)
+	}
+	current := service.byID[initial.SessionID]
+	if _, err := current.dial(context.Background(), "tcp", "192.0.2.1:80"); err == nil {
+		t.Fatal("preparing owner admitted traffic")
+	}
+	extended := expires.Add(10 * time.Second)
+	renewed, err := service.EnsureOwned(context.Background(), "line-a", "egress:gb", "", extended, 4096, "renew-deferred")
+	if err != nil || renewed.SessionID != initial.SessionID || !renewed.ExpiresAt.Equal(extended) || renewed.State != "preparing" {
+		t.Fatalf("pending renewal lost owner: %+v %v", renewed, err)
+	}
+	before, err := budgets.DonorBudget(card)
+	if err != nil || before.Grant == nil || before.Grant.SessionID != initial.SessionID {
+		t.Fatal("pending donor reservation lost")
+	}
+	agents.mu.Lock()
+	agents.prepareErr = nil
+	agents.mu.Unlock()
+	// Wait on the actual retained owner's lifecycle, not a fabricated ready reply.
+	deadline := time.Now().Add(8 * time.Second)
+	for current.view(false).State == "preparing" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	ready := current.view(true)
+	if ready.State != "ready" || ready.SessionID != initial.SessionID || ready.Username == "" || ready.ListenPort == 0 {
+		t.Fatalf("original pending owner did not resume: %+v", ready)
+	}
+	after, err := budgets.DonorBudget(card)
+	if err != nil || after.Grant == nil || after.Grant.SessionID != before.Grant.SessionID || after.Grant.MaxBytes != before.Grant.MaxBytes {
+		t.Fatal("resume replaced or duplicated budget reservation")
+	}
+	agents.mu.Lock()
+	requests := append([]agentlink.ModemDataRequest(nil), agents.requests...)
+	agents.mu.Unlock()
+	if len(requests) != 2 || requests[1].Action != agentlink.ModemDataPrepare || requests[1].SessionID != initial.SessionID || !requests[1].ExpiresAt.Equal(extended) {
+		t.Fatalf("wrong prepare retry: %+v", requests)
+	}
+	if err := current.stop("test-complete"); err != nil {
+		t.Fatal(err)
+	}
+	after, err = budgets.DonorBudget(card)
+	if err != nil || after.Grant != nil {
+		t.Fatal("completed pending owner was not settled")
+	}
 }

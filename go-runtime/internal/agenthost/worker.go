@@ -1066,7 +1066,11 @@ func (executor dataCoordinatedModems) ExecuteModem(ctx context.Context, request 
 	switch request.Action {
 	case agentlink.ModemCallDial, agentlink.ModemCallAnswer, agentlink.ModemSMSList, agentlink.ModemSMSSend:
 		var response agentlink.ModemResponse
-		err := executor.data.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+		admit := executor.data.DoAuxiliary
+		if request.Action == agentlink.ModemCallDial || request.Action == agentlink.ModemCallAnswer {
+			admit = executor.data.DoCall
+		}
+		err := admit(ctx, request.EquipmentID, func(operationContext context.Context) error {
 			response = executor.worker.ExecuteModem(operationContext, request)
 			return nil
 		})

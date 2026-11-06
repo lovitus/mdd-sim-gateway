@@ -6,6 +6,48 @@ reports for provenance reconciliation; not revalidated by this review does not m
 The supported build/install surfaces are Go binaries plus the embedded React UI and manifest-listed native helpers.
 Docker, Python Control, VPCD and Asterisk are retired; they are not local development prerequisites.
 
+## Cellular voice and borrowing coexistence
+
+November6 owner decision: a logical data borrower must not prohibit cellular
+Dial/Answer; voice-induced data suspension is acceptable. Preserve exact SIM
+identity, durable paid-call leases, independent hangup, user intent and isolation.
+The fixed reviewer accepted this direction before implementation. Two reported
+calls failed before answer; their historical Agent error was not retained. A
+nonpaid read reproduced the shared data-admission refusal, not a carrier failure.
+
+This candidate separates logical Renew/Open from destructive modem ownership
+changes. Borrowing requested during a paid call stays preparing under one Core
+owner/budget; a retained disconnected borrower recovers only after the voice gate.
+Probe no longer performs destructive cleanup as a side effect of hangup/status.
+Failure checklist: lifetime mutual exclusion; lost pending owner/reservation;
+unknown bearer treated as disconnected; stale SIM accepted; expiry cleanup or
+background probe disrupting voice; false ready; default-network fallback.
+
+Fixed source review accepted8222c7d. Run42153737616/b5db829 preserves the
+original seven behavioral reds; run42156044160/8222c7d preserves seven additional
+review-defect reds. Its green phase caught malformed test requests; the first
+fixture correction supplies the required renewal purpose and identity-only Stop,
+without changing product validation or assertions. Run42157268521/18c31d0 passes
+all eight related race packages, including forced-control-close, Answer/Hangup,
+DHCP/partial recovery and transport-close cleanup. The optional real-Xray case
+is skipped in this limited proof; normal CI retains its existing external coverage.
+Archive `archive/2026-11-06/cellular-coexistence-qualified` retains that candidate.
+Artifact13474994265 (SHA256 a6a0d99d105360e050b82e403c1548386f847eedd25a02ea599a79b471f98065)
+supplies the same-source embedded UI. Temporary proof is removed; both completed
+red sets are not rerun. Final original CI and delivery review remain required.
+Existing command-owner test expectations are corrected: cleanup retains the exact
+MM status/hangup channel until inhibition, while direct tty remains unavailable.
+No production change, repeat paid call or deferred hardware qualification is claimed.
+
+Final-source review accepted9adccdd; Android42158250483 passed. Go42158250610
+found two fixture defects: DHCP still expected physical invalidation to cancel
+the logical borrower, and fresh-install version detection invoked a daemon absent
+from PATH. The fixed reviewer accepted retaining/renewing the exact original
+borrower before identity-only Stop and using `systemctl --version` with the same
+minimum version. Original isolation, expiry/quota, SIM replacement and time limits
+remain. Archive `cellular-coexistence-full-ci-red` preserves the failed candidate;
+corrected original CI and final review remain required.
+
 ## Updater staging permissions
 
 The October28 fixed review accepted a bounded repair of `FetchAndStage`:

@@ -1,5 +1,18 @@
 # Branch disposition and integration record
 
+PR57 `archive/2026-11-06/cellular-coexistence-full-ci-red` preserves9adccdd,
+accepted final source, Android42158250483 and failed Go42158250610. Only the
+reviewed DHCP lifecycle fixture and systemd version command are corrected in the
+same delivery batch; product/UI stay unchanged. Original CI/final review pending.
+
+November6 `archive/2026-11-06/cellular-coexistence-qualified` preserves18c31d0
+and related8-package race run42157268521. Fixed source review accepted8222c7d;
+18c31d0 only corrects three malformed test-request fields and retires repeated reds.
+Initial/review-red archive tags preserve b5db829/8222c7d and both seven-case proofs.
+The complete batch keeps borrowing independent from voice while protecting physical
+cleanup and original owners. Final normal CI/review gate merge; no deployment,
+paid call or PR56 acceptance is implied. See DEVELOPMENT.md for exact artifacts.
+
 PR55 `archive/2026-10-28/updater-stage-qualified` preserves candidate `94a93a2`,
 tested `6d19f533` and shared tree `02bddab634ad3c75917ef2a629fb758a4aa44970`.
 Original fixed source review and Go `40645037422` / Android `40645037653` passed.

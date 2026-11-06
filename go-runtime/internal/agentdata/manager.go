@@ -73,6 +73,7 @@ func Invalidated(done <-chan struct{}) bool {
 type Admission interface {
 	ResolveDataProfile(context.Context, Target, string, string, string) (Profile, error)
 	ValidateDataTarget(context.Context, Target) error
+	ValidateDataLease(context.Context, Target) error
 	DataPrepared(Target, string, string)
 	DataCleanup(Target, string, string)
 	DataReleased(Target, string)
@@ -112,6 +113,7 @@ type dataSession struct {
 	target      Target
 	id          string
 	profile     string
+	resolved    Profile
 	purpose     string
 	expiresAt   time.Time
 	maxBytes    uint64
@@ -120,6 +122,9 @@ type dataSession struct {
 	cancel      context.CancelFunc
 	mu          sync.Mutex
 	streams     map[string]net.Conn
+	opening     map[string]context.CancelFunc
+	streamEpoch uint64
+	recovering  bool
 	stopMu      sync.Mutex
 	stopErr     error
 	expiryWake  chan struct{}
@@ -233,8 +238,8 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 	}
 	sessionContext, cancel := context.WithCancel(manager.ctx)
 	current := &dataSession{target: target, id: request.SessionID, profile: profile, expiresAt: request.ExpiresAt,
-		purpose: purpose, maxBytes: request.MaxBytes, ctx: sessionContext, cancel: cancel,
-		streams: map[string]net.Conn{}, expiryWake: make(chan struct{}, 1), invalidated: invalidated}
+		purpose: purpose, resolved: resolved, maxBytes: request.MaxBytes, ctx: sessionContext, cancel: cancel,
+		streams: map[string]net.Conn{}, opening: map[string]context.CancelFunc{}, expiryWake: make(chan struct{}, 1), invalidated: invalidated}
 	manager.mu.Lock()
 	if manager.closed || manager.items[request.EquipmentID] != nil {
 		manager.mu.Unlock()
@@ -258,13 +263,12 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 
 func (manager *Manager) open(ctx context.Context, request agentlink.ModemDataRequest) error {
 	manager.operationMu.Lock()
-	defer manager.operationMu.Unlock()
-	return manager.config.Coordinator.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
-		return manager.openLocked(operationContext, request)
-	})
-}
-
-func (manager *Manager) openLocked(ctx context.Context, request agentlink.ModemDataRequest) error {
+	locked := true
+	defer func() {
+		if locked {
+			manager.operationMu.Unlock()
+		}
+	}()
 	manager.mu.Lock()
 	current := manager.items[request.EquipmentID]
 	manager.mu.Unlock()
@@ -284,7 +288,28 @@ func (manager *Manager) openLocked(ctx context.Context, request agentlink.ModemD
 		current.mu.Unlock()
 		return nil
 	}
+	if current.ctx.Err() != nil || current.recovering || Invalidated(current.invalidated) || current.opening[request.StreamID] != nil {
+		current.mu.Unlock()
+		return errors.New("data stream is unavailable or already opening")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	unlink := context.AfterFunc(current.ctx, cancel)
+	current.opening[request.StreamID] = cancel
+	epoch := current.streamEpoch
 	current.mu.Unlock()
+	manager.wait.Add(1)
+	defer manager.wait.Done()
+	defer func() {
+		unlink()
+		cancel()
+		current.mu.Lock()
+		delete(current.opening, request.StreamID)
+		current.mu.Unlock()
+	}()
+	// DNS, connect and WSS acknowledgement cannot hold up Dial/Answer. Stop and
+	// recovery cancel pending I/O, and the epoch rejects late old-bearer results.
+	locked = false
+	manager.operationMu.Unlock()
 	remote, err := manager.config.Backend.DialData(ctx, current.target, request.Network, request.Address)
 	if err != nil {
 		return fmt.Errorf("dial cellular destination: %w", err)
@@ -294,8 +319,10 @@ func (manager *Manager) openLocked(ctx context.Context, request agentlink.ModemD
 		_ = remote.Close()
 		return err
 	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
 	current.mu.Lock()
-	if current.ctx.Err() != nil || current.streams[request.StreamID] != nil {
+	if current.ctx.Err() != nil || ctx.Err() != nil || current.streamEpoch != epoch || Invalidated(current.invalidated) || current.used.Load() >= current.maxBytes || current.streams[request.StreamID] != nil {
 		current.mu.Unlock()
 		socket.CloseNow()
 		_ = remote.Close()
@@ -317,23 +344,23 @@ func (manager *Manager) renew(ctx context.Context, request agentlink.ModemDataRe
 	if current == nil || current.id != request.SessionID || current.target != targetFor(request) {
 		return errors.New("data session target was replaced")
 	}
-	return manager.config.Coordinator.DoAuxiliary(ctx, request.EquipmentID, func(context.Context) error {
-		if err := manager.config.Admission.ValidateDataTarget(ctx, current.target); err != nil {
-			return err
-		}
-		current.mu.Lock()
-		defer current.mu.Unlock()
-		if current.ctx.Err() != nil || Invalidated(current.invalidated) || request.ExpiresAt.Before(current.expiresAt) ||
-			request.MaxBytes != current.maxBytes || normalizeDataPurpose(request.Purpose) != current.purpose {
-			return errors.New("data session renewal does not match current owner")
-		}
-		current.expiresAt = request.ExpiresAt
-		select {
-		case current.expiryWake <- struct{}{}:
-		default:
-		}
-		return nil
-	})
+	// Renew the logical lease even when a voice call temporarily suspends data.
+	// Exact identity, policy and quota still apply; invalidation stops sockets.
+	if err := manager.config.Admission.ValidateDataLease(ctx, current.target); err != nil {
+		return err
+	}
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	if current.ctx.Err() != nil || request.ExpiresAt.Before(current.expiresAt) ||
+		request.MaxBytes != current.maxBytes || normalizeDataPurpose(request.Purpose) != current.purpose {
+		return errors.New("data session renewal does not match current owner")
+	}
+	current.expiresAt = request.ExpiresAt
+	select {
+	case current.expiryWake <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 func (current *dataSession) expiry() time.Time {
@@ -383,7 +410,9 @@ func (manager *Manager) bridge(current *dataSession, request agentlink.ModemData
 		socket.CloseNow()
 		_ = remote.Close()
 		current.mu.Lock()
-		delete(current.streams, request.StreamID)
+		if current.streams[request.StreamID] == remote {
+			delete(current.streams, request.StreamID)
+		}
 		current.mu.Unlock()
 	}()
 	var err error
@@ -524,6 +553,8 @@ func (manager *Manager) watch(equipmentID string, current *dataSession) {
 }
 
 func (manager *Manager) waitForExpiry(current *dataSession) {
+	recovery := time.NewTicker(30 * time.Second)
+	defer recovery.Stop()
 	for {
 		expiresAt := current.expiry()
 		delay := time.Until(expiresAt)
@@ -531,12 +562,22 @@ func (manager *Manager) waitForExpiry(current *dataSession) {
 			current.cancel()
 			return
 		}
+		manager.operationMu.Lock()
+		invalidated := current.invalidated
+		if current.recovering && Invalidated(invalidated) {
+			invalidated = nil
+		}
+		manager.operationMu.Unlock()
 		timer := time.NewTimer(delay)
 		select {
-		case <-current.invalidated:
+		case <-invalidated:
 			timer.Stop()
-			current.cancel()
-			return
+			manager.operationMu.Lock()
+			if current.invalidated == invalidated {
+				current.recovering = true
+				manager.closeStreams(current)
+			}
+			manager.operationMu.Unlock()
 		case <-current.ctx.Done():
 			timer.Stop()
 			return
@@ -547,11 +588,60 @@ func (manager *Manager) waitForExpiry(current *dataSession) {
 				default:
 				}
 			}
+		case <-recovery.C:
+			timer.Stop()
+			manager.recoverConnection(current)
 		case <-timer.C:
 			current.cancel()
 			return
 		}
 	}
+}
+
+func (manager *Manager) recoverConnection(current *dataSession) {
+	backend, ok := manager.config.Backend.(interface {
+		RecoverData(context.Context, Target, Profile) error
+	})
+	if !ok {
+		return
+	}
+	health, ok := manager.config.Admission.(interface {
+		DataRecoveryNeeded(context.Context, Target) (bool, error)
+	})
+	if !ok {
+		return
+	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	if current.ctx.Err() != nil {
+		return
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	if expiry := current.expiry(); expiry.Before(deadline) {
+		deadline = expiry
+	}
+	ctx, cancel := context.WithDeadline(current.ctx, deadline)
+	defer cancel()
+	_ = manager.config.Coordinator.DoAuxiliary(ctx, current.target.EquipmentID, func(ctx context.Context) error {
+		if err := manager.config.Admission.ValidateDataLease(ctx, current.target); err != nil {
+			return err
+		}
+		recover, err := health.DataRecoveryNeeded(ctx, current.target)
+		if err != nil || !recover && !current.recovering && !Invalidated(current.invalidated) {
+			return err
+		}
+		current.recovering = true
+		manager.closeStreams(current)
+		if err := backend.RecoverData(ctx, current.target, current.resolved); err != nil {
+			return err
+		}
+		invalidated, err := DataValidity(manager.config.Backend, current.target)
+		if err == nil && !Invalidated(invalidated) {
+			current.invalidated = invalidated
+			current.recovering = false
+		}
+		return err
+	})
 }
 
 func (manager *Manager) stop(_ context.Context, request agentlink.ModemDataRequest) error {
@@ -587,7 +677,34 @@ func (manager *Manager) stop(_ context.Context, request agentlink.ModemDataReque
 	return err
 }
 
-// DoAuxiliary serializes a call/raw/SIM operation with data lifecycle changes
+// DoCall serializes call admission with physical data lifecycle changes. A
+// logical borrower does not own the voice service; only unfinished cleanup
+// prevents admitting a new paid call. Existing hangup/status/renew bypass it.
+func (manager *Manager) DoCall(ctx context.Context, equipmentID string, callback func(context.Context) error) error {
+	if callback == nil {
+		return errors.New("nil modem call operation")
+	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	manager.mu.Lock()
+	// Context ends only for the logical lease (stop/expiry/quota/transport),
+	// never for DHCP invalidation. Publish cleanup before new call admission.
+	if current := manager.items[equipmentID]; current != nil && current.ctx.Err() != nil {
+		delete(manager.items, equipmentID)
+		manager.cleanup[equipmentID] = current
+	}
+	cleaning, closed := manager.cleanup[equipmentID] != nil, manager.closed
+	manager.mu.Unlock()
+	if closed {
+		return context.Canceled
+	}
+	if cleaning {
+		return ErrSessionActive
+	}
+	return callback(ctx)
+}
+
+// DoAuxiliary serializes a raw/SIM operation with data lifecycle changes
 // and rejects it while the exact modem still owns a prepared or open data
 // session. Transport-loss cleanup deliberately bypasses this method and calls
 // Manager.Close so a broken WSS can never strand a raw USB attachment.
@@ -615,8 +732,20 @@ func (manager *Manager) closeSession(current *dataSession) error {
 	current.stopMu.Lock()
 	defer current.stopMu.Unlock()
 	manager.config.Admission.DataCleanup(current.target, current.id, current.purpose)
+	if backend, ok := manager.config.Backend.(interface{ ReleaseBorrower(Target) (bool, error) }); ok {
+		released, err := backend.ReleaseBorrower(current.target)
+		if err != nil {
+			return err
+		}
+		if released {
+			manager.config.Admission.DataReleased(current.target, current.id)
+			return nil
+		}
+	}
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	current.stopErr = manager.config.Backend.StopData(stopCtx, current.target)
+	current.stopErr = manager.config.Coordinator.DoAuxiliary(stopCtx, current.target.EquipmentID, func(ctx context.Context) error {
+		return manager.config.Backend.StopData(ctx, current.target)
+	})
 	cancel()
 	if current.stopErr == nil {
 		manager.config.Admission.DataReleased(current.target, current.id)
@@ -626,6 +755,10 @@ func (manager *Manager) closeSession(current *dataSession) error {
 
 func (manager *Manager) closeStreams(current *dataSession) {
 	current.mu.Lock()
+	current.streamEpoch++
+	for _, cancel := range current.opening {
+		cancel()
+	}
 	streams := make([]net.Conn, 0, len(current.streams))
 	for _, conn := range current.streams {
 		streams = append(streams, conn)

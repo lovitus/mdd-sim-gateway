@@ -1244,7 +1244,7 @@ jobs:
             -o /dev/null -w '%{http_code}' \
             https://localhost:8443/v1/system/status)
           test "$unauthenticated_status" = 401
-          systemd_major=$(systemd --version | awk 'NR == 1 {print $2}')
+          systemd_major=$(systemctl --version | awk 'NR == 1 {print $2}')
           test "$systemd_major" -ge 230
           system_status="$RUNNER_TEMP/system-status.json"
           for attempt in $(seq 1 60); do
