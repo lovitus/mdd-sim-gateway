@@ -149,12 +149,21 @@ func renderAtBase(document egressdesired.Document, portBase int, feeds map[strin
 				})
 				result.Ports = append(result.Ports, status.ProxyPort)
 				status.Ready = true
+				if profile.RuntimeError != "" {
+					// Keep the relay route in sing-box; only this exit reports the outage.
+					status.Ready = false
+					status.Error = profile.RuntimeError
+					status.HostProxyHost, status.ProxyPort = "", 0
+				}
 			}
 		}
 		if err != nil {
 			allReady = false
 			status.Error = err.Error()
 			status.HostProxyHost, status.ProxyPort = "", 0
+		}
+		if !status.Ready {
+			allReady = false
 		}
 		result.Status.Exits[country] = status
 	}
@@ -207,11 +216,13 @@ func effectiveProfile(config egressconfig.Config, exit egressconfig.Exit) (egres
 	if !ok {
 		return profile, "", errors.New("country exit references an unknown profile")
 	}
+	// The fixed relay endpoint is always renderable; lease availability is
+	// reported on the exit status instead of changing the shared route.
+	if profile.RuntimeMode == "cellular_sim" && profile.Type == "socks5" {
+		return profile, "cellular_sim", nil
+	}
 	if profile.RuntimeError != "" {
 		return profile, "cellular_sim", errors.New(profile.RuntimeError)
-	}
-	if profile.RuntimeMode == "cellular_sim" {
-		return profile, "cellular_sim", nil
 	}
 	switch profile.Type {
 	case "node", "socks5":

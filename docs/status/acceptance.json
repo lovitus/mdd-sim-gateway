@@ -2254,6 +2254,30 @@
       ]
     },
     {
+      "id": "EGRESS_BORROW_DECOUPLING",
+      "state": "needs_verification",
+      "releaseRelevance": "current",
+      "summary": "Borrowed-lease changes must not restart the shared sing-box process or take down unrelated country exits and VoWiFi. Each cellular exit now has a fixed loopback SOCKS5 relay in the egress executor; its port and credentials persist in cellular-relays.json. Lease renewal, loss and replacement only switch the relay upstream and close flows bound to the superseded lease. A missing lease marks only that exit ready=false with proxy_port 0 and refuses new CONNECT and UDP ASSOCIATE through the relay; it never falls back to direct. The saved port is reused when still free; if it is occupied at restart, one new endpoint is generated and sing-box applies one configuration change. Accepted boundary: if the relay itself cannot be created because both the local port and the state file are unusable, that exit's route is removed from the shared configuration, causing one shared configuration change.",
+      "acceptance": "Not accepted until the pull request merges and the maintenance rollout is verified. Evidence levels: R1 (state file null, nil-map panic) has pre-fix red evidence on hosted run 42192919084 and green focus evidence. R2 (UDP datagrams move to the current lease after a switch) has pre-fix red evidence on hosted run 42196326542 (head 738b49b): the UDP association died on the lease switch, which the write-path change addresses. R3 (busy identity port keeps credentials and reuses the replacement port) is a coverage test with no pre-fix failure claimed. Focus tests are green on tree 17b7bf9c50edde0d4af54305e93e232bd85381c9 (run 42203025809). The final candidate, a single commit on main 20d7fbc, passed the full go-runtime run 42221080387 (including macOS arm64 and Universal) and received final source review. Historical macOS Universal verification failed twice on 31e3cbb with a 90-second ETIMEDOUT in the verifier child (runs 42208393447 and 42213092417); an instrumented harness with asynchronous per-command timing and a process snapshot passed on the same logic, and the final harness passed in runs 42218359960 and 42221080387. The original stall root cause is unconfirmed; it is not classified as a flake, and the 90-second gate was not changed. Still required before acceptance: merge, one protected maintenance rollout, and post-deployment readback of HK/GB/FR readiness plus a lease-switch check showing unrelated exits keep the same sing-box start count. A rollback to the previous egressexec is not a binary-only change: it regenerates the lease endpoint and causes one expected shared configuration change, which the maintenance plan must list. No paid call or SMS is part of this workstream.",
+      "evidence": [
+        "go-runtime/internal/egressexec/cellular_relay.go",
+        "go-runtime/internal/egressexec/cellular_relay_test.go",
+        "go-runtime/internal/egressexec/cellular.go",
+        "go-runtime/internal/egressexec/render.go",
+        "go-runtime/internal/egressexec/runner.go"
+      ]
+    },
+    {
+      "id": "EGRESS_RELAY_UDP_DROP",
+      "state": "needs_verification",
+      "releaseRelevance": "deferred",
+      "summary": "go-socks5 v0.1.3 sends the UDP ASSOCIATE success reply before the upstream dial, and drops datagrams silently when the dial later fails. This is fail-closed (no direct fallback and no leak) but gives the client no error signal once a lease is lost mid-association. On a lease switch, the superseded UDP flow closes itself and the association survives, because a write error would end the whole association in go-socks5. A datagram whose write began before the switch may complete on the old upstream or be dropped. Datagrams racing with asynchronous removal of the superseded UDP mapping may be dropped; subsequent datagrams are re-dialed through the current lease. No direct fallback is permitted.",
+      "acceptance": "Deferred. Not a release blocker because nothing leaks. Revisit only with evidence that a borrowed-lease user-visible UDP failure matters in practice; a fix would require a bounded relay-side error path or a library change.",
+      "evidence": [
+        "go-runtime/internal/egressexec/cellular_relay.go"
+      ]
+    },
+    {
       "id": "FORK_MAINTENANCE",
       "state": "ongoing",
       "summary": "Large files and a maintained upstream fork create maintenance cost, not proof of functional failure.",

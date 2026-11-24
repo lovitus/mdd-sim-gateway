@@ -98,6 +98,7 @@ func Run(ctx context.Context, settings Settings) error {
 	if err != nil {
 		return err
 	}
+	cellular.relayStatePath = filepath.Join(settings.StateDir, "cellular-relays.json")
 	runner := &executor{identity: rand.Text(), settings: settings, controller: systemProcessController{}, xrayController: xrayProcessController{}, now: time.Now, cellular: cellular}
 	leaseContext, stopRenewal := context.WithCancel(ctx)
 	renewalDone := make(chan struct{})
