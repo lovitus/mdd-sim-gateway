@@ -57,8 +57,8 @@ into this repository or passed through workflow inputs.
 The macOS job now builds the existing arm64 archive and a separate
 `MDD-Agent-macOS-universal.tar.gz` for macOS15 or newer. Universal is
 not part of the already published v2.0.0 download set. PR50 source and signed
-artifact qualification are complete; v2.1.0 passed its own exact-tag Developer ID
-checks and is public. No old tag or asset was replaced. See the [publication receipt](../../DEPLOYMENT.md#2026-10-28-v210-正式发布非生产升级).
+artifact qualification are complete; `v2.1.0` and `v2.2.0` use exact-tag Developer ID
+checks for public release assets. No old tag or asset is replaced. See [DEPLOYMENT.md](../../DEPLOYMENT.md).
 
 `build-macos-agent.sh --arch arm64|amd64` defaults to arm64. Fyne and license
 tools run on the host while every binary/static dependency targets the selected

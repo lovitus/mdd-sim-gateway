@@ -17,13 +17,14 @@ passed; merge5c4e1a9 retains tree728955ab. Signed main run39875568282 produced
 retained v203, not installed or publicly released. Current phone acceptance
 remains owner-skipped; this does not revoke earlier acceptance.
 
-The current public preview is [2.1.0-preview / v228](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.1.0).
-Original source review, normal CI and signed tag workflow `40638015971` passed.
-All seven public assets were downloaded and checksummed; source `90e9881` matches
-the Go v2.1.0 tag exactly. The non-debug APK preserves its application ID and
-stable preview signer; code228 exceeds retained203 and public182. Install as an
-update without uninstalling a compatible preview, after verifying its own
-SHA256SUMS/signature.txt. This publication did not update a phone or Core.
+The current public preview series tracks `2.2.0-preview` at
+[android-preview-v2.2.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.2.0),
+matching the exact source and tree of [Go v2.2.0](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v2.2.0).
+Earlier public previews remain immutable at
+[2.1.0-preview / v228](https://github.com/lovitus/mdd-sim-gateway/releases/tag/android-preview-v2.1.0)
+(`90e9881`, workflow `40638015971`) and `2.0.0-preview / v182`. The non-debug APK preserves its application ID and
+stable preview signer; install as an update without uninstalling a compatible preview, after verifying its own
+`SHA256SUMS` and `signature.txt`.
 
 The `2.0.0-preview` release (versionCode **182**) was published on October 18 with
 the existing stable preview signing identity and application ID. Its fixed download is
