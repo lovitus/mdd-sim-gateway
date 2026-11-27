@@ -160,7 +160,7 @@ server {
 - 默认 `modem_enabled=false`（PC/SC-only），管理多读卡器与 eUICC；配置文件位于 `~/Library/Application Support/MDD Agent/config.json`（目录 `0700`、文件 `0600`）。
 
 ### 3. Linux / 树莓派 / NAS 客户端
-- **systemd 托管安装**：配置 `/var/lib/mdd-agent/config.json`（`0600`）后启用 `mdd-agent.service`；ARM64 独立包自带 `install-linux-arm64-agent.sh` 支持完整预检与受隔离托管首装。
+- **systemd 托管安装**：配置 `/var/lib/mdd-agent/config.json`（`0600`）后启用 `mdd-agent.service`；ARM64 独立包自带 `install-linux-agent.sh` 支持完整预检与受隔离托管首装。
 - **嵌入式无 systemd 手动部署**：仅需读卡器能力时可按 [`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md#嵌入式设备手动部署) 手动放置二进制并配合 crontab 保活。
 - **蜂窝数据与隔离**：Linux 原生支持 ModemManager / AT 适配、受隔离静态 IPv4 与 Ethernet ModemManager DHCPv4 租约，以及同一模块上的语音/短信与数据借用共存（PPP/IPv6 保持 fail-closed）；隔离依赖 `nftables`、设备组、cgroup 与策略路由/`mdd-cellular-guard.service`。
 
@@ -193,3 +193,20 @@ server {
    - 如需回滚，将 `/usr/lib/mdd/current` 指回上一已验证 release 目录并执行受控重启（注意若跨越出口中继持久化契约边界，需按维护计划核对一次共享出口配置收敛）。
 2. **历史版本目录清理**：
    - `/usr/lib/mdd/releases/` 下建议始终保留 **当前运行版本** 与 **紧邻上一可回滚版本** 两个不可变目录；更早的历史解包目录与临时构建缓存可在核对软链接与运行进程映像路径后安全清理以释放磁盘空间。
+
+---
+
+## 七、当前正式发布与生产部署回执（v2.2.0）
+
+- **同源发布摘要（2026-11-27）**：源码 `c805d1164f64e78bcd979f98f6b334f195e4be3d`，tree `19348a841458a6150bdab7a3bd69585659371ee3`。
+  - `android-preview-v2.2.0`（工作流 `46001913107`，`versionCode=253`）：`mdd-agent-preview.apk` SHA-256 `d78ab4e2a14644589df4ebc546ae23cfd86ab577eeb950df04eef5a37b55bbf7`，保留稳定预览签名与包名。
+  - `v2.2.0` `Latest`（工作流 `46003552438`）：
+    - `mdd-2.2.0-linux-amd64.tar` / `mdd-c805d1164f64-linux-amd64.tar`：`d94c14714666c4eb079cea77d0773c2df5308fde054e3a0657e1b229ffd5db02`
+    - `MDD-Agent-Linux-arm64.tar.gz`：`77bfb4b2fa43efa176cebbfb7f223d4e65dfb5998c0d5c933739a2fbfb71462a`
+    - `MDD-Agent-Windows-amd64.tar.gz`：`9013b42c57b3664ee5660b285e9ee20218009506a5a89c17c8e600d1442082a7`
+    - `MDD-Agent-macOS-arm64.tar.gz`：`50331ce85ff071ddcbb43791d6fe35aff021fe0934dd1b14392a3a5a17d7311f`
+    - `MDD-Agent-macOS-universal.tar.gz`：`c63db180142fe5104868c6267b6d2cddb220d5cb118fa36473d26c33c1a8ed66`
+- **受控生产升级与校验边界（2026-11-27）**：
+  - Linux amd64 网关主机在维护排空保护下切换至 `/usr/lib/mdd/releases/mdd-c805d1164f64`（保留 `mdd-6236b1a6db37` 作为回滚目录并清理更早历史目录），`mdd-core`、`mdd-egress`、`mdd-provider-apply`、`mdd-agent`、`mdd-updater` 及 7 个运行中 `mdd-vowifi@` 实例进程映像 SHA-256 全部匹配 manifest；配置、TLS 指纹与 `mdd-cellular-guard.service`（`active`）保持不变。
+  - `/v1/system/update/check?force=true` 返回 `current="2.2.0"`、`latest="2.2.0"`、`comparison_known=true`、`update_available=false`；`fr`/`gb`/`hk` 三个国家出口均 `ready=true`，蜂窝借用 Donor 会话 `ready`，3 条在线英国 VoWiFi 线路恢复 `ims=ready`（`200 OK`）。
+  - 三台 SSH 可达远端 Agent（Linux ARM64、Windows 11 AMD64、macOS ARM64）升级至同源 `v2.2.0` 并重连（含 Windows 远端 Whole-Modem USB/IP 导出至网关主机及对应出口恢复）；另一台未开放免密 SSH 的 macOS 读卡器主机保持既有 `1bfcf9a` 连接与双读卡器在线未中断；未执行任何付费通话/短信、SIM PIN 或 eSIM profile 写操作。
