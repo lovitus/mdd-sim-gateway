@@ -13,6 +13,7 @@ import (
 type fakePCSC struct {
 	mu       sync.Mutex
 	names    []string
+	listErr  error
 	states   map[string]scard.ReaderState
 	waitErr  error
 	canceled bool
@@ -22,6 +23,9 @@ type fakePCSC struct {
 func (fake *fakePCSC) ListReaders() ([]string, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
+	if fake.listErr != nil {
+		return nil, fake.listErr
+	}
 	return append([]string(nil), fake.names...), nil
 }
 

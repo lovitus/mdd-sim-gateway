@@ -456,6 +456,15 @@ func saveConfigLocked(path string, settings config) error {
 		return err
 	}
 	payload = append(payload, '\n')
+	if runtime.GOOS == "windows" {
+		original := path
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			original = ""
+		} else if err != nil {
+			return err
+		}
+		return writeSetupFile(path, payload, original == "", original)
+	}
 	if err := atomicwriter.WriteFile(path, payload, 0o600); err != nil {
 		return err
 	}

@@ -27,20 +27,33 @@ type pcscContext interface {
 
 type Factory struct{}
 
+func establishPCSC() (pcscContext, error) {
+	pcsc, err := scard.EstablishContext()
+	if err != nil || pcsc == nil {
+		return nil, err
+	}
+	return pcsc, nil
+}
+
 func (Factory) Open(ctx context.Context) (agentreader.Monitor, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	pcsc, err := scard.EstablishContext()
+	pcsc, err := establishPCSC()
 	if err != nil {
-		return nil, fmt.Errorf("establish PC/SC context: %w", err)
+		if !allowIdleNoReaders(err) {
+			return nil, fmt.Errorf("establish PC/SC context: %w", err)
+		}
+		pcsc = nil
 	}
 	monitorID, err := randomID()
 	if err != nil {
-		_ = pcsc.Release()
+		if pcsc != nil {
+			_ = pcsc.Release()
+		}
 		return nil, err
 	}
-	return newMonitor(pcsc, monitorID), nil
+	return newMonitorWithHooks(pcsc, monitorID, establishPCSC, allowIdleNoReaders), nil
 }
 
 type cardState struct {
@@ -51,8 +64,12 @@ type cardState struct {
 }
 
 type Monitor struct {
-	pcsc pcscContext
-	id   string
+	pcscMu    sync.Mutex
+	pcsc      pcscContext
+	closed    bool
+	open      func() (pcscContext, error)
+	allowIdle func(error) bool
+	id        string
 
 	states         map[string]scard.StateFlag
 	cards          map[string]cardState
@@ -62,10 +79,32 @@ type Monitor struct {
 }
 
 func newMonitor(pcsc pcscContext, id string) *Monitor {
+	return newMonitorWithHooks(pcsc, id, nil, nil)
+}
+
+func newMonitorWithHooks(pcsc pcscContext, id string, open func() (pcscContext, error), allowIdle func(error) bool) *Monitor {
 	return &Monitor{
-		pcsc: pcsc, id: id,
+		pcsc: pcsc, open: open, allowIdle: allowIdle, id: id,
 		states: make(map[string]scard.StateFlag),
 		cards:  make(map[string]cardState),
+	}
+}
+
+func (monitor *Monitor) currentPCSC() pcscContext {
+	monitor.pcscMu.Lock()
+	defer monitor.pcscMu.Unlock()
+	return monitor.pcsc
+}
+
+func (monitor *Monitor) dropIdlePCSC(target pcscContext) {
+	monitor.pcscMu.Lock()
+	same := monitor.pcsc == target
+	if same {
+		monitor.pcsc = nil
+	}
+	monitor.pcscMu.Unlock()
+	if same && target != nil {
+		_ = target.Release()
 	}
 }
 
@@ -86,13 +125,43 @@ func (monitor *Monitor) Scan(ctx context.Context) ([]agentreader.Reader, error) 
 }
 
 func (monitor *Monitor) scanOnce() ([]agentreader.Reader, error) {
-	names, err := monitor.pcsc.ListReaders()
+	pcsc := monitor.currentPCSC()
+	if pcsc == nil {
+		if monitor.open == nil {
+			return nil, errors.New("PC/SC context unavailable")
+		}
+		opened, err := monitor.open()
+		if err != nil {
+			if monitor.allowIdle != nil && monitor.allowIdle(err) {
+				monitor.states = make(map[string]scard.StateFlag)
+				monitor.cards = make(map[string]cardState)
+				return []agentreader.Reader{}, nil
+			}
+			return nil, fmt.Errorf("establish PC/SC context: %w", err)
+		}
+		monitor.pcscMu.Lock()
+		if monitor.closed {
+			monitor.pcscMu.Unlock()
+			_ = opened.Release()
+			return nil, errors.New("PC/SC monitor closed")
+		}
+		monitor.pcsc = opened
+		pcsc = opened
+		monitor.pcscMu.Unlock()
+	}
+	names, err := pcsc.ListReaders()
 	if errors.Is(err, scard.ErrNoReadersAvailable) {
 		monitor.states = make(map[string]scard.StateFlag)
 		monitor.cards = make(map[string]cardState)
 		return []agentreader.Reader{}, nil
 	}
 	if err != nil {
+		if monitor.allowIdle != nil && monitor.allowIdle(err) {
+			monitor.dropIdlePCSC(pcsc)
+			monitor.states = make(map[string]scard.StateFlag)
+			monitor.cards = make(map[string]cardState)
+			return []agentreader.Reader{}, nil
+		}
 		return nil, fmt.Errorf("list PC/SC readers: %w", err)
 	}
 	if err := validateNames(names); err != nil {
@@ -103,7 +172,7 @@ func (monitor *Monitor) scanOnce() ([]agentreader.Reader, error) {
 		states[index] = scard.ReaderState{Reader: name, CurrentState: scard.StateUnaware}
 	}
 	if len(states) > 0 {
-		if err := monitor.pcsc.GetStatusChange(states, 0); err != nil {
+		if err := pcsc.GetStatusChange(states, 0); err != nil {
 			return nil, fmt.Errorf("snapshot PC/SC readers: %w", err)
 		}
 	}
@@ -127,6 +196,10 @@ func (monitor *Monitor) Wait(ctx context.Context, _ []agentreader.Reader, maximu
 			return nil
 		}
 	}
+	pcsc := monitor.currentPCSC()
+	if pcsc == nil {
+		return errors.New("PC/SC context unavailable")
+	}
 	names := make([]string, 0, len(monitor.states))
 	for name := range monitor.states {
 		names = append(names, name)
@@ -140,9 +213,9 @@ func (monitor *Monitor) Wait(ctx context.Context, _ []agentreader.Reader, maximu
 	cancelDone := make(chan struct{})
 	stopCancel := context.AfterFunc(ctx, func() {
 		defer close(cancelDone)
-		_ = monitor.pcsc.Cancel()
+		_ = pcsc.Cancel()
 	})
-	err := monitor.pcsc.GetStatusChange(states, maximum)
+	err := pcsc.GetStatusChange(states, maximum)
 	if !stopCancel() {
 		<-cancelDone
 	}
@@ -163,7 +236,14 @@ func (monitor *Monitor) Wait(ctx context.Context, _ []agentreader.Reader, maximu
 
 func (monitor *Monitor) Close() error {
 	monitor.closeOnce.Do(func() {
-		monitor.closeErr = errors.Join(monitor.pcsc.Cancel(), monitor.pcsc.Release())
+		monitor.pcscMu.Lock()
+		monitor.closed = true
+		pcsc := monitor.pcsc
+		monitor.pcsc = nil
+		monitor.pcscMu.Unlock()
+		if pcsc != nil {
+			monitor.closeErr = errors.Join(pcsc.Cancel(), pcsc.Release())
+		}
 	})
 	return monitor.closeErr
 }

@@ -468,6 +468,89 @@ No timeout expansion or automatic retry; unexpected layout fails. Reference:
 References: [ListView selection](https://developer.android.com/reference/android/widget/ListView#setSelection(int)),
 [AndroidX test output](https://github.com/android/android-test/blob/main/runner/monitor/java/androidx/test/platform/io/PlatformTestStorage.java).
 
+### Windows ordinary-user management: approved design
+
+M15 does not need a second hardware process: the existing Windows service is the
+single owner. The missing path is ordinary-user GUI access without reading its
+protected control credential or requesting SCM start/stop privileges. PR47's
+query-only status fix is already qualified; do not repeat that proof.
+
+Original reviewer approved option A on October 23 (reply `5707c78e`): reuse a local named pipe with an
+explicit installer-authorized operator SID. Keep service/configuration/binary and
+isolation ACLs private. Expose only redacted status and allowlisted connection edits,
+never tokens, arbitrary paths, shell commands or generic control-API forwarding.
+Keep exact service/PID verification, original-file CAS, cancellation and trust/token
+validation before persistence. Existing installs gain no operator automatically.
+The proposed existing-library choice is Microsoft go-winio v0.6.4; its listener
+rejects remote clients and exclusively creates the first pipe instance. Use
+individual pipe rights, not generic write (which also grants instance creation).
+
+The apply boundary is explicit: a local idle snapshot cannot replace
+Core's active-call/maintenance protection. This delivery saves through
+the service and applies through the existing Core-controlled restart; offline
+restart remains an administrator action. This would improve daily configuration,
+but does not claim the full original M15 no-admin lifecycle. Adding an Agent-to-Core
+self-maintenance protocol is not approved by this design note. The GUI opens the
+currently running Core, not the saved destination; cross-Core migration is an
+administrator operation. Restart success is not an atomic receipt for one edit:
+compare actual running settings after reconnect. A retained token stays at its
+original origin/trust binding; a changed binding requires a replacement token.
+PIN and connection writers share a lock spanning their complete read-modify-write.
+Authorization is separate from config version 1 for rollback compatibility;
+revocation invalidates existing sessions. Protect replaceable parent directories,
+not only file ACLs. The right is account-wide Core configuration authority, not
+an application-only permission. Implementation/hosted/native acceptance are pending.
+
+Failure checklist: unauthorized/remote user; counterfeit pipe or replaced service;
+late save after cancellation; stale revision; bad trust/token changing the original
+file; old service silently falling back to broad credentials; saved labeled loaded;
+restart bypassing active-call/borrow ownership. Qualify a complete isolated Windows
+service/ordinary-user configuration journey plus relevant security/state tables on
+hosted CI; no production fault injection or previously accepted proof replay.
+
+Implementation review `6099c283` requested pipe metadata read rights, preservation
+of `-config`/environment targeting and read-only persisted modem choices. The
+revised candidate includes these plus the descriptor-mask and shallow-checkout
+proof corrections. First run `39831348196` at `d5ba979` failed compilation/module
+metadata before Windows acceptance; it is not behavioral-red evidence. GUI helper
+coverage is discovery/render/editor cancel; successful save is the restricted
+client journey, not a native GUI save receipt. Revised `efeb6f5` passed source
+review `cc3c2591`; run `39836215604` retained two executed counterexamples but
+stopped at isolated service readiness before pipe assertions. Typed failure
+diagnostics are added without changing readiness or extending the wait.
+Diagnostic `1bd0aa8`/`39840779742` supports startup cancellation, not a PC/SC root
+cause. Review `b411f55a` accepts correcting this real-service fixture to production
+defaults: internal startup 2s -> 30s, scan/retry 1s/1s/30s; the two outer 30s samples
+and real ready criteria remain. Review `121a66ba` on `15fc0d1`/`39844561322`
+identifies the fixture synchronization gap where the loop exited on local
+`CoreConnection=connected` before Core-side empty inventory publication; the
+two-sample readiness loop now requires both predicates and logs typed Core
+inventory metadata on failure without extending timeouts. Run `45977729257` on
+`95254f5` then captured exact typed readiness evidence (`pcsc_service_state=1`,
+`reader_condition="recovering"`, runtime stopping at the 30s startup deadline):
+Windows automatically stops trigger-started `SCardSvr` when zero smart card
+readers exist, returning `SCARD_E_NO_SERVICE` instead of `SCARD_E_NO_READERS_AVAILABLE`.
+`pcscmonitor` now treats `SCARD_E_NO_SERVICE`/`SCARD_E_SERVICE_STOPPED` on Windows
+as an empty reader set only when SCM confirms `SCardSvr` is stopped and not
+disabled and SetupAPI confirms zero present smart card reader devices/interfaces,
+re-establishing the live PC/SC context automatically when a reader arrives.
+Run `45983801377` on `6099f4e` confirmed the `pcsc-windows-idle-service` behavioral
+red and reached the restricted ordinary-user helper on the first 30s readiness sample,
+exposing that Windows `LocalSystem` default process DACLs deny ordinary users
+`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE)` during peer verification.
+`startLocalManagement` now grants only `PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE`
+on the current service process to the explicitly authorized operator SID while active
+and restores the original process DACL on revocation or shutdown. Run `45986500400`
+on `c21eaf4` passed the complete Windows validation job (`pcsc-windows-idle-service`
+`576769ff`, `pipe-instance-rights` `5da4623c`, `gui-environment-target` `4998f1b4`,
+`gui-persisted-modes` `8c5b622f`, `fixed-logic` `89254979`, and `fixed-service-journey`
+`efa5acb3` in 61.65s with zero skips); temporary counterexample mutation is removed
+while retaining the permanent real-service E2E gate.
+
+References: [Windows pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
+[service rights](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights),
+[go-winio v0.6.4](https://github.com/microsoft/go-winio/releases/tag/v0.6.4).
+
 Read the exact Go language/toolchain requirements from `providers/vowifi-go/go.mod`, `go-runtime/go.mod`
 and each nested module. Current CI uses Go 1.26.x and Node 24. Run `npm ci`, not an unconstrained dependency upgrade.
 

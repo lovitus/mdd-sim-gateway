@@ -4,7 +4,7 @@
   "baselineTree": "f0f6b038519bdce6520ea805c4c77c5aecd0535a",
   "reviewDate": "2026-09-20",
   "issue": "https://github.com/lovitus/mdd-sim-gateway/issues/3",
-  "scope": "October22 PR46 approved d0ed08d, merge5a6c7e2 and deployed Core artifactd3ebc0221b6c share treec6afc0cd; normal Go39747311051/Android39747310982 and original review passed. Owner-authorized original-donor pause/cleanup preceded Core-only process cutover. Config/pin/user switches/isolation, PR45 Agent startup and the verified apply/egress-owner/Agent/ten-Provider images/PIDs remain (not a claim about egress child-process lifetime); borrowing/exit restored with catalog37/applied36 unchanged. Two GB routes transiently failed, then automatically recovered by09:23UTC. Real Chrome main pages and served embed were checked; no current authentication-failure field sample was manufactured. No paid or expanded deferred tests. See DEPLOYMENT.md for exact acceptance boundaries. PR41 GUI and isolated public-Linux CLI proof39746284080 remain separately scoped. Diagnostics ended/cleaned with event/end evidence unavailable and original MM cause unknown. Android app/reader verification remains owner-skipped.",
+  "scope": "October23 PR47 approved25c78a0, full Go39802816073 and original final review passed; merge1bfcf9a retains treef00db424. Main39814557921 is cancelled, not full qualification; explicitly successful Windows/Mac jobs and verified signed packages support only the reviewer-approved desktop rollout. Two Macs and one Windows upgraded with configuration/pin/mode/account/ACL/isolation preserved; another Windows remains old because its pre-existing connection failure prevents safe ownership confirmation. Two GB card routes are fresh but business remained swu_open_failed at the end of one600s observation; retries beyond that window are not evidence of no recovery attempt. Core/Provider/Linux borrower unchanged; no paid or deferred tests. PR46 browser/Core acceptance and PR41 setup evidence remain valid within their original scope. See DEPLOYMENT.md and PR47 receipts. M15 option A was approved by original review5707c78e; the complete same-service ordinary-user management candidate is implemented but hosted/native qualification and deployment remain pending. Android app/reader verification remains owner-skipped; original MM cause and expired diagnostic evidence gaps remain unknown.",
   "archives": [
     {
       "original": "TODO.md",
@@ -332,9 +332,11 @@
       "requirement": "Windows 安装器一次提权安装 companion/守卫服务、固定版本依赖和卸载恢复信息；日常 Agent\n      与 Web 用户不需要管理员权限。companion 链接 libGammu 时作为独立 GPL 程序分发并附许可证、\n      对应源码与构建说明；MDD 通过进程外 IPC 调用，不复制或链接 GPL 代码。",
       "implementation": "partial",
       "acceptance": "pending_product",
-      "rationale": "A single Windows service and elevated installer exist. The old Gammu companion/license recipe is obsolete; full least-privilege service separation and event-driven installer waiting require separate design/acceptance.",
+      "rationale": "A single Windows service and elevated installer exist; the old Gammu companion recipe is obsolete. October23 original review5707c78e approved an explicitly granted ordinary-user status/connection editor on that same service, applied through existing Core-controlled restart. Hosted qualification completed in Go45986500400 (c21eaf4) together with earlier token-recipient/PIN-ownership reds in Go39836215604, including fail-closed readerless Windows SCardSvr idle handling and scoped PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE peer verification. Full no-admin offline lifecycle and event-driven installer waiting remain outside this batch.",
       "evidence": [
         ".github/workflows/go-runtime.yml",
+        "go-runtime/cmd/mdd-agent/local_management_windows.go",
+        "go-runtime/internal/pcscmonitor/idle_windows.go",
         "go-runtime/internal/agentconnection/manager.go",
         "go-runtime/internal/agenthost/worker.go",
         "go-runtime/release/install-macos-agent.sh",
@@ -347,7 +349,7 @@
       "workstreamRefs": [
         "INSTALLER_WAIT"
       ],
-      "remainingAcceptance": "Deferred from this Android preview under ANDROID_PREVIEW_CLOSE; existing product and safety requirements remain. Separately scope any remaining least-privilege or event-driven installer work; do not extend the Android PR."
+      "remainingAcceptance": "Windows same-service ordinary-user connection management is qualified on hosted CI (Go45986500400); temporary counterexample steps are removed while the real Windows service journey remains a permanent CI gate. Offline/cross-Core maintenance and full no-admin installer lifecycle remain explicit limits."
     },
     {
       "id": "M16",
@@ -1425,10 +1427,12 @@
       "id": "AGENT_USABILITY",
       "state": "partial",
       "releaseRelevance": "current",
-      "summary": "Desktop PR47 and Android PR49 readability/configuration interaction are implemented, reviewed and merged. Three of four desktop rollout targets were upgraded. The remaining Windows target recovered its original Agent control connection and exact modem/SIM after the authorized October28 Mesh-process exit, through the existing alternate route. This did not upgrade its UI or prove Mesh recovery. The UI is now included in public Go v2.1.0 / Android preview v228; publication did not update devices. Earlier signed v203 is retained but not installed; current phone acceptance remains owner-skipped. PR48 remains frozen at15fc0d1 awaiting owner direction. The broader completion goal is not closed by these UI batches.",
-      "acceptance": "PR47 final25c78a0/original final review/Go39802816073 merged1bfcf9a with treef00db424. archive/2026-10-22/agent-usability-qualified retains the accepted proof, including38 fixed Windows race passes; prior native GUI, SCM and ACL evidence remains valid. Three-desktop rollout receipt6350988175 and bounded follow-up6354463445 preserve configuration/pins/intent/isolation and do not prove paid communication. PR49 final0cbf077 passed original review, Go39871769608 and Android39871769636; merge5c4e1a9/tree728955ab matches archive/2026-10-23/android-status-delivery. Three compiled behavioral reds,44 fixed native passes on each API28/35 and inspected API35 portrait images remain accepted; API28 image export and current-phone validation are unverified. Main signing39875568282 produced retained v203, not installed or publicly released. Historical fixture/dependency failures stay in docs/branches.md, not current UI defects. PR48/39844561322 remains unqualified and frozen under the repeated-test-failure rule. October28 bounded Windows diagnosis and separately authorized normal Mesh-process replacement are complete. The original Agent reconnected before the replacement GUI launched, through an existing alternate route; the exact modem/SIM, disconnected/protected data and configuration remained intact. Original review accepted this control recovery, not full Mesh recovery or fourth-target UI deployment. The owner handled remote desktop; no further restoration is pending. See DEPLOYMENT.md for the bounded field receipt.",
+      "summary": "Desktop PR47 and Android PR49 readability/configuration interaction are implemented, reviewed and merged, and PR48 resumes the reviewed same-service Windows ordinary-user connection management candidate on current main. Three of four desktop rollout targets were upgraded; the fourth Windows target recovered its original Agent control connection after the authorized October28 Mesh-process exit. The UI is included in public Go v2.1.0 / Android preview v228; current phone acceptance remains owner-skipped, and full M15 no-admin lifecycle remains open.",
+      "acceptance": "PR47 final25c78a0/original final review/Go39802816073 merged1bfcf9a with treef00db424. archive/2026-10-22/agent-usability-qualified retains the accepted proof, including38 fixed Windows race passes; prior native GUI, SCM and ACL evidence remains valid. Three-desktop rollout receipt6350988175 and bounded follow-up6354463445 preserve configuration/pins/intent/isolation and do not prove paid communication. PR49 final0cbf077 passed original review, Go39871769608 and Android39871769636; merge5c4e1a9/tree728955ab matches archive/2026-10-23/android-status-delivery. Three compiled behavioral reds,44 fixed native passes on each API28/35 and inspected API35 portrait images remain accepted; API28 image export and current-phone validation are unverified. October28 bounded Windows diagnosis and separately authorized normal Mesh-process replacement are complete; see DEPLOYMENT.md. Original review5707c78e approved M15 option A, and review121a66ba on PR48 15fc0d1/39844561322 identified the two-sample readiness synchronization gap between local CoreConnection=connected and Core empty-inventory publication; the rebased candidate applies that exact bounded synchronization and retains the hosted counterexample/service journey qualification.",
       "evidence": [
         "DEVELOPMENT.md",
+        "DEPLOYMENT.md",
+        "docs/branches.md",
         "go-runtime/cmd/mdd-agent/gui_enabled.go",
         "go-runtime/cmd/mdd-agent/connection_edit.go",
         "go-runtime/cmd/mdd-agent/setup_gui.go",
@@ -2129,7 +2133,7 @@
     {
       "id": "INSTALLER_WAIT",
       "state": "deferred",
-      "summary": "Exact service/launchd ownership, captured-process waiting, bounded immediate readiness and rollback-stop protection are implemented. Fully event-driven service waiting and least-privilege service architecture are still partial.",
+      "summary": "Exact service/launchd ownership, captured-process waiting, bounded immediate readiness and rollback-stop protection are implemented. Fully event-driven waiting remains deferred. The separately resumed M15 candidate adds same-service ordinary-user connection management; its qualification is tracked in M15/AGENT_USABILITY, not claimed complete here.",
       "acceptance": "Outside the Android preview milestone. Resume only as separately scoped follow-up or when a new main-flow failure supplies relevant evidence. Verify exact polling paths on Windows/macOS before changing them; retain bounded waits and error diagnostics. September 30 deployment also exposed releaseinstall copying public artifact modes under an inherited private umask: manifest validation correctly rejected the staged files. A scoped public-installer umask allowed the unchanged qualified artifact to install after a verified rollback. Preserve that refusal and private evidence; making the installer independent of restrictive caller umask is a later bounded improvement, not new fleet-rollout development. See DEPLOYMENT.md.",
       "evidence": [
         "go-runtime/release/install-windows-agent.ps1",
