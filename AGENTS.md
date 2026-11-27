@@ -62,3 +62,5 @@ Do not clean unknown files, devices, processes or branches; preserve unique evid
 Update the versioned ledger with current scope, reasons, decision references and evidence; regenerate with
 `node tools/repository-check.mjs --write`. Preserve workstream identities while allowing supported completed,
 accepted, superseded, deferred or cancelled transitions. Product decisions and hardware acceptance are distinct.
+Historical rollout, PR design, and branch logs prior to `v2.2.0` (which integrates PRs #48, #56, #57, and #58 on `main`)
+are archived under `docs/archive/2026-11-27/`; keep root documentation concise and operational.

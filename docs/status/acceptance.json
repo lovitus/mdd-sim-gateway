@@ -4,7 +4,7 @@
   "baselineTree": "f0f6b038519bdce6520ea805c4c77c5aecd0535a",
   "reviewDate": "2026-09-20",
   "issue": "https://github.com/lovitus/mdd-sim-gateway/issues/3",
-  "scope": "October23 PR47 approved25c78a0, full Go39802816073 and original final review passed; merge1bfcf9a retains treef00db424. Main39814557921 is cancelled, not full qualification; explicitly successful Windows/Mac jobs and verified signed packages support only the reviewer-approved desktop rollout. Two Macs and one Windows upgraded with configuration/pin/mode/account/ACL/isolation preserved; another Windows remains old because its pre-existing connection failure prevents safe ownership confirmation. Two GB card routes are fresh but business remained swu_open_failed at the end of one600s observation; retries beyond that window are not evidence of no recovery attempt. Core/Provider/Linux borrower unchanged; no paid or deferred tests. PR46 browser/Core acceptance and PR41 setup evidence remain valid within their original scope. See DEPLOYMENT.md and PR47 receipts. M15 option A was approved by original review5707c78e; the complete same-service ordinary-user management candidate is implemented but hosted/native qualification and deployment remain pending. Android app/reader verification remains owner-skipped; original MM cause and expired diagnostic evidence gaps remain unknown.",
+  "scope": "v2.2.0 mainline baseline integrates PR58 borrowed cellular relay decoupling (6236b1a, deployed and verified with FR/GB/HK exits ready and zero sing-box restarts across live lease switch), PR57 Linux cellular voice/borrowing coexistence, PR56 fresh-install P-256 TLS bootstrap and Type=exec semantic-version update continuity (2f40d0a), and PR48 Windows same-service ordinary-user connection management plus readerless SCardSvr idle handling (4c3a41a). Historical rollout, PR design, and branch logs are preserved under docs/archive/2026-11-27/. Deferred physical hardware/endurance validations and owner-skipped phone checks remain explicitly recorded.",
   "archives": [
     {
       "original": "TODO.md",
@@ -1427,8 +1427,8 @@
       "id": "AGENT_USABILITY",
       "state": "partial",
       "releaseRelevance": "current",
-      "summary": "Desktop PR47 and Android PR49 readability/configuration interaction are implemented, reviewed and merged, and PR48 resumes the reviewed same-service Windows ordinary-user connection management candidate on current main. Three of four desktop rollout targets were upgraded; the fourth Windows target recovered its original Agent control connection after the authorized October28 Mesh-process exit. The UI is included in public Go v2.1.0 / Android preview v228; current phone acceptance remains owner-skipped, and full M15 no-admin lifecycle remains open.",
-      "acceptance": "PR47 final25c78a0/original final review/Go39802816073 merged1bfcf9a with treef00db424. archive/2026-10-22/agent-usability-qualified retains the accepted proof, including38 fixed Windows race passes; prior native GUI, SCM and ACL evidence remains valid. Three-desktop rollout receipt6350988175 and bounded follow-up6354463445 preserve configuration/pins/intent/isolation and do not prove paid communication. PR49 final0cbf077 passed original review, Go39871769608 and Android39871769636; merge5c4e1a9/tree728955ab matches archive/2026-10-23/android-status-delivery. Three compiled behavioral reds,44 fixed native passes on each API28/35 and inspected API35 portrait images remain accepted; API28 image export and current-phone validation are unverified. October28 bounded Windows diagnosis and separately authorized normal Mesh-process replacement are complete; see DEPLOYMENT.md. Original review5707c78e approved M15 option A, and review121a66ba on PR48 15fc0d1/39844561322 identified the two-sample readiness synchronization gap between local CoreConnection=connected and Core empty-inventory publication; the rebased candidate applies that exact bounded synchronization and retains the hosted counterexample/service journey qualification.",
+      "summary": "Desktop Fyne overview/configuration/diagnostics (PR47), Android status/configuration feedback (PR49), and Windows same-service ordinary-user connection management with readerless SCardSvr idle handling (PR48 4c3a41a) are implemented, verified on hosted CI, and merged into main for v2.2.0. Current phone acceptance remains owner-skipped and offline/cross-Core no-admin lifecycle remains outside scope.",
+      "acceptance": "PR47 (1bfcf9a), PR49 (5c4e1a9), and PR48 (cb01bb4 -> 4c3a41a, Go 45988883165, Android 45988883007, Review 45988883148, VoWiFi 45988883075) passed full hosted qualification, with behavioral counterexamples retained in run 45986500400 (pcsc-windows-idle-service, pipe-instance-rights, gui-environment-target, gui-persisted-modes) and permanent real Windows service E2E active in CI.",
       "evidence": [
         "DEVELOPMENT.md",
         "DEPLOYMENT.md",
@@ -1436,7 +1436,9 @@
         "go-runtime/cmd/mdd-agent/gui_enabled.go",
         "go-runtime/cmd/mdd-agent/connection_edit.go",
         "go-runtime/cmd/mdd-agent/setup_gui.go",
-        "android-agent/app/src/main/java/com/lovitus/mddagent/MainActivity.java"
+        "android-agent/app/src/main/java/com/lovitus/mddagent/MainActivity.java",
+        "go-runtime/cmd/mdd-agent/local_management_windows.go",
+        "go-runtime/internal/pcscmonitor/idle_windows.go"
       ],
       "decisionRefs": [
         "COMPLETION_AND_AGENT_UX"
@@ -1446,7 +1448,7 @@
       "id": "FORMAL_RELEASE",
       "state": "completed",
       "releaseRelevance": "current",
-      "summary": "Published Go v2.1.0 and the exact same-source independent Android 2.1.0-preview through the existing workflows. Five Go platform packages, byte-identical Linux alias, eight Go/seven Android public assets, original signing and complete public download/Latest readback are delivered. The earlier v2.0.0 assets and scoped acceptance remain intact. This is publication, not fleet deployment.",
+      "summary": "Published Go v2.0.0 / v2.1.0 with matching independent Android previews, and prepared v2.2.0 / android-preview-v2.2.0 from unified mainline integrating PR48, PR56, PR57, and PR58.",
       "acceptance": "October18 publication boundary: Initial42e4f7b/39107209751 and corrected6a89191/39108506631 behavioral red/green evidence are archived; the original0ec4d65 green CI but rejected review remains recorded in docs/branches.md. Final e9de823 passed original source review, Go39108641098 and Android39108640988; normal merge9a139f81647a83224f04b8c30f06279176061bfb shares tree32bcc859197f28c650f80f0766ea53e6104ca4f3. Both release tags point there. Signed Android39109678131 published preview v182, then Go39110411762 published v2.0.0; all seven public assets per release were downloaded, complete checksums/source/tree/package metadata matched, and Linux aliases are byte-identical. Android preserves its stable signer/application ID and is non-debug/prerelease; Go readback is Latest. Normal Android API28/35 each passed41 methods without failures/errors/skips; dedicated hosted root/Xray/liveness passes cover corresponding default skips, not real-systemd or ARM64 interactive CLI/PTY acceptance. No fleet/phone upgrade, paid/card operation, automatic Python1.x migration or expanded deferred acceptance occurred. Actual installed artifacts remain in DEPLOYMENT.md. The separately authorized October19 rollout is recorded under FLEET_MAIN_ALIGNMENT; this historical no-deployment statement is not current fleet status. October28 v2.1.0 delivery complete: PR53 d0fc89c passed original final review, Go40636084731 and Android40636084681; tested c5838e4 and merge90e9881 share tree617cc7469500b66ff48541f90114924deebe6ba4. Both tags point to that exact merge. Android40638015971 published non-debug v228 with the original app ID/signer, then Go40639141778 published all five platform packages as Latest. All seven Android/eight Go public files were downloaded and checksummed; both indexes match exact source/tree, Linux aliases are identical and both Mac packages have the original Developer ID Team. First Go wait timed out; the second bounded same-run check succeeded without workflow retry. No old tag/asset replacement, fleet upgrade, PR48 reopening, paid operation or deferred validation occurred. DEPLOYMENT.md retains the publication receipt and checksum references.",
       "evidence": [
         "README.md",
@@ -1658,8 +1660,8 @@
       "id": "SYSTEM_UPDATE_CONTINUITY",
       "state": "needs_verification",
       "releaseRelevance": "current",
-      "summary": "N10/N11/N12: Core-owned durable update maintenance, original Provider lease recovery, service-readable progress and sidebar confirmation are implemented. PR35 corrects the deployment-discovered production authentication mismatch. Scoped Core/updater installation and idle watcher activation passed; full in-app restart continuity remains unverified. October28 source review confirmed that archive extraction discarded 0644/0755 file modes, so strict bundle validation rejected valid packages. PR55 candidate94a93a2 passed original source review, Go40645037422 and Android40645037653; tested6d19f533 shares tree02bddab6. Archived old-source behavior fails and fixed16-case/public-v2.1.0 staging passes qualify the repair. Final Go40646568030, Android40646568017 and original full final review passed; merged620b153/treeaf9d26f6; this does not qualify installation preflight, service restart continuity or field upgrade. The next reviewed batch wires real product VERSION into Linux Core build_version and qualifies the complete browser/root-worker/systemd/reauthentication journey on isolated hosted hardware-free packages. PR56 source design passed original review; Go40663130810 exposed a real fresh-bootstrap Ed25519/NSS3.98 incompatibility before login, with clean teardown. The accepted correction creates P256 identities only on fresh installs and retains existing certificates/pins. Strict P256/NSS import, real Chrome login and version comparison passed in Go40666923268 attempt2, but the first post-restart Core image check failed. The October29 diagnostic run Go40827744418 identifies the original image-mismatch branch; Android40827744423 passed. A later matching image does not establish what the worker read. The owner then authorized the reviewed Type=exec correction in only the three fixed units, concise documentation and one unchanged full hosted validation. Go40832320836 passed actual replacement, original maintenance release and browser reauthentication, but its one-shot Agent observation preceded the minimum reconnect delay; Android40832320884 passed. The original final review accepts the product correction, not complete qualification. The owner authorized only an E2E observer correction sharing the original600s absolute deadline across update completion, reauthentication and original Agent recovery; process/image/config and all other assertions remain. One original CI and fixed final review follow, without product or deployment changes. Exact receipts and scope are in DEVELOPMENT.md; old PR55 qualification is not repeated.",
-      "acceptance": "PR33 finale531446/Go38427350573 and original final review passed. archive/2026-10-14/update-maintenance-qualified retains6b718e7/Go38425248981 and17 compiled behavior reds plus old-sidebar failure, then fixed race/root/Chromium. Integrated728b788/Go38508488826 and final639f55a/Go38509927202 passed. First cutover rollback and auth mismatch remain recorded. PR35 c59056d/Go38514560874 proves actual-wrapper old401/fixed race; final431fa6b/Go38516014673 approved and merged77f23e0. Same-tree261d8e7 canonical rollout succeeded; raw maintenance IPC200, original lease released, independent empty request/status/maintenance files and workerPID0 checked before watcher enabled/waiting. No synthetic request, full in-app service restart test or opt-in real-systemd/process qualification claimed. Do not restore stale stores/status; see DEPLOYMENT.md.",
+      "summary": "Core-owned durable update maintenance, archive permission preservation (PR55 620b153), semantic VERSION wiring, fresh-install P-256 TLS compatibility, and Type=exec core service units (PR56 2f40d0a) are implemented and merged on main. Production semantic-version update check and controlled v2.2.0 rollout verification follow release publication.",
+      "acceptance": "PR33/PR35 update maintenance and PR55 archive staging repair (620b153) passed full hosted CI. PR56 rebased onto main and merged as 2f40d0a after passing full Go Runtime CI (45379181831) and Review regressions (45379181753), qualifying fresh P-256 NSS/Chrome bootstrap, semantic version comparison, real root-worker systemd Type=exec replacement, and bounded Agent reconnect continuity.",
       "evidence": [
         "DEVELOPMENT.md",
         "go-runtime/internal/systemupdate/maintenance.go",
@@ -2261,17 +2263,33 @@
     },
     {
       "id": "EGRESS_BORROW_DECOUPLING",
-      "state": "needs_verification",
+      "state": "completed",
       "releaseRelevance": "current",
-      "summary": "Borrowed-lease changes must not restart the shared sing-box process or take down unrelated country exits and VoWiFi. Each cellular exit now has a fixed loopback SOCKS5 relay in the egress executor; its port and credentials persist in cellular-relays.json. Lease renewal, loss and replacement only switch the relay upstream and close flows bound to the superseded lease. A missing lease marks only that exit ready=false with proxy_port 0 and refuses new CONNECT and UDP ASSOCIATE through the relay; it never falls back to direct. The saved port is reused when still free; if it is occupied at restart, one new endpoint is generated and sing-box applies one configuration change. Accepted boundary: if the relay itself cannot be created because both the local port and the state file are unusable, that exit's route is removed from the shared configuration, causing one shared configuration change.",
-      "acceptance": "Not accepted until the pull request merges and the maintenance rollout is verified. Evidence levels: R1 (state file null, nil-map panic) has pre-fix red evidence on hosted run 42192919084 and green focus evidence. R2 (UDP datagrams move to the current lease after a switch) has pre-fix red evidence on hosted run 42196326542 (head 738b49b): the UDP association died on the lease switch, which the write-path change addresses. R3 (busy identity port keeps credentials and reuses the replacement port) is a coverage test with no pre-fix failure claimed. Focus tests are green on tree 17b7bf9c50edde0d4af54305e93e232bd85381c9 (run 42203025809). The final candidate, a single commit on main 20d7fbc, passed the full go-runtime run 42221080387 (including macOS arm64 and Universal) and received final source review. Historical macOS Universal verification failed twice on 31e3cbb with a 90-second ETIMEDOUT in the verifier child (runs 42208393447 and 42213092417); an instrumented harness with asynchronous per-command timing and a process snapshot passed on the same logic, and the final harness passed in runs 42218359960 and 42221080387. The original stall root cause is unconfirmed; it is not classified as a flake, and the 90-second gate was not changed. Still required before acceptance: merge, one protected maintenance rollout, and post-deployment readback of HK/GB/FR readiness plus a lease-switch check showing unrelated exits keep the same sing-box start count. A rollback to the previous egressexec is not a binary-only change: it regenerates the lease endpoint and causes one expected shared configuration change, which the maintenance plan must list. No paid call or SMS is part of this workstream.",
+      "summary": "Persistent loopback SOCKS5 cellular relays (cellular-relays.json) decouple borrowed cellular lease renewal, loss, and replacement from the shared sing-box process; missing leases fail closed (ready=false, proxy_port=0) without direct fallback.",
+      "acceptance": "PR58 merged as 6236b1a (Go CI 45374791926, all 22 manifest artifacts verified) after R1/R2 behavioral red/green proofs (42192919084, 42196326542, 42221080387). Protected production rollout of mdd-6236b1a6db37 verified /var/lib/mdd-egress/cellular-relays.json (0600), FR/GB/HK exits all ready=true, and a live non-paid lease switch keeping the shared sing-box PID at zero restarts while 3 online GB VoWiFi lines remained ims=ready.",
       "evidence": [
         "go-runtime/internal/egressexec/cellular_relay.go",
         "go-runtime/internal/egressexec/cellular_relay_test.go",
         "go-runtime/internal/egressexec/cellular.go",
         "go-runtime/internal/egressexec/render.go",
         "go-runtime/internal/egressexec/runner.go"
-      ]
+      ],
+      "resolution": {
+        "basis": "implementation_evidence",
+        "reason": "Merged on main (6236b1a), deployed under maintenance protection, and verified via FR/GB/HK exit readiness plus zero-restart live lease switch.",
+        "evidence": [
+          "DEPLOYMENT.md",
+          "DEVELOPMENT.md",
+          "go-runtime/internal/egressexec/cellular_relay.go",
+          "go-runtime/internal/egressexec/cellular_relay_test.go",
+          "go-runtime/internal/egressexec/cellular.go",
+          "go-runtime/internal/egressexec/render.go",
+          "go-runtime/internal/egressexec/runner.go"
+        ],
+        "decisionRefs": [
+          "HK_BORROWER_DISPOSITION"
+        ]
+      }
     },
     {
       "id": "EGRESS_RELAY_UDP_DROP",

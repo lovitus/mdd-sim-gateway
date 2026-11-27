@@ -1,0 +1,614 @@
+# Historical Development and PR Qualification Notes (2026-10 to 2026-11)
+
+> Archived from `DEVELOPMENT.md` on 2026-11-27. Preserves historical per-batch design and CI qualification notes; see root `DEVELOPMENT.md` for current toolchain and validation commands.
+
+## Cellular voice and borrowing coexistence
+
+November6 owner decision: a logical data borrower must not prohibit cellular
+Dial/Answer; voice-induced data suspension is acceptable. Preserve exact SIM
+identity, durable paid-call leases, independent hangup, user intent and isolation.
+The fixed reviewer accepted this direction before implementation. Two reported
+calls failed before answer; their historical Agent error was not retained. A
+nonpaid read reproduced the shared data-admission refusal, not a carrier failure.
+
+This candidate separates logical Renew/Open from destructive modem ownership
+changes. Borrowing requested during a paid call stays preparing under one Core
+owner/budget; a retained disconnected borrower recovers only after the voice gate.
+Probe no longer performs destructive cleanup as a side effect of hangup/status.
+Failure checklist: lifetime mutual exclusion; lost pending owner/reservation;
+unknown bearer treated as disconnected; stale SIM accepted; expiry cleanup or
+background probe disrupting voice; false ready; default-network fallback.
+
+Fixed source review accepted8222c7d. Run42153737616/b5db829 preserves the
+original seven behavioral reds; run42156044160/8222c7d preserves seven additional
+review-defect reds. Its green phase caught malformed test requests; the first
+fixture correction supplies the required renewal purpose and identity-only Stop,
+without changing product validation or assertions. Run42157268521/18c31d0 passes
+all eight related race packages, including forced-control-close, Answer/Hangup,
+DHCP/partial recovery and transport-close cleanup. The optional real-Xray case
+is skipped in this limited proof; normal CI retains its existing external coverage.
+Archive `archive/2026-11-06/cellular-coexistence-qualified` retains that candidate.
+Artifact13474994265 (SHA256 a6a0d99d105360e050b82e403c1548386f847eedd25a02ea599a79b471f98065)
+supplies the same-source embedded UI. Temporary proof is removed; both completed
+red sets are not rerun. Final original CI and delivery review remain required.
+Existing command-owner test expectations are corrected: cleanup retains the exact
+MM status/hangup channel until inhibition, while direct tty remains unavailable.
+No production change, repeat paid call or deferred hardware qualification is claimed.
+
+Final-source review accepted9adccdd; Android42158250483 passed. Go42158250610
+found two fixture defects: DHCP still expected physical invalidation to cancel
+the logical borrower, and fresh-install version detection invoked a daemon absent
+from PATH. The fixed reviewer accepted retaining/renewing the exact original
+borrower before identity-only Stop and using `systemctl --version` with the same
+minimum version. Original isolation, expiry/quota, SIM replacement and time limits
+remain. Archive `cellular-coexistence-full-ci-red` preserves the failed candidate;
+corrected original CI and final review remain required.
+
+Go42161172653/53c01d8 passes the full DHCP lifecycle and both corrected fixtures;
+Android42161172591 passes. The later uninstall step exposes a separate linked-unit
+failure: `disable --now` removes the release link before stopping the service.
+The fixed reviewer accepts stopping first, retaining Provider inventories across
+apply shutdown, then disabling together. Stop the packaged updater trigger and
+refuse an active/unverifiable updater; recheck both units in the locked removal gate.
+If disable partially fails, retain software/data and manually reinstall the same
+verified release with the existing `install` entry before retrying strict uninstall.
+That repairs managed links without enabling/starting services or changing config;
+no relaxed preflight or automatic recovery is introduced. Existing uninstall/reinstall
+E2E remains the gate; no production uninstall or paid operation is authorized.
+
+Go42164603594/255f32e passes the original real install/stop/uninstall/reinstall
+journey; its separate macOS Universal verifier timed out at90s, so full CI is not
+qualified. The completed fixed review requires restoring the originally active
+updater path on pre-disable refusal and strict inactive readback. Its full-length
+successor accepts the scoped EXIT/signal recovery, with no restore once disable
+starts. Ordinary stop uses the same strict status check without new recovery.
+The existing hosted fresh-install job adds whole-entrypoint refusal/state cases
+in a private mount namespace; the actual installed Core preflight is retained,
+only the systemctl dependency is fault-injected, and disable always fails before
+removal. One-time255f32e counterexamples are distinct from the permanent cases.
+No local execution, new timeout, production operation or paid acceptance is implied.
+Successor source review accepts f7d53b0. Go42167267055 passes all build/platform
+and original real installer gates; the new refusal driver fails at JavaScript
+parsing, before any behavioral proof. Correct its shell interpolation and retain
+old signal termination as a valid pre-fix outcome; add the four requested path
+query/stop cases. Product and original assertions/timeouts are unchanged.
+Android42168926068/aed1112 passes. Go42168926174 stops at the original Chrome
+startup timeout before refusal qualification. Preserve this separate failure; do
+not change browser timing. Successor accepts the fixture design and requests one
+explicit stop-attempted assertion, now included. Actual old/new proof is pending.
+
+Qualified022f345 and actual hosted checkoutef131613 share treeb9ced795.
+Go42170150295 and Android42170150265 pass. Downloaded artifact13480812230
+(SHA256 cd67760a67cce4ecfd2637e6fea497c0a3cb82747a289fa2908a34ecfed151a3)
+confirms20 old behavioral failures and25 new passes, including the explicit
+path-stop assertion, all signals and ordinary stop. The real full installer
+journey also passes. Archive `cellular-coexistence-refusal-qualified` retains
+proof; remove only the old-script fetch/execution and obsolete red metadata.
+All25 permanent cases, real lifecycle gates, product and timeouts remain.
+Final cleanup-tree CI and successor review gate merge; no deployment is claimed.
+
+## Hosted browser update continuity
+
+The fixed reviewer accepted the October28 `620b153` plan after correcting its
+version prerequisite. The public v2.1.0 Core embeds module `(devel)` and its real
+VCS revision; that SHA is not a comparable product version. Normal Linux builds
+now inject `VERSION` into `main.releaseVersion`, retaining original Go/module/VCS,
+dirty and manifest identity. Development fallback and checker guards stay intact.
+
+Failure checklist: uncomparable running version; colliding release IDs; watcher or
+sandbox failure; duplicate activation; lost maintenance owner after restart;
+old authenticated session incorrectly retained; configuration/Agent replacement;
+fixture trust or cleanup failure. No production, paid or deferred hardware tests.
+
+The separate hosted consumer installs complete same-source qualification packages
+with distinct IDs and test semvers through the original installer. The old main
+is compiled once to demonstrate real runtime/check refusal, not compilation failure.
+The fixed journey uses Chrome, real authentication, original root updater/path,
+three real systemd replacements and original maintenance recovery/release. It checks
+cancel, one confirmation, the original cookie being rejected with HTTP401,
+reauthentication and the original operation's result. A retained modal is closed
+through its visible action before opening Update status; empty Provider records
+accept only the existing null/empty-array representations. Success also requires
+the worker's normal terminal state, a healthy waiting watcher and no failed
+invocation hidden by a later successful run.
+Only the external release HTTPS boundary is synthetic. Temporary trust/hosts are
+restored after owned workers stop; failure remains failure. The normal no-checkout
+fresh-artifact gate and public asset selection remain separate and required.
+Complete journey qualification is **pending**. Existing PR55 reds are not
+repeated. No public-version data migration, physical Provider drain, paid continuity
+or production upgrade is claimed. Archive/remove the one-time old-main builder
+only after its behavioral evidence is preserved; retain the permanent journey.
+
+First hosted candidate `829f8cb` / tested `1136671e` / tree `b08439f7`:
+Go `40658961131` failed only at the new consumer's certificate import; Android
+`40658961065` and the normal fresh-artifact/version gate passed. The complete
+stderr reports `SEC_ERROR_ADDING_CERT`; actual NSS package versions were not saved.
+Missing `-a` is not a confirmed cause: NSS also decodes PEM downstream. No version
+red or update green was reached;
+zero apply requests and successful cleanup are retained in
+[the failure receipt](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6464852607).
+The [corrected finding](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6465041321)
+and original review limit the retry to pre-import package versions, public-key type
+and public DER evidence, explicit `-a`, then binary DER digest readback. Failure
+stops the journey and still runs cleanup. The original certificate, trust, command
+limits and product are unchanged; no algorithm substitution or TLS bypass.
+
+The bounded retry `d980d42` / tested `406ef6ce` / tree `6bb8fac8` failed
+at the same import in Go `40663130810`; Android `40663131018` passed.
+[Exact certificate evidence](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6465487861)
+records NSS/tools `2:3.98-1ubuntu0.3`, original Ed25519 public DER, zero apply
+and successful cleanup. The original review traced the failure through NSS3.98's
+unsupported public-key extraction to its generic import error; Chrome handshake
+failure was not observed because the browser had not started.
+
+The scoped product correction uses ECDSA-P256 only for fresh bootstrap identities;
+existing files, SANs, permissions, lifetime, PKCS#8, pin computation and refusal
+of partial/existing state are unchanged. Existing bootstrap coverage now also
+retains complete legacy Ed25519 material byte-for-byte. This is preservation
+coverage, not a separate old-code failure claim. The above actual import failure
+is the compatibility counterexample; strict NSS import and real Chrome login in
+the unchanged hosted journey must establish the fixed behavior. Record the actual
+Chrome version without upgrading NSS or replacing certificates in the fixture.
+The version red still overlays only old main; all three packages use the fixed
+bootstrap. Full journey qualification remains pending.
+
+Candidate `b43b812` / tested `1d6fa0e9` / tree `5ca21995`: Go `40666923268`
+attempt2 passed strict P256/NSS3.98 import, actual Chrome login, the old-version
+behavioral red, Agent registration and Cancel. After one confirmed update, the
+first Core image check failed with `unknown/health/update_fixed_service_unconfirmed`.
+Android `40666923103` passed; complete cleanup does not prove maintenance recovery.
+[Failure receipt](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6466242675)
+and `archive/2026-10-28/update-continuity-health-red` preserve the evidence.
+The owner authorized one reviewed diagnostic continuation on October29: only the
+existing E2E failure branch captures exact classified worker errors and one later
+unit/running-image snapshot before original cleanup. Limits:25s total,3s/64KiB per
+command,128 journal rows and128KiB retained report. Unknown messages stay hidden;
+ambiguity/limits/read errors remain explicit. Later host reads do not prove the
+worker's earlier view. Product, assertions, units, topology and timeouts stay fixed;
+the result returns to the same reviewer without automatic further repair or rerun.
+
+Diagnostic candidate `97d4d0c` / tested `2903c274` / tree `416ff3c0`:
+Go `40827744418` confirms the original worker's `image_mismatch` branch;
+Android `40827744423` passed. A later stable Core snapshot matches the target,
+but does not establish the worker-time PID/image. Original cleanup completed.
+[Complete result and review](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6489856588)
+confirm a startup-contract gap, not the exact historical mismatched executable.
+The owner authorized only the three fixed units' `Type=simple` to `Type=exec`
+correction, necessary documentation and one original complete hosted validation.
+Retain this red evidence and all existing assertions, diagnostics and budgets.
+Check the actual loaded Types in the existing process snapshots; do not add
+sleep, digest retries or new compatibility matrices. See the release README for
+the systemd capability prerequisite. Complete qualification is still pending.
+
+Candidate `268549b` / tested `4920ab15` / tree `8105aec4`: Go `40832320836`
+passed the actual update, three target images and original maintenance release;
+Android `40832320884` passed. The original Agent/process/config stayed unchanged,
+but the one-shot registration assertion ran before its minimum30s reconnect delay.
+The [complete fixed review](https://github.com/lovitus/mdd-sim-gateway/pull/56#issuecomment-6490696757)
+accepts the product correction, not full qualification or proof of eventual recovery.
+The owner authorized only the existing observer correction: updater completion,
+reauthentication and Agent observation share one original600s absolute deadline.
+Keep bounded backoff; reject malformed/auth/request errors, wrong/empty generation
+and late success. Recheck the original process/image and configuration after actual
+registration. No product, topology, total budget or deployment change. Preserve
+`archive/2026-10-29/update-continuity-exec-partial`; one original CI and final review follow.
+
+References: [Go module version stamping](https://go.dev/doc/go1.24),
+[Chromium local certificate trust](https://chromium.googlesource.com/chromium/src.git/+/refs/heads/main/docs/linux/cert_management.md),
+[systemd path activation](https://freedesktop.org/software/systemd/man/latest/systemd.path.html).
+
+## Updater staging permissions
+
+The October28 fixed review accepted a bounded repair of `FetchAndStage`:
+regular files were written as0600 and then rejected by the release manifest's
+strict0644/0755 checks. Preserve private staging and all digest/path/type/size/
+duplicate/manifest guards. Accept only raw tar0644/0755, copy privately, then
+chmod the held descriptor before closing; reject special bits without masking.
+Failure checklist: executable permissions lost to creation/umask, special bits
+silently masked, tar/manifest disagreement, incomplete writes, wrong fixture
+layout hiding the defect, or published bytes mistaken for installed code.
+
+PR55 candidate `94a93a2`, tested `6d19f533`, tree `02bddab6` passed Go
+`40645037422`, Android `40645037653` and the original fixed source review.
+`archive/2026-10-28/updater-stage-qualified` retains the one-time proof: compiled
+old source `a565497` rejects a valid complete release; fixed code passes all16
+contract cases and the immutable public v2.1.0 tar (source `90e9881`,22 artifacts).
+[Exact qualification receipt](https://github.com/lovitus/mdd-sim-gateway/pull/55#issuecomment-6462676916)
+records hashes and boundaries. The temporary workflow/public-tar test is removed;
+the permanent regression and original CI remain. PR55 merged `620b153` after
+normal Go `40646568030`, Android `40646568017` and full original final review;
+reviewed/tested/merge tree is `af9d26f6`.
+Only staging/strict bundle validation is claimed, not installation preflight or
+full in-app restart continuity. Old installed updaters need the existing controlled
+upgrade path to acquire this repair; a newer download alone cannot fix the old
+extractor. Existing release tags/assets and production stay unchanged.
+
+## Toolchain and native dependencies
+
+### v2.1.0 delivery
+
+The fixed reviewer accepted the complete delivery plan and PR53 final source/CI.
+Merge `90e9881` and both release tags share the reviewed tree `617cc746`.
+This release packages merged PR47/49 UI, PR50 Universal, PR51 ARM64 delivery
+and PR52 DHCP work through the existing workflows. Only release labels/notes and
+documentation change; runtime, installers, permissions, topology and timeouts do not.
+Android `40638015971` and Go `40639141778` passed their real tag gates; all seven
+Android/eight Go public assets were downloaded and verified, including original
+signing and APK code228. See DEPLOYMENT.md for the actual publication receipt.
+The completed v2.0.0 receipt and assets remain intact. Do not rerun archived
+one-time reds, paid/field tests, frozen PR48 or deferred compatibility matrices.
+The publication contract requires both tags to resolve to the same exact approved commit:
+Android first, then Go only after the complete signed preview is public. Tag push
+starts automatic publication, so the release authorization boundary precedes it.
+Verify the new Android code exceeds retained v203, the stable signer/application
+ID, both original-Team Mac signatures, and all eight Go/seven Android assets.
+Failure checklist: stale links mislabeled with new capabilities; PR/merge/tag
+identity confused; missing helper/Universal; APK downgrade or signer change;
+publication mistaken for deployment. Keep partial drafts and original bytes;
+never move tags, overwrite assets or claim a missing Go release after preview success.
+
+### Linux DHCP IPv4 claim lifecycle
+
+PR52 final `a866156` passed full normal Go `40626366156` and the original
+final review. Merge `fbe46f3` and tested checkout `54ec9d52` share tree
+`7c8094ac15831ae799d0752ec83ef694ee2553cb`. Full DHCP E2E passed in57.66s;
+the complete receipt reports exit0, no cleanup errors and unchanged host
+namespaces/mounts. The final ARM64 standalone-install receipt also passed.
+`archive/2026-10-28/linux-dhcp-final` and the final receipts in docs/branches.md
+supersede pending source/CI/merge statements in the historical sequence below.
+Permanent tests/full E2E remain; only completed one-time proof was removed.
+No publication, production deployment or physical/paid acceptance is implied.
+
+October27 owner authorized the fixed successor's route-loss repair. Preserve
+c797b05/tree27f49252 and run39986314729 as the actual red: bound cellular sockets
+used an unowned on-link route after private-default deletion, without observed
+host-default leakage. Add owned-route realms and exact nft classid matching only
+for DHCP; retain static/bootstrap behavior. Recheck realm ownership, complete
+inventories, numeric interface identity, publication/readback and exact deletion.
+The original fixture also checks existing TCP/UDP at that deletion boundary.
+Reader timeout remains unconfirmed (both diagnostic suites passed); no speculative
+reader edit, production change or paid operation. Full qualification is pending.
+The completed implementation review requires iproute2's read-only binary
+`route save table all`, `rule save` and `address save` inventories: zero exit,
+empty stderr, bounded complete output and strict numeric-object decoding.
+This preserves DONE-only interruption detection missing from the pinned Go
+transport; mutations still use its numeric-ifindex codec and exclusive ACKs.
+The archived PR52-only hosted counterexample step restored the old flat
+permit acceptance and zero-exit-only completion behavior and proved named
+runtime failures. It is removed after qualification; permanent regressions remain.
+The original route-loss red is retained rather than replayed.
+Run40475039191 stopped at the unexported `RTA_NH_ID` constant before DHCP
+qualification. The revised candidate uses Linux UAPI value30 and includes the
+fixed source review's tagged-test import and nft numeric-string realm fixes;
+neither that failed build nor source review alone qualifies this batch.
+Source-approved fecef696/tree5c96475d failed run40476145065 at the original T2
+broadcast ACK assertion; realm counterexamples passed red/green, later lifecycle
+was not reached. Retain this red at `archive/2026-10-27/linux-dhcp-t2-red`.
+The same reviewer accepted DHCP-only raw broadcast with a frozen lease source,
+separate broadcast-capable receive wrapper and the existing exchange write
+deadline. T1/data realm checks and original E2E assertions/timeouts are unchanged.
+Run40479004518/treeeeec76fa passed T2 and route-only withdrawal, then stopped
+at the fixture's slash-form realm argument; use the same full uint32 decimal.
+Its reader diagnostic exposed a prior-response/deferred-slot-release assumption;
+the fixed review accepted fresh-connection saturation, preserving all original
+capacity/scope/time limits. Earlier undiagnosed reader timeouts remain unconfirmed.
+Run40482148703/tree3e035ff9 passed reader, permit and realm checks, then failed
+the short-lease address assertion. IPv4-only iproute2 output omits addressless
+links; owner/reviewer approved all-family readback of the original interface,
+strictly no IPv4 and bounded diagnostics. No product or timeout change; actual
+cleanup and the remaining lifecycle still require the normal hosted result.
+
+The fixed successor accepted NEXT_BATCH_992c4fb on October 23. Reuse
+insomniacslk/dhcp at c6bb46ad3f3a for Ethernet-only MM method3 IPv4, with
+claim-owned bootstrap, T1/T2 renewal, expiry, socket invalidation and existing
+owner recovery. Preserve static IPv4, user leases/quotas, active-call guards,
+configuration, pins and policy. No Core/wire changes, host DHCP scripts, main
+routes, resolv.conf writes or automatic enabling. PPP/IPv6/raw-IP DHCP and
+non-systemd managed modem remain separate gaps, not this batch's qualification.
+
+Failure checklist: bootstrap exposes ordinary traffic; wrong interface or SIM
+renews; DHCP extends user lease/quota; expired sockets revive after same-card
+reconnect; malformed options or stale replies publish; late worker downs a new
+interface; borrower/persistent owner cannot recover; MM cleanup bypasses a call;
+worker shutdown deadlocks. Hosted real DHCP/veth/netns tests must exercise the
+production guard, routes and sockets in the fixed Agent cgroup, with a working
+alternate default route. Use compiled old-method3 refusal once, then acquisition,
+T1 unicast/T2 broadcast, NAK/expiry, owner cleanup and static regression. No
+production, paid tests, PR51 qualification replay or frozen PR48 changes.
+
+References: [MM IP setup](https://modemmanager.org/docs/modemmanager/ip-connectivity-setup-in-lte-modems/),
+[DHCP upstream](https://github.com/insomniacslk/dhcp/tree/c6bb46ad3f3ada83ff1d61d5b57ed57a590289fd),
+[RFC2131](https://www.rfc-editor.org/rfc/rfc2131),
+[packet sockets](https://man7.org/linux/man-pages/man7/packet.7.html).
+Include BSD-3-Clause and the nclient4 gVisor-derived Apache-2.0 notice in the
+existing source/license inventory; do not upgrade unrelated dependencies.
+
+`tools/test-linux-dhcp.mjs` invokes the tagged existing-package Go E2E under the
+fixed `mdd-agent.service` cgroup on disposable hosted ARM64. Three real namespaces
+and veth paths exercise the original guard, DHCP server/packet exchange, marked
+routes, TCP/UDP WebSocket borrowing, DNS and original durable policy recovery.
+Only MM/AT and USB-parent sysfs stand in for hardware; a narrow fixture adapter
+substitutes that parent check while calling the original contract/netdev guard.
+The peer is outside the Agent cgroup. Run39942634074 qualified the compiled old
+method3 entry refusal and the failed-inventory cleanup red/green counterexample;
+their one-time machinery is archived at `archive/2026-10-23/linux-dhcp-counterexamples`.
+Final full CI/source review are accepted above; this is not physical modem or
+production evidence. DNS changes invalidate
+the old claim and rebuild through the original owner; unadvertised renewal DNS
+inherits only that same validated lease. DHCP MTU/hostname/search/NTP options are
+not applied to the host. The R1-R5 source review is addressed in the same batch:
+datagram DNS semantics, voice-protected partial MM cleanup, expiry before permit
+publication, failed-link-inventory ownership and the approved negative traffic /
+lease cases. Run39939080172 did not qualify DHCP; its E2E failed and root-only
+scratch files also blocked artifact upload. The revised harness emits the result
+and exports readable receipts before deleting only its own scratch directory.
+Run39942634074 reached DORA, then failed permit publication because the fixed
+cgroup path was unavailable after `ip netns exec` replaced sysfs. The reviewed
+second harness correction preserves the existing cgroup2 mount with read-only
+binds in private mount namespaces, validates exact process membership, and
+compares the host's full cgroup mountinfo before/after cleanup. No new cgroup2
+mount, fake hierarchy or weakened guard is allowed. Current R3/R5 refinements
+serialize expiry decisions with renewals and independently qualify route/permit
+withdrawal using chain-specific drop counters and a fenced packet observer.
+If this second correction still fails, preserve evidence and stop automatic
+test repairs. This does not qualify borrower lifecycle or physical hardware yet.
+
+### Linux ARM64 standalone delivery
+
+The owner-authorized successor fixed reviewer approved `LINUX_AGENT_PLAN_4297696`
+at main42976962. Complete the existing Agent package with its pinned malgo0.11.26
+helper, original guard/Agent units, source/license inventory and fresh standalone
+placement. Reuse the existing MM staticIPv4 and serial AT/SIM paths; serial has
+no data backend. Do not modify Core, the full-server updater, runtime identity,
+policy, guard or reader/cron contracts. No dependency upgrade is needed.
+
+Failure checklist: missing helper discovered after guard mutation; helper -h
+mistaken for ALSA initialization; foreign/Core/unit/drop-in ownership overwritten;
+preflight succeeds but a target changes before install; config ready:false treated
+as valid; explicit config loses adjacent state or violates the original sandbox;
+new placement auto-starts hardware; a hosted kernel prerequisite is skipped as
+passed; zero-device readiness mistaken for physical modem/audio/no-leak acceptance.
+
+Native ARM64 hosted qualification must extract the final tar independently, use
+the real CLI/helper/installer, validate default and explicit config paths and
+refusals, and explicitly start the original unit on an empty disposable host to
+observe guard persistence, VHCI authorization and fixed cgroup. Missing hosted
+prerequisites fail qualification. Candidate a891f5d / Go39907297621 passed the
+complete final-tar journey, including actual old-package/installer counterexamples,
+original guard loading and hosted ancestor-permission restoration. The exact
+proof is retained at archive/2026-10-23/linux-agent-qualified; temporary old-source
+dependencies are removed from normal CI, not the current behavior assertions.
+No local tests/builds or production probes. PR51 final cleanup, full CI and
+original review passed before merge992c4fb; exact evidence is in docs/branches.md.
+Public delivery, physical hardware and unsupported bearer paths remain separate.
+
+References: [ModemManager IP connectivity](https://modemmanager.org/docs/modemmanager/ip-connectivity-setup/),
+[malgo0.11.26](https://github.com/gen2brain/malgo/tree/v0.11.26),
+[systemd execution sandbox](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html),
+[USB authorization](https://docs.kernel.org/usb/authorization.html).
+
+### October 22 completion goal
+
+The owner requests completion of the remaining implementation and as much missing
+acceptance as can be automated, plus usable Agent colors and configuration. This
+is an ongoing goal, not a claim that the first delivery batch closes all work.
+Preserve the existing ledger identities and accepted evidence. The implementation
+queue includes Windows least-privilege service separation, native/embedded Linux
+modem and missing bearer support, and macOS Universal packaging. The acceptance
+queue includes update restart continuity, eSIM location/operation recovery,
+archive/restore, communication ownership, country exits and donor budgets.
+Long-duration/hardware cases may be attempted only with the required environment;
+unsupported or unavailable evidence must not become a pass. Historical incident
+causes remain unknown unless new evidence identifies them. Android local modem,
+abandoned soft deletion, notarization and landscape remain excluded. Existing
+paid-operation, destructive-action, production-maintenance and isolation gates
+still apply; the goal is not permission to repeat paid tests or interrupt leases.
+
+The first batch addresses the existing Fyne desktop Agent, not a new framework:
+readable local/Core/device status, structured device rows, separate diagnostics,
+clear primary and destructive actions, and the existing three setup methods.
+Use Fyne 2.8.1's existing theme, AppTabs and Form APIs (the current upstream
+release, checked October 22). Existing configuration identity, pin, private
+permissions, pending setup and capability defaults remain authoritative. A saved
+configuration must never be labeled active until the actual runtime uses it.
+Android's Material client remains in the same goal for a separate actual-screen
+check and interaction pass; completing desktop work does not close Android work.
+
+Failure checklist: gray disabled-looking primary controls; unknown/off interpreted
+as healthy; local runtime mistaken for Core or call readiness; topology loss
+leaving stale device health; periodic refresh replacing edits or selection;
+credential/pin leakage through diagnostics; save silently starting hardware or
+rotating identity; existing config bypassing edited inputs; repeated destructive
+actions or an old result updating a newer dialog. Use the existing GUI test suite
+and GitHub-hosted jobs for behavioral red/green and qualified artifacts, followed
+by actual native window checks. Do not run local builds or duplicate accepted
+hardware/paid tests.
+
+References: [Fyne themes](https://docs.fyne.io/extend/custom-theme/),
+[AppTabs](https://docs.fyne.io/container/apptabs/),
+[upstream releases](https://github.com/fyne-io/fyne/releases).
+
+### Android status and configuration follow-up
+
+The October23 independent client batch starts at main `1bfcf9a`; the original
+reviewer approved its plan (`dcaa936f`) and implementation (`d6055e50`).
+Reuse Material 1.14.0 and existing Views/UiLabels: separate Home directory warnings
+from ready counts, reveal a proven original reply card without reordering or
+changing selection, and color actual draft persistence outcomes. Editing clears
+stale saved feedback. No Core, credentials, account/identity guards, confirmation,
+USB recovery, user intent or hardware behavior changes.
+
+Failure checklist: partial/offline facts inherit ready green; unavailable service
+keeps old colors; long reply lists hide the checked card or select an unknown one;
+a refresh overrides the user's selection; failed/stale writes look saved or
+replace unsaved input. Three native regressions use existing TLS/Activity fixtures.
+Archived API35 proof compiled old MainActivity with the new tests, observed three
+named behavioral failures, then restored exact candidate bytes; API28/35 each
+passed44 methods in Android39856193041. Temporary proof is removed; normal tests
+and AndroidX screenshot collection remain. Inspected API35 portrait images are
+UI evidence, not phone, carrier, long-session or USB qualification; current phone
+verification remains owner-skipped. PR48 stays separate and frozen pending direction.
+Final Android39860851491 and source cleanup review passed; full Go39860851473
+was cancelled during Windows dependency preparation, not product compilation.
+The reviewed CI-only increment makes that existing step observable and bounded:
+strict update180s, install300s, each with15s TERM-to-KILL grace; nonzero status
+stops the job unchanged. No retry, mirror/cache/package change or larger job budget.
+The next normal hosted run qualifies this candidate; it does not repeat the archived
+Android red proof or prove the earlier cancellation's root cause.
+Diagnostic Go39868592415 located the current failure in Azure-mirror package
+downloads (install300s/124 after update9s/0). The reviewed follow-up validates the
+runner's existing mirror-file layout and removes only its exact Azure entry,
+preserving official HTTPS archive/security fallbacks, source checksum and signing.
+No timeout expansion or automatic retry; unexpected layout fails. Reference:
+[corresponding runner image](https://github.com/actions/runner-images/blob/ubuntu24/20261012.334/images/ubuntu/scripts/build/configure-apt-sources.sh).
+References: [ListView selection](https://developer.android.com/reference/android/widget/ListView#setSelection(int)),
+[AndroidX test output](https://github.com/android/android-test/blob/main/runner/monitor/java/androidx/test/platform/io/PlatformTestStorage.java).
+
+### Windows ordinary-user management: approved design
+
+M15 does not need a second hardware process: the existing Windows service is the
+single owner. The missing path is ordinary-user GUI access without reading its
+protected control credential or requesting SCM start/stop privileges. PR47's
+query-only status fix is already qualified; do not repeat that proof.
+
+Original reviewer approved option A on October 23 (reply `5707c78e`): reuse a local named pipe with an
+explicit installer-authorized operator SID. Keep service/configuration/binary and
+isolation ACLs private. Expose only redacted status and allowlisted connection edits,
+never tokens, arbitrary paths, shell commands or generic control-API forwarding.
+Keep exact service/PID verification, original-file CAS, cancellation and trust/token
+validation before persistence. Existing installs gain no operator automatically.
+The proposed existing-library choice is Microsoft go-winio v0.6.4; its listener
+rejects remote clients and exclusively creates the first pipe instance. Use
+individual pipe rights, not generic write (which also grants instance creation).
+
+The apply boundary is explicit: a local idle snapshot cannot replace
+Core's active-call/maintenance protection. This delivery saves through
+the service and applies through the existing Core-controlled restart; offline
+restart remains an administrator action. This would improve daily configuration,
+but does not claim the full original M15 no-admin lifecycle. Adding an Agent-to-Core
+self-maintenance protocol is not approved by this design note. The GUI opens the
+currently running Core, not the saved destination; cross-Core migration is an
+administrator operation. Restart success is not an atomic receipt for one edit:
+compare actual running settings after reconnect. A retained token stays at its
+original origin/trust binding; a changed binding requires a replacement token.
+PIN and connection writers share a lock spanning their complete read-modify-write.
+Authorization is separate from config version 1 for rollback compatibility;
+revocation invalidates existing sessions. Protect replaceable parent directories,
+not only file ACLs. The right is account-wide Core configuration authority, not
+an application-only permission. Implementation/hosted/native acceptance are pending.
+
+Failure checklist: unauthorized/remote user; counterfeit pipe or replaced service;
+late save after cancellation; stale revision; bad trust/token changing the original
+file; old service silently falling back to broad credentials; saved labeled loaded;
+restart bypassing active-call/borrow ownership. Qualify a complete isolated Windows
+service/ordinary-user configuration journey plus relevant security/state tables on
+hosted CI; no production fault injection or previously accepted proof replay.
+
+Implementation review `6099c283` requested pipe metadata read rights, preservation
+of `-config`/environment targeting and read-only persisted modem choices. The
+revised candidate includes these plus the descriptor-mask and shallow-checkout
+proof corrections. First run `39831348196` at `d5ba979` failed compilation/module
+metadata before Windows acceptance; it is not behavioral-red evidence. GUI helper
+coverage is discovery/render/editor cancel; successful save is the restricted
+client journey, not a native GUI save receipt. Revised `efeb6f5` passed source
+review `cc3c2591`; run `39836215604` retained two executed counterexamples but
+stopped at isolated service readiness before pipe assertions. Typed failure
+diagnostics are added without changing readiness or extending the wait.
+Diagnostic `1bd0aa8`/`39840779742` supports startup cancellation, not a PC/SC root
+cause. Review `b411f55a` accepts correcting this real-service fixture to production
+defaults: internal startup 2s -> 30s, scan/retry 1s/1s/30s; the two outer 30s samples
+and real ready criteria remain. Review `121a66ba` on `15fc0d1`/`39844561322`
+identifies the fixture synchronization gap where the loop exited on local
+`CoreConnection=connected` before Core-side empty inventory publication; the
+two-sample readiness loop now requires both predicates and logs typed Core
+inventory metadata on failure without extending timeouts. Run `45977729257` on
+`95254f5` then captured exact typed readiness evidence (`pcsc_service_state=1`,
+`reader_condition="recovering"`, runtime stopping at the 30s startup deadline):
+Windows automatically stops trigger-started `SCardSvr` when zero smart card
+readers exist, returning `SCARD_E_NO_SERVICE` instead of `SCARD_E_NO_READERS_AVAILABLE`.
+`pcscmonitor` now treats `SCARD_E_NO_SERVICE`/`SCARD_E_SERVICE_STOPPED` on Windows
+as an empty reader set only when SCM confirms `SCardSvr` is stopped and not
+disabled and SetupAPI confirms zero present smart card reader devices/interfaces,
+re-establishing the live PC/SC context automatically when a reader arrives.
+Run `45983801377` on `6099f4e` confirmed the `pcsc-windows-idle-service` behavioral
+red and reached the restricted ordinary-user helper on the first 30s readiness sample,
+exposing that Windows `LocalSystem` default process DACLs deny ordinary users
+`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE)` during peer verification.
+`startLocalManagement` now grants only `PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE`
+on the current service process to the explicitly authorized operator SID while active
+and restores the original process DACL on revocation or shutdown. Run `45986500400`
+on `c21eaf4` passed the complete Windows validation job (`pcsc-windows-idle-service`
+`576769ff`, `pipe-instance-rights` `5da4623c`, `gui-environment-target` `4998f1b4`,
+`gui-persisted-modes` `8c5b622f`, `fixed-logic` `89254979`, and `fixed-service-journey`
+`efa5acb3` in 61.65s with zero skips); temporary counterexample mutation is removed
+while retaining the permanent real-service E2E gate.
+
+References: [Windows pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
+[service rights](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights),
+[go-winio v0.6.4](https://github.com/microsoft/go-winio/releases/tag/v0.6.4).
+
+Read the exact Go language/toolchain requirements from `providers/vowifi-go/go.mod`, `go-runtime/go.mod`
+and each nested module. Current CI uses Go 1.26.x and Node 24. Run `npm ci`, not an unconstrained dependency upgrade.
+
+### macOS Universal packaging
+
+Original plan review `d84e2d8f` approves this October23 batch on main `5c4e1a9`.
+Keep Fyne 2.8.1/tools 1.7.2, libusb 1.0.30 and lwIP 2.2.1. Build host-native
+packaging tools with explicit arm64/amd64 child targets, then combine all six
+Mach-O files with Apple lipo and sign from inner components to the App. Both
+inputs must share source/tree/version/resources/signing; retain the license union.
+The complete package requires macOS15+, with the original Team for signed builds.
+
+Failure checklist: host architecture leaks into Intel output; one helper stays
+thin; input resources or source disagree; unsigned or wrong-Team output replaces
+production; an incompatible package stops the old Agent before rejection; a new
+archive is uploaded but omitted from the download index. No runtime or user-state
+changes. Existing arm64 filenames/installer and all normal gates remain.
+
+Hosted E2E forces each final slice through real CLI/App config init/show in private
+temporary paths, both audio helpers through -h and both cellular helpers through
+exact missing-argument exit2. Inherited media/config environments are removed.
+It checks unchanged inputs/config and installer refusal before deployment state.
+Intel execution is Rosetta, not Intel hardware acceptance. Qualified03f5c77 /
+Go39885181111 proves the old publisher's missing-Universal assertion and the old
+installer's acceptance of an incomplete helper; evidence/tag are in docs/branches.md.
+Temporary proof is removed; no local tests run. Final5180618 passed original
+review, Go39886954243 and Android39886954195; merge42976962 shares tree4d7f0ffc.
+Main39888741520 qualified original-Team signed packages and both final slices;
+original final review2ac1684a accepted the exact artifacts (PR50 receipt6356021902).
+Publication, installation and Intel physical-hardware acceptance remain separate.
+Do not change existing v2.0.0 tags/assets or repeat paid/deferred tests.
+
+References: [Apple Universal binaries](https://developer.apple.com/documentation/apple-silicon/building-a-universal-macos-binary),
+[pinned Fyne builder](https://github.com/fyne-io/tools/blob/v1.7.2/cmd/fyne/internal/commands/build.go),
+[Apple synthesized designated requirements](https://developer.apple.com/library/archive/technotes/tn2206/),
+[Apple lipo argument parser](https://github.com/apple-oss-distributions/cctools/blob/main/misc/lipo.c).
+
+For Debian/Ubuntu development of the full Core/Agent GUI, audio helper and VoWiFi Provider:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libpcsclite-dev libasound2-dev \
+  libgl1-mesa-dev xorg-dev libopencore-amrnb-dev
+pkg-config --exists libpcsclite alsa opencore-amrnb
+```
+
+`opencore-amrnb` is a cgo link dependency of the Provider media packages, not merely an optional test.
+PC/SC and ALSA belong to the native Agent/audio boundary; a source build needs their development headers,
+while a customer should use the reviewed release's declared runtime requirements instead.
+A missing pkg-config library is an environment/build failure, not a passing or skipped Provider suite.
+
+On macOS, install Xcode Command Line Tools and, for local Provider media tests, the explicit Homebrew dependencies:
+
+```bash
+brew install pkg-config opencore-amr
+export PKG_CONFIG_PATH="$(brew --prefix opencore-amr)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+pkg-config --exists opencore-amrnb
+```
+
+PC/SC/CoreAudio use the platform frameworks. Do not install Linux ALSA packages on macOS or infer that
+successful Darwin builds qualify experimental Modem functionality. The cellular companion's libusb/lwIP
+versions and hashes are pinned in [agent/cellular-io/THIRD_PARTY.md](agent/cellular-io/THIRD_PARTY.md).
+Windows build/install/driver and signing details are exercised in `.github/workflows/go-runtime.yml`;
+a Linux race run cannot replace those Windows-native tests.
+
